@@ -171,8 +171,11 @@ impl CameraSession {
     /// performed. Aperture is planned against the camera's live f-number choices and the
     /// live fps (for the shutter angle), so a write always matches the current camera.
     pub fn apply(&self, req: &SetRequest) -> Result<usize> {
-        let fnumber_choices = parse_choices(&self.runner.get_config("f-number")?);
-        let raw = self.read_raw().unwrap_or_default();
+        // Read the live config ONCE, and PROPAGATE a read failure: falling back to a default
+        // fps here would plan a wrong d002 shutter angle and write a wrong exposure to a live
+        // camera on a partial read (the handler maps this error to 502).
+        let raw = self.read_raw()?;
+        let fnumber_choices = parse_choices(&raw.fnumber);
         let (params, _) = params_and_caps(&raw);
         let fps100 = params.fps100.unwrap_or(DEFAULT_FPS100);
         let writes = plan_writes(req, &fnumber_choices, fps100);

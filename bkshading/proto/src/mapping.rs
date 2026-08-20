@@ -164,12 +164,19 @@ pub fn parse_choices(output: &str) -> Vec<String> {
 /// — matches `mapping.py`'s `re.fullmatch(r"f/(\d+(?:\.\d+)?)")`.
 pub fn parse_fnumber(s: &str) -> Option<f64> {
     let num = s.trim().strip_prefix("f/")?;
-    // fullmatch: only digits and at most one decimal point.
-    if num.is_empty() || !num.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
+    // fullmatch of `\d+(\.\d+)?`: digits, optionally a dot followed by more digits.
+    // Rejects "5." and ".5" (which the reference regex also rejects), and "5.2.1".
+    let (int_part, frac_part) = match num.split_once('.') {
+        Some((a, b)) => (a, Some(b)),
+        None => (num, None),
+    };
+    if int_part.is_empty() || !int_part.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    if num.bytes().filter(|&b| b == b'.').count() > 1 {
-        return None;
+    if let Some(frac) = frac_part {
+        if frac.is_empty() || !frac.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
     }
     num.parse::<f64>().ok()
 }

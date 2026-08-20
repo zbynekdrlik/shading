@@ -121,6 +121,8 @@ fn parse_fnumber_accepts_only_f_slash_number() {
     assert_eq!(parse_fnumber("auto"), None);
     assert_eq!(parse_fnumber("f/"), None);
     assert_eq!(parse_fnumber("f/5.2.1"), None);
+    assert_eq!(parse_fnumber("f/5."), None); // reference regex requires a digit after the dot
+    assert_eq!(parse_fnumber("f/.5"), None); // and a digit before it
 }
 
 #[test]

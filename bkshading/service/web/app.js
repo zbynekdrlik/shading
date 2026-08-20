@@ -32,6 +32,10 @@ async function setParam(id, patch) {
 // Wire a freshly cloned block's controls to their PUT handlers (attached once per block).
 function wire(el, id) {
   const q = (role) => el.querySelector(`[data-role="${role}"]`);
+  // Pause the 2s re-render for the whole block while a control is being touched, so a poll
+  // between a button's pointerdown and its click never rebuilds (and eats) the tap.
+  el.addEventListener("pointerdown", () => (interacting = true));
+  el.addEventListener("pointerup", () => setTimeout(() => (interacting = false), 250));
   const guard = (fn) => (ev) => {
     interacting = false;
     fn(ev);

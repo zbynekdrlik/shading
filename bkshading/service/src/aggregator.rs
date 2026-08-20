@@ -47,11 +47,17 @@ impl Aggregator {
 
     /// One aggregate snapshot across every configured camera.
     pub async fn snapshot(&self, cfg: &ServiceConfig) -> Aggregate {
-        let mut cameras = Vec::with_capacity(cfg.cameras.len());
-        for cam in &cfg.cameras {
-            let state = self.poll_state(cam).await;
-            cameras.push(camera_view(cam, state));
-        }
+        // Poll every relay CONCURRENTLY: /api/cameras latency is bounded by the SLOWEST relay
+        // (~one client timeout), not the SUM — the normal M1 state has several relays down, and
+        // each unreachable relay would otherwise burn a full connect timeout in series.
+        let states =
+            futures::future::join_all(cfg.cameras.iter().map(|cam| self.poll_state(cam))).await;
+        let cameras = cfg
+            .cameras
+            .iter()
+            .zip(states)
+            .map(|(cam, state)| camera_view(cam, state))
+            .collect();
         Aggregate {
             version: self.version.clone(),
             cameras,
