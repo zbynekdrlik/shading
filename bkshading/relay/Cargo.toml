@@ -1,0 +1,23 @@
+[package]
+name = "bkshading-relay"
+version = "1.7.0-dev.516"
+edition = "2021"
+authors = ["zbynekdrlik"]
+description = "Cambox/SBC USB relay: exposes a local Blackmagic camera's shading over HTTP for the bkshading service (issue 808)"
+license = "MIT"
+repository = "https://github.com/zbynekdrlik/camera-box"
+
+[[bin]]
+name = "bkshading-relay"
+path = "src/main.rs"
+
+[dependencies]
+bkshading-proto = { path = "../proto" }
+axum = "0.7"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

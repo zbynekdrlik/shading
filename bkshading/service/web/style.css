@@ -1,0 +1,97 @@
+/* bkshading web panel (issue 808, M1). Responsive operator panel: works on the studio
+   monitor next to OBS and on a phone/tablet. Big touch controls; aperture is the dominant
+   slider. Dark, high-contrast for a control room. */
+:root {
+  --bg: #14171c;
+  --panel: #1e232b;
+  --panel-2: #262c36;
+  --edge: #333b47;
+  --text: #e7ecf2;
+  --muted: #9aa6b4;
+  --accent: #4f9dff;
+  --ok: #3ecb7a;
+  --bad: #e5544b;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+.app-header {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  padding: 0.6rem 1rem;
+  background: var(--panel);
+  border-bottom: 1px solid var(--edge);
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}
+.app-title { font-size: 1.1rem; margin: 0; letter-spacing: 0.02em; }
+.app-version { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 0.85rem; }
+.conn-status { margin-left: auto; color: var(--muted); font-size: 0.8rem; }
+.conn-status.bad { color: var(--bad); }
+
+.camera-grid {
+  display: grid;
+  gap: 0.9rem;
+  padding: 0.9rem;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+}
+.empty-note { color: var(--muted); padding: 1.5rem; text-align: center; }
+
+.camera-block {
+  background: var(--panel);
+  border: 1px solid var(--edge);
+  border-radius: 0.6rem;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.camera-block.disabled .block-params { opacity: 0.45; pointer-events: none; }
+
+.block-preview {
+  aspect-ratio: 16 / 9;
+  background: #0d0f13;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-bottom: 1px solid var(--edge);
+}
+.preview-placeholder { color: var(--muted); font-size: 0.85rem; letter-spacing: 0.03em; }
+
+.block-params { padding: 0.7rem 0.8rem 0.9rem; display: flex; flex-direction: column; gap: 0.7rem; }
+.block-head { display: flex; align-items: baseline; justify-content: space-between; }
+.cam-label { font-weight: 600; }
+.cam-online { font-size: 0.72rem; color: var(--muted); }
+.cam-online.ok { color: var(--ok); }
+.cam-online.bad { color: var(--bad); }
+
+.control { background: var(--panel-2); border-radius: 0.5rem; padding: 0.55rem 0.6rem; }
+.control-head { display: flex; justify-content: space-between; color: var(--muted); font-size: 0.8rem; margin-bottom: 0.35rem; }
+.control-head .value { color: var(--text); font-variant-numeric: tabular-nums; }
+
+.slider { width: 100%; accent-color: var(--accent); height: 1.6rem; }
+.iris-control .slider { height: 2rem; } /* aperture is the dominant, "thumb-zone" control */
+
+.btn-group { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+.btn {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--edge);
+  border-radius: 0.4rem;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.82rem;
+  cursor: pointer;
+  min-height: 2.1rem;
+}
+.btn:hover { border-color: var(--accent); }
+.btn.active { background: var(--accent); border-color: var(--accent); color: #0b1016; font-weight: 600; }
+.wb-auto { margin-top: 0.4rem; }
+
+@media (max-width: 480px) {
+  .camera-grid { grid-template-columns: 1fr; }
+}

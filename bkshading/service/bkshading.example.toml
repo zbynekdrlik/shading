@@ -1,0 +1,22 @@
+# bkshading service config (issue 808, M1). The camera list is NOT tied to camboxes:
+# each camera is a record with an id, a transport, and its relay address. `ndi_preview`
+# is optional — a handheld with no video feed omits it and gets a params-only block.
+
+# Web panel bind address (the operator opens http://strih.lan:8770/).
+bind = "0.0.0.0:8770"
+
+# cam1: camera USB -> cambox cam1, controlled by bkshading-relay on cam1.
+[[camera]]
+id = "cam1"
+label = "Cam 1"
+transport = "cambox-relay"
+address = "cam1.lan:8771"
+ndi_preview = "CAM1 (usb)"    # NDI source name (preview is an M1 placeholder; real feed = M2)
+
+# A handheld on a mini SBC (Pi Zero 2 W) — same relay component, no video feed.
+[[camera]]
+id = "handheld-1"
+label = "Handheld 1"
+transport = "sbc-relay"
+address = "10.77.9.60:8771"
+# no ndi_preview -> params-only block

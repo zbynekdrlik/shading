@@ -1,0 +1,31 @@
+[package]
+name = "bkshading"
+version = "1.7.0-dev.516"
+edition = "2021"
+authors = ["zbynekdrlik"]
+description = "Camera shading-control aggregation service + operator web panel (issue 808)"
+license = "MIT"
+repository = "https://github.com/zbynekdrlik/camera-box"
+
+[lib]
+name = "bkshading"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bkshading"
+path = "src/main.rs"
+
+[dependencies]
+bkshading-proto = { path = "../proto" }
+axum = "0.7"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+# Plain-HTTP LAN relay polling. rustls (pure Rust) avoids a system openssl build dep, so
+# the service cross-compiles cleanly (incl. the future Windows/ARM targets).
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

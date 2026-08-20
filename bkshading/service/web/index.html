@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="sk">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>bkshading — riadenie shadingu kamier</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="app-header">
+    <h1 class="app-title">bkshading</h1>
+    <!-- version-on-dashboard: the service injects its version here at serve time. -->
+    <span id="app-version" class="app-version" data-role="version" data-testid="version">v{{VERSION}}</span>
+    <span id="conn-status" class="conn-status" data-role="conn">spájam…</span>
+  </header>
+
+  <!-- The 4+4 blocks (up to 4 camboxes + 4 handhelds) are rendered here from /api/cameras.
+       Each block = a preview area on TOP (placeholder in M1; NDI via presenter is M2) and the
+       shading parameters BELOW it. A camera with no NDI preview gets a params-only block. -->
+  <main id="camera-grid" class="camera-grid" aria-live="polite"></main>
+  <p id="empty-note" class="empty-note" hidden>Žiadne kamery v konfigurácii.</p>
+
+  <!-- One camera block skeleton, cloned per camera by app.js. -->
+  <template id="camera-block">
+    <section class="camera-block" data-role="camera-block">
+      <div class="block-preview" data-role="preview">
+        <div class="preview-placeholder">NDI preview — M2</div>
+      </div>
+      <div class="block-params" data-role="params">
+        <div class="block-head">
+          <span class="cam-label" data-role="label"></span>
+          <span class="cam-online" data-role="online">—</span>
+        </div>
+
+        <div class="control iris-control">
+          <div class="control-head"><span>Clona</span><span class="value" data-role="fnum">f/—</span></div>
+          <input type="range" min="0" max="1" step="0.001" value="0.5" class="slider" data-role="aperture" aria-label="Clona" />
+        </div>
+
+        <div class="control iso-control">
+          <div class="control-head"><span>ISO</span><span class="value" data-role="iso-val">—</span></div>
+          <div class="btn-group" data-role="iso"></div>
+        </div>
+
+        <div class="control wb-control">
+          <div class="control-head"><span>Biely bod</span><span class="value" data-role="kelvin-val">—</span></div>
+          <input type="range" min="2500" max="10000" step="50" value="5600" class="slider" data-role="kelvin" aria-label="Biely bod (Kelvin)" />
+          <div class="control-head"><span>Tint</span><span class="value" data-role="tint-val">—</span></div>
+          <input type="range" min="-50" max="50" step="1" value="0" class="slider" data-role="tint" aria-label="Tint" />
+          <button type="button" class="btn wb-auto" data-role="auto-wb">Auto WB</button>
+        </div>
+
+        <div class="control shutter-control">
+          <div class="control-head"><span>Uzávierka</span><span class="value" data-role="shutter-val">—</span></div>
+          <div class="btn-group" data-role="shutter"></div>
+        </div>
+
+        <div class="control fps-control">
+          <div class="control-head"><span>fps</span><span class="value" data-role="fps-val">—</span></div>
+        </div>
+      </div>
+    </section>
+  </template>
+
+  <script src="/app.js"></script>
+</body>
+</html>

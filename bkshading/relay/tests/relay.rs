@@ -1,0 +1,168 @@
+//! Relay logic tests driven by a fake gphoto2 runner — no camera, no gphoto2 binary. This
+//! is how the M1 relay is verified while cam1 is running E2E (and before gphoto2 is even
+//! installed on the box).
+
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+use anyhow::{anyhow, bail, Result};
+use bkshading_proto::wire::SetRequest;
+use bkshading_relay::transport::{parse_first_model, CameraSession, Gphoto2Runner};
+
+const AUTO_DETECT: &str = "\
+Model                          Port
+----------------------------------------------------------
+Blackmagic Design Pocket Cinema Camera 4K usb:002,005";
+
+struct FakeRunner {
+    detect: String,
+    configs: HashMap<String, String>,
+    camera_present: bool,
+}
+
+impl FakeRunner {
+    fn full_camera() -> Self {
+        let mut configs = HashMap::new();
+        configs.insert(
+            "iso".into(),
+            "Current: 400\nChoice: 0 0\nChoice: 1 100\nChoice: 2 200\nChoice: 3 400\nChoice: 4 800\nEND".into(),
+        );
+        configs.insert(
+            "f-number".into(),
+            "Current: f/5.2\nChoice: 0 f/2.8\nChoice: 1 f/4.0\nChoice: 2 f/5.2\nChoice: 3 f/8.0\nEND".into(),
+        );
+        configs.insert(
+            "d002".into(),
+            "Current: 18000\nBottom: 173\nTop: 36000\nEND".into(),
+        );
+        configs.insert(
+            "d004".into(),
+            "Current: 5600\nBottom: 2500\nTop: 10000\nEND".into(),
+        );
+        configs.insert("d005".into(), "Current: 0\nEND".into());
+        configs.insert("d006".into(), "Current: 2500\nEND".into());
+        configs.insert("d007".into(), "Current: 25\nBottom: 5\nTop: 60\nEND".into());
+        FakeRunner {
+            detect: AUTO_DETECT.into(),
+            configs,
+            camera_present: true,
+        }
+    }
+}
+
+impl Gphoto2Runner for FakeRunner {
+    fn auto_detect(&self) -> Result<String> {
+        if !self.camera_present {
+            bail!("no camera detected");
+        }
+        Ok(self.detect.clone())
+    }
+    fn get_config(&self, key: &str) -> Result<String> {
+        self.configs
+            .get(key)
+            .cloned()
+            .ok_or_else(|| anyhow!("no such config key: {key}"))
+    }
+    fn set_config(&self, _key: &str, _value: &str) -> Result<()> {
+        Ok(()) // reads don't write; the apply test uses RecordingRunner below
+    }
+}
+
+#[test]
+fn parse_first_model_from_auto_detect_table() {
+    assert_eq!(
+        parse_first_model(AUTO_DETECT).as_deref(),
+        Some("Blackmagic Design Pocket Cinema Camera 4K")
+    );
+    // No camera row -> None (header/separator only).
+    assert_eq!(
+        parse_first_model("Model                          Port\n-------------"),
+        None
+    );
+}
+
+#[test]
+fn read_state_reports_online_camera() {
+    let session = CameraSession::new(Box::new(FakeRunner::full_camera()), "1.7.0-dev.516");
+    let st = session.read_state();
+    assert!(st.online);
+    assert_eq!(
+        st.camera.as_deref(),
+        Some("Blackmagic Design Pocket Cinema Camera 4K")
+    );
+    assert_eq!(st.params.iso, Some(400));
+    assert_eq!(st.params.kelvin, Some(5600));
+    assert_eq!(st.params.shutter, Some(50)); // d002 18000 @ 25fps -> 1/50
+    assert!(st.fps_supported);
+    let caps = st.caps.unwrap();
+    assert_eq!(caps.iso_choices, vec![100, 200, 400, 800]);
+    assert_eq!(st.version, "1.7.0-dev.516");
+}
+
+#[test]
+fn read_state_offline_when_camera_absent() {
+    let mut fake = FakeRunner::full_camera();
+    fake.camera_present = false;
+    let session = CameraSession::new(Box::new(fake), "1.7.0-dev.516");
+    let st = session.read_state();
+    assert!(!st.online);
+    assert_eq!(st.camera, None);
+    assert_eq!(st.params.iso, None);
+}
+
+#[test]
+fn apply_writes_expected_gphoto2_config() {
+    // Keep a raw pointer to inspect the recorded sets after moving the fake into the session.
+    let fake = FakeRunner::full_camera();
+    // We can't share the Mutex out of the Box easily, so re-read via a fresh apply and a
+    // wrapper that exposes the recorded writes.
+    let recorded = std::sync::Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+
+    struct RecordingRunner {
+        inner: FakeRunner,
+        recorded: std::sync::Arc<Mutex<Vec<(String, String)>>>,
+    }
+    impl Gphoto2Runner for RecordingRunner {
+        fn auto_detect(&self) -> Result<String> {
+            self.inner.auto_detect()
+        }
+        fn get_config(&self, key: &str) -> Result<String> {
+            self.inner.get_config(key)
+        }
+        fn set_config(&self, key: &str, value: &str) -> Result<()> {
+            self.recorded
+                .lock()
+                .unwrap()
+                .push((key.to_string(), value.to_string()));
+            Ok(())
+        }
+    }
+
+    let session = CameraSession::new(
+        Box::new(RecordingRunner {
+            inner: fake,
+            recorded: recorded.clone(),
+        }),
+        "1.7.0-dev.516",
+    );
+
+    let req = SetRequest {
+        aperture_norm: Some(1.0), // last f-number choice -> f/8.0
+        iso: Some(800),
+        kelvin: Some(6500),
+        tint: Some(10),
+        shutter: Some(50), // @ 25fps -> d002 angle 18000
+        fps: Some(30),
+        auto_wb: Some(true), // dropped (no PTP equivalent)
+    };
+    let n = session.apply(&req).expect("apply ok");
+    assert_eq!(n, 6); // 6 real writes, auto_wb dropped
+    let writes = recorded.lock().unwrap().clone();
+    assert!(writes.contains(&("f-number".into(), "f/8.0".into())));
+    assert!(writes.contains(&("iso".into(), "800".into())));
+    assert!(writes.contains(&("d002".into(), "18000".into())));
+    assert!(writes.contains(&("d004".into(), "6500".into())));
+    assert!(writes.contains(&("d005".into(), "10".into())));
+    assert!(writes.contains(&("d007".into(), "30".into())));
+    assert!(!writes.iter().any(|(k, _)| k.contains("wb")));
+}
