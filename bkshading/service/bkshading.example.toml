@@ -22,6 +22,10 @@ label = "Cam 1"
 transport = "cambox-relay"
 address = "cam1.lan:8771"
 ndi_preview = "CAM1 (usb)"    # NDI source name (preview is an M1 placeholder; real feed = M2)
+grab_fps = 60                 # box grabs this cam at 60 fps (issue 809) — the panel warns if
+                              # the camera's project fps drifts off 60, and offers an explicit
+                              # "align to grab" button (never an automatic write). Omit for a
+                              # camera whose grab rate you don't want compared.
 
 # A handheld on a mini SBC (Pi Zero 2 W) — same relay component, no video feed.
 [[camera]]

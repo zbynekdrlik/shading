@@ -46,6 +46,13 @@ pub struct CameraConfig {
     /// (a handheld without a video feed).
     #[serde(default)]
     pub ndi_preview: Option<String>,
+    /// The box's grab-mode fps this camera should match (issue 809, e.g. `60` for a cam
+    /// grabbed at 60 fps). When set, the panel compares the camera's reported project fps
+    /// against it and warns on a mismatch (a mismatch makes duplicate/beat artefacts at
+    /// the capture source). Absent => no grab comparison for this camera. A static config
+    /// field for now (the follow-up is deriving it from the box's live capture_fps).
+    #[serde(default)]
+    pub grab_fps: Option<i64>,
 }
 
 impl ServiceConfig {

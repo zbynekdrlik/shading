@@ -69,6 +69,40 @@ def test_no_localhost_urls_anywhere():
             assert bad not in text, f"{name} must not hardcode {bad}"
 
 
+def test_index_has_fps_grab_sync_ui():
+    # issue 809: each block shows the box grab fps, a mismatch warning, and an explicit
+    # "align to grab" button (never an auto-write).
+    html = _read("index.html")
+    for role in ("fps-grab", "fps-warn", "fps-set-grab"):
+        assert f'data-role="{role}"' in html, f"missing fps-sync element: {role}"
+    # the warning + align button are hidden by default (shown only on a mismatch).
+    assert 'data-role="fps-warn" hidden' in html, "fps-warn hidden by default"
+    assert 'data-role="fps-set-grab" hidden' in html, "align button hidden by default"
+
+
+def test_app_js_align_button_sends_grab_fps_without_autowrite():
+    # issue 809: the align button issues an explicit fps write of the configured grab value,
+    # and there is NO automatic fps write anywhere (operator action only). The negative claim
+    # is verified, not just asserted-in-prose: the sole fps write must sit inside a click
+    # handler, and updateBlock() (which runs on every 2s poll) must never write fps.
+    js = _read("app.js")
+    assert "fps-set-grab" in js, "JS wires the align button (q('fps-set-grab'))"
+    assert "cam.fpsSync" in js, "JS renders the fps sync verdict"
+    assert "cam.grabFps" in js, "JS renders the configured grab fps"
+    # exactly ONE fps write in the whole panel — the explicit align button.
+    assert js.count("{ fps:") == 1, "exactly one fps write (the explicit align button)"
+    idx = js.index("{ fps:")
+    before = js[:idx]
+    # that single write's nearest enclosing listener is the CLICK handler (not a change/poll).
+    last_listener = before.rfind("addEventListener(")
+    assert last_listener != -1 and before[last_listener:].startswith(
+        'addEventListener("click"'
+    ), "the fps write must live inside a click handler, not an auto path"
+    # updateBlock() runs every poll; it must never write fps (that would be an auto-write).
+    ub = js.index("function updateBlock(")
+    assert "{ fps:" not in js[ub:], "updateBlock must never write fps (no auto-write)"
+
+
 def _run():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

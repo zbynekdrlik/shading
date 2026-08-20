@@ -106,6 +106,47 @@ pub struct SetRequest {
     pub auto_wb: Option<bool>,
 }
 
+/// Whether a camera's reported frame rate matches the box's grab mode (issue 809). A
+/// mismatch produces duplicate/beat artefacts at the source of the capture chain (#674
+/// duplicate-frame analysis, #685 capture-rate health), so the panel surfaces it as a
+/// visible warning and offers an explicit "align to grab" action (never an auto-write —
+/// a camera-side format change can interrupt recording).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FpsSync {
+    /// Can't judge: the camera's fps isn't known this cycle (offline / not read) or no
+    /// grab mode is configured for this camera.
+    #[default]
+    Unknown,
+    /// The camera's project fps equals the box's grab fps — no beat.
+    Synced,
+    /// The camera's project fps differs from the box's grab fps — the warning state.
+    Mismatch,
+}
+
+impl FpsSync {
+    /// Classifies a camera's reported project fps (`ShadingParams.fps100`, i.e. fps x100)
+    /// against the box's configured grab fps (plain fps, e.g. `60`). Pure — the single
+    /// source of truth for the sync verdict, shared by the service and covered by unit
+    /// tests. Compares the PROJECT fps (d007), because that is exactly what the "align to
+    /// grab" write changes and what the camera's HDMI output follows; `sensor_fps100`
+    /// (off-speed d006) stays a separate diagnostic. A non-positive value on either side
+    /// (an unread property, a misconfigured `grab_fps = 0`) is treated as "not known" and
+    /// yields [`FpsSync::Unknown`] rather than a false mismatch.
+    pub fn classify(camera_fps100: Option<i64>, grab_fps: Option<i64>) -> FpsSync {
+        match (camera_fps100, grab_fps) {
+            (Some(cam), Some(grab)) if cam > 0 && grab > 0 => {
+                if cam == grab * 100 {
+                    FpsSync::Synced
+                } else {
+                    FpsSync::Mismatch
+                }
+            }
+            _ => FpsSync::Unknown,
+        }
+    }
+}
+
 /// One camera as the aggregation service presents it to the web panel. A camera with no
 /// NDI preview (a handheld, or M1 where preview is not wired yet) has `has_preview =
 /// false` and the panel renders a params-only block (no preview area).
@@ -120,6 +161,13 @@ pub struct CameraView {
     pub has_preview: bool,
     /// The camera's relay was reachable this cycle.
     pub reachable: bool,
+    /// The box's grab-mode fps for this camera (issue 809), from config (`60` for cam1).
+    /// `None` when the camera's config declares no grab mode — then `fps_sync` is
+    /// [`FpsSync::Unknown`] and the panel shows no grab comparison.
+    pub grab_fps: Option<i64>,
+    /// FPS-vs-grab sync verdict (issue 809) — [`FpsSync::classify`] of the camera's
+    /// reported project fps against `grab_fps`. Drives the panel's warning + align button.
+    pub fps_sync: FpsSync,
     /// Live state from the relay, when reachable.
     pub state: Option<RelayState>,
 }

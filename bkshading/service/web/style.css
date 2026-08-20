@@ -109,6 +109,14 @@ body {
 .btn.active { background: var(--accent); border-color: var(--accent); color: #0b1016; font-weight: 600; }
 .wb-auto { margin-top: 0.4rem; }
 
+/* issue 809: fps-vs-grab sync row. The explicit [hidden] rules guard against an author
+   display beating the UA rule (the same M1 lesson as .block-preview[hidden]). */
+.fps-sync { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; margin-top: 0.4rem; }
+.fps-grab { color: var(--muted); font-size: 0.78rem; font-variant-numeric: tabular-nums; }
+.fps-warn { color: var(--bad); font-size: 0.78rem; font-weight: 600; }
+.fps-set-grab { margin-left: auto; }
+.fps-sync[hidden], .fps-grab[hidden], .fps-warn[hidden], .fps-set-grab[hidden] { display: none; }
+
 @media (max-width: 480px) {
   .camera-grid { grid-template-columns: 1fr; }
 }

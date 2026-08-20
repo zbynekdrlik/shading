@@ -2,7 +2,7 @@
 
 use bkshading::aggregator::camera_view;
 use bkshading::config::ServiceConfig;
-use bkshading_proto::wire::{RelayState, ShadingParams, Transport};
+use bkshading_proto::wire::{FpsSync, RelayState, ShadingParams, Transport};
 
 const EXAMPLE: &str = "\
 bind = \"0.0.0.0:8770\"
@@ -110,4 +110,97 @@ fn parses_preview_table_and_defaults_when_absent() {
     let d = ServiceConfig::from_toml_str("").expect("empty parse");
     assert!(d.preview.fps > 0.0);
     assert!(d.preview.jpeg_quality > 0);
+}
+
+// --- issue 809: camera fps <-> box grab-mode sync ----------------------------
+
+/// An online relay state reporting a given project fps (x100), for the sync tests.
+fn online_state_with_fps100(fps100: Option<i64>) -> RelayState {
+    RelayState {
+        online: true,
+        camera: Some("Blackmagic Design Pocket Cinema Camera 4K".into()),
+        params: ShadingParams {
+            fps100,
+            ..Default::default()
+        },
+        caps: None,
+        fps_supported: true,
+        version: "1.7.0-dev.516".into(),
+    }
+}
+
+#[test]
+fn parses_grab_fps_when_present_and_defaults_none() {
+    let cfg = ServiceConfig::from_toml_str(
+        "\
+[[camera]]
+id = \"cam1\"
+label = \"Cam 1\"
+transport = \"cambox-relay\"
+address = \"cam1.lan:8771\"
+grab_fps = 60
+
+[[camera]]
+id = \"cam2\"
+label = \"Cam 2\"
+transport = \"cambox-relay\"
+address = \"cam2.lan:8771\"
+",
+    )
+    .expect("parse grab_fps");
+    assert_eq!(cfg.cameras[0].grab_fps, Some(60));
+    assert_eq!(cfg.cameras[1].grab_fps, None); // omitted -> no grab comparison
+}
+
+#[test]
+fn camera_view_syncs_and_flags_mismatch_against_grab() {
+    let cfg = ServiceConfig::from_toml_str(
+        "\
+[[camera]]
+id = \"cam1\"
+label = \"Cam 1\"
+transport = \"cambox-relay\"
+address = \"cam1.lan:8771\"
+grab_fps = 60
+",
+    )
+    .unwrap();
+    let cam = &cfg.cameras[0];
+
+    // Camera at 60.00 fps matches the 60 fps grab -> Synced.
+    let v = camera_view(cam, Some(online_state_with_fps100(Some(6000))));
+    assert_eq!(v.grab_fps, Some(60));
+    assert_eq!(v.fps_sync, FpsSync::Synced);
+
+    // Camera at 50.00 fps against a 60 fps grab -> Mismatch (the beat-artefact warning).
+    let v = camera_view(cam, Some(online_state_with_fps100(Some(5000))));
+    assert_eq!(v.fps_sync, FpsSync::Mismatch);
+
+    // Reachable but fps not read this cycle -> Unknown, never a false mismatch.
+    let v = camera_view(cam, Some(online_state_with_fps100(None)));
+    assert_eq!(v.fps_sync, FpsSync::Unknown);
+
+    // Relay unreachable -> Unknown, but the configured grab is still surfaced.
+    let v = camera_view(cam, None);
+    assert_eq!(v.fps_sync, FpsSync::Unknown);
+    assert_eq!(v.grab_fps, Some(60));
+}
+
+#[test]
+fn camera_view_without_grab_config_is_unknown_sync() {
+    let cfg = ServiceConfig::from_toml_str(
+        "\
+[[camera]]
+id = \"cam2\"
+label = \"Cam 2\"
+transport = \"cambox-relay\"
+address = \"cam2.lan:8771\"
+",
+    )
+    .unwrap();
+    // Even a perfectly good 60.00 fps reading is Unknown when no grab mode is configured
+    // (nothing to compare against).
+    let v = camera_view(&cfg.cameras[0], Some(online_state_with_fps100(Some(6000))));
+    assert_eq!(v.grab_fps, None);
+    assert_eq!(v.fps_sync, FpsSync::Unknown);
 }

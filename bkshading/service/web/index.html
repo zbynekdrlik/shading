@@ -59,6 +59,13 @@
 
         <div class="control fps-control">
           <div class="control-head"><span>fps</span><span class="value" data-role="fps-val">—</span></div>
+          <!-- issue 809: grab-mode sync. `fps-grab` shows the box's grab fps; `fps-warn` is
+               shown only on a mismatch; `fps-set-grab` is an explicit align button (no auto-write). -->
+          <div class="fps-sync" data-role="fps-sync">
+            <span class="fps-grab" data-role="fps-grab" hidden></span>
+            <span class="fps-warn" data-role="fps-warn" hidden></span>
+            <button type="button" class="btn fps-set-grab" data-role="fps-set-grab" hidden></button>
+          </div>
         </div>
       </div>
     </section>

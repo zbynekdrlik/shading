@@ -56,6 +56,18 @@ function wire(el, id) {
   q("tint").addEventListener("change", guard((e) => setParam(id, { tint: Math.round(Number(e.target.value)) })));
   q("auto-wb").addEventListener("click", () => setParam(id, { autoWb: true }));
 
+  // issue 809: explicit "align camera fps to the box's grab mode" button. Never an auto-write
+  // (a camera-side format change can interrupt recording) — the operator must click. The grab
+  // target is read from the block's dataset (kept current by updateBlock), so the handler is
+  // wired once and always sends the latest configured grab fps.
+  const setGrabBtn = q("fps-set-grab");
+  if (setGrabBtn) {
+    setGrabBtn.addEventListener("click", () => {
+      const g = Number(el.dataset.grabFps);
+      if (Number.isFinite(g) && g > 0) setParam(id, { fps: g });
+    });
+  }
+
   // Preview image: show it once a frame loads, fall back to the placeholder on error (503
   // until the first frame, or a dropped feed). Wired once per block.
   const img = q("preview-img");
@@ -140,8 +152,37 @@ function updateBlock(el, cam) {
   q("shutter-val").textContent = p.shutter == null ? "—" : "1/" + p.shutter;
   renderButtonGroup(q("shutter"), caps ? caps.shutterChoices : [], p.shutter, (v) => setParam(cam.id, { shutter: v }));
 
-  // fps.
-  q("fps-val").textContent = p.fps100 == null ? "—" : (p.fps100 / 100).toFixed(2);
+  // fps + issue-809 grab-mode sync.
+  const camFps = p.fps100 == null ? null : p.fps100 / 100;
+  q("fps-val").textContent = camFps == null ? "—" : camFps.toFixed(2);
+  const grab = cam.grabFps; // configured box grab fps (null => no comparison for this camera)
+  el.dataset.grabFps = grab == null ? "" : String(grab);
+  const syncRow = q("fps-sync");
+  const grabEl = q("fps-grab");
+  const warnEl = q("fps-warn");
+  const setBtn = q("fps-set-grab");
+  // Hide the whole sync row (not just its children) for a camera with no grab configured,
+  // so no empty gap shows under the "fps —" line (a handheld without a grab mode).
+  if (syncRow) syncRow.hidden = grab == null;
+  if (grab == null) {
+    grabEl.hidden = true;
+    warnEl.hidden = true;
+    setBtn.hidden = true;
+  } else {
+    grabEl.textContent = "grab " + grab;
+    grabEl.hidden = false;
+    const mismatch = cam.fpsSync === "mismatch";
+    warnEl.hidden = !mismatch;
+    if (mismatch) {
+      warnEl.textContent = `⚠ kamera ${camFps == null ? "?" : camFps.toFixed(2)} ≠ grab ${grab}`;
+    }
+    // The align button appears only when there is a mismatch to fix AND it is actionable
+    // (camera online and its project fps is settable). Server-truth: after the write the next
+    // poll re-reads the camera and the warning/button clear on their own.
+    const settable = online && cam.state && cam.state.fpsSupported;
+    setBtn.hidden = !(mismatch && settable);
+    setBtn.textContent = `Zosúladiť s grab (${grab})`;
+  }
 }
 
 function render(agg) {
