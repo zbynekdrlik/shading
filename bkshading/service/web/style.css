@@ -115,7 +115,7 @@ body {
 .fps-grab { color: var(--muted); font-size: 0.78rem; font-variant-numeric: tabular-nums; }
 .fps-warn { color: var(--bad); font-size: 0.78rem; font-weight: 600; }
 .fps-set-grab { margin-left: auto; }
-.fps-grab[hidden], .fps-warn[hidden], .fps-set-grab[hidden] { display: none; }
+.fps-sync[hidden], .fps-grab[hidden], .fps-warn[hidden], .fps-set-grab[hidden] { display: none; }
 
 @media (max-width: 480px) {
   .camera-grid { grid-template-columns: 1fr; }

@@ -81,13 +81,26 @@ def test_index_has_fps_grab_sync_ui():
 
 
 def test_app_js_align_button_sends_grab_fps_without_autowrite():
-    # issue 809: the align button issues an explicit fps write of the configured grab value;
-    # there is no automatic fps write anywhere (operator action only).
+    # issue 809: the align button issues an explicit fps write of the configured grab value,
+    # and there is NO automatic fps write anywhere (operator action only). The negative claim
+    # is verified, not just asserted-in-prose: the sole fps write must sit inside a click
+    # handler, and updateBlock() (which runs on every 2s poll) must never write fps.
     js = _read("app.js")
     assert "fps-set-grab" in js, "JS wires the align button (q('fps-set-grab'))"
-    assert re.search(r"setParam\([^,]+,\s*\{\s*fps:", js), "align button PUTs { fps: <grab> }"
     assert "cam.fpsSync" in js, "JS renders the fps sync verdict"
     assert "cam.grabFps" in js, "JS renders the configured grab fps"
+    # exactly ONE fps write in the whole panel — the explicit align button.
+    assert js.count("{ fps:") == 1, "exactly one fps write (the explicit align button)"
+    idx = js.index("{ fps:")
+    before = js[:idx]
+    # that single write's nearest enclosing listener is the CLICK handler (not a change/poll).
+    last_listener = before.rfind("addEventListener(")
+    assert last_listener != -1 and before[last_listener:].startswith(
+        'addEventListener("click"'
+    ), "the fps write must live inside a click handler, not an auto path"
+    # updateBlock() runs every poll; it must never write fps (that would be an auto-write).
+    ub = js.index("function updateBlock(")
+    assert "{ fps:" not in js[ub:], "updateBlock must never write fps (no auto-write)"
 
 
 def _run():

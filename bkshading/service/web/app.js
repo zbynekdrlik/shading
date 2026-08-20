@@ -157,9 +157,13 @@ function updateBlock(el, cam) {
   q("fps-val").textContent = camFps == null ? "—" : camFps.toFixed(2);
   const grab = cam.grabFps; // configured box grab fps (null => no comparison for this camera)
   el.dataset.grabFps = grab == null ? "" : String(grab);
+  const syncRow = q("fps-sync");
   const grabEl = q("fps-grab");
   const warnEl = q("fps-warn");
   const setBtn = q("fps-set-grab");
+  // Hide the whole sync row (not just its children) for a camera with no grab configured,
+  // so no empty gap shows under the "fps —" line (a handheld without a grab mode).
+  if (syncRow) syncRow.hidden = grab == null;
   if (grab == null) {
     grabEl.hidden = true;
     warnEl.hidden = true;
