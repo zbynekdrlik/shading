@@ -29,7 +29,7 @@ remote. Implements the owner architecture decided 2026-08-20 (issue 808 comments
 |---|---|
 | `bkshading-proto` | Shared wire types + the byte-verified Blackmagic PTP mapping (ported from the dev2 MVP `pybridge/mapping.py`). Pure, no IO — one source of truth for both sides. |
 | `bkshading-relay` | The cambox/SBC USB relay. `gphoto2` transport behind a trait, small HTTP API (`/healthz`, `/api/state`, `/api/detect`, `PUT /api/params`). |
-| `bkshading` | The aggregation service + operator web panel (`GET /`, `/api/cameras`, `PUT /api/cameras/<id>/params`). |
+| `bkshading` | The aggregation service + operator web panel (`GET /`, `/api/cameras`, `PUT /api/cameras/<id>/params`, and the M2 live preview `GET /api/cameras/<id>/preview.jpg`). |
 
 ## M1 scope (this milestone)
 
@@ -41,9 +41,23 @@ remote. Implements the owner architecture decided 2026-08-20 (issue 808 comments
   preview renders a params-only block.
 - The relay's `gphoto2` read + write logic, fully unit-tested with a fake runner (no camera).
 
+## M2 scope (live preview)
+
+- Live NDI camera preview into each 4+4 block's top area (replaces the M1 placeholder). The
+  service subscribes to each configured camera's NDI **low-bandwidth** stream, decimates to a
+  few fps, JPEG-encodes, and serves the latest frame at `GET /api/cameras/<id>/preview.jpg`;
+  the web UI reloads an `<img>` a few times a second.
+- A `PreviewSource` seam: the default (and CI) source is a **stub test pattern**, so the
+  service compiles and runs with no libndi and no camera. The real libndi receiver (bandwidth
+  LOWEST, mirroring the appliance `src/ndi.rs`) is behind `--features ndi`, **off by default**
+  and unverified against a live source in this lane (see "Deferred").
+- Pure, CI-tested logic: frame decimation, RGB→JPEG encode, colour conversion, per-camera
+  routing/store. Tuned via the optional `[preview]` config table (`fps`, `jpeg_quality`, ...).
+
 ## Deferred to M2+
 
-- NDI low-quality preview via the **presenter** tech (M1 shows a placeholder box).
+- Verifying the **real** libndi preview receive (`--features ndi`) end-to-end against a live
+  cambox NDI source + provisioning libndi on the strih box + full FourCC coverage.
 - WS push of the aggregate; cloudflare remote with password protection.
 - Installing `gphoto2` on the camboxes (a RUNTIME dep; not present on cam1 yet — verified
   read-only) + provisioning hooks (`setup-device.sh`/`verify-device.sh`), the SBC handheld

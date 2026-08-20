@@ -68,6 +68,7 @@ function wire(el, id) {
     img.addEventListener("error", () => {
       img.classList.remove("ready");
       if (ph) ph.hidden = false;
+      el.dataset.previewErrAt = String(Date.now());
     });
   }
 }
@@ -75,10 +76,13 @@ function wire(el, id) {
 // Reload each preview-capable block's <img> from the service. Cache-busting query so the
 // browser fetches a fresh frame; a 503/404 fires the img's error handler (placeholder shown).
 function refreshPreviews() {
+  const now = Date.now();
   for (const [id, el] of blocks) {
     if (el.dataset.preview !== "1") continue;
+    // Brief backoff after a failed load, so a down camera (503/404) isn't hit at the full rate.
+    if (now - Number(el.dataset.previewErrAt || 0) < 1500) continue;
     const img = el.querySelector('[data-role="preview-img"]');
-    if (img) img.src = `/api/cameras/${encodeURIComponent(id)}/preview.jpg?t=${Date.now()}`;
+    if (img) img.src = `/api/cameras/${encodeURIComponent(id)}/preview.jpg?t=${now}`;
   }
 }
 

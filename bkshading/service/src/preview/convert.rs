@@ -46,6 +46,9 @@ pub fn rgba_to_rgb(rgba: &[u8], width: usize, height: usize) -> Vec<u8> {
 /// `UYVY` (packed 4:2:2, 4 bytes = 2 px: `U Y0 V Y1`) → RGB, BT.601 full-range approximation.
 /// Exact coefficients are unimportant for a shading PREVIEW (a rough colour reference, not a
 /// graded master); the conversion is deterministic and unit-tested for grey/luma sanity.
+/// EVEN width is assumed (each macropixel is 2 px); an odd-width source would yield
+/// `rgb.len() != w*h*3`, which `RawFrame::is_valid` then rejects downstream (frame dropped,
+/// never a panic) — NDI video widths are even in practice.
 pub fn uyvy_to_rgb(uyvy: &[u8], width: usize, height: usize) -> Vec<u8> {
     let px = width * height;
     let pairs = (px / 2).min(uyvy.len() / 4);

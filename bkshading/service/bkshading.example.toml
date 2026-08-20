@@ -10,7 +10,7 @@ bind = "0.0.0.0:8770"
 # as JPEG at /api/cameras/<id>/preview.jpg. A preview is a colour/exposure reference, not a
 # graded master, so a few fps at modest quality is plenty.
 [preview]
-fps = 3                    # target preview frame rate (2-5 is plenty for shading)
+fps = 3.0                  # target preview frame rate (2-5 is plenty for shading)
 jpeg_quality = 55          # 0-100; lower = smaller frames
 capture_timeout_ms = 1000  # how long one NDI capture blocks before looping
 reconnect_backoff_ms = 2000  # wait before rebuilding a source that dropped

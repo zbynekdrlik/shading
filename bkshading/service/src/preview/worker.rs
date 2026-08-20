@@ -8,7 +8,7 @@
 //! decision logic it composes (decimate, encode) is unit-tested separately.
 
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::preview::decimate::Decimator;
 use crate::preview::encode::encode_jpeg;
@@ -77,15 +77,18 @@ fn run_source(
     decim: &mut Decimator,
 ) {
     let timeout = Duration::from_millis(cfg.capture_timeout_ms);
+    // Decimation runs on a MONOTONIC clock (immune to a wall-clock / NTP backward step, which
+    // would otherwise pause emission until wall time caught up); the store's `updated_ms` stays
+    // wall-clock for diagnostics.
+    let started = Instant::now();
     loop {
         match src.next_frame(timeout) {
             Ok(Some(frame)) => {
-                let t = now_ms();
-                if !decim.should_emit(t) {
+                if !decim.should_emit(started.elapsed().as_millis() as u64) {
                     continue; // thinned to the target fps
                 }
                 match encode_jpeg(&frame, cfg.jpeg_quality) {
-                    Ok(jpeg) => store.put(cam_id, jpeg, t),
+                    Ok(jpeg) => store.put(cam_id, jpeg, now_ms()),
                     Err(e) => {
                         tracing::warn!(cam = %cam_id, error = %e, "preview jpeg encode failed")
                     }
