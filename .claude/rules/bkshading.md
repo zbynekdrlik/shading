@@ -17,7 +17,7 @@ dev2 MVP `pybridge/mapping.py`). Owner architecture: issue 808 comments 53558360
   from the dev2 MVP is dead; do not reintroduce it.
 - Camera list is config-driven (`bkshading/service/bkshading.example.toml`): a camera is a record
   (id, transport, address, optional `ndi_preview`). **A camera with no `ndi_preview` renders a
-  params-only block** (no preview). NDI preview itself is M2 (presenter tech) — M1 is a placeholder.
+  params-only block** (no preview). M2 delivers the LIVE preview (JPEG over HTTP; see M2 section).
 - Relay transport = shell out to the `gphoto2` CLI behind the `CameraTransport`-style trait (NOT a
   `libgphoto2` FFI binding — the trait keeps FFI as a future 2nd impl). Rationale: no build-time C
   dep → clean ARM cross-build for the Pi Zero 2 W handheld relay.
@@ -75,12 +75,48 @@ CI is the first compile. The local net that CAUGHT real issues here:
    showed its preview); a real Playwright E2E against a running service is M2 (Tier-0 can't run it).
 4. Type errors are the residual risk fmt can't catch — hand-audit the axum 0.7 (`:id` routes, not
    `{id}`), reqwest-rustls, serde `rename_all`, clap-derive, `spawn_blocking` Send-bounds surfaces,
-   and clippy `-D warnings` traps (a never-read struct field fails `dead_code`).
+   and clippy `-D warnings` traps (a never-read struct field fails `dead_code`; and since Rust
+   1.98, `chunks_exact(N)` with a CONSTANT N is a clippy-deny lint — use index math or
+   `slice::as_chunks::<N>().0`; the main crate was fixed in dev `052da4c5d`).
 
 ## M1 done / M2+ deferred
 Done: the 3 crates + workspace/CI wiring, the 4+4 responsive web panel skeleton (version in the DOM,
 version-on-dashboard), config-driven camera list, relay read+write logic unit-tested with a fake
-runner; ONE workspace-inherited crate version across all four crates (#1154). Deferred (M2+): NDI low-quality preview via presenter tech; WS push of the aggregate;
+runner; ONE workspace-inherited crate version across all four crates (#1154). M2 DONE: live NDI preview (below). Deferred (M2+): WS push of the aggregate;
 cloudflare password-protected remote (NOT tailscale — owner decision); SBC/handheld image; installing
 `gphoto2` on the camboxes (a RUNTIME dep — NOT present on cam1 yet) + provisioning hooks; automating
 the E2E camera pre-run shutter checklist.
+
+
+## M2 — live camera preview (issue 808, `bkshading/service/src/preview/**`)
+Owner architecture: the cambox publishes ONE NDI stream (strih OBS + this service both consume it);
+the service subscribes to the NDI **low-bandwidth** variant, decimates to ~3 fps, JPEG-encodes, and
+serves the latest frame at `GET /api/cameras/<id>/preview.jpg`; the web UI reloads an `<img>` a few
+times a second. Structure: a `PreviewSource` trait behind which the **default stub** (test pattern,
+CI-safe, no libndi) and a `#[cfg(feature="ndi")]` real receiver live; pure CI-tested stages
+(`frame`/`pattern`/`decimate`/`encode`/`convert`/`store`) + runtime glue (`source`/`worker` — one OS
+thread per camera, NOT tokio, since NDI capture is a blocking FFI call). Feature `ndi` is OFF by
+default + UNVERIFIED against a live source (follow-up #1157: verify + provision libndi on the strih
+service). Delivery is JPEG-over-HTTP, NOT presenter's gstreamer→webrtcsink (WHEP) — WebRTC is too
+heavy + CI-unverifiable for a ~3 fps shading preview; only the minimal "NDI recv → per-frame" idea
+was reused.
+- **The appliance ALREADY has the NDI recv pattern at `src/ndi.rs`** (`NdiReceiver::connect` +
+  `capture_frame`, `recv_create_v3` with a `bandwidth` field, `recv_capture_v3`,
+  `recv_free_video_v2`). The real preview receiver mirrors it VERBATIM (safest for an untestable
+  path), only swapping bandwidth `HIGHEST`(100) → `LOWEST`(0). Do NOT depend on the appliance root
+  crate from a member (pulls the whole heavy appliance tree) — copy the minimal recv FFI instead.
+- **jpeg-encoder 0.7**: `Encoder::new(w, quality) -> Encoder` (NOT a Result); `encode(self, &[u8],
+  width: u16, height: u16, ColorType::Rgb) -> Result` (consumes self). Pure Rust, default `std`
+  only (no simd/C) → cross-compiles to Windows/ARM.
+- **FFI init E0505 trap**: inline `*lib.get::<Fn>(...)?` calls INSIDE a struct literal keep their
+  Symbol temporaries alive to the END of the statement, so moving the `Library` into the last field
+  (`_library: lib`) fails with E0505 (borrowed). Deref-copy each fn pointer into its OWN `let` FIRST
+  (each `?` temp ends at its statement — fn pointers are Copy), THEN build the struct moving `lib`
+  last. (`src/ndi.rs` dodges it by binding Symbols to `let`s; the inline form does not.)
+- **FFI `#[repr(C)]` dead_code**: a private field never read (e.g. `p_url_address`, most of the
+  recv video-frame struct) trips `dead_code` under `-D warnings` — annotate the struct
+  `#[allow(dead_code)]` (the appliance made its fields `pub` instead, which is also exempt).
+- The feature-gated path gets its OWN CI step: `cargo clippy -p bkshading --features ndi
+  --all-targets -- -D warnings` (libloading is a RUNTIME load, so it compiles without libndi).
+- Decimation runs on a MONOTONIC `Instant` (not wall clock — immune to an NTP backward step); the
+  store's `updated_ms` stays wall clock for diagnostics.

@@ -96,3 +96,18 @@ fn served_index_injects_the_version() {
     );
     assert!(html.contains("data-testid=\"version\""));
 }
+
+#[test]
+fn parses_preview_table_and_defaults_when_absent() {
+    // M2: the optional [preview] table deserializes into PreviewConfig (fps is an f64, so the
+    // shipped example uses 3.0 — this pins the deserialize path in CI).
+    let cfg = ServiceConfig::from_toml_str("[preview]\nfps = 3.0\njpeg_quality = 40\n")
+        .expect("parse [preview]");
+    assert!((cfg.preview.fps - 3.0).abs() < 1e-9);
+    assert_eq!(cfg.preview.jpeg_quality, 40);
+
+    // Absent [preview] -> sensible defaults (never a parse error).
+    let d = ServiceConfig::from_toml_str("").expect("empty parse");
+    assert!(d.preview.fps > 0.0);
+    assert!(d.preview.jpeg_quality > 0);
+}

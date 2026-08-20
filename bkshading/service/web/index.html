@@ -15,8 +15,9 @@
   </header>
 
   <!-- The 4+4 blocks (up to 4 camboxes + 4 handhelds) are rendered here from /api/cameras.
-       Each block = a preview area on TOP (placeholder in M1; NDI via presenter is M2) and the
-       shading parameters BELOW it. A camera with no NDI preview gets a params-only block. -->
+       Each block = a live NDI preview area on TOP (M2: JPEG frames from /api/cameras/<id>/
+       preview.jpg) and the shading parameters BELOW it. A camera with no NDI preview gets a
+       params-only block. -->
   <main id="camera-grid" class="camera-grid" aria-live="polite"></main>
   <p id="empty-note" class="empty-note" hidden>Žiadne kamery v konfigurácii.</p>
 
@@ -24,7 +25,8 @@
   <template id="camera-block">
     <section class="camera-block" data-role="camera-block">
       <div class="block-preview" data-role="preview">
-        <div class="preview-placeholder">NDI preview — M2</div>
+        <img class="preview-img" data-role="preview-img" alt="Živý NDI preview kamery" />
+        <div class="preview-placeholder" data-role="preview-placeholder">NDI preview — čakám…</div>
       </div>
       <div class="block-params" data-role="params">
         <div class="block-head">

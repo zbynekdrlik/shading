@@ -51,6 +51,17 @@ def test_ndi_preview_is_optional():
     assert "ndi_preview" not in cams["handheld-1"]
 
 
+def test_preview_table_is_valid_when_present():
+    # M2: the optional [preview] table tunes the live preview. When present it must carry a
+    # sane fps and quality (the Rust PreviewConfig defaults them, but the shipped example
+    # documents them, so keep the example honest).
+    cfg = _load()
+    if "preview" in cfg:
+        prev = cfg["preview"]
+        assert isinstance(prev.get("fps"), (int, float)) and prev["fps"] > 0
+        assert 0 < prev.get("jpeg_quality", 55) <= 100
+
+
 def _run():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

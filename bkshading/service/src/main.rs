@@ -58,15 +58,28 @@ async fn main() -> Result<()> {
     }
 
     let addr: SocketAddr = config.bind.parse()?;
+
+    // Start one preview worker per camera that has an NDI preview source (M2). Returns the
+    // shared store the `preview.jpg` HTTP handler reads. Cameras without a preview name get
+    // no worker (params-only blocks).
+    let previews = bkshading::preview::start_all(&config);
+    let preview_workers = config
+        .cameras
+        .iter()
+        .filter(|c| c.ndi_preview.is_some())
+        .count();
+
     let state = AppState {
         agg: Arc::new(Aggregator::new(VERSION)?),
         config: Arc::new(config),
+        previews,
     };
 
     tracing::info!(
         version = VERSION,
         %addr,
         cameras = state.config.cameras.len(),
+        preview_workers,
         "bkshading service starting"
     );
     let listener = tokio::net::TcpListener::bind(addr).await?;

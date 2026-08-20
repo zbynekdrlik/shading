@@ -1,8 +1,9 @@
 "use strict";
-// bkshading web panel (issue 808, M1). Server-truth: the panel renders whatever
-// /api/cameras reports and never keeps optimistic local state. Controls PUT a shading
-// change to /api/cameras/<id>/params (forwarded to the camera's relay). NDI preview is an
-// M1 placeholder; a camera with no preview shows a params-only block.
+// bkshading web panel (issue 808). Server-truth: the panel renders whatever /api/cameras
+// reports and never keeps optimistic local state. Controls PUT a shading change to
+// /api/cameras/<id>/params (forwarded to the camera's relay). M2: a camera with an NDI
+// preview shows a live JPEG preview (top block) reloaded a few times a second from
+// /api/cameras/<id>/preview.jpg; a camera with no preview shows a params-only block.
 
 const grid = document.getElementById("camera-grid");
 const tmpl = document.getElementById("camera-block");
@@ -10,6 +11,10 @@ const connEl = document.getElementById("conn-status");
 const emptyNote = document.getElementById("empty-note");
 const blocks = new Map(); // camera id -> block element (reused to preserve control focus)
 let interacting = false; // pause re-render while the operator is dragging a control
+
+// Live preview refresh rate (Hz). Shading is about colour/exposure, not motion, so a few
+// fps is plenty; keep it in step with the service-side decimation (~3 fps).
+const PREVIEW_FPS = 3;
 
 // Present f-number from the AV the relay reported: fNumber = sqrt(2^AV).
 function fNumberFromAv(av) {
@@ -50,6 +55,35 @@ function wire(el, id) {
   q("kelvin").addEventListener("change", guard((e) => setParam(id, { kelvin: Math.round(Number(e.target.value)) })));
   q("tint").addEventListener("change", guard((e) => setParam(id, { tint: Math.round(Number(e.target.value)) })));
   q("auto-wb").addEventListener("click", () => setParam(id, { autoWb: true }));
+
+  // Preview image: show it once a frame loads, fall back to the placeholder on error (503
+  // until the first frame, or a dropped feed). Wired once per block.
+  const img = q("preview-img");
+  const ph = q("preview-placeholder");
+  if (img) {
+    img.addEventListener("load", () => {
+      img.classList.add("ready");
+      if (ph) ph.hidden = true;
+    });
+    img.addEventListener("error", () => {
+      img.classList.remove("ready");
+      if (ph) ph.hidden = false;
+      el.dataset.previewErrAt = String(Date.now());
+    });
+  }
+}
+
+// Reload each preview-capable block's <img> from the service. Cache-busting query so the
+// browser fetches a fresh frame; a 503/404 fires the img's error handler (placeholder shown).
+function refreshPreviews() {
+  const now = Date.now();
+  for (const [id, el] of blocks) {
+    if (el.dataset.preview !== "1") continue;
+    // Brief backoff after a failed load, so a down camera (503/404) isn't hit at the full rate.
+    if (now - Number(el.dataset.previewErrAt || 0) < 1500) continue;
+    const img = el.querySelector('[data-role="preview-img"]');
+    if (img) img.src = `/api/cameras/${encodeURIComponent(id)}/preview.jpg?t=${now}`;
+  }
 }
 
 // Rebuild a value-button group (ISO, shutter) from the camera caps, marking the current one.
@@ -69,9 +103,12 @@ function updateBlock(el, cam) {
   const q = (role) => el.querySelector(`[data-role="${role}"]`);
   q("label").textContent = cam.label;
 
-  // Preview area: keep only for cameras that carry an NDI preview (M1 placeholder).
+  // Preview area: shown only for cameras that carry an NDI preview. The `preview` dataset
+  // flag drives refreshPreviews() (which reloads the <img>); a camera without a feed keeps
+  // its preview area hidden and gets no image reloads.
   const preview = q("preview");
   if (preview) preview.hidden = !cam.hasPreview;
+  el.dataset.preview = cam.hasPreview ? "1" : "0";
 
   const online = cam.reachable && cam.state && cam.state.online;
   q("online").textContent = !cam.reachable ? "relay offline" : online ? "online" : "kamera offline";
@@ -147,3 +184,4 @@ async function poll() {
 
 poll();
 setInterval(poll, 2000);
+setInterval(refreshPreviews, Math.round(1000 / PREVIEW_FPS));
