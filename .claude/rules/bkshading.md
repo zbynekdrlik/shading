@@ -36,6 +36,29 @@ are added as SEPARATE workspace members:
 - Deps stay OUT of the appliance tree: axum/tokio/reqwest(rustls, no openssl)/toml live only in the
   member manifests, so the appliance's minimal deps + probe feature-gating are never touched.
 
+## Crate versions — ONE workspace source of truth (issue 1154)
+All four crates (appliance + the 3 members) inherit ONE version from root
+`[workspace.package] version = "X"` via `version.workspace = true`; NO crate hard-codes its own.
+A single edit of that ONE line bumps every crate's `CARGO_PKG_VERSION` (relay/service read it as
+`const VERSION`, which feeds the panel DOM / `/api/version` / `RelayState.version` — the
+version-on-dashboard surface). Before #1154 the members hard-coded their version and silently
+drifted after each root-only bump (root `.518` vs members `.516` live).
+- The three `^version = "X"` readers (`camera-box-version-gate.sh:169` incl. its origin/main pin,
+  `recording-e2e.sh:903` sed, `rig-status.py` `_read_version`) STILL work UNTOUCHED: each anchors
+  on the FIRST column-0 `version = "X"` line, now the `[workspace.package]` one (same value), which
+  sits before all dependency lines. `version.workspace = true` never matches that anchor (no quote
+  after `=`), and the new comment lines start with `#`.
+- **Bump discipline is now: edit the single `[workspace.package].version` line at the root.**
+- GOTCHA when bumping via sed: a blanket `sed 's/^version = "OLD"$/.../'` will ALSO rewrite the
+  `[workspace.package]` literal (it is the ONLY column-0 `version = "X"` line now). Target that
+  one line specifically (e.g. `sed '/^\[workspace.package\]$/{n;s/.../}'`).
+- The `"1.7.0-dev.516"` literals in `service/tests/service.rs` + `relay/tests/relay.rs` are INERT
+  test inputs (a version string passed INTO `CameraSession::new(...)`/a fixture and echoed back),
+  decoupled from `env!` — they do NOT track the crate version and do NOT break CI.
+- Invariant test: `tests/python/test_bkshading_versions_1154.py` (tomllib structural — runs in the
+  `python-tests` CI job, no toolchain; a skip-if-no-cargo `cargo metadata` check proves resolved
+  value-level uniformity where cargo exists).
+
 ## Tier-0 verification of a NEW crate (no cargo build locally, issue 557)
 CI is the first compile. The local net that CAUGHT real issues here:
 1. `cargo fmt --all -- --check` — parses every member, proving the Rust is brace/syntax-balanced
@@ -57,7 +80,7 @@ CI is the first compile. The local net that CAUGHT real issues here:
 ## M1 done / M2+ deferred
 Done: the 3 crates + workspace/CI wiring, the 4+4 responsive web panel skeleton (version in the DOM,
 version-on-dashboard), config-driven camera list, relay read+write logic unit-tested with a fake
-runner. Deferred (M2+): NDI low-quality preview via presenter tech; WS push of the aggregate;
+runner; ONE workspace-inherited crate version across all four crates (#1154). Deferred (M2+): NDI low-quality preview via presenter tech; WS push of the aggregate;
 cloudflare password-protected remote (NOT tailscale — owner decision); SBC/handheld image; installing
 `gphoto2` on the camboxes (a RUNTIME dep — NOT present on cam1 yet) + provisioning hooks; automating
-the E2E camera pre-run shutter checklist; unifying crate versions with the bump discipline (#1154).
+the E2E camera pre-run shutter checklist.

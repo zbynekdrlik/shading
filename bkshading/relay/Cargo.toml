@@ -1,6 +1,6 @@
 [package]
 name = "bkshading-relay"
-version = "1.7.0-dev.516"
+version.workspace = true
 edition = "2021"
 authors = ["zbynekdrlik"]
 description = "Cambox/SBC USB relay: exposes a local Blackmagic camera's shading over HTTP for the bkshading service (issue 808)"

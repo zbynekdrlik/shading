@@ -1,6 +1,6 @@
 [package]
 name = "bkshading"
-version = "1.7.0-dev.516"
+version.workspace = true
 edition = "2021"
 authors = ["zbynekdrlik"]
 description = "Camera shading-control aggregation service + operator web panel (issue 808)"
