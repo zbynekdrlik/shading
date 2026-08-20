@@ -120,3 +120,26 @@ was reused.
   --all-targets -- -D warnings` (libloading is a RUNTIME load, so it compiles without libndi).
 - Decimation runs on a MONOTONIC `Instant` (not wall clock — immune to an NTP backward step); the
   store's `updated_ms` stays wall clock for diagnostics.
+
+
+## Camera fps ↔ box grab-mode sync (issue 809)
+The camera FRAME-RATE get/set ALREADY EXISTS from M1 — do NOT add a new message pair. It flows
+through the general shading path: `ShadingParams.fps100` (project fps d007 x100) + `sensor_fps100`
+(d006 readback) on the GET side, and `SetRequest.fps` → `read::plan_writes` → gphoto2 `d007` on the
+SET side; the relay reads d006/d007 in `read_state`, `RelayState.fps_supported` reports whether d007
+is exposed. #809 added only the grab-mode SYNC LAYER on top of that (duplicating the get/set would
+break the one-source-of-truth the owner flagged in the MVP):
+- proto: `FpsSync {Unknown,Synced,Mismatch}` + pure `FpsSync::classify(camera_fps100, grab_fps)`
+  (kebab-case wire: `"unknown"/"synced"/"mismatch"`); `CameraView` gains `grab_fps` + `fps_sync`.
+- service: `CameraConfig.grab_fps: Option<i64>` (per-camera box grab mode, `60` for cam1); the
+  aggregator computes `fps_sync` in the pure `camera_view` (CI-tested in `service/tests/service.rs`).
+- web panel: shows the grab fps, a mismatch warning, and an EXPLICIT per-camera "align to grab"
+  button that issues the existing `SetRequest.fps`. NEVER an auto-write — a camera-side format
+  change can interrupt recording (owner constraint); the button lives only in the click handler,
+  never in `updateBlock` (which runs every poll). Test `test_app_js_align_button_...` pins that.
+- The sync compares PROJECT fps (d007), NOT sensor fps (d006): d007 is exactly what the align write
+  changes and what the camera's HDMI output follows; `sensor_fps100` stays an off-speed diagnostic.
+- `grab_fps` is a plain integer for now (the rig is integer-genlock 60). A fractional NTSC grab
+  (59.94/29.97) would classify Mismatch against an integer and needs a new representation — deferred
+  scope, not a bug. Deriving grab from the box's live capture_fps (vs a static config field) is the
+  follow-up.
