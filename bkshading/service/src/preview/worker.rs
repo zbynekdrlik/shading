@@ -36,13 +36,14 @@ pub fn spawn_preview(
     store: PreviewStore,
     build: SourceBuilder,
 ) {
+    let log_name = source_name.clone();
     let spawned = thread::Builder::new()
         .name(format!("preview-{cam_id}"))
         .spawn(move || run_forever(&cam_id, &source_name, &cfg, &store, build));
     if let Err(e) = spawned {
         // A thread that cannot even start is logged, not panicked — one camera's preview
         // failing must never take the service down.
-        tracing::error!(source = %source_name, error = %e, "failed to spawn preview thread");
+        tracing::error!(source = %log_name, error = %e, "failed to spawn preview thread");
     }
 }
 
