@@ -15,6 +15,16 @@ path = "src/lib.rs"
 name = "bkshading"
 path = "src/main.rs"
 
+[features]
+default = []
+# Real NDI receive for the live preview (issue 808 M2). OFF by default: the service compiles
+# + runs with the STUB test-pattern source on CI (no libndi needed). The real recv path
+# (src/preview/ndi_source.rs) loads libndi at RUNTIME via libloading and mirrors the
+# appliance's verified src/ndi.rs at bandwidth LOWEST; it is UNVERIFIED against a live source
+# in this lane (see the issue 808 M2 follow-up). libloading is dynamic, so this compiles on CI
+# even without libndi installed — the dedicated `cargo clippy --features ndi` CI step proves it.
+ndi = ["dep:libloading"]
+
 [dependencies]
 bkshading-proto = { path = "../proto" }
 axum = "0.7"
@@ -30,3 +40,8 @@ futures = "0.3"
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Pure-Rust JPEG encoder for the preview wire format (default features = `std` only, no simd/C
+# → cross-compiles cleanly to Windows/ARM).
+jpeg-encoder = "0.7"
+# Runtime dynamic load of libndi (feature `ndi` only).
+libloading = { version = "0.8", optional = true }

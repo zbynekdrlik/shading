@@ -8,6 +8,8 @@
 use bkshading_proto::wire::Transport;
 use serde::Deserialize;
 
+use crate::preview::PreviewConfig;
+
 fn default_bind() -> String {
     "0.0.0.0:8770".to_string()
 }
@@ -21,6 +23,10 @@ pub struct ServiceConfig {
     /// The cameras this service aggregates (`[[camera]]` tables).
     #[serde(default, rename = "camera")]
     pub cameras: Vec<CameraConfig>,
+    /// Live-preview tuning (the optional `[preview]` table). Defaults are sensible, so it may
+    /// be omitted entirely.
+    #[serde(default)]
+    pub preview: PreviewConfig,
 }
 
 /// One camera the service controls through its relay.
@@ -59,6 +65,7 @@ impl ServiceConfig {
         ServiceConfig {
             bind: default_bind(),
             cameras: Vec::new(),
+            preview: PreviewConfig::default(),
         }
     }
 }

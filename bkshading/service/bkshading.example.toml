@@ -5,6 +5,16 @@
 # Web panel bind address (the operator opens http://strih.lan:8770/).
 bind = "0.0.0.0:8770"
 
+# Live-preview tuning (M2, issue 808). Optional — every field defaults sensibly. Each camera
+# with an `ndi_preview` name gets a low-bandwidth NDI receiver decimated to `fps` and served
+# as JPEG at /api/cameras/<id>/preview.jpg. A preview is a colour/exposure reference, not a
+# graded master, so a few fps at modest quality is plenty.
+[preview]
+fps = 3                    # target preview frame rate (2-5 is plenty for shading)
+jpeg_quality = 55          # 0-100; lower = smaller frames
+capture_timeout_ms = 1000  # how long one NDI capture blocks before looping
+reconnect_backoff_ms = 2000  # wait before rebuilding a source that dropped
+
 # cam1: camera USB -> cambox cam1, controlled by bkshading-relay on cam1.
 [[camera]]
 id = "cam1"

@@ -54,17 +54,31 @@ body {
 .camera-block.disabled .block-params { opacity: 0.45; pointer-events: none; }
 
 .block-preview {
+  position: relative;
   aspect-ratio: 16 / 9;
   background: #0d0f13;
   display: flex;
   align-items: center;
   justify-content: center;
   border-bottom: 1px solid var(--edge);
+  overflow: hidden;
 }
 /* A params-only block (no NDI preview) hides its preview area; the author display:flex
    above otherwise beats the UA [hidden] rule. */
 .block-preview[hidden] { display: none; }
-.preview-placeholder { color: var(--muted); font-size: 0.85rem; letter-spacing: 0.03em; }
+/* Live JPEG preview (M2): fills the 16:9 area, shown only once a frame has loaded; the
+   placeholder shows underneath until then (or if the feed drops). */
+.preview-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+  display: none;
+}
+.preview-img.ready { display: block; }
+.preview-placeholder { color: var(--muted); font-size: 0.85rem; letter-spacing: 0.03em; z-index: 1; }
 
 .block-params { padding: 0.7rem 0.8rem 0.9rem; display: flex; flex-direction: column; gap: 0.7rem; }
 .block-head { display: flex; align-items: baseline; justify-content: space-between; }
