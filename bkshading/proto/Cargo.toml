@@ -1,6 +1,6 @@
 [package]
 name = "bkshading-proto"
-version = "1.7.0-dev.516"
+version.workspace = true
 edition = "2021"
 authors = ["zbynekdrlik"]
 description = "Shared wire types + byte-verified Blackmagic PTP mapping for bkshading (issue 808)"
