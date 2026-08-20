@@ -62,6 +62,15 @@ def test_preview_table_is_valid_when_present():
         assert 0 < prev.get("jpeg_quality", 55) <= 100
 
 
+def test_cam1_declares_grab_fps_and_handheld_omits_it():
+    # issue 809: cam1 is grabbed at 60 fps; the example documents the grab-mode field so the
+    # panel can warn on a camera-fps mismatch. grab_fps is optional (handheld omits it).
+    cfg = _load()
+    cams = {c["id"]: c for c in cfg["camera"]}
+    assert cams["cam1"].get("grab_fps") == 60
+    assert "grab_fps" not in cams["handheld-1"]
+
+
 def _run():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

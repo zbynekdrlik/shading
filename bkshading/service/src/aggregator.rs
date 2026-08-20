@@ -7,14 +7,19 @@
 
 use std::time::Duration;
 
-use bkshading_proto::wire::{Aggregate, CameraView, RelayState, SetRequest};
+use bkshading_proto::wire::{Aggregate, CameraView, FpsSync, RelayState, SetRequest};
 
 use crate::config::{CameraConfig, ServiceConfig};
 
 /// Pure assembly of a [`CameraView`] from a camera's config and its (optional) relay state.
-/// Split out so the mapping — including "has NDI preview iff `ndi_preview` is configured" —
-/// is unit-testable without any HTTP.
+/// Split out so the mapping — including "has NDI preview iff `ndi_preview` is configured"
+/// and the issue-809 fps-vs-grab sync verdict — is unit-testable without any HTTP.
 pub fn camera_view(cam: &CameraConfig, state: Option<RelayState>) -> CameraView {
+    // issue 809: compare the camera's reported project fps against the box's grab mode.
+    // A camera-offline / unreachable state carries `fps100 = None`, which classifies as
+    // Unknown (never a false mismatch).
+    let camera_fps100 = state.as_ref().and_then(|s| s.params.fps100);
+    let fps_sync = FpsSync::classify(camera_fps100, cam.grab_fps);
     CameraView {
         id: cam.id.clone(),
         label: cam.label.clone(),
@@ -23,6 +28,8 @@ pub fn camera_view(cam: &CameraConfig, state: Option<RelayState>) -> CameraView 
         // configured (a handheld without a feed has none -> params-only block).
         has_preview: cam.ndi_preview.is_some(),
         reachable: state.is_some(),
+        grab_fps: cam.grab_fps,
+        fps_sync,
         state,
     }
 }

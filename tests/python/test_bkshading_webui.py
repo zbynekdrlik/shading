@@ -69,6 +69,27 @@ def test_no_localhost_urls_anywhere():
             assert bad not in text, f"{name} must not hardcode {bad}"
 
 
+def test_index_has_fps_grab_sync_ui():
+    # issue 809: each block shows the box grab fps, a mismatch warning, and an explicit
+    # "align to grab" button (never an auto-write).
+    html = _read("index.html")
+    for role in ("fps-grab", "fps-warn", "fps-set-grab"):
+        assert f'data-role="{role}"' in html, f"missing fps-sync element: {role}"
+    # the warning + align button are hidden by default (shown only on a mismatch).
+    assert 'data-role="fps-warn" hidden' in html, "fps-warn hidden by default"
+    assert 'data-role="fps-set-grab" hidden' in html, "align button hidden by default"
+
+
+def test_app_js_align_button_sends_grab_fps_without_autowrite():
+    # issue 809: the align button issues an explicit fps write of the configured grab value;
+    # there is no automatic fps write anywhere (operator action only).
+    js = _read("app.js")
+    assert "fps-set-grab" in js, "JS wires the align button (q('fps-set-grab'))"
+    assert re.search(r"setParam\([^,]+,\s*\{\s*fps:", js), "align button PUTs { fps: <grab> }"
+    assert "cam.fpsSync" in js, "JS renders the fps sync verdict"
+    assert "cam.grabFps" in js, "JS renders the configured grab fps"
+
+
 def _run():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:
