@@ -7,7 +7,9 @@ use std::sync::Mutex;
 
 use anyhow::{anyhow, bail, Result};
 use bkshading_proto::wire::SetRequest;
-use bkshading_relay::transport::{parse_first_model, CameraSession, Gphoto2Runner};
+use bkshading_relay::transport::{
+    parse_capture_fps_env, parse_first_model, CameraSession, Gphoto2Runner,
+};
 
 const AUTO_DETECT: &str = "\
 Model                          Port
@@ -108,6 +110,44 @@ fn read_state_offline_when_camera_absent() {
     assert!(!st.online);
     assert_eq!(st.camera, None);
     assert_eq!(st.params.iso, None);
+}
+
+#[test]
+fn parse_capture_fps_env_parses_int_decimal_and_rejects_junk() {
+    // issue 809: the box's capture-mode fps from CAMERA_BOX_CAPTURE_FPS.
+    assert_eq!(parse_capture_fps_env(Some("60".into())), Some(60));
+    assert_eq!(parse_capture_fps_env(Some(" 60 ".into())), Some(60)); // trimmed
+    assert_eq!(parse_capture_fps_env(Some("60.0".into())), Some(60));
+    assert_eq!(parse_capture_fps_env(Some("59.94".into())), Some(60)); // rounded (integer model)
+    assert_eq!(parse_capture_fps_env(Some("0".into())), None); // non-positive -> unknown
+    assert_eq!(parse_capture_fps_env(Some("-5".into())), None);
+    assert_eq!(parse_capture_fps_env(Some("abc".into())), None); // junk -> unknown
+    assert_eq!(parse_capture_fps_env(Some("".into())), None);
+    assert_eq!(parse_capture_fps_env(None), None); // env unset -> unknown
+}
+
+#[test]
+fn with_capture_fps_is_reported_in_state_online_and_offline() {
+    // issue 809: the relay reports the box's capture-mode fps in RelayState, both when the
+    // camera is online AND when it is offline (it is a box property, not a camera one).
+    let online = CameraSession::new(Box::new(FakeRunner::full_camera()), "1.7.0-dev.516")
+        .with_capture_fps(Some(60));
+    assert_eq!(online.read_state().capture_fps, Some(60));
+
+    let mut fake = FakeRunner::full_camera();
+    fake.camera_present = false;
+    let offline = CameraSession::new(Box::new(fake), "1.7.0-dev.516").with_capture_fps(Some(60));
+    let st = offline.read_state();
+    assert!(!st.online);
+    assert_eq!(
+        st.capture_fps,
+        Some(60),
+        "box rate reported even camera-offline"
+    );
+
+    // Default (no env) -> None, never a bogus value.
+    let none = CameraSession::new(Box::new(FakeRunner::full_camera()), "1.7.0-dev.516");
+    assert_eq!(none.read_state().capture_fps, None);
 }
 
 #[test]

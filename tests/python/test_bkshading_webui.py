@@ -119,6 +119,17 @@ def test_app_js_align_button_sends_grab_fps_without_autowrite():
     assert "{ fps:" not in js[ub:], "updateBlock must never write fps (no auto-write)"
 
 
+def test_index_and_js_surface_grab_config_desync():
+    # issue 809 remainder: the panel surfaces when the static grab_fps config disagrees with the
+    # box's live capture rate (a silent desync after a capture-mode change).
+    html = _read("index.html")
+    assert 'data-role="fps-desync"' in html, "desync element present in the block template"
+    assert 'data-role="fps-desync" hidden' in html, "desync hidden by default (shown on desync)"
+    js = _read("app.js")
+    assert "cam.grabFpsDesync" in js, "the JS renders the grab config desync flag"
+    assert 'q("fps-desync")' in js, "the JS drives the desync element"
+
+
 def _run():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:
