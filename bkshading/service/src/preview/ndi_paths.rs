@@ -39,9 +39,9 @@ pub fn ndi_lib_names(os: NdiOs) -> &'static [&'static str] {
         NdiOs::Linux => &["libndi.so.6", "libndi.so.5", "libndi.so"],
         // Windows: the NDI Tools / redist DLL (x64 grounded from bundle-state-server.py; x86 the
         // standard 32-bit sibling name).
-        NdiOs::Windows => &["libndi.so.6", "libndi.so.5", "libndi.so"],
+        NdiOs::Windows => &["Processing.NDI.Lib.x64.dll", "Processing.NDI.Lib.x86.dll"],
         // macOS (not a current ship target — bare-name/dyld fallback only, no invented dir).
-        NdiOs::Macos => &["libndi.so.6", "libndi.so.5", "libndi.so"],
+        NdiOs::Macos => &["libndi.dylib"],
     }
 }
 
@@ -54,9 +54,9 @@ pub fn ndi_wellknown_dirs(os: NdiOs) -> &'static [&'static str] {
         NdiOs::Linux => &["/usr/lib/ndi", "/usr/local/lib/ndi", "/opt/ndi/lib"],
         // Grounded: the strih NDI Tools runtime dir (bundle-state-server.py / drift-guard.md).
         // The redist install is covered by NDI_RUNTIME_DIR_V6 (env) + the PATH fallback.
-        NdiOs::Windows => &["/usr/lib/ndi", "/usr/local/lib/ndi", "/opt/ndi/lib"],
+        NdiOs::Windows => &[r"C:\Program Files\NDI\NDI 6 Tools\Runtime"],
         // No hardcoded macOS dir (env + dyld fallback only).
-        NdiOs::Macos => &["/usr/lib/ndi", "/usr/local/lib/ndi", "/opt/ndi/lib"],
+        NdiOs::Macos => &[],
     }
 }
 

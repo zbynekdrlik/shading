@@ -13,7 +13,6 @@
 //! FourCC coverage are the named M2 follow-up (issue 808).
 
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
-use std::path::Path;
 use std::ptr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,6 +22,7 @@ use libloading::Library;
 
 use crate::preview::convert::{bgra_to_rgb, rgba_to_rgb, uyvy_to_rgb};
 use crate::preview::frame::RawFrame;
+use crate::preview::ndi_paths::{current_ndi_os, ndi_search_candidates};
 use crate::preview::source::PreviewSource;
 
 // --- FFI layout (recv subset, copied verbatim from the appliance src/ndi.rs) --------------
@@ -121,32 +121,27 @@ unsafe impl Sync for NdiLib {}
 
 impl NdiLib {
     fn load() -> Result<Self> {
-        let search = [
-            std::env::var("NDI_RUNTIME_DIR_V6").ok(),
-            std::env::var("NDI_RUNTIME_DIR_V5").ok(),
-            std::env::var("NDI_RUNTIME_DIR").ok(),
-            Some("/usr/lib/ndi".to_string()),
-            Some("/usr/local/lib/ndi".to_string()),
-            Some("/opt/ndi/lib".to_string()),
-        ];
-        let names = ["libndi.so.6", "libndi.so.5", "libndi.so"];
-        for dir in search.iter().flatten() {
-            for name in &names {
-                let path = Path::new(dir).join(name);
-                if path.exists() {
-                    if let Ok(lib) = unsafe { Library::new(&path) } {
-                        return Self::init(lib);
-                    }
+        // Cross-platform ordered candidate library paths (env dirs, then per-OS well-known dirs,
+        // then bare names for the dynamic-linker fallback). The DECISION lives in the pure,
+        // CI-unit-tested `ndi_paths` module (issue 1157): the bkshading service ships to the
+        // strih PC (Windows), where the runtime is Processing.NDI.Lib.x64.dll — never a `.so`.
+        let candidates = ndi_search_candidates(current_ndi_os(), |k| std::env::var(k).ok());
+        for path in &candidates {
+            // A dir-joined candidate is only worth a load attempt if the file exists; a bare-name
+            // candidate (empty parent) is handed straight to the loader (LD_LIBRARY_PATH /
+            // Windows PATH / dyld search).
+            let is_bare = path.parent().map_or(true, |p| p.as_os_str().is_empty());
+            if is_bare || path.exists() {
+                if let Ok(lib) = unsafe { Library::new(path) } {
+                    return Self::init(lib);
                 }
             }
         }
-        // Last resort: let the dynamic linker search (LD_LIBRARY_PATH, Windows PATH, ...).
-        for name in &names {
-            if let Ok(lib) = unsafe { Library::new(*name) } {
-                return Self::init(lib);
-            }
-        }
-        anyhow::bail!("NDI runtime not found (install the NDI SDK or set NDI_RUNTIME_DIR_V6)")
+        anyhow::bail!(
+            "NDI runtime not found (install the NDI SDK / NDI Tools, or set NDI_RUNTIME_DIR_V6); \
+             tried {} candidate paths",
+            candidates.len()
+        )
     }
 
     fn init(lib: Library) -> Result<Self> {
