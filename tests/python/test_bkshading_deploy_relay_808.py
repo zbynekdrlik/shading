@@ -207,12 +207,14 @@ def _fake_deploy_env(tmp, remote_sha):
     log = os.path.join(tmp, "calls.log")
     # Fake ssh: log the command; if it's a sha256sum, print the injected sha for the relay path.
     fake_ssh = os.path.join(tmp, "fake-ssh")
+    # The real remote command is `sha256sum <path> | awk '{print $1}'`, so a faithful fake returns
+    # ONLY the sha (the awk'd first field), not the raw `sha256sum` "<sha>  <path>" line.
     ssh_body = (
         "#!/usr/bin/env bash\n"
         'printf "SSH %s\\n" "$*" >> "__LOG__"\n'
         'cmd="${!#}"\n'
         "case \"$cmd\" in\n"
-        '  *sha256sum*) printf "__SHA__  /usr/local/bin/bkshading-relay\\n" ;;\n'
+        '  *sha256sum*) printf "__SHA__\\n" ;;\n'
         "  *) : ;;\n"
         "esac\n"
         "exit 0\n"
@@ -285,10 +287,13 @@ def test_relay_bin_path_agrees_with_relay_runtime_lib():
 
 
 def test_no_bluetooth_anywhere():
+    # `ble` is matched as a standalone word (\bble\b) — a bare "ble " substring would false-match the
+    # ubiquitous "enable "/"disable "/"table ", so the acronym BLE is checked with word boundaries.
     for f in (SCRIPT, LIB):
         text = open(f).read().lower()
-        for banned in ("bluetooth", "ble ", "bluez", "gatt"):
+        for banned in ("bluetooth", "bluez", "gatt"):
             assert banned not in text, "%s must not mention %r (owner hard rule)" % (f, banned)
+        assert not re.search(r"\bble\b", text), "%s must not mention BLE (owner hard rule)" % f
 
 
 if __name__ == "__main__":
