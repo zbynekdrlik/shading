@@ -172,3 +172,74 @@ fn preview_config_defaults_are_sane() {
     assert!(c.fps >= 2.0 && c.fps <= 5.0, "default preview fps in 2..5");
     assert!(c.jpeg_quality > 0 && c.jpeg_quality <= 100);
 }
+
+// --- NDI runtime discovery (issue 1157) ---------------------------------------------------
+// The bkshading SERVICE ships to the strih PC (Windows first), so the real-preview receiver's
+// libndi discovery MUST look for the Windows runtime DLL, not only the appliance's Linux `.so`
+// names. These pin the PURE, default-feature discovery decision (the `#[cfg(feature="ndi")]`
+// `NdiLib::load()` consumes it), so they run on CI with no libndi.
+
+use bkshading::preview::ndi_paths::{ndi_search_candidates, NdiOs};
+
+#[test]
+fn windows_candidates_include_the_ndi_runtime_dll() {
+    let cands = ndi_search_candidates(NdiOs::Windows, |_| None);
+    let has_dll = cands
+        .iter()
+        .any(|p| p.to_string_lossy().contains("Processing.NDI.Lib"));
+    assert!(
+        has_dll,
+        "Windows NDI discovery must try Processing.NDI.Lib*.dll (the strih runtime); got {cands:?}"
+    );
+}
+
+#[test]
+fn windows_candidates_include_the_documented_strih_runtime_dir() {
+    let cands = ndi_search_candidates(NdiOs::Windows, |_| None);
+    let has_dir = cands.iter().any(|p| {
+        let s = p.to_string_lossy();
+        s.contains("NDI 6 Tools") && s.contains("Runtime") && s.contains("Processing.NDI.Lib")
+    });
+    assert!(
+        has_dir,
+        "Windows discovery must include the documented NDI 6 Tools Runtime dir; got {cands:?}"
+    );
+}
+
+#[test]
+fn linux_candidates_cover_libndi_so_and_bare_fallback() {
+    let cands = ndi_search_candidates(NdiOs::Linux, |_| None);
+    assert!(
+        cands
+            .iter()
+            .any(|p| p.to_string_lossy().ends_with("libndi.so.6")),
+        "Linux discovery must include libndi.so.6"
+    );
+    assert!(
+        cands.iter().any(|p| p.to_string_lossy() == "libndi.so.6"),
+        "bare-name dynamic-linker fallback must be present"
+    );
+}
+
+#[test]
+fn env_runtime_dir_is_searched_before_wellknown_dirs() {
+    let env = |k: &str| {
+        if k == "NDI_RUNTIME_DIR_V6" {
+            Some("/custom/ndi".to_string())
+        } else {
+            None
+        }
+    };
+    let cands = ndi_search_candidates(NdiOs::Linux, env);
+    let first_env = cands.iter().position(|p| p.starts_with("/custom/ndi"));
+    let first_wellknown = cands.iter().position(|p| p.starts_with("/usr/lib/ndi"));
+    assert!(first_env.is_some(), "env dir candidate must exist");
+    assert!(
+        first_wellknown.is_some(),
+        "well-known dir candidate must exist"
+    );
+    assert!(
+        first_env < first_wellknown,
+        "env dir must be tried before well-known dirs"
+    );
+}
