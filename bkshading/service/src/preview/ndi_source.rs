@@ -130,7 +130,7 @@ impl NdiLib {
             // A dir-joined candidate is only worth a load attempt if the file exists; a bare-name
             // candidate (empty parent) is handed straight to the loader (LD_LIBRARY_PATH /
             // Windows PATH / dyld search).
-            let is_bare = path.parent().map_or(true, |p| p.as_os_str().is_empty());
+            let is_bare = path.parent().is_none_or(|p| p.as_os_str().is_empty());
             if is_bare || path.exists() {
                 if let Ok(lib) = unsafe { Library::new(path) } {
                     return Self::init(lib);

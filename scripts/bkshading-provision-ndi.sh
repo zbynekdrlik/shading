@@ -28,6 +28,9 @@ set -euo pipefail
 # Usage:  scripts/bkshading-provision-ndi.sh [--check|--install]
 #   --check    (default) verify the runtime is discoverable; 0 if so, non-zero + remediation if not
 #   --install  Linux only: fetch+install the public NDI Linux runtime if missing, then re-verify
+#
+# Exit codes: 0 = discoverable / OK; 1 = missing + remediation printed; 2 = bad argument;
+#             3 = UNVERIFIABLE from this shell (a Windows bash with no cygpath — verify live).
 # ---------------------------------------------------------------------------------------------
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -148,10 +151,11 @@ case "$os" in
       echo "Install NDI Tools (the same runtime OBS/DistroAV use) or set NDI_RUNTIME_DIR_V6." >&2
       exit 1
     fi
-    echo "(cannot stat a Windows path from this shell) — the service's #1157 load fix resolves"
-    echo "the runtime at the path above or via NDI_RUNTIME_DIR_V6 / PATH. Verify live by running"
-    echo "the service (--features ndi) and opening the operator panel; the preview blocks update."
-    exit 0
+    echo "UNVERIFIED: cannot stat a Windows path from this shell (no cygpath)." >&2
+    echo "The service's cross-platform load resolves the runtime at the path above or via" >&2
+    echo "NDI_RUNTIME_DIR_V6 / PATH. Verify live by running the service (--features ndi) and" >&2
+    echo "opening the operator panel; the preview blocks update. (exit 3 = unverifiable here)" >&2
+    exit 3
     ;;
   *)
     echo "unsupported OS '$os' — the bkshading service targets Linux (/usr/lib/ndi) and Windows" >&2
