@@ -47,6 +47,22 @@ def test_app_js_wires_the_live_preview_endpoint():
     assert 'data-role="preview-img"' in js, "the JS reloads the preview image element"
 
 
+def test_app_js_uses_websocket_live_push_with_http_fallback():
+    # issue 808 WS milestone: the panel's primary live channel is a WebSocket to /ws; it renders
+    # the flattened {"type":"state",...} envelope, and HTTP /api/cameras polling stays as a
+    # fallback that runs only while the WS is down.
+    js = _read("app.js")
+    assert "new WebSocket(" in js, "panel opens a WebSocket for live push"
+    assert "/ws" in js, "the live channel is the /ws endpoint"
+    assert 'msg.type === "state"' in js, "renders the flattened state envelope"
+    # wss/ws chosen from the page protocol (works behind the cloudflare https remote).
+    assert '"wss:"' in js and '"ws:"' in js, "ws/wss selected from location.protocol"
+    # The HTTP poll must remain, gated on the WS being down (fallback, not the primary path).
+    assert "if (!wsConnected) poll()" in js, "HTTP poll runs only as a WS fallback"
+    # A dropped WS reconnects with backoff (never a dead panel).
+    assert "scheduleWsReconnect" in js, "WS reconnects on drop"
+
+
 def test_index_has_all_shading_controls():
     html = _read("index.html")
     for role in ("aperture", "iso", "kelvin", "tint", "shutter", "fps-val", "auto-wb"):
