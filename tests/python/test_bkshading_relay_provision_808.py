@@ -162,7 +162,11 @@ def _fake_systemctl(record_path):
     d = tempfile.mkdtemp()
     p = os.path.join(d, "systemctl")
     with open(p, "w", encoding="utf-8") as f:
-        f.write('#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s"\n' % record_path)
+        f.write(
+            "#!/usr/bin/env bash\n"
+            'printf "%%s\\n" "$*" >> "%s"\n'
+            'if [ "$1" = "is-enabled" ]; then echo enabled; fi\n' % record_path
+        )
     os.chmod(p, 0o755)
     return p
 
