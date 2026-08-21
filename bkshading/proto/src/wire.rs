@@ -180,3 +180,19 @@ pub struct Aggregate {
     pub version: String,
     pub cameras: Vec<CameraView>,
 }
+
+/// A server -> client WebSocket message for the issue-808 live state push (`/ws`).
+///
+/// Internally tagged (`#[serde(tag = "type")]`), so the payload flattens the aggregate's
+/// own fields alongside a `type` discriminator — the exact `{"type":"state", ...}` shape the
+/// verified dev2 MVP web UI already speaks. That lets the browser reuse its existing
+/// `render(agg)` directly on the flattened message (`msg.version` / `msg.cameras`) instead of
+/// unwrapping a nested object. Push-only: the panel still WRITES over the HTTP
+/// `PUT /api/cameras/:id/params` surface (robust through the cloudflare remote), so no
+/// client->server variant is needed yet.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+pub enum ServerMsg {
+    /// The full aggregate, pushed on connect and again whenever it changes.
+    State(Aggregate),
+}
