@@ -317,8 +317,9 @@ def test_check_fails_when_creds_file_wrong_mode():
             root,
         )
         # loosen the credentials file mode -> --check must FAIL (a secret must stay 0600).
+        # make_creds=False so the check run does NOT re-create the file back at 0600.
         os.chmod(creds_path, 0o644)
-        r2, _c2, _cfg2, _m2, _cr2 = _run_provision(["--check"], root)
+        r2, _c2, _cfg2, _m2, _cr2 = _run_provision(["--check"], root, make_creds=False)
         assert r2.returncode != 0, (r2.returncode, r2.stdout, r2.stderr)
         assert "0600" in (r2.stdout + r2.stderr) or "mode" in (r2.stdout + r2.stderr).lower()
     finally:
