@@ -58,19 +58,30 @@ ARTIFACT="${ARTIFACT:-$(bkshading_deploy_artifact_name)}"
 GH="${BKSHADING_DEPLOY_GH:-gh}"
 SSH_BIN="${BKSHADING_DEPLOY_SSH:-ssh}"
 SCP_BIN="${BKSHADING_DEPLOY_SCP:-scp}"
-# `-` (not `:-`): unset -> wrap with the password; set-but-empty (a test) -> run the fakes bare.
-SSHPASS_PREFIX="${BKSHADING_DEPLOY_SSHPASS_PREFIX-sshpass -p $SSH_PASS}"
+# sshpass prefix as an ARRAY (not a word-split string), so a password with whitespace is safe
+# (deploy-fleet.sh quotes `-p "$SSH_PASS"`; a word-split string here would not). The env var, when
+# SET (even empty — a test), replaces the prefix verbatim: empty -> the fakes run bare (no sshpass);
+# unset -> wrap ssh/scp with the fleet password.
+if [ -n "${BKSHADING_DEPLOY_SSHPASS_PREFIX+set}" ]; then
+  read -r -a SSHPASS_PREFIX <<<"$BKSHADING_DEPLOY_SSHPASS_PREFIX"
+else
+  SSHPASS_PREFIX=(sshpass -p "$SSH_PASS")
+fi
 
 HOST=""
 RUN_ID=""
 BINARY=""
 DRY_RUN=0
 
+# require_val: a flag needs a following value; without one, fail with the bad-args exit 2 + a
+# message (NOT a bare `shift 2` that aborts under set -e with exit 1 and no diagnostic).
+require_val() { [ "$1" -ge 2 ] || { echo "ERROR: $2 requires a value (see --help)" >&2; exit 2; }; }
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --host) HOST="${2:-}"; shift 2 ;;
-    --run) RUN_ID="${2:-}"; shift 2 ;;
-    --binary) BINARY="${2:-}"; shift 2 ;;
+    --host) require_val "$#" --host; HOST="$2"; shift 2 ;;
+    --run) require_val "$#" --run; RUN_ID="$2"; shift 2 ;;
+    --binary) require_val "$#" --binary; BINARY="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h | --help)
       grep -E '^# ' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -89,10 +100,8 @@ if [ -n "$RUN_ID" ] && [ -n "$BINARY" ]; then
   exit 2
 fi
 
-# shellcheck disable=SC2086  # $SSHPASS_PREFIX is an intentional word-split command prefix.
-ssh_box() { $SSHPASS_PREFIX "$SSH_BIN" -o StrictHostKeyChecking=no -o ConnectTimeout=10 "root@$1" "$2"; }
-# shellcheck disable=SC2086
-scp_box() { $SSHPASS_PREFIX "$SCP_BIN" -o StrictHostKeyChecking=no "$2" "root@$1:$3"; }
+ssh_box() { "${SSHPASS_PREFIX[@]}" "$SSH_BIN" -o StrictHostKeyChecking=no -o ConnectTimeout=10 "root@$1" "$2"; }
+scp_box() { "${SSHPASS_PREFIX[@]}" "$SCP_BIN" -o StrictHostKeyChecking=no "$2" "root@$1:$3"; }
 
 # --- resolve the relay binary (a pre-downloaded --binary, or the CI artifact) ---
 if [ -z "$BINARY" ]; then
@@ -102,6 +111,9 @@ if [ -z "$BINARY" ]; then
     [ -n "$RUN_ID" ] || { echo "ERROR: no successful ci.yml run found on $BRANCH" >&2; exit 1; }
   fi
   DIST="$(mktemp -d)"
+  # Clean up the downloaded artifact dir on exit (mirrors deploy-fleet.sh's DIST trap).
+  # shellcheck disable=SC2064  # expand DIST now so the trap has the concrete path.
+  trap "rm -rf '$DIST'" EXIT
   echo "Downloading $ARTIFACT from ci.yml run $RUN_ID ($REPO) ..."
   "$GH" run download "$RUN_ID" --repo "$REPO" -n "$ARTIFACT" --dir "$DIST"
   BINARY="$DIST/$(bkshading_deploy_relay_artifact_bin)"
@@ -126,9 +138,9 @@ PLAN
 fi
 
 # --- real deploy: read-only-root swap cycle (mirrors deploy-fleet.sh) ---
-case "$SSHPASS_PREFIX" in
-  sshpass*) command -v sshpass >/dev/null 2>&1 || { echo "ERROR: sshpass required (apt-get install sshpass)" >&2; exit 1; } ;;
-esac
+if [ "${SSHPASS_PREFIX[0]:-}" = "sshpass" ]; then
+  command -v sshpass >/dev/null 2>&1 || { echo "ERROR: sshpass required (apt-get install sshpass)" >&2; exit 1; }
+fi
 
 echo "[bkshading-deploy-relay] deploying $BINARY -> root@$HOST:$RELAY_DEST"
 if ! ssh_box "$HOST" "mount -o remount,rw /"; then
@@ -142,8 +154,11 @@ fi
 ssh_box "$HOST" "chmod +x $RELAY_DEST 2>/dev/null || true" || true
 
 # Byte-verify (deploy-from-clean-tree.md Layer 3): a partial scp / stale same-name binary would
-# otherwise pass unnoticed. Read the remote sha BEFORE restoring ro so the read is on the fresh file.
+# otherwise pass unnoticed. Read the remote sha AND the exec bit BEFORE restoring ro (fresh file):
+# scp with no `-p` creates a 0644 file on a FIRST deploy, so the chmod above is the ONLY thing making
+# it executable — verify that too, else the unit's ExecStart would fail at reboot.
 REMOTE_SHA="$(ssh_box "$HOST" "sha256sum $RELAY_DEST 2>/dev/null | awk '{print \$1}'" || echo "")"
+REMOTE_EXEC="$(ssh_box "$HOST" "test -x $RELAY_DEST && echo yes || echo no" 2>/dev/null || echo no)"
 
 # Always restore the ro root, whatever the verdict.
 ssh_box "$HOST" "mount -o remount,ro / 2>/dev/null; true" || true
@@ -152,7 +167,11 @@ if [ "$(bkshading_deploy_sha_match "$LOCAL_SHA" "$REMOTE_SHA")" != "match" ]; th
   echo "ERROR: sha256 mismatch after deploy (local=$LOCAL_SHA remote=${REMOTE_SHA:-<none>}) — deploy NOT verified" >&2
   exit 1
 fi
-echo "OK: relay deployed + byte-verified on $HOST ($RELAY_DEST, sha256 $LOCAL_SHA)"
+if [ "$REMOTE_EXEC" != "yes" ]; then
+  echo "ERROR: $RELAY_DEST is not executable on $HOST after deploy — deploy NOT verified" >&2
+  exit 1
+fi
+echo "OK: relay deployed + byte-verified (executable) on $HOST ($RELAY_DEST, sha256 $LOCAL_SHA)"
 
 # ENABLE-ONLY: never start/restart the service here. The predicate is the single source of truth
 # (always `no`); if a future change flips it, that is a RED test, not a silent live start.

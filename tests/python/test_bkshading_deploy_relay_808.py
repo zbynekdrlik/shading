@@ -189,6 +189,15 @@ def test_missing_host_fails_with_usage():
         assert re.search(r"(host|usage)", r.stdout + r.stderr, re.I)
 
 
+def test_option_as_last_token_fails_with_bad_args_not_silent_abort():
+    # `--host` with no following value must exit 2 (bad args) with a message — NOT a bare `shift 2`
+    # that aborts silently under `set -euo pipefail` (exit 1, no diagnostic).
+    r = _run_script(["--host"])
+    assert r.returncode == 2, "an option missing its value must exit 2 (bad args), got %d" % r.returncode
+    assert re.search(r"(requires a value|host|usage)", r.stdout + r.stderr, re.I), \
+        "must print a diagnostic naming the missing value"
+
+
 # ---------------------------------------------------------------------------------------------
 # fake --binary deploy: proves the remount->scp->remount sequence and ENABLE-ONLY (no systemctl start)
 # ---------------------------------------------------------------------------------------------
@@ -208,13 +217,15 @@ def _fake_deploy_env(tmp, remote_sha):
     # Fake ssh: log the command; if it's a sha256sum, print the injected sha for the relay path.
     fake_ssh = os.path.join(tmp, "fake-ssh")
     # The real remote command is `sha256sum <path> | awk '{print $1}'`, so a faithful fake returns
-    # ONLY the sha (the awk'd first field), not the raw `sha256sum` "<sha>  <path>" line.
+    # ONLY the sha (the awk'd first field), not the raw `sha256sum` "<sha>  <path>" line. The
+    # `test -x … && echo yes` exec-bit probe is faked as "yes" (a deployed binary is executable).
     ssh_body = (
         "#!/usr/bin/env bash\n"
         'printf "SSH %s\\n" "$*" >> "__LOG__"\n'
         'cmd="${!#}"\n'
         "case \"$cmd\" in\n"
         '  *sha256sum*) printf "__SHA__\\n" ;;\n'
+        '  *"test -x"*) printf "yes\\n" ;;\n'
         "  *) : ;;\n"
         "esac\n"
         "exit 0\n"
@@ -249,12 +260,18 @@ def test_fake_deploy_sequence_and_enable_only():
         r = _run_script(["--host", "10.77.9.201", "--binary", fake_bin], env=env)
         assert r.returncode == 0, "deploy should succeed on matching sha: %s%s" % (r.stdout, r.stderr)
         calls = open(log).read()
-        # ro-root swap in the right order.
+        # Full ro-root swap cycle in order: remount,rw  <  scp  <  byte-verify(sha read)  <  remount,ro.
+        scp_target = "root@10.77.9.201:" + RELAY_BIN_PATH
         assert "remount,rw /" in calls, "must remount rw before scp"
-        assert "remount,ro /" in calls, "must remount ro after scp"
-        assert calls.index("remount,rw /") < calls.index("remount,ro /")
-        # scp to the exact relay path.
-        assert ("root@10.77.9.201:" + RELAY_BIN_PATH) in calls, "must scp to the relay bin path"
+        assert "remount,ro /" in calls, "must remount ro after the swap"
+        assert scp_target in calls, "must scp to the relay bin path"
+        assert "sha256sum" in calls, "must byte-verify (remote sha read)"
+        i_rw = calls.index("remount,rw /")
+        i_scp = calls.index(scp_target)
+        i_sha = calls.index("sha256sum")
+        i_ro = calls.index("remount,ro /")
+        assert i_rw < i_scp < i_ro, "swap order must be remount,rw -> scp -> remount,ro"
+        assert i_sha < i_ro, "byte-verify must read the fresh file before remounting ro"
         # ENABLE-ONLY: NEVER start/restart the service.
         assert "systemctl start" not in calls, "deploy must never start the service"
         assert "systemctl restart" not in calls, "deploy must never restart the service"
@@ -289,7 +306,8 @@ def test_relay_bin_path_agrees_with_relay_runtime_lib():
 def test_no_bluetooth_anywhere():
     # `ble` is matched as a standalone word (\bble\b) — a bare "ble " substring would false-match the
     # ubiquitous "enable "/"disable "/"table ", so the acronym BLE is checked with word boundaries.
-    for f in (SCRIPT, LIB):
+    # Scans the deploy script, its lib, AND the CI workflow (the epic hard rule spans all of them).
+    for f in (SCRIPT, LIB, CI_YML):
         text = open(f).read().lower()
         for banned in ("bluetooth", "bluez", "gatt"):
             assert banned not in text, "%s must not mention %r (owner hard rule)" % (f, banned)
