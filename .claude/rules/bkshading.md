@@ -77,7 +77,13 @@ CI is the first compile. The local net that CAUGHT real issues here:
    `{id}`), reqwest-rustls, serde `rename_all`, clap-derive, `spawn_blocking` Send-bounds surfaces,
    and clippy `-D warnings` traps (a never-read struct field fails `dead_code`; and since Rust
    1.98, `chunks_exact(N)` with a CONSTANT N is a clippy-deny lint — use index math or
-   `slice::as_chunks::<N>().0`; the main crate was fixed in dev `052da4c5d`).
+   `slice::as_chunks::<N>().0`; the main crate was fixed in dev `052da4c5d`;
+   `Option::map_or(<bool literal>, |x| …)` trips `unnecessary_map_or` (clippy `style`, stable
+   1.84) — use `is_none_or`/`is_some_and` instead, issue 1157). These clippy traps bite HARDEST
+   in the `#[cfg(feature = "ndi")]` code (`ndi_source.rs`): it compiles ONLY under
+   `--features ndi` on CI, so a `-D warnings` lint there is invisible to `cargo fmt` and to every
+   Tier-0 local check — CI is the first (and only) place it surfaces. Hand-audit feature-gated
+   code against this list before pushing.
 
 ## M1 done / M2+ deferred
 Done: the 3 crates + workspace/CI wiring, the 4+4 responsive web panel skeleton (version in the DOM,
@@ -120,6 +126,34 @@ was reused.
   --all-targets -- -D warnings` (libloading is a RUNTIME load, so it compiles without libndi).
 - Decimation runs on a MONOTONIC `Instant` (not wall clock — immune to an NTP backward step); the
   store's `updated_ms` stays wall clock for diagnostics.
+
+### M2 follow-up — cross-platform libndi discovery + provisioning (issue 1157)
+The M2 receiver copied `src/ndi.rs`'s `NdiLib::load()` VERBATIM, which is Linux-only (`libndi.so*`
++ `/usr/lib/ndi` etc.). But the SERVICE ships to the strih PC (Windows first), where the NDI
+runtime is `Processing.NDI.Lib.x64.dll` at `C:\Program Files\NDI\NDI 6 Tools\Runtime\` (documented
+in-repo at `scripts/bundle-state-server.py::DEFAULT_NDI_RUNTIME_DLL`) — so `--features ndi` could
+never load on its own ship target.
+- **Discovery is now a PURE, default-feature module** `bkshading/service/src/preview/ndi_paths.rs`
+  (Tier-0 unit-tested WITHOUT libndi, mirroring the `convert.rs` split): `NdiOs {Linux,Windows,Macos}`
+  as an INPUT (not `cfg!`) so every OS's candidate set is tested on the Linux runner. `NdiLib::load()`
+  now consumes `ndi_search_candidates(current_ndi_os(), |k| std::env::var(k).ok())` (env dirs →
+  per-OS well-known dirs → bare-name dynamic-linker fallback) instead of a hard-coded Linux list.
+  Tests live in `service/tests/preview.rs` (run in the default-feature `bkshading` CI test).
+- **CI compiles + verifies the feature on BOTH ship targets:** the `bkshading` job gained
+  `cargo test -p bkshading --features ndi` + a `--features ndi` bins build; `bkshading-windows`
+  gained `cargo check -p bkshading --features ndi` (the strih deploy ships this exact binary — the
+  M2 lane only ever clippy-compiled the feature for Linux).
+- **Provisioning/verify:** `scripts/bkshading-provision-ndi.sh` (+ source-only pure helper
+  `scripts/lib/bkshading-ndi-runtime.sh`) — idempotent, fail-loud, enable-only. Linux `--check`
+  verifies discovery / `--install` delegates to `vendor/distroav/CI/libndi-get.sh`; Windows reports
+  the documented DLL path. `tests/python/test_bkshading_ndi_provision_1157.py` cross-checks the shell
+  dirs/names + the Windows DLL AGAINST `ndi_paths.rs` so the two lists cannot drift.
+- **STILL the rig-verify half (supervisor, live):** run the strih service `--features ndi` against a
+  live cambox NDI source + confirm the 4+4 preview updates, and confirm the 3 M2 SDK deferrals
+  (per-source init/destroy refcounting across a reconnect; the actual `COLOR_FORMAT_UYVY_BGRA=0`
+  meaning vs the installed header; full FourCC coverage of the real low-bandwidth stream). Task 4
+  (make `--features ndi` the default strih build, or keep opt-in) is the owner's call AFTER that
+  live verify — left opt-in for now.
 
 
 ## Camera fps ↔ box grab-mode sync (issue 809)

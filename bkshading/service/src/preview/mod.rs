@@ -7,7 +7,8 @@
 //! minimal receive pattern the presenter project and the appliance's own `src/ndi.rs` use.
 //!
 //! Layered so the pixel/decision logic is pure and CI-testable without libndi:
-//! - pure core: [`frame`], [`pattern`], [`decimate`], [`encode`], [`convert`], [`store`]
+//! - pure core: [`frame`], [`pattern`], [`decimate`], [`encode`], [`convert`], [`store`],
+//!   [`ndi_paths`] (cross-platform runtime discovery — the ordered candidate paths)
 //! - runtime glue: [`source`] (trait + stub), [`worker`] (one OS thread per camera)
 //! - `#[cfg(feature = "ndi")]` [`ndi_source`]: the real libndi receiver at bandwidth LOWEST
 //!   (mirrors `src/ndi.rs`), OFF by default and UNVERIFIED against a live source in this lane.
@@ -16,6 +17,7 @@ pub mod convert;
 pub mod decimate;
 pub mod encode;
 pub mod frame;
+pub mod ndi_paths;
 pub mod pattern;
 pub mod source;
 pub mod store;
