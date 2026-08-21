@@ -35,9 +35,11 @@ SyslogIdentifier=bkshading-relay
 
 # Security hardening (kept light so raw USB-PTP still works -- gphoto2 needs /dev/bus/usb, which
 # these directives do not restrict; no ProtectSystem=strict/ReadOnlyPaths so libgphoto2's temp
-# handling is unaffected, and PrivateTmp isolates it anyway).
+# handling is unaffected, and PrivateTmp isolates it anyway). ProtectHome is deliberately NOT set:
+# the gphoto2 CLI may read/write ~/.config/gphoto2 as root, and blanking $HOME can't be verified at
+# Tier-0 -- the asymmetric risk (a relay that can't talk to the camera vs marginal hardening on an
+# internal-LAN root service that already has full USB access) favours leaving $HOME accessible.
 NoNewPrivileges=yes
-ProtectHome=yes
 PrivateTmp=yes
 
 [Install]

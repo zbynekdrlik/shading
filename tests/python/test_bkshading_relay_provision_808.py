@@ -107,6 +107,18 @@ def test_effective_capture_fps_mirrors_requested_denominator():
     assert _bash_arg("bkshading_relay_effective_capture_fps", "-5")[1] == DEFAULT_FPS
 
 
+def test_decimal_dropin_matches_appliance_all_or_nothing():
+    # A malformed decimal drop-in must derive the SAME rate the appliance would: the appliance's
+    # `parse::<u32>("30.5")` fails -> None -> requested_capture_denominator -> 60. The parser hands
+    # the WHOLE token ("30.5", not a prefix-matched "30") to effective, which rejects it -> 60.
+    rc, tok = _bash_arg(
+        "bkshading_relay_capture_fps_from_dropins",
+        "Environment=CAMERA_BOX_CAPTURE_FPS=30.5\n",
+    )
+    assert rc == 0 and tok == "30.5", (rc, tok)  # full token, NOT a truncated "30"
+    assert _bash_arg("bkshading_relay_effective_capture_fps", "30.5")[1] == DEFAULT_FPS
+
+
 def test_env_file_content_carries_the_fps():
     body = _bash_arg("bkshading_relay_env_file_content", "50")[1]
     assert "CAMERA_BOX_CAPTURE_FPS=50" in body, body

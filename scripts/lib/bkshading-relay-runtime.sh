@@ -39,13 +39,18 @@ bkshading_relay_default_capture_fps() { printf '%s\n' 60; }
 
 # --- Pure helpers ---
 
-# Extract the LAST CAMERA_BOX_CAPTURE_FPS=<int> value from concatenated camera-box.service.d drop-in
-# text (a systemd `Environment=CAMERA_BOX_CAPTURE_FPS=N` line, or a bare KEY=N). Echoes the integer,
-# or NOTHING when unset. Mirrors setup-device.sh's genlock_dropin_fps shape — the trailing `|| true`
-# is mandatory (the #458 footgun: a no-match grep|tail|cut fails under the caller's pipefail even
-# though tail/cut succeed on empty input, and a bare X="$(...)" caller must never abort).
+# Extract the LAST CAMERA_BOX_CAPTURE_FPS value from concatenated camera-box.service.d drop-in text
+# (a systemd `Environment=CAMERA_BOX_CAPTURE_FPS=N` line, or a bare KEY=N). Echoes the WHOLE value
+# TOKEN (everything up to whitespace/EOL), or NOTHING when unset — deliberately NOT `[0-9]+`, which
+# would PREFIX-match a decimal (`=30.5` -> `30`) and thus REPORT 30 while the appliance's own
+# `std::env::var(...).parse::<u32>()` rejects "30.5" entirely and falls back to 60 — a one-source-of
+# -truth divergence. Handing the full token to `..._effective_capture_fps` (which accepts pure digits
+# only, else the 60 default) mirrors the appliance's all-or-nothing parse exactly. Mirrors
+# setup-device.sh's genlock_dropin_fps shape — the trailing `|| true` is mandatory (the #458 footgun:
+# a no-match grep|tail|cut fails under the caller's pipefail even though tail/cut succeed on empty
+# input, and a bare X="$(...)" caller must never abort).
 bkshading_relay_capture_fps_from_dropins() {
-  printf '%s\n' "$1" | grep -oE 'CAMERA_BOX_CAPTURE_FPS=[0-9]+' | tail -1 | cut -d= -f2 || true
+  printf '%s\n' "$1" | grep -oE 'CAMERA_BOX_CAPTURE_FPS=[^[:space:]]+' | tail -1 | cut -d= -f2- || true
 }
 
 # Derive the effective capture fps to provision, mirroring src/capture.rs
