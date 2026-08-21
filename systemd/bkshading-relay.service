@@ -1,0 +1,46 @@
+[Unit]
+Description=bkshading relay - Blackmagic camera shading over USB-PTP (issue 808)
+Documentation=https://github.com/zbynekdrlik/camera-box
+After=network-online.target
+Wants=network-online.target
+
+# Bound any runaway restart storm (mirrors camera-box.service #828). StartLimit* are UNIT-level
+# directives (placing them in [Service] silently no-ops). 20 starts / 5 min is a generous cap.
+StartLimitIntervalSec=300
+StartLimitBurst=20
+
+[Service]
+Type=simple
+# The relay drives the local Blackmagic camera over USB-PTP by shelling out to the `gphoto2` CLI
+# (a RUNTIME dep installed by scripts/bkshading-provision-relay.sh; NOT a build/link dep -- the
+# relay uses the Gphoto2Runner trait / shell-out, keeping a clean ARM cross-build). It runs as
+# root (no User=) for raw USB device access, exactly like camera-box.service. On a headless cambox
+# there is no gvfs-gphoto2-volume-monitor to contend for the PTP device.
+ExecStart=/usr/local/bin/bkshading-relay --bind 0.0.0.0:8771
+Restart=always
+RestartSec=3
+
+# issue 809: CAMERA_BOX_CAPTURE_FPS is provisioned into this file by
+# scripts/bkshading-provision-relay.sh, DERIVED from the box's own appliance capture-fps config
+# (the SAME value src/capture.rs requested_capture_denominator uses -- ONE source of truth). The
+# leading `-` makes the file OPTIONAL: if it is absent (relay not yet provisioned, or a box with no
+# camera) the relay reads no capture fps -> the aggregation service falls back to the static
+# grab_fps config instead of writing a WRONG rate.
+EnvironmentFile=-/etc/bkshading/relay.env
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bkshading-relay
+
+# Security hardening (kept light so raw USB-PTP still works -- gphoto2 needs /dev/bus/usb, which
+# these directives do not restrict; no ProtectSystem=strict/ReadOnlyPaths so libgphoto2's temp
+# handling is unaffected, and PrivateTmp isolates it anyway). ProtectHome is deliberately NOT set:
+# the gphoto2 CLI may read/write ~/.config/gphoto2 as root, and blanking $HOME can't be verified at
+# Tier-0 -- the asymmetric risk (a relay that can't talk to the camera vs marginal hardening on an
+# internal-LAN root service that already has full USB access) favours leaving $HOME accessible.
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
