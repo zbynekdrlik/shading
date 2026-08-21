@@ -76,6 +76,7 @@ fn camera_view_wire_carries_grab_and_sync_camel_case() {
         has_preview: true,
         reachable: true,
         grab_fps: Some(60),
+        grab_fps_desync: false,
         fps_sync: FpsSync::Mismatch,
         state: None,
     };

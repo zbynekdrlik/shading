@@ -8,13 +8,17 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path, State},
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        Path, State,
+    },
     http::{header, StatusCode},
     response::{Html, IntoResponse, Json, Response},
     routing::{get, put},
     Router,
 };
-use bkshading_proto::wire::{Aggregate, SetRequest};
+use bkshading_proto::wire::{Aggregate, ServerMsg, SetRequest};
+use tokio::sync::watch;
 
 use crate::aggregator::Aggregator;
 use crate::config::ServiceConfig;
@@ -31,6 +35,10 @@ pub struct AppState {
     pub agg: Arc<Aggregator>,
     /// Latest JPEG preview frame per camera, written by the per-camera preview workers.
     pub previews: PreviewStore,
+    /// The latest aggregate, published by the single background pump task (issue 808 WS
+    /// milestone). `/ws` clients subscribe to this; keeping the receiver here means there is
+    /// always at least one receiver, so the pump's `send` never fails for "no receivers".
+    pub live: watch::Receiver<Arc<Aggregate>>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -42,7 +50,42 @@ pub fn router(state: AppState) -> Router {
         .route("/api/cameras", get(cameras))
         .route("/api/cameras/:id/params", put(set_params))
         .route("/api/cameras/:id/preview.jpg", get(preview_jpg))
+        .route("/ws", get(ws_upgrade))
         .with_state(state)
+}
+
+/// Upgrades a `GET /ws` to a WebSocket that receives a live push of the whole aggregate:
+/// the current state on connect, then a fresh state on every change (issue 808). Push-only —
+/// writes stay on `PUT /api/cameras/:id/params`; this is the single-source-of-truth channel
+/// the owner asked for (server pushes, every panel sees the same state).
+async fn ws_upgrade(State(state): State<AppState>, ws: WebSocketUpgrade) -> Response {
+    ws.on_upgrade(move |socket| ws_push(socket, state.live.clone()))
+}
+
+/// Pushes the latest aggregate to one connected panel: send the current state immediately,
+/// then block on `changed()` and send each new state. A client that goes away is detected on
+/// the next `send`; a dropped pump (`changed()` = `Err`) ends the loop. Inbound frames are not
+/// read (push-only) — a browser panel sends nothing.
+async fn ws_push(mut socket: WebSocket, mut rx: watch::Receiver<Arc<Aggregate>>) {
+    loop {
+        // `borrow_and_update` marks the current value seen, so the FIRST `changed()` below
+        // only fires on the NEXT pump update (no duplicate initial send).
+        let snapshot = rx.borrow_and_update().clone();
+        match serde_json::to_string(&ServerMsg::State((*snapshot).clone())) {
+            Ok(text) => {
+                if socket.send(Message::Text(text)).await.is_err() {
+                    break; // client gone
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "ws: serialize aggregate failed");
+                break;
+            }
+        }
+        if rx.changed().await.is_err() {
+            break; // pump/sender dropped (service shutting down)
+        }
+    }
 }
 
 /// Injects the compiled service version into the served HTML so the panel header shows it

@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use bkshading_proto::wire::{Aggregate, CameraView, FpsSync, RelayState, SetRequest};
+use bkshading_proto::wire::{resolve_grab, Aggregate, CameraView, FpsSync, RelayState, SetRequest};
 
 use crate::config::{CameraConfig, ServiceConfig};
 
@@ -19,7 +19,13 @@ pub fn camera_view(cam: &CameraConfig, state: Option<RelayState>) -> CameraView 
     // A camera-offline / unreachable state carries `fps100 = None`, which classifies as
     // Unknown (never a false mismatch).
     let camera_fps100 = state.as_ref().and_then(|s| s.params.fps100);
-    let fps_sync = FpsSync::classify(camera_fps100, cam.grab_fps);
+    // issue 809: DERIVE the effective grab from the box's live reported capture rate when the
+    // relay reports one (the ACTUAL capture mode — a box-side mode change is then followed
+    // automatically), else fall back to the static config; and VALIDATE the two against each
+    // other so a stale config surfaces (`desync`) instead of silently mis-comparing.
+    let reported_capture = state.as_ref().and_then(|s| s.capture_fps);
+    let resolution = resolve_grab(cam.grab_fps, reported_capture);
+    let fps_sync = FpsSync::classify(camera_fps100, resolution.effective);
     CameraView {
         id: cam.id.clone(),
         label: cam.label.clone(),
@@ -28,7 +34,8 @@ pub fn camera_view(cam: &CameraConfig, state: Option<RelayState>) -> CameraView 
         // configured (a handheld without a feed has none -> params-only block).
         has_preview: cam.ndi_preview.is_some(),
         reachable: state.is_some(),
-        grab_fps: cam.grab_fps,
+        grab_fps: resolution.effective,
+        grab_fps_desync: resolution.desync,
         fps_sync,
         state,
     }

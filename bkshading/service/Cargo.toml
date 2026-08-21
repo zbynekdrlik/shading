@@ -27,8 +27,11 @@ ndi = ["dep:libloading"]
 
 [dependencies]
 bkshading-proto = { path = "../proto" }
-axum = "0.7"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+# `ws` = the /ws live state-push endpoint (issue 808 WS milestone).
+axum = { version = "0.7", features = ["ws"] }
+# `sync` = the watch channel the pump broadcasts the latest aggregate on; `time` = the pump's
+# interval ticker (issue 808 WS milestone).
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
 # Plain-HTTP LAN relay polling. rustls (pure Rust) avoids a system openssl build dep, so
 # the service cross-compiles cleanly (incl. the future Windows/ARM targets).
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

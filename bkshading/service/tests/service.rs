@@ -57,6 +57,7 @@ fn camera_with_ndi_preview_has_preview_block() {
         },
         caps: None,
         fps_supported: true,
+        capture_fps: None,
         version: "1.7.0-dev.516".into(),
     };
     let view = camera_view(&cfg.cameras[0], Some(state));
@@ -116,6 +117,11 @@ fn parses_preview_table_and_defaults_when_absent() {
 
 /// An online relay state reporting a given project fps (x100), for the sync tests.
 fn online_state_with_fps100(fps100: Option<i64>) -> RelayState {
+    online_state_with_fps_and_capture(fps100, None)
+}
+
+/// An online relay state reporting a project fps (x100) AND a box capture-mode fps (issue 809).
+fn online_state_with_fps_and_capture(fps100: Option<i64>, capture_fps: Option<i64>) -> RelayState {
     RelayState {
         online: true,
         camera: Some("Blackmagic Design Pocket Cinema Camera 4K".into()),
@@ -125,6 +131,7 @@ fn online_state_with_fps100(fps100: Option<i64>) -> RelayState {
         },
         caps: None,
         fps_supported: true,
+        capture_fps,
         version: "1.7.0-dev.516".into(),
     }
 }
@@ -203,4 +210,116 @@ address = \"cam2.lan:8771\"
     let v = camera_view(&cfg.cameras[0], Some(online_state_with_fps100(Some(6000))));
     assert_eq!(v.grab_fps, None);
     assert_eq!(v.fps_sync, FpsSync::Unknown);
+}
+
+// --- issue 809 remainder: derive/validate grab against the box's live capture rate ----------
+
+const CAM1_GRAB60: &str = "\
+[[camera]]
+id = \"cam1\"
+label = \"Cam 1\"
+transport = \"cambox-relay\"
+address = \"cam1.lan:8771\"
+grab_fps = 60
+";
+
+#[test]
+fn camera_view_derives_effective_grab_from_live_capture_rate() {
+    let cfg = ServiceConfig::from_toml_str(CAM1_GRAB60).unwrap();
+    let cam = &cfg.cameras[0];
+
+    // The box actually grabs 50 (relay-reported) while the static config still says 60: derive
+    // the LIVE rate (50) and flag the stale config; a camera at 50.00 is then Synced to the
+    // real grab, not spuriously Mismatched against the stale 60.
+    let v = camera_view(
+        cam,
+        Some(online_state_with_fps_and_capture(Some(5000), Some(50))),
+    );
+    assert_eq!(
+        v.grab_fps,
+        Some(50),
+        "effective grab derived from the live capture rate"
+    );
+    assert!(v.grab_fps_desync, "config 60 != live 50 -> desync flagged");
+    assert_eq!(
+        v.fps_sync,
+        FpsSync::Synced,
+        "camera 50.00 matches the live grab 50"
+    );
+
+    // Config and live rate agree -> no desync; a camera off that rate is a genuine mismatch.
+    let v = camera_view(
+        cam,
+        Some(online_state_with_fps_and_capture(Some(5000), Some(60))),
+    );
+    assert!(!v.grab_fps_desync);
+    assert_eq!(v.grab_fps, Some(60));
+    assert_eq!(v.fps_sync, FpsSync::Mismatch);
+
+    // Relay reports no capture rate (env unset / older relay) -> fall back to the static config,
+    // never a desync (current behaviour, no regression).
+    let v = camera_view(
+        cam,
+        Some(online_state_with_fps_and_capture(Some(6000), None)),
+    );
+    assert!(!v.grab_fps_desync);
+    assert_eq!(v.grab_fps, Some(60));
+    assert_eq!(v.fps_sync, FpsSync::Synced);
+}
+
+#[test]
+fn fps_alert_transitions_logs_mismatch_once_per_transition() {
+    use bkshading::monitor::fps_alert_transitions;
+    use std::collections::HashMap;
+
+    let cfg = ServiceConfig::from_toml_str(CAM1_GRAB60).unwrap();
+    let cam = &cfg.cameras[0];
+    let mut state: HashMap<String, (FpsSync, bool)> = HashMap::new();
+
+    // Camera at 50.00 vs grab 60 -> Mismatch: logs ONCE on entry, with the cross-reference.
+    let mismatch = vec![camera_view(cam, Some(online_state_with_fps100(Some(5000))))];
+    let lines = fps_alert_transitions(&mut state, &mismatch);
+    assert_eq!(lines.len(), 1, "one mismatch line on transition");
+    assert!(lines[0].contains("cam1"));
+    assert!(
+        lines[0].contains("capture_rate_health"),
+        "cross-ref present: {}",
+        lines[0]
+    );
+
+    // Same state again -> no re-log (a chronic mismatch is logged once, not every cycle).
+    assert!(fps_alert_transitions(&mut state, &mismatch).is_empty());
+
+    // Recover to Synced -> no line; then back to Mismatch -> logs afresh.
+    let synced = vec![camera_view(cam, Some(online_state_with_fps100(Some(6000))))];
+    assert!(fps_alert_transitions(&mut state, &synced).is_empty());
+    assert_eq!(fps_alert_transitions(&mut state, &mismatch).len(), 1);
+}
+
+#[test]
+fn fps_alert_transitions_logs_grab_config_desync_once() {
+    use bkshading::monitor::fps_alert_transitions;
+    use std::collections::HashMap;
+
+    let cfg = ServiceConfig::from_toml_str(CAM1_GRAB60).unwrap();
+    let cam = &cfg.cameras[0];
+    let mut state: HashMap<String, (FpsSync, bool)> = HashMap::new();
+
+    // Box live-captures 50 while config says 60, camera at 50.00 -> Synced to the live rate but
+    // the static config is out of sync: logs a desync line ONCE.
+    let desync = vec![camera_view(
+        cam,
+        Some(online_state_with_fps_and_capture(Some(5000), Some(50))),
+    )];
+    let lines = fps_alert_transitions(&mut state, &desync);
+    assert_eq!(lines.len(), 1, "one desync line on transition");
+    assert!(
+        lines[0].to_lowercase().contains("desync"),
+        "desync note: {}",
+        lines[0]
+    );
+    assert!(
+        fps_alert_transitions(&mut state, &desync).is_empty(),
+        "chronic desync silent"
+    );
 }

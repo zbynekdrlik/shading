@@ -103,10 +103,35 @@ pub fn parse_first_model(output: &str) -> Option<String> {
     None
 }
 
+/// Parses the box's capture-mode fps from the raw `CAMERA_BOX_CAPTURE_FPS` environment value
+/// (issue 809). The appliance uses this SAME env to request its `/dev/videoN` capture rate
+/// (`src/capture.rs`), and the relay runs on the same cambox, so reading it here reports the
+/// box's ACTUAL grab rate to the service — with ZERO change to the appliance. Accepts an integer
+/// or decimal (rounded to the nearest integer — the rig is integer-genlock 60, and the fps-sync
+/// model is integer; fractional NTSC is deferred). A non-positive, non-finite (`inf`/`nan`),
+/// absurd (`> 1000` fps), empty, or unparseable value (or an unset env) yields `None` — never a
+/// bogus value. Pure — unit-tested without any env.
+pub fn parse_capture_fps_env(raw: Option<String>) -> Option<i64> {
+    let v: f64 = raw?.trim().parse().ok()?;
+    // Guard `is_finite` FIRST: `"inf"` parses to `f64::INFINITY`, passes `> 0.0`, and saturates
+    // to `i64::MAX` through the cast -- a bogus giant `capture_fps` that would drive a spurious
+    // desync/Mismatch. The `<= 1000` ceiling rejects an absurd finite value too (a real capture
+    // rate is 24-60).
+    if v.is_finite() && v > 0.0 && v <= 1000.0 {
+        Some(v.round() as i64)
+    } else {
+        None
+    }
+}
+
 /// One camera the relay owns, driven through a [`Gphoto2Runner`].
 pub struct CameraSession {
     runner: Box<dyn Gphoto2Runner>,
     version: String,
+    /// The box's capture-mode fps (issue 809), read from `CAMERA_BOX_CAPTURE_FPS` at startup;
+    /// `None` when the env is unset. Reported in every `RelayState` (even a camera-offline one —
+    /// it is a box property, not a camera one).
+    capture_fps: Option<i64>,
 }
 
 impl CameraSession {
@@ -114,7 +139,15 @@ impl CameraSession {
         CameraSession {
             runner,
             version: version.into(),
+            capture_fps: None,
         }
+    }
+
+    /// Sets the box's capture-mode fps this relay reports (issue 809). The binary passes
+    /// `parse_capture_fps_env(std::env::var("CAMERA_BOX_CAPTURE_FPS").ok())`.
+    pub fn with_capture_fps(mut self, capture_fps: Option<i64>) -> Self {
+        self.capture_fps = capture_fps;
+        self
     }
 
     pub fn version(&self) -> String {
@@ -146,7 +179,11 @@ impl CameraSession {
     pub fn read_state(&self) -> RelayState {
         let camera = self.detect();
         if camera.is_none() {
-            return RelayState::offline(self.version.clone());
+            // The box capture rate is known even with no camera — report it (issue 809).
+            return RelayState {
+                capture_fps: self.capture_fps,
+                ..RelayState::offline(self.version.clone())
+            };
         }
         match self.read_raw() {
             Ok(raw) => {
@@ -157,11 +194,13 @@ impl CameraSession {
                     params,
                     caps: Some(caps),
                     fps_supported: fps_supported(&raw),
+                    capture_fps: self.capture_fps,
                     version: self.version.clone(),
                 }
             }
             Err(_) => RelayState {
                 camera,
+                capture_fps: self.capture_fps,
                 ..RelayState::offline(self.version.clone())
             },
         }

@@ -155,10 +155,13 @@ function updateBlock(el, cam) {
   // fps + issue-809 grab-mode sync.
   const camFps = p.fps100 == null ? null : p.fps100 / 100;
   q("fps-val").textContent = camFps == null ? "—" : camFps.toFixed(2);
-  const grab = cam.grabFps; // configured box grab fps (null => no comparison for this camera)
+  // Effective grab fps (issue 809): the box's live capture rate when the relay reports one,
+  // else the static config; null => no comparison for this camera.
+  const grab = cam.grabFps;
   el.dataset.grabFps = grab == null ? "" : String(grab);
   const syncRow = q("fps-sync");
   const grabEl = q("fps-grab");
+  const desyncEl = q("fps-desync");
   const warnEl = q("fps-warn");
   const setBtn = q("fps-set-grab");
   // Hide the whole sync row (not just its children) for a camera with no grab configured,
@@ -166,11 +169,18 @@ function updateBlock(el, cam) {
   if (syncRow) syncRow.hidden = grab == null;
   if (grab == null) {
     grabEl.hidden = true;
+    if (desyncEl) desyncEl.hidden = true;
     warnEl.hidden = true;
     setBtn.hidden = true;
   } else {
     grabEl.textContent = "grab " + grab;
     grabEl.hidden = false;
+    // issue 809: the static config grab_fps disagrees with the box's live capture rate — the
+    // panel compares against the live rate (grab above) and flags the stale config.
+    if (desyncEl) {
+      desyncEl.hidden = !cam.grabFpsDesync;
+      if (cam.grabFpsDesync) desyncEl.textContent = `⚠ config ≠ box capture (${grab})`;
+    }
     const mismatch = cam.fpsSync === "mismatch";
     warnEl.hidden = !mismatch;
     if (mismatch) {
@@ -223,6 +233,63 @@ async function poll() {
   }
 }
 
-poll();
-setInterval(poll, 2000);
+// issue 808 — live state push over WebSocket (server = single source of truth): the service
+// pushes the whole aggregate on connect and on every change as {"type":"state", version,
+// cameras} (the flattened dev2-MVP envelope), so render() consumes it directly. HTTP /api/cameras
+// polling stays as a FALLBACK, active only while the WS is down (an old browser, a proxy that
+// blocks WS). Writes still go over HTTP PUT (setParam) — the WS is push-only.
+let ws = null;
+let wsConnected = false;
+let wsBackoff = 1000; // reconnect backoff (ms), doubling up to a cap.
+
+function wsUrl() {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  return `${proto}//${location.host}/ws`;
+}
+
+function connectWs() {
+  let sock;
+  try {
+    sock = new WebSocket(wsUrl());
+  } catch (e) {
+    scheduleWsReconnect();
+    return;
+  }
+  ws = sock;
+  sock.addEventListener("open", () => {
+    wsConnected = true;
+    wsBackoff = 1000;
+    connEl.textContent = "online";
+    connEl.classList.remove("bad");
+  });
+  sock.addEventListener("message", (ev) => {
+    try {
+      const msg = JSON.parse(ev.data);
+      // Flattened envelope: {type:"state", version, cameras} — render() reads version/cameras.
+      if (msg && msg.type === "state") render(msg);
+    } catch (e) {
+      console.warn("bad ws message", e);
+    }
+  });
+  sock.addEventListener("close", () => {
+    wsConnected = false;
+    scheduleWsReconnect();
+  });
+  // An error is always followed by close; close drives the reconnect, so just log here.
+  sock.addEventListener("error", () => console.warn("ws error"));
+}
+
+function scheduleWsReconnect() {
+  connEl.textContent = "offline";
+  connEl.classList.add("bad");
+  setTimeout(connectWs, wsBackoff);
+  wsBackoff = Math.min(wsBackoff * 2, 15000);
+}
+
+poll(); // immediate first paint over HTTP, before the WS handshake completes
+connectWs(); // primary live channel
+// HTTP poll is the FALLBACK — it runs only while the WS is not connected.
+setInterval(() => {
+  if (!wsConnected) poll();
+}, 2000);
 setInterval(refreshPreviews, Math.round(1000 / PREVIEW_FPS));

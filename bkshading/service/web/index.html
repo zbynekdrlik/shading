@@ -63,6 +63,9 @@
                shown only on a mismatch; `fps-set-grab` is an explicit align button (no auto-write). -->
           <div class="fps-sync" data-role="fps-sync">
             <span class="fps-grab" data-role="fps-grab" hidden></span>
+            <!-- issue 809: shown when the static grab_fps config disagrees with the box's live
+                 capture rate (a silent desync after a capture-mode change). -->
+            <span class="fps-desync" data-role="fps-desync" hidden></span>
             <span class="fps-warn" data-role="fps-warn" hidden></span>
             <button type="button" class="btn fps-set-grab" data-role="fps-set-grab" hidden></button>
           </div>
