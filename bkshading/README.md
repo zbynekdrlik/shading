@@ -58,14 +58,37 @@ remote. Implements the owner architecture decided 2026-08-20 (issue 808 comments
 
 - Verifying the **real** libndi preview receive (`--features ndi`) end-to-end against a live
   cambox NDI source + provisioning libndi on the strih box + full FourCC coverage.
-- WS push of the aggregate; cloudflare remote with password protection.
-- Installing `gphoto2` on the camboxes (a RUNTIME dep; not present on cam1 yet — verified
-  read-only) + provisioning hooks (`setup-device.sh`/`verify-device.sh`), the SBC handheld
-  image, and automating the E2E camera pre-run shutter checklist.
+- cloudflare remote with password protection; the SBC handheld image; and automating the E2E
+  camera pre-run shutter checklist (now unblocked by the relay provisioning below).
+
+## Relay provisioning (issue 808) — systemd unit + gphoto2 + the issue-809 env
+
+The relay BINARY already reads `CAMERA_BOX_CAPTURE_FPS` from its env and reports it as
+`RelayState.capture_fps` (the service's issue-809 grab derive consumes it), but nothing ran it on a
+cambox. Provisioning is a standalone, supervisor-run script (mirrors `bkshading-provision-ndi.sh`):
+
+- `systemd/bkshading-relay.service` — runs `/usr/local/bin/bkshading-relay --bind 0.0.0.0:8771` as
+  root (raw USB-PTP), with `EnvironmentFile=-/etc/bkshading/relay.env` (the `-` makes it OPTIONAL:
+  an unprovisioned box reports no capture fps and the service falls back to the static `grab_fps`
+  config, never a wrong value).
+- `scripts/bkshading-provision-relay.sh --check|--install` — idempotent, fail-loud, ENABLE-ONLY
+  (`daemon-reload` + `enable`, never `start`/`restart` — defer to reboot, per
+  `.claude/rules/provisioning-scripts.md`). `--install` installs `gphoto2` (apt, if missing),
+  DERIVES `CAMERA_BOX_CAPTURE_FPS` from the box's own `camera-box.service.d` drop-ins (mirroring
+  `src/capture.rs requested_capture_denominator` — the default `60` when no drop-in overrides it,
+  so the reported rate matches what the box actually grabs at — ONE source of truth, not a hard-coded
+  duplicate), writes `/etc/bkshading/relay.env`, installs + enables the unit.
+- `scripts/lib/bkshading-relay-runtime.sh` — source-only pure helpers (paths/port + the capture-fps
+  derive + env-file body); `tests/python/test_bkshading_relay_provision_808.py` cross-checks the
+  unit/script/helper so they cannot drift and drives an install→check end-to-end into a temp root
+  (fake systemctl/gphoto2 — no root/apt/systemd needed, Tier-0 runnable).
+- **The relay BINARY deploy** (the CI-built `bkshading-relay` → `/usr/local/bin`) and the **live
+  verify against a real camera** are the supervisor's rig steps (this lane has no rig access).
 
 ## Running (once built on CI)
 
 ```
-bkshading-relay --bind 0.0.0.0:8771            # on the cambox/SBC (needs gphoto2 installed)
+scripts/bkshading-provision-relay.sh --install  # on the cambox/SBC: gphoto2 + unit + env; enable
+bkshading-relay --bind 0.0.0.0:8771            # what the unit runs (needs gphoto2 installed)
 bkshading --config bkshading/service/bkshading.example.toml   # on the strih PC
 ```
