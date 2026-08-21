@@ -124,6 +124,11 @@ fn parse_capture_fps_env_parses_int_decimal_and_rejects_junk() {
     assert_eq!(parse_capture_fps_env(Some("abc".into())), None); // junk -> unknown
     assert_eq!(parse_capture_fps_env(Some("".into())), None);
     assert_eq!(parse_capture_fps_env(None), None); // env unset -> unknown
+                                                   // Review hardening: a non-finite / absurd env must not slip through as a bogus giant rate
+                                                   // ("inf" would otherwise saturate to i64::MAX through the cast).
+    assert_eq!(parse_capture_fps_env(Some("inf".into())), None);
+    assert_eq!(parse_capture_fps_env(Some("NaN".into())), None);
+    assert_eq!(parse_capture_fps_env(Some("1e18".into())), None);
 }
 
 #[test]

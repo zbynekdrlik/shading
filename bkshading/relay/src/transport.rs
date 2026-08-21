@@ -108,11 +108,16 @@ pub fn parse_first_model(output: &str) -> Option<String> {
 /// (`src/capture.rs`), and the relay runs on the same cambox, so reading it here reports the
 /// box's ACTUAL grab rate to the service — with ZERO change to the appliance. Accepts an integer
 /// or decimal (rounded to the nearest integer — the rig is integer-genlock 60, and the fps-sync
-/// model is integer; fractional NTSC is deferred). A non-positive, empty, or unparseable value
-/// (or an unset env) yields `None` — never a bogus `0`. Pure — unit-tested without any env.
+/// model is integer; fractional NTSC is deferred). A non-positive, non-finite (`inf`/`nan`),
+/// absurd (`> 1000` fps), empty, or unparseable value (or an unset env) yields `None` — never a
+/// bogus value. Pure — unit-tested without any env.
 pub fn parse_capture_fps_env(raw: Option<String>) -> Option<i64> {
     let v: f64 = raw?.trim().parse().ok()?;
-    if v > 0.0 {
+    // Guard `is_finite` FIRST: `"inf"` parses to `f64::INFINITY`, passes `> 0.0`, and saturates
+    // to `i64::MAX` through the cast -- a bogus giant `capture_fps` that would drive a spurious
+    // desync/Mismatch. The `<= 1000` ceiling rejects an absurd finite value too (a real capture
+    // rate is 24-60).
+    if v.is_finite() && v > 0.0 && v <= 1000.0 {
         Some(v.round() as i64)
     } else {
         None
