@@ -155,10 +155,13 @@ function updateBlock(el, cam) {
   // fps + issue-809 grab-mode sync.
   const camFps = p.fps100 == null ? null : p.fps100 / 100;
   q("fps-val").textContent = camFps == null ? "—" : camFps.toFixed(2);
-  const grab = cam.grabFps; // configured box grab fps (null => no comparison for this camera)
+  // Effective grab fps (issue 809): the box's live capture rate when the relay reports one,
+  // else the static config; null => no comparison for this camera.
+  const grab = cam.grabFps;
   el.dataset.grabFps = grab == null ? "" : String(grab);
   const syncRow = q("fps-sync");
   const grabEl = q("fps-grab");
+  const desyncEl = q("fps-desync");
   const warnEl = q("fps-warn");
   const setBtn = q("fps-set-grab");
   // Hide the whole sync row (not just its children) for a camera with no grab configured,
@@ -166,11 +169,18 @@ function updateBlock(el, cam) {
   if (syncRow) syncRow.hidden = grab == null;
   if (grab == null) {
     grabEl.hidden = true;
+    if (desyncEl) desyncEl.hidden = true;
     warnEl.hidden = true;
     setBtn.hidden = true;
   } else {
     grabEl.textContent = "grab " + grab;
     grabEl.hidden = false;
+    // issue 809: the static config grab_fps disagrees with the box's live capture rate — the
+    // panel compares against the live rate (grab above) and flags the stale config.
+    if (desyncEl) {
+      desyncEl.hidden = !cam.grabFpsDesync;
+      if (cam.grabFpsDesync) desyncEl.textContent = `⚠ config ≠ box capture (${grab})`;
+    }
     const mismatch = cam.fpsSync === "mismatch";
     warnEl.hidden = !mismatch;
     if (mismatch) {

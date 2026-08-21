@@ -17,6 +17,7 @@ use anyhow::Result;
 use bkshading::aggregator::Aggregator;
 use bkshading::config::ServiceConfig;
 use bkshading::http::{router, AppState};
+use bkshading_proto::wire::FpsSync;
 use clap::Parser;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -90,10 +91,23 @@ async fn main() -> Result<()> {
         tokio::spawn(async move {
             let mut ticker =
                 tokio::time::interval(std::time::Duration::from_millis(LIVE_PUSH_INTERVAL_MS));
+            // issue 809: per-camera fps-sync alert state, so a mismatch / grab-config desync is
+            // logged ONCE on transition (not every ~2 s pump cycle).
+            let mut fps_alert_state: std::collections::HashMap<String, (FpsSync, bool)> =
+                std::collections::HashMap::new();
             ticker.tick().await; // consume the immediate first tick (channel is already seeded)
             loop {
                 ticker.tick().await;
                 let snapshot = Arc::new(agg.snapshot(&config).await);
+                // issue 809: telemetry — surface a camera fps mismatch or a config-vs-capture
+                // grab desync in the log (with the cross-reference to capture_rate_health), on
+                // transition only.
+                for line in bkshading::monitor::fps_alert_transitions(
+                    &mut fps_alert_state,
+                    &snapshot.cameras,
+                ) {
+                    tracing::warn!("{line}");
+                }
                 // The AppState keeps a receiver alive, so `send` never fails for "no receivers".
                 let _ = live_tx.send(snapshot);
             }

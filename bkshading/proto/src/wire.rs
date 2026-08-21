@@ -70,12 +70,22 @@ pub struct RelayState {
     pub caps: Option<CameraCaps>,
     /// Whether the project fps is settable (d007 present) on this camera.
     pub fps_supported: bool,
+    /// The box's own capture-mode fps, reported by the relay from its `CAMERA_BOX_CAPTURE_FPS`
+    /// environment (the relay runs on the cambox, so it reads the SAME rate the appliance
+    /// requests). `None` when the relay's environment does not set it (issue 809). This is the
+    /// box's ACTUAL grab rate — the service derives/validates the per-camera `grab_fps` against
+    /// it so a stale static config can't silently mis-compare. `#[serde(default)]` so an older
+    /// relay that doesn't send it still deserializes (as `None`).
+    #[serde(default)]
+    pub capture_fps: Option<i64>,
     /// The relay binary's own version (for diagnostics; the service shows its own).
     pub version: String,
 }
 
 impl RelayState {
-    /// The state a relay reports when it cannot see its camera this cycle.
+    /// The state a relay reports when it cannot see its camera this cycle. `capture_fps` is
+    /// `None` here (the box rate is filled in by the relay, which overrides this default with
+    /// its known env value even on a camera-offline cycle).
     pub fn offline(version: impl Into<String>) -> Self {
         RelayState {
             online: false,
@@ -83,6 +93,7 @@ impl RelayState {
             params: ShadingParams::default(),
             caps: None,
             fps_supported: false,
+            capture_fps: None,
             version: version.into(),
         }
     }
@@ -161,15 +172,99 @@ pub struct CameraView {
     pub has_preview: bool,
     /// The camera's relay was reachable this cycle.
     pub reachable: bool,
-    /// The box's grab-mode fps for this camera (issue 809), from config (`60` for cam1).
-    /// `None` when the camera's config declares no grab mode — then `fps_sync` is
-    /// [`FpsSync::Unknown`] and the panel shows no grab comparison.
+    /// The EFFECTIVE grab-mode fps this camera is compared against (issue 809) — the box's live
+    /// reported capture rate when the relay reports one ([`resolve_grab`] DERIVES it from the
+    /// actual capture mode), else the static per-camera config value. `None` when neither is
+    /// known — then `fps_sync` is [`FpsSync::Unknown`] and the panel shows no grab comparison.
     pub grab_fps: Option<i64>,
+    /// The static config `grab_fps` disagrees with the box's live reported capture rate (issue
+    /// 809): a silent desync (e.g. the box's capture mode changed but the TOML wasn't updated).
+    /// The panel then compares against the LIVE rate (`grab_fps` above) and surfaces this so the
+    /// stale config gets fixed. `#[serde(default)]` for older-service wire compat.
+    #[serde(default)]
+    pub grab_fps_desync: bool,
     /// FPS-vs-grab sync verdict (issue 809) — [`FpsSync::classify`] of the camera's
-    /// reported project fps against `grab_fps`. Drives the panel's warning + align button.
+    /// reported project fps against the EFFECTIVE `grab_fps`. Drives the panel's warning +
+    /// align button.
     pub fps_sync: FpsSync,
     /// Live state from the relay, when reachable.
     pub state: Option<RelayState>,
+}
+
+/// Reconciliation of a camera's configured grab fps with the box's live reported capture rate
+/// (issue 809). See [`resolve_grab`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GrabResolution {
+    /// The grab fps to compare the camera against: the box's live reported capture rate when
+    /// known (the ACTUAL capture mode), otherwise the static config value.
+    pub effective: Option<i64>,
+    /// The static config grab fps disagrees with the box's live reported capture rate — a
+    /// silent desync that would otherwise mis-compare against a stale reference.
+    pub desync: bool,
+}
+
+/// Reconciles a per-camera configured grab fps with the box's live reported capture rate
+/// (`RelayState::capture_fps`), for issue 809. DERIVES the effective grab from the box's ACTUAL
+/// capture mode when the relay reports it (a box-side mode change is then followed automatically
+/// instead of silently desyncing a static config), falling back to the config when the relay
+/// reports nothing. VALIDATES the two against each other: when both are known and differ,
+/// `desync = true` and the LIVE capture rate wins (it is the real grab). A non-positive value on
+/// either side is treated as "not known" (never a false desync).
+pub fn resolve_grab(config_grab: Option<i64>, reported_capture_fps: Option<i64>) -> GrabResolution {
+    let config = config_grab.filter(|&g| g > 0);
+    let reported = reported_capture_fps.filter(|&c| c > 0);
+    match (config, reported) {
+        (Some(cfg), Some(cap)) => GrabResolution {
+            effective: Some(cap),
+            desync: cfg != cap,
+        },
+        (None, Some(cap)) => GrabResolution {
+            effective: Some(cap),
+            desync: false,
+        },
+        (Some(cfg), None) => GrabResolution {
+            effective: Some(cfg),
+            desync: false,
+        },
+        (None, None) => GrabResolution {
+            effective: None,
+            desync: false,
+        },
+    }
+}
+
+/// The one-line telemetry note the service logs when a camera's project fps does NOT match the
+/// box's grab mode (issue 809). Names the concrete rates AND cross-references the appliance's
+/// grabber-side capture-rate health (`capture_rate_health`, issues 656/685 — captured-vs-
+/// negotiated rate on `/dev/videoN`) plus the duplicate-frame analysis (issue 674): a camera
+/// off-grab is the SAME source beat those downstream checks see, so aligning the camera fps to
+/// the grab removes it at the source. Pure so the exact wording is pinned by a test.
+pub fn fps_mismatch_note(id: &str, camera_fps100: Option<i64>, grab_fps: Option<i64>) -> String {
+    let cam = camera_fps100
+        .map(|f| format!("{:.2}", f as f64 / 100.0))
+        .unwrap_or_else(|| "?".into());
+    let grab = grab_fps
+        .map(|g| g.to_string())
+        .unwrap_or_else(|| "?".into());
+    format!(
+        "issue-809 fps mismatch on '{id}': camera project fps {cam} != box grab {grab} \
+         — source beat/duplicate class (cross-ref capture_rate_health 656/685 grabber rate, \
+         674 duplicate-frame analysis); align camera fps to grab to remove it at the source"
+    )
+}
+
+/// The one-line telemetry note logged when the static per-camera `grab_fps` config disagrees
+/// with the box's live reported capture rate (issue 809) — the "mode change silently desynced
+/// the config" case. `effective_grab` is the LIVE capture rate now being used.
+pub fn grab_desync_note(id: &str, effective_grab: Option<i64>) -> String {
+    let g = effective_grab
+        .map(|g| g.to_string())
+        .unwrap_or_else(|| "?".into());
+    format!(
+        "issue-809 grab config desync on '{id}': box live capture rate is {g} fps but the \
+         static grab_fps config differs — comparing against the live rate; update grab_fps in \
+         the TOML to match the box's capture mode"
+    )
 }
 
 /// The whole aggregate the service serves at `GET /api/cameras`.
