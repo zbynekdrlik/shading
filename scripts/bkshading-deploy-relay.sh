@@ -121,6 +121,16 @@ case "$ARCH" in
 esac
 ARTIFACT="${ARTIFACT_ENV:-$(bkshading_deploy_artifact_name_for_arch "$ARCH")}"
 
+# arm64 targets an SBC, and a stock Raspberry Pi OS root is read-WRITE — a ro-root remount on it is
+# almost always wrong. --arch and --no-remount stay ORTHOGONAL (a deliberately read-only Pi image
+# legitimately wants arm64 WITH the remount), so WARN rather than force — the operator keeps the
+# choice. This removes the "forgot --no-remount" footgun without breaking the read-only-Pi case.
+if [ "$ARCH" = "arm64" ] && [ "$RO_ROOT" = 1 ]; then
+  echo "WARNING: --arch arm64 without --no-remount will remount the target root read-only after the" >&2
+  echo "         deploy; a stock Raspberry Pi OS SBC has a read-WRITE root, so pass --no-remount" >&2
+  echo "         unless this is a deliberately read-only Pi image." >&2
+fi
+
 # Conditional read-only-root swap (a cambox has a read-only root; a stock Pi OS SBC root is rw). No
 # ssh remount call at all when --no-remount is set, so an SBC deploy never tries to remount its
 # root ro (which would be wrong / fail-busy).

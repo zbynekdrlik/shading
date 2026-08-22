@@ -348,6 +348,25 @@ def test_deploy_dry_run_arm64_no_remount_skips_remount():
         assert re.search(r"(NOT start|enable-only|reboot)", out, re.I)
 
 
+def test_deploy_arm64_without_no_remount_warns():
+    # arm64 targets an SBC (rw root); forgetting --no-remount is a footgun -> the script WARNS (but
+    # does not force: --arch/--no-remount stay orthogonal for the read-only-Pi case).
+    with tempfile.TemporaryDirectory() as tmp:
+        fake_bin = os.path.join(tmp, "bkshading-relay")
+        _fake_elf(fake_bin, AARCH64)
+        # arm64 WITHOUT --no-remount -> warning present.
+        r = _run_deploy(["--host", "10.77.9.60", "--arch", "arm64", "--binary", fake_bin, "--dry-run"])
+        assert r.returncode == 0, (r.stdout, r.stderr)
+        assert re.search(r"--no-remount", r.stdout + r.stderr) and \
+            re.search(r"warning", r.stdout + r.stderr, re.I), \
+            "arm64 without --no-remount must warn about the rw-root Pi footgun"
+        # arm64 WITH --no-remount -> no such warning.
+        r2 = _run_deploy(["--host", "10.77.9.60", "--arch", "arm64", "--no-remount",
+                          "--binary", fake_bin, "--dry-run"])
+        assert not re.search(r"WARNING: --arch arm64 without --no-remount", r2.stdout + r2.stderr), \
+            "arm64 WITH --no-remount must not warn"
+
+
 def _fake_deploy_env(tmp, remote_sha):
     log = os.path.join(tmp, "calls.log")
     fake_ssh = os.path.join(tmp, "fake-ssh")

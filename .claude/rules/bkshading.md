@@ -1,6 +1,9 @@
 ---
 paths:
   - "bkshading/**"
+  - "scripts/bkshading-*"
+  - "scripts/lib/bkshading-*"
+  - "systemd/bkshading-*"
 ---
 
 # bkshading — remote camera shading control (issue 808)
@@ -88,8 +91,8 @@ CI is the first compile. The local net that CAUGHT real issues here:
 ## M1 done / M2+ deferred
 Done: the 3 crates + workspace/CI wiring, the 4+4 responsive web panel skeleton (version in the DOM,
 version-on-dashboard), config-driven camera list, relay read+write logic unit-tested with a fake
-runner; ONE workspace-inherited crate version across all four crates (#1154). M2 DONE: live NDI preview (below). Deferred (M2+): WS push of the aggregate;
-cloudflare password-protected remote (NOT tailscale — owner decision); SBC/handheld image; installing
+runner; ONE workspace-inherited crate version across all four crates (#1154). M2 DONE: live NDI preview (below). SBC/handheld provisioning DONE (below). Deferred (M2+): WS push of the aggregate;
+cloudflare password-protected remote (NOT tailscale — owner decision) DONE; installing
 `gphoto2` on the camboxes (a RUNTIME dep — NOT present on cam1 yet) + provisioning hooks; automating
 the E2E camera pre-run shutter checklist.
 
@@ -149,9 +152,13 @@ never load on its own ship target.
   the documented DLL path. `tests/python/test_bkshading_ndi_provision_1157.py` cross-checks the shell
   dirs/names + the Windows DLL AGAINST `ndi_paths.rs` so the two lists cannot drift.
 - **STILL the rig-verify half (supervisor, live):** run the strih service `--features ndi` against a
-  live cambox NDI source + confirm the 4+4 preview updates, and confirm the 3 M2 SDK deferrals
-  (per-source init/destroy refcounting across a reconnect; the actual `COLOR_FORMAT_UYVY_BGRA=0`
-  meaning vs the installed header; full FourCC coverage of the real low-bandwidth stream). Task 4
+  live cambox NDI source + confirm the 4+4 preview updates, and confirm the 2 remaining M2 SDK
+  deferrals (per-source init/destroy refcounting across a reconnect; full FourCC coverage of the
+  real low-bandwidth stream). The 3rd — the color-format meaning vs the installed header — is
+  RESOLVED (#808 SBC lane): value 0 is `BGRX_BGRA` per `Processing.NDI.Recv.h`, so the misnamed
+  constant was renamed `COLOR_FORMAT_UYVY_BGRA` → `COLOR_FORMAT_BGRX_BGRA` (behaviour unchanged; the
+  same harmless mislabel still stands in the main display path `src/ndi.rs`, a separate subsystem).
+  Task 4
   (make `--features ndi` the default strih build, or keep opt-in) is the owner's call AFTER that
   live verify — left opt-in for now.
 
@@ -177,3 +184,37 @@ break the one-source-of-truth the owner flagged in the MVP):
   (59.94/29.97) would classify Mismatch against an integer and needs a new representation — deferred
   scope, not a bug. Deriving grab from the box's live capture_fps (vs a static config field) is the
   follow-up.
+
+
+## SBC / handheld provisioning (issue 808 — the last milestone)
+A handheld camera runs the SAME `bkshading-relay` on a mini SBC (a Pi Zero 2 W): camera USB → Pi,
+Pi on WiFi. The service already understands it (`Transport::SbcRelay`, `handheld-1` /
+`transport="sbc-relay"` in `bkshading.example.toml`, a params-only block — no NDI preview). The box
+side is `scripts/bkshading-provision-sbc.sh` (+ pure lib `scripts/lib/bkshading-sbc-runtime.sh`),
+mirroring the relay/cloudflared provisioning canon but with two deliberate deltas + one gotcha:
+- **The SBC REUSES `systemd/bkshading-relay.service` UNCHANGED** (owner: "the SAME relay component")
+  and writes **NO `CAMERA_BOX_CAPTURE_FPS` env** — an SBC has no camera-box appliance to derive from
+  and a handheld has no grab comparison, so the unit's `EnvironmentFile=-` degrades gracefully
+  (relay → `capture_fps=None` → service static config). Do NOT reuse `bkshading-provision-relay.sh`
+  (its whole job is deriving that env from `camera-box.service.d` drop-ins, which an SBC lacks).
+- **Deploy uses `bkshading-deploy-relay.sh --arch arm64 --no-remount`.** `--arch arm64` fetches the
+  `bkshading-relay-linux-arm64` artifact; `--no-remount` skips the read-only-root swap (a cambox
+  appliance has a ro root; a **stock Raspberry Pi OS root is read-WRITE** — remounting it ro is
+  wrong). The default (no flags) is still amd64 + ro-root remount (cambox), byte-unchanged.
+- **CROSS-BUILD GOTCHA — only the RELAY cross-builds to aarch64 trivially; the SERVICE does NOT.**
+  The relay is pure Rust (axum/tokio/serde/clap; **no reqwest/rustls/ring, no libndi** on the relay
+  side), so the CI `bkshading` job cross-compiles it for `aarch64-unknown-linux-gnu` with just
+  `rustup target add` + the `gcc-aarch64-linux-gnu` linker + `CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER`.
+  Target = aarch64 (NOT armhf): the Pi Zero 2 W is ARMv8 and Pi OS 64-bit is its default; a 32-bit
+  `armv7-unknown-linux-gnueabihf` build is one extra matrix entry only if a legacy handheld needs it.
+  **Do NOT naively add a service ARM cross-build** — the service pulls `ring`/`rustls` (reqwest) +
+  the libndi FFI, which do NOT cross-link with a bare gcc linker; the service is Windows/amd64 only
+  (it runs on the strih PC), so there is deliberately no service ARM artifact.
+- **`--check` verifies the deployed relay binary is actually AArch64** (an ELF `e_machine` read via
+  `od` — offset 18, 2 bytes LE, AArch64=183 / x86-64=62; pure helpers in `bkshading-sbc-runtime.sh`,
+  Tier-0 testable with a 20-byte fake-ELF fixture) so a mis-deployed amd64 binary is caught here,
+  not at reboot with an opaque `Exec format error`.
+- The physical bring-up (flash Pi OS with `rpi-imager`, headless WiFi, then deploy + `--install` +
+  reboot) is the owner's/supervisor's rig step. Transports stay USB-PTP (gphoto2/libusb) / USB-Eth
+  REST — NEVER Bluetooth; a gphoto2 camera is a USB device, not a network link, so the netplan
+  `enx*` CDC-NCM trap (#1155) does not touch the handheld.
