@@ -202,7 +202,6 @@ def _run_provision(args, root, make_creds=True):
     sysd = os.path.join(root, "systemd-system")
     config_file = os.path.join(root, "bkshading", "cloudflared-config.yml")
     marker = os.path.join(root, "bkshading", "cloudflared-access-confirmed")
-    binp = os.path.join(root, "bin", "cloudflared")
     creds = os.path.join(root, "bkshading", "church-shading.json")
     calls = os.path.join(root, "systemctl-calls.log")
     sc = _fake_systemctl(calls)
@@ -216,7 +215,6 @@ def _run_provision(args, root, make_creds=True):
         BKSHADING_CF_UNIT_DEST=os.path.join(sysd, UNIT_NAME),
         BKSHADING_CF_CONFIG_FILE=config_file,
         BKSHADING_CF_ACCESS_MARKER=marker,
-        BKSHADING_CF_BIN=binp,
         BKSHADING_CF_CLOUDFLARED="true",  # command -v succeeds -> apt install skipped
         BKSHADING_CF_SYSTEMCTL=sc,
     )

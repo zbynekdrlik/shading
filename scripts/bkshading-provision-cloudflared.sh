@@ -42,7 +42,7 @@ set -euo pipefail
 #
 # Overridable targets (for Tier-0 tests to a temp root — no root/apt/systemd/cloudflared needed):
 #   BKSHADING_CF_UNIT_DEST, BKSHADING_CF_CONFIG_FILE, BKSHADING_CF_ACCESS_MARKER,
-#   BKSHADING_CF_BIN, BKSHADING_CF_CLOUDFLARED, BKSHADING_CF_SYSTEMCTL
+#   BKSHADING_CF_CLOUDFLARED, BKSHADING_CF_SYSTEMCTL
 # ---------------------------------------------------------------------------------------------
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -292,17 +292,17 @@ MSG
 }
 
 windows_notice() {
-  local dll_free_note
-  dll_free_note='%USERPROFILE%\.cloudflared\'
+  local cf_dir
+  cf_dir='%USERPROFILE%\.cloudflared\'
   cat >&2 <<MSG
 bkshading cloudflare remote (Windows / strih PC — the Windows-first service host):
   A bash shell cannot install a Windows service. On the strih PC, do it with cloudflared itself:
     1. Install cloudflared for Windows (https://pkg.cloudflare.com / the .msi).
     2. Create the tunnel + credentials:  cloudflared tunnel login ; cloudflared tunnel create <name>
-       (credentials JSON lands in $dll_free_note<UUID>.json — keep it private, never commit it).
+       (credentials JSON lands in $cf_dir<UUID>.json — keep it private, never commit it).
     3. Write a config.yml there with the SAME shape this script composes on Linux:
          tunnel: <name>
-         credentials-file: $dll_free_note<UUID>.json
+         credentials-file: $cf_dir<UUID>.json
          ingress:
            - hostname: <public hostname>
              service: http://localhost:$(bkshading_cloudflared_service_port)

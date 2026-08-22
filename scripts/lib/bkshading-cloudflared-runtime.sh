@@ -76,7 +76,11 @@ EOF
 }
 
 # Extract the credentials-file PATH referenced by a config.yml (read from stdin). Echoes the path,
-# or nothing. Pure text — no secret is ever read (the path, not the JSON content).
+# or nothing. Pure text — no secret is ever read (the path, not the JSON content). The composer
+# emits exactly ONE `credentials-file:` line, so `sed` alone yields one line — deliberately NO
+# `| head -1`, which under a caller's `pipefail` can SIGPIPE `sed` on early close (the #458 footgun);
+# a malformed multi-line config would yield a multi-line value that fails the caller's `[ -f ]` check
+# (safe — never a false match).
 bkshading_cloudflared_creds_file_from_config() {
-  sed -n 's/^[[:space:]]*credentials-file:[[:space:]]*//p' | head -1
+  sed -n 's/^[[:space:]]*credentials-file:[[:space:]]*//p'
 }
