@@ -25,13 +25,21 @@ set -euo pipefail
 # performs are the standing-approved WORK — this script does NOT ask permission and does NOT gate on
 # "is it off-air"; the operator who runs it guards live timing. It does NOT reboot the host.
 #
-# Usage:  scripts/bkshading-deploy-relay.sh --host <ip> [--run <id> | --binary <path>] [--dry-run]
+# Usage:  scripts/bkshading-deploy-relay.sh --host <ip> [--arch amd64|arm64] [--no-remount]
+#                                           [--run <id> | --binary <path>] [--dry-run]
 #   --host <ip>       (required) the cambox/SBC to deploy the relay to (e.g. 10.77.9.201).
+#   --arch <a>        target arch of the CI artifact: `amd64` (default; cambox — the relay+service
+#                     bkshading-linux-amd64 artifact) or `arm64` (SBC/handheld Pi Zero 2 W — the
+#                     relay-only bkshading-relay-linux-arm64 artifact; issue 808 SBC milestone).
+#   --no-remount      skip the read-only-root remount,rw/remount,ro swap. A camera-box appliance has
+#                     a read-only root (default: remount); a stock Raspberry Pi OS SBC root is
+#                     read-WRITE, so an SBC deploy passes --no-remount (remounting it ro is wrong).
 #   --run <id>        pin a specific GitHub Actions ci.yml run id to download the artifact from.
 #   --binary <path>   deploy an already-downloaded CI relay binary (skips gh download).
 #   --dry-run         print the plan and touch nothing (no gh/ssh/scp).
 #   -h | --help       show this header.
 # With neither --run nor --binary, the latest successful ci.yml run on $BRANCH is used.
+# SBC/handheld example: scripts/bkshading-deploy-relay.sh --host <pi> --arch arm64 --no-remount
 #
 # Env: SSH_PASS (default newlevel), REPO (default zbynekdrlik/camera-box), BRANCH (default main),
 #      ARTIFACT (default from the lib). Overridable for Tier-0 tests (inject fakes):
@@ -52,7 +60,11 @@ RELAY_DEST="$(bkshading_relay_bin_path)"     # /usr/local/bin/bkshading-relay (o
 SSH_PASS="${SSH_PASS:-newlevel}"
 REPO="${REPO:-zbynekdrlik/camera-box}"
 BRANCH="${BRANCH:-main}"
-ARTIFACT="${ARTIFACT:-$(bkshading_deploy_artifact_name)}"
+# An explicit ARTIFACT env override wins; otherwise it is derived from --arch AFTER arg parsing (the
+# arch flag decides which CI artifact to fetch), so capture the override here and resolve below.
+ARTIFACT_ENV="${ARTIFACT:-}"
+ARCH="amd64"   # default: cambox (relay+service amd64 artifact); --arch arm64 = SBC/handheld relay
+RO_ROOT=1      # default: read-only-root remount cycle (cambox); --no-remount = stock rw-root SBC
 
 # Overridable command surfaces (real defaults; the test injects fakes + an empty sshpass prefix).
 GH="${BKSHADING_DEPLOY_GH:-gh}"
@@ -80,6 +92,8 @@ require_val() { [ "$1" -ge 2 ] || { echo "ERROR: $2 requires a value (see --help
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --host) require_val "$#" --host; HOST="$2"; shift 2 ;;
+    --arch) require_val "$#" --arch; ARCH="$2"; shift 2 ;;
+    --no-remount) RO_ROOT=0; shift ;;
     --run) require_val "$#" --run; RUN_ID="$2"; shift 2 ;;
     --binary) require_val "$#" --binary; BINARY="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
@@ -92,13 +106,26 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ -z "$HOST" ]; then
-  echo "ERROR: --host <ip> is required. Usage: bkshading-deploy-relay.sh --host <ip> [--run <id> | --binary <path>] [--dry-run]" >&2
+  echo "ERROR: --host <ip> is required. Usage: bkshading-deploy-relay.sh --host <ip> [--arch amd64|arm64] [--no-remount] [--run <id> | --binary <path>] [--dry-run]" >&2
   exit 2
 fi
 if [ -n "$RUN_ID" ] && [ -n "$BINARY" ]; then
   echo "ERROR: --run and --binary are mutually exclusive" >&2
   exit 2
 fi
+
+# Validate the arch and derive the CI artifact from it (an explicit ARTIFACT env override wins).
+case "$ARCH" in
+  amd64 | arm64) ;;
+  *) echo "ERROR: --arch must be amd64 or arm64 (got: $ARCH)" >&2; exit 2 ;;
+esac
+ARTIFACT="${ARTIFACT_ENV:-$(bkshading_deploy_artifact_name_for_arch "$ARCH")}"
+
+# Conditional read-only-root swap (a cambox has a read-only root; a stock Pi OS SBC root is rw). No
+# ssh remount call at all when --no-remount is set, so an SBC deploy never tries to remount its
+# root ro (which would be wrong / fail-busy).
+maybe_remount_rw() { [ "$RO_ROOT" = 1 ] || return 0; ssh_box "$1" "mount -o remount,rw /"; }
+maybe_remount_ro() { [ "$RO_ROOT" = 1 ] || return 0; ssh_box "$1" "mount -o remount,ro / 2>/dev/null; true" || true; }
 
 ssh_box() { "${SSHPASS_PREFIX[@]}" "$SSH_BIN" -o StrictHostKeyChecking=no -o ConnectTimeout=10 "root@$1" "$2"; }
 scp_box() { "${SSHPASS_PREFIX[@]}" "$SCP_BIN" -o StrictHostKeyChecking=no "$2" "root@$1:$3"; }
@@ -125,14 +152,22 @@ LOCAL_SHA="$(sha256sum "$BINARY" | awk '{print $1}')"
 
 # --- dry-run: print the plan, touch nothing ---
 if [ "$DRY_RUN" -eq 1 ]; then
+  if [ "$RO_ROOT" = 1 ]; then
+    STEPS="mount -o remount,rw /  ->  scp  ->  chmod +x  ->  sha256 byte-verify  ->  mount -o remount,ro /"
+    NEXT="on the box run scripts/bkshading-provision-relay.sh --install (if not yet) + reboot"
+  else
+    STEPS="scp  ->  chmod +x  ->  sha256 byte-verify   (no remount -- stock rw-root SBC, --no-remount)"
+    NEXT="on the SBC run scripts/bkshading-provision-sbc.sh --install (if not yet) + reboot"
+  fi
   cat <<PLAN
 DRY-RUN — bkshading relay deploy plan:
   host           : $HOST
+  arch           : $ARCH (artifact $ARTIFACT)
   source binary  : $BINARY (sha256 $LOCAL_SHA)
   deploy target  : root@$HOST:$RELAY_DEST
-  steps          : mount -o remount,rw /  ->  scp  ->  chmod +x  ->  sha256 byte-verify  ->  mount -o remount,ro /
+  steps          : $STEPS
   enable-only    : will NOT start/restart the service (reboot brings it live; provisioning-scripts.md)
-  next step      : on the box run scripts/bkshading-provision-relay.sh --install (if not yet) + reboot
+  next step      : $NEXT
 PLAN
   exit 0
 fi
@@ -142,13 +177,13 @@ if [ "${SSHPASS_PREFIX[0]:-}" = "sshpass" ]; then
   command -v sshpass >/dev/null 2>&1 || { echo "ERROR: sshpass required (apt-get install sshpass)" >&2; exit 1; }
 fi
 
-echo "[bkshading-deploy-relay] deploying $BINARY -> root@$HOST:$RELAY_DEST"
-if ! ssh_box "$HOST" "mount -o remount,rw /"; then
+echo "[bkshading-deploy-relay] deploying $BINARY ($ARCH) -> root@$HOST:$RELAY_DEST"
+if ! maybe_remount_rw "$HOST"; then
   echo "ERROR: remount rw / failed on $HOST" >&2; exit 1
 fi
 if ! scp_box "$HOST" "$BINARY" "$RELAY_DEST"; then
   echo "ERROR: scp of relay binary to $HOST failed" >&2
-  ssh_box "$HOST" "mount -o remount,ro / 2>/dev/null; true" || true
+  maybe_remount_ro "$HOST"
   exit 1
 fi
 ssh_box "$HOST" "chmod +x $RELAY_DEST 2>/dev/null || true" || true
@@ -160,8 +195,8 @@ ssh_box "$HOST" "chmod +x $RELAY_DEST 2>/dev/null || true" || true
 REMOTE_SHA="$(ssh_box "$HOST" "sha256sum $RELAY_DEST 2>/dev/null | awk '{print \$1}'" || echo "")"
 REMOTE_EXEC="$(ssh_box "$HOST" "test -x $RELAY_DEST && echo yes || echo no" 2>/dev/null || echo no)"
 
-# Always restore the ro root, whatever the verdict.
-ssh_box "$HOST" "mount -o remount,ro / 2>/dev/null; true" || true
+# Always restore the ro root, whatever the verdict (a no-op under --no-remount for a rw-root SBC).
+maybe_remount_ro "$HOST"
 
 if [ "$(bkshading_deploy_sha_match "$LOCAL_SHA" "$REMOTE_SHA")" != "match" ]; then
   echo "ERROR: sha256 mismatch after deploy (local=$LOCAL_SHA remote=${REMOTE_SHA:-<none>}) — deploy NOT verified" >&2

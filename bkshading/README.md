@@ -58,8 +58,9 @@ remote. Implements the owner architecture decided 2026-08-20 (issue 808 comments
 
 - Verifying the **real** libndi preview receive (`--features ndi`) end-to-end against a live
   cambox NDI source + provisioning libndi on the strih box + full FourCC coverage.
-- The SBC handheld image; and automating the E2E camera pre-run shutter checklist. Cloudflare
-  remote access with password protection is DONE — see "Remote access (cloudflare)" below.
+- Automating the E2E camera pre-run shutter checklist. Cloudflare remote access with password
+  protection is DONE (see "Remote access (cloudflare)" below), and the SBC handheld provisioning is
+  DONE (see "SBC / handheld image" below).
 
 ## Relay provisioning (issue 808) — systemd unit + gphoto2 + the issue-809 env
 
@@ -129,6 +130,53 @@ scripts/bkshading-provision-cloudflared.sh --check
   Cloudflare Access application + One-Time-PIN policy on the hostname. The tunnel flow needs **no**
   Cloudflare API token. Deploying the `cloudflared` binary + the live remote-access verify are the
   supervisor's steps.
+
+## SBC / handheld image (issue 808)
+
+A **handheld** camera (no cambox, video over wireless HDMI) is shaded by running the SAME
+`bkshading-relay` on a **mini SBC on the cage** — a Raspberry **Pi Zero 2 W**: camera USB → Pi,
+Pi on WiFi, the relay exposes the camera's shading to the service exactly like a cambox does (owner
+architecture, issue 808 comment 5356048130 path 2). The service already treats it as just another
+camera (`transport = "sbc-relay"`, the `handheld-1` record in `bkshading.example.toml`, a
+params-only block — a handheld has no NDI feed). This milestone provisions the box side.
+
+- **CI cross-builds the ARM binary.** The `bkshading` job cross-compiles the relay for
+  **`aarch64-unknown-linux-gnu`** (rustup target + the `gcc-aarch64-linux-gnu` linker; the relay is
+  pure Rust — axum/tokio/serde/clap, no C link deps — so the cross-link is trivial) and uploads it
+  as the relay-only **`bkshading-relay-linux-arm64`** artifact. **Target choice — aarch64, not
+  armhf:** the Pi Zero 2 W is a Cortex-A53 (ARMv8-A, 64-bit) and Raspberry Pi OS (Bookworm) 64-bit
+  is its current default image; the relay's footprint is a few MB (well under the 512 MB budget on
+  64-bit), and aarch64-gnu is the best-supported Rust cross target with glibc matching Pi OS. A
+  32-bit `armv7-unknown-linux-gnueabihf` build is one extra CI matrix entry to add IF a legacy
+  32-bit handheld ever needs it — not the default.
+- **`scripts/bkshading-provision-sbc.sh --check|--install`** (+ pure lib
+  `scripts/lib/bkshading-sbc-runtime.sh`) — idempotent, fail-loud, ENABLE-ONLY (`daemon-reload` +
+  `enable`, never `start`/`restart` — defer to reboot, per `.claude/rules/provisioning-scripts.md`).
+  `--install` installs `gphoto2` (apt, if missing) and installs + enables the **reused**
+  `systemd/bkshading-relay.service` (the SBC runs the SAME unit). It writes **NO**
+  `CAMERA_BOX_CAPTURE_FPS` env: an SBC has no camera-box appliance to derive from and a handheld has
+  no grab comparison, so the relay's `EnvironmentFile=-` degrades gracefully (relay reports
+  `capture_fps=None` → the service uses its static config, never a wrong value). `--check` verifies
+  `gphoto2` + the unit installed (byte-match) + enabled + the relay binary present **and actually
+  aarch64** (an ELF `e_machine` read — a mis-deployed amd64 binary is caught here, not at reboot
+  with an opaque `Exec format error`).
+- **Deploy the ARM relay:** `scripts/bkshading-deploy-relay.sh --host <pi> --arch arm64
+  --no-remount` — `--arch arm64` fetches the `bkshading-relay-linux-arm64` artifact; `--no-remount`
+  skips the read-only-root swap (a cambox appliance has a read-only root; a stock Pi OS root is
+  read-write). The scp + sha256 byte-verify + ENABLE-ONLY discipline is otherwise identical to the
+  cambox path.
+- **The physical box bring-up is the owner's / supervisor's step** (no rig access in this lane):
+  flash Raspberry Pi OS Lite (64-bit) with `rpi-imager` (headless WiFi + ssh), then deploy +
+  `--install` + reboot, then add the `handheld-1` (or another id) `[[camera]]` record to the
+  service config. **Transports stay USB-relay / USB-Ethernet REST only — never Bluetooth** (owner
+  hard rule): the SBC drives the camera over USB-PTP (`gphoto2`/libusb), so it never enumerates as a
+  network link (the netplan `enx*` CDC-NCM trap that bites camboxes does not touch the handheld).
+
+```
+# on the SBC (after flashing Pi OS + deploying the aarch64 relay):
+scripts/bkshading-provision-sbc.sh --install   # gphoto2 + reused relay unit; enable (defer to reboot)
+scripts/bkshading-provision-sbc.sh --check     # verify gphoto2 + unit enabled + aarch64 binary
+```
 
 ## Running (once built on CI)
 
