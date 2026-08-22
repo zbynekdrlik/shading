@@ -18,6 +18,25 @@
 # .github/workflows/ci.yml `Upload bkshading binaries`; the python test cross-checks both).
 bkshading_deploy_artifact_name() { printf '%s\n' bkshading-linux-amd64; }
 
+# The aarch64 relay-only artifact the `bkshading` job cross-builds + uploads for the SBC/handheld
+# (issue 808 SBC milestone; a Pi Zero 2 W is ARM and cannot run the amd64 binary). ONE source of
+# truth for the arm64 artifact name — the CI upload, the deploy `--arch arm64` path, and the python
+# cross-check all read this. Relay-ONLY (the service runs on the strih PC, never on a handheld SBC),
+# hence the distinct `bkshading-relay-linux-arm64` name vs the amd64 `bkshading-linux-amd64` (relay
+# + service).
+bkshading_deploy_arm64_artifact_name() { printf '%s\n' bkshading-relay-linux-arm64; }
+
+# Select the artifact name for a target arch. `amd64` (default) -> the relay+service amd64 artifact
+# (cambox deploy, unchanged); `arm64` -> the relay-only aarch64 artifact (SBC/handheld deploy). An
+# unknown arch echoes nothing (the caller validates + fails loud).
+bkshading_deploy_artifact_name_for_arch() {
+  case "${1:-amd64}" in
+    amd64) bkshading_deploy_artifact_name ;;
+    arm64) bkshading_deploy_arm64_artifact_name ;;
+    *) : ;;
+  esac
+}
+
 # The relay binary file name INSIDE that artifact (matches bkshading/relay's [[bin]] name).
 bkshading_deploy_relay_artifact_bin() { printf '%s\n' bkshading-relay; }
 
