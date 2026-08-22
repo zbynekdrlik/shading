@@ -88,8 +88,11 @@ type FnRecvCaptureV3 = unsafe extern "C" fn(
 type FnRecvFreeVideoV2 = unsafe extern "C" fn(*mut c_void, *const NDIlibVideoFrameV2RecvT);
 
 const FRAME_TYPE_VIDEO: c_int = 1;
-// Request UYVY-or-BGRA (same as src/ndi.rs); the actual FourCC is dispatched on capture.
-const COLOR_FORMAT_UYVY_BGRA: c_int = 0;
+// Request BGRX/BGRA = value 0 per vendor/distroav/lib/ndi/Processing.NDI.Recv.h
+// (NDIlib_recv_color_format_BGRX_BGRA = 0; UYVY_BGRA would be 1). This is the correct, live-verified
+// request (the BGRA/BGRX 4bpp path serves the JPEG preview); the actual FourCC is dispatched on
+// capture, where UYVY is still handled defensively (see the FOURCC_UYVY arm below).
+const COLOR_FORMAT_BGRX_BGRA: c_int = 0;
 // The NDI low-quality preview stream (`NDIlib_recv_bandwidth_lowest`). src/ndi.rs uses 100
 // (HIGHEST) for the full display; a shading preview only needs LOWEST.
 const BANDWIDTH_LOWEST: c_int = 0;
@@ -266,7 +269,7 @@ impl NdiPreviewSource {
         let recv_name = CString::new("bkshading-preview").context("recv name")?;
         let create = NDIlibRecvCreateV3T {
             source_to_connect_to: source,
-            color_format: COLOR_FORMAT_UYVY_BGRA,
+            color_format: COLOR_FORMAT_BGRX_BGRA,
             bandwidth: BANDWIDTH_LOWEST,
             allow_video_fields: false,
             p_ndi_recv_name: recv_name.as_ptr(),
