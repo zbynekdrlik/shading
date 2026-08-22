@@ -1,0 +1,37 @@
+[Unit]
+Description=bkshading cloudflared tunnel - remote access to the shading panel (issue 808)
+Documentation=https://github.com/zbynekdrlik/camera-box
+# The tunnel fronts the bkshading service web panel, so come up after it (best-effort ordering; the
+# connector retries if the panel is not yet listening) and after the network is online.
+After=network-online.target bkshading.service
+Wants=network-online.target
+
+# Bound any runaway restart storm (mirrors camera-box.service #828 / bkshading-relay.service).
+# StartLimit* are UNIT-level directives (placing them in [Service] silently no-ops).
+StartLimitIntervalSec=300
+StartLimitBurst=20
+
+[Service]
+Type=simple
+# Config-file mode: the connector reads the tunnel name, the credentials-file reference, and the
+# ingress rules from /etc/bkshading/cloudflared-config.yml (provisioned by
+# scripts/bkshading-provision-cloudflared.sh). --no-autoupdate keeps the deployed binary version
+# stable (auto-update is disabled fleet-wide). The tunnel is OUTBOUND-only (no inbound port opened);
+# the operator password is enforced at the Cloudflare Access layer on the hostname, not here. No
+# token/credential is inlined -- the credentials JSON lives at the 0600 path the config references.
+ExecStart=/usr/local/bin/cloudflared tunnel --no-autoupdate --config /etc/bkshading/cloudflared-config.yml run
+Restart=always
+RestartSec=5
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bkshading-cloudflared
+
+# Runs as root (no User=) so it can read the 0600 credentials JSON in /etc/bkshading and matches the
+# other bkshading units; the tunnel opens no listening socket, so the exposure is outbound-only.
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

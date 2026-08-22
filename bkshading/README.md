@@ -20,8 +20,8 @@ remote. Implements the owner architecture decided 2026-08-20 (issue 808 comments
   via the `gphoto2` CLI and exposes its shading over a small HTTP API.
 - The **service** runs on the strih PC (Windows first, Linux after the frame-loss P0),
   aggregates every relay, and serves ONE operator web panel: 4+4 blocks stacked, each with a
-  camera preview on top and the shading parameters below. Opened at `strih.lan` — local and
-  (later) remote via a password-protected cloudflare proxy.
+  camera preview on top and the shading parameters below. Opened at `strih.lan` locally, and
+  remotely via a password-protected cloudflare proxy (see "Remote access (cloudflare)" below).
 
 ## Crates
 
@@ -58,8 +58,8 @@ remote. Implements the owner architecture decided 2026-08-20 (issue 808 comments
 
 - Verifying the **real** libndi preview receive (`--features ndi`) end-to-end against a live
   cambox NDI source + provisioning libndi on the strih box + full FourCC coverage.
-- cloudflare remote with password protection; the SBC handheld image; and automating the E2E
-  camera pre-run shutter checklist (now unblocked by the relay provisioning below).
+- The SBC handheld image; and automating the E2E camera pre-run shutter checklist. Cloudflare
+  remote access with password protection is DONE — see "Remote access (cloudflare)" below.
 
 ## Relay provisioning (issue 808) — systemd unit + gphoto2 + the issue-809 env
 
@@ -84,6 +84,51 @@ cambox. Provisioning is a standalone, supervisor-run script (mirrors `bkshading-
   (fake systemctl/gphoto2 — no root/apt/systemd needed, Tier-0 runnable).
 - **The relay BINARY deploy** (the CI-built `bkshading-relay` → `/usr/local/bin`) and the **live
   verify against a real camera** are the supervisor's rig steps (this lane has no rig access).
+
+## Remote access (cloudflare) (issue 808)
+
+The panel is LAN-only by default (`strih.lan:8770`). Remote access goes through a
+**password-protected cloudflare proxy** — the owner's decision (issue 808 comment 5355836067;
+NOT tailscale). Provisioning mirrors `bkshading-provision-relay.sh`:
+
+- `systemd/bkshading-cloudflared.service` — runs `cloudflared tunnel --no-autoupdate --config
+  /etc/bkshading/cloudflared-config.yml run`. The tunnel is **outbound-only** (opens no inbound
+  port); the connector holds ONLY its credentials JSON, referenced by path in the config (0600,
+  placed by the owner from `cloudflared tunnel create` — **never committed**).
+- `scripts/bkshading-provision-cloudflared.sh --check|--install` — idempotent, fail-loud,
+  ENABLE-ONLY (`daemon-reload` + `enable`, never `start`/`restart` — defer to reboot). `--install`
+  installs `cloudflared` (if missing), composes `/etc/bkshading/cloudflared-config.yml` (config-file
+  mode: tunnel name, credentials-file reference, ingress `hostname → http://localhost:8770` + the
+  catch-all 404), installs + enables the unit. Cross-platform: Linux installs the systemd unit; on
+  the Windows-first strih PC it documents `cloudflared service install` + `%USERPROFILE%\.cloudflared\`.
+- `scripts/lib/bkshading-cloudflared-runtime.sh` — source-only pure helpers (paths / unit / config
+  path + the config.yml composer + the service origin, whose port is cross-checked against the
+  service's own `default_bind` so the tunnel points where the panel listens — ONE source of truth).
+- `tests/python/test_bkshading_cloudflared_provision_808.py` — cross-checks unit/script/lib
+  no-drift, asserts NO secret is committed (references-by-path only), enable-only, and the
+  Access-enforcement gate; drives an install→check end-to-end into a temp root (fake
+  cloudflared/systemctl — Tier-0 runnable).
+
+**Operator auth story (password protection).** The password is enforced at the **Cloudflare Access**
+layer on the public hostname — NOT in the service (the owner put the protection at the proxy). The
+recommended policy for a small operator team is **One-Time PIN**: allowed operator emails receive a
+login code (no shared password to leak, per-operator revocable). Because a tunnel exposes a PUBLIC
+hostname, `--install` **REFUSES without `--access-confirmed`** and `--check` **FAILS without the
+Access marker** — a naked, unprotected public tunnel can never be the "provisioned" state.
+
+```
+scripts/bkshading-provision-cloudflared.sh --install \
+  --hostname shading.example.org --tunnel church-shading \
+  --credentials-file /etc/bkshading/church-shading.json --access-confirmed
+scripts/bkshading-provision-cloudflared.sh --check
+```
+
+- **The live Cloudflare Zero Trust steps are the owner's** (this lane has no rig/account access):
+  `cloudflared tunnel login` + `create` (produces the credentials JSON — place it at the referenced
+  path, `chmod 0600`), `cloudflared tunnel route dns <name> <hostname>` (the DNS record), and the
+  Cloudflare Access application + One-Time-PIN policy on the hostname. The tunnel flow needs **no**
+  Cloudflare API token. Deploying the `cloudflared` binary + the live remote-access verify are the
+  supervisor's steps.
 
 ## Running (once built on CI)
 
