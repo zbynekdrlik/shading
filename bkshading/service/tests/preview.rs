@@ -243,3 +243,44 @@ fn env_runtime_dir_is_searched_before_wellknown_dirs() {
         "env dir must be tried before well-known dirs"
     );
 }
+
+// --- NDI runtime lifecycle (issue 808: reconnect-safe init/destroy) -------------------------
+//
+// The receiver module itself compiles only under `--features ndi`, but its LIFECYCLE contract
+// is pinned here on default features from the source text: the NDI runtime (NDIlib_initialize /
+// NDIlib_destroy) is APPLICATION-lifetime and process-GLOBAL, so a per-connect load would let
+// one camera's routine reconnect destroy the SDK under every other live preview receiver.
+
+/// The real receiver source text (structural pins run without libndi).
+const NDI_SOURCE_SRC: &str = include_str!("../src/preview/ndi_source.rs");
+
+#[test]
+fn ndi_connect_acquires_the_process_shared_runtime_never_a_per_connect_load() {
+    let src = NDI_SOURCE_SRC;
+    let connect_start = src.find("pub fn connect").expect("connect fn present");
+    let connect_end = src[connect_start..]
+        .find("impl PreviewSource for NdiPreviewSource")
+        .map(|o| connect_start + o)
+        .expect("impl PreviewSource anchor after connect");
+    let connect_body = &src[connect_start..connect_end];
+    assert!(
+        !connect_body.contains("NdiLib::load()"),
+        "connect() must NOT load a fresh NDI runtime per connect: a per-source NdiLib means \
+         one camera's reconnect (the worker drops its source before every backoff) runs the \
+         process-global NDI destroy under every other live preview receiver"
+    );
+    assert!(
+        connect_body.contains("NdiLib::shared()"),
+        "connect() must acquire the process-shared NDI runtime via NdiLib::shared()"
+    );
+}
+
+#[test]
+fn ndi_runtime_is_kept_alive_process_wide_via_shared_runtime_static() {
+    let src = NDI_SOURCE_SRC;
+    assert!(
+        src.contains("SharedRuntime<NdiLib>"),
+        "ndi_source.rs must hold the runtime in a process-wide SharedRuntime<NdiLib> static \
+         (load-once keep-alive: initialize once per process, never a mid-flight destroy)"
+    );
+}
