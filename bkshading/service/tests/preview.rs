@@ -284,3 +284,66 @@ fn ndi_runtime_is_kept_alive_process_wide_via_shared_runtime_static() {
          (load-once keep-alive: initialize once per process, never a mid-flight destroy)"
     );
 }
+
+// --- shared runtime keeper (pure, default features) -----------------------------------------
+
+#[test]
+fn shared_runtime_loads_once_and_shares_the_same_instance() {
+    use bkshading::preview::shared_runtime::SharedRuntime;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let rt: SharedRuntime<String> = SharedRuntime::new();
+    let loads = AtomicUsize::new(0);
+    let a = rt
+        .acquire(|| -> Result<Arc<String>, ()> {
+            loads.fetch_add(1, Ordering::SeqCst);
+            Ok(Arc::new("ndi".to_string()))
+        })
+        .expect("first load");
+    let b = rt
+        .acquire(|| -> Result<Arc<String>, ()> {
+            loads.fetch_add(1, Ordering::SeqCst);
+            Ok(Arc::new("other".to_string()))
+        })
+        .expect("second acquire");
+    assert!(Arc::ptr_eq(&a, &b), "every acquire must share ONE instance");
+    assert_eq!(loads.load(Ordering::SeqCst), 1, "loader runs exactly once");
+}
+
+#[test]
+fn shared_runtime_keeps_the_instance_alive_after_all_handles_drop() {
+    use bkshading::preview::shared_runtime::SharedRuntime;
+    use std::sync::Arc;
+
+    let rt: SharedRuntime<u32> = SharedRuntime::new();
+    let first = rt
+        .acquire(|| -> Result<Arc<u32>, ()> { Ok(Arc::new(7)) })
+        .expect("first load");
+    let first_ptr = Arc::as_ptr(&first);
+    // The worker drops its source (and with it every outer handle) before each reconnect
+    // backoff — the runtime must survive that and be reused, never reloaded/destroyed.
+    drop(first);
+    let again = rt
+        .acquire(|| -> Result<Arc<u32>, ()> { panic!("must NOT reload — keep-alive slot") })
+        .expect("reacquire");
+    assert_eq!(
+        Arc::as_ptr(&again),
+        first_ptr,
+        "reconnect must reuse the SAME live runtime instance"
+    );
+}
+
+#[test]
+fn shared_runtime_does_not_cache_a_failed_load() {
+    use bkshading::preview::shared_runtime::SharedRuntime;
+    use std::sync::Arc;
+
+    let rt: SharedRuntime<u32> = SharedRuntime::new();
+    let err = rt.acquire(|| -> Result<Arc<u32>, &str> { Err("no runtime found") });
+    assert_eq!(err.expect_err("load must fail"), "no runtime found");
+    let ok = rt
+        .acquire(|| -> Result<Arc<u32>, &str> { Ok(Arc::new(1)) })
+        .expect("retry after failure");
+    assert_eq!(*ok, 1, "a failed load must not poison later loads");
+}

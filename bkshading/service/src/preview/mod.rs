@@ -8,7 +8,8 @@
 //!
 //! Layered so the pixel/decision logic is pure and CI-testable without libndi:
 //! - pure core: [`frame`], [`pattern`], [`decimate`], [`encode`], [`convert`], [`store`],
-//!   [`ndi_paths`] (cross-platform runtime discovery — the ordered candidate paths)
+//!   [`ndi_paths`] (cross-platform runtime discovery — the ordered candidate paths),
+//!   [`shared_runtime`] (process-shared load-once runtime keeper — reconnect-safe lifecycle)
 //! - runtime glue: [`source`] (trait + stub), [`worker`] (one OS thread per camera)
 //! - `#[cfg(feature = "ndi")]` [`ndi_source`]: the real libndi receiver at bandwidth LOWEST
 //!   (mirrors `src/ndi.rs`), OFF by default and UNVERIFIED against a live source in this lane.
@@ -19,6 +20,7 @@ pub mod encode;
 pub mod frame;
 pub mod ndi_paths;
 pub mod pattern;
+pub mod shared_runtime;
 pub mod source;
 pub mod store;
 pub mod worker;
