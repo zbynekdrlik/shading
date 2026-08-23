@@ -177,7 +177,7 @@ fn preview_config_defaults_are_sane() {
 // The bkshading SERVICE ships to the strih PC (Windows first), so the real-preview receiver's
 // libndi discovery MUST look for the Windows runtime DLL, not only the appliance's Linux `.so`
 // names. These pin the PURE, default-feature discovery decision (the `#[cfg(feature="ndi")]`
-// `NdiLib::load()` consumes it), so they run on CI with no libndi.
+// `NdiLib::load_uncached()` loader consumes it), so they run on CI with no libndi.
 
 use bkshading::preview::ndi_paths::{ndi_search_candidates, NdiOs};
 
@@ -242,4 +242,133 @@ fn env_runtime_dir_is_searched_before_wellknown_dirs() {
         first_env < first_wellknown,
         "env dir must be tried before well-known dirs"
     );
+}
+
+// --- NDI runtime lifecycle (issue 808: reconnect-safe init/destroy) -------------------------
+//
+// The receiver module itself compiles only under `--features ndi`, but its LIFECYCLE contract
+// is pinned here on default features from the source text: the NDI runtime (NDIlib_initialize /
+// NDIlib_destroy) is APPLICATION-lifetime and process-GLOBAL, so a per-connect load would let
+// one camera's routine reconnect destroy the SDK under every other live preview receiver.
+
+/// The real receiver source text (structural pins run without libndi).
+const NDI_SOURCE_SRC: &str = include_str!("../src/preview/ndi_source.rs");
+
+#[test]
+fn ndi_connect_acquires_the_process_shared_runtime_never_a_per_connect_load() {
+    let src = NDI_SOURCE_SRC;
+    let connect_start = src.find("pub fn connect").expect("connect fn present");
+    let connect_end = src[connect_start..]
+        .find("impl PreviewSource for NdiPreviewSource")
+        .map(|o| connect_start + o)
+        .expect("impl PreviewSource anchor after connect");
+    let connect_body = &src[connect_start..connect_end];
+    assert!(
+        !connect_body.contains("NdiLib::load()"),
+        "connect() must NOT load a fresh NDI runtime per connect: a per-source NdiLib means \
+         one camera's reconnect (the worker drops its source before every backoff) runs the \
+         process-global NDI destroy under every other live preview receiver"
+    );
+    assert!(
+        !connect_body.contains("load_uncached"),
+        "connect() must never reach the uncached loader directly — only through the \
+         process-shared keep-alive slot"
+    );
+    assert!(
+        connect_body.contains("NdiLib::shared()"),
+        "connect() must acquire the process-shared NDI runtime via NdiLib::shared()"
+    );
+}
+
+#[test]
+fn ndi_runtime_is_kept_alive_process_wide_via_shared_runtime_static() {
+    let src = NDI_SOURCE_SRC;
+    assert!(
+        src.contains("SharedRuntime<NdiLib>"),
+        "ndi_source.rs must hold the runtime in a process-wide SharedRuntime<NdiLib> static \
+         (load-once keep-alive: initialize once per process, never a mid-flight destroy)"
+    );
+}
+
+// --- shared runtime keeper (pure, default features) -----------------------------------------
+
+#[test]
+fn shared_runtime_loads_once_and_shares_the_same_instance() {
+    use bkshading::preview::shared_runtime::SharedRuntime;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let rt: SharedRuntime<String> = SharedRuntime::new();
+    let loads = AtomicUsize::new(0);
+    let a = rt
+        .acquire(|| -> Result<Arc<String>, ()> {
+            loads.fetch_add(1, Ordering::SeqCst);
+            Ok(Arc::new("ndi".to_string()))
+        })
+        .expect("first load");
+    let b = rt
+        .acquire(|| -> Result<Arc<String>, ()> {
+            loads.fetch_add(1, Ordering::SeqCst);
+            Ok(Arc::new("other".to_string()))
+        })
+        .expect("second acquire");
+    assert!(Arc::ptr_eq(&a, &b), "every acquire must share ONE instance");
+    assert_eq!(loads.load(Ordering::SeqCst), 1, "loader runs exactly once");
+}
+
+#[test]
+fn shared_runtime_keeps_the_instance_alive_after_all_handles_drop() {
+    use bkshading::preview::shared_runtime::SharedRuntime;
+    use std::sync::Arc;
+
+    let rt: SharedRuntime<u32> = SharedRuntime::new();
+    let first = rt
+        .acquire(|| -> Result<Arc<u32>, ()> { Ok(Arc::new(7)) })
+        .expect("first load");
+    let first_ptr = Arc::as_ptr(&first);
+    // The worker drops its source (and with it every outer handle) before each reconnect
+    // backoff — the runtime must survive that and be reused, never reloaded/destroyed.
+    drop(first);
+    let again = rt
+        .acquire(|| -> Result<Arc<u32>, ()> { panic!("must NOT reload — keep-alive slot") })
+        .expect("reacquire");
+    assert_eq!(
+        Arc::as_ptr(&again),
+        first_ptr,
+        "reconnect must reuse the SAME live runtime instance"
+    );
+}
+
+#[test]
+fn shared_runtime_recovers_from_a_poisoned_lock() {
+    use bkshading::preview::shared_runtime::SharedRuntime;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::sync::Arc;
+
+    let rt: SharedRuntime<u32> = SharedRuntime::new();
+    // A loader that panics unwinds while the slot lock is held -> the mutex poisons.
+    let panicked = catch_unwind(AssertUnwindSafe(|| {
+        let _ = rt.acquire(|| -> Result<Arc<u32>, ()> { panic!("loader panicked mid-acquire") });
+    }));
+    assert!(panicked.is_err(), "the loader panic must propagate");
+    // A one-off panic must self-heal: the next reconnect's acquire still works (the slot is
+    // only written after a fully successful load, so the guarded data stayed valid).
+    let ok = rt
+        .acquire(|| -> Result<Arc<u32>, ()> { Ok(Arc::new(9)) })
+        .expect("acquire after a poisoned lock must recover, not panic forever");
+    assert_eq!(*ok, 9);
+}
+
+#[test]
+fn shared_runtime_does_not_cache_a_failed_load() {
+    use bkshading::preview::shared_runtime::SharedRuntime;
+    use std::sync::Arc;
+
+    let rt: SharedRuntime<u32> = SharedRuntime::new();
+    let err = rt.acquire(|| -> Result<Arc<u32>, &str> { Err("no runtime found") });
+    assert_eq!(err.expect_err("load must fail"), "no runtime found");
+    let ok = rt
+        .acquire(|| -> Result<Arc<u32>, &str> { Ok(Arc::new(1)) })
+        .expect("retry after failure");
+    assert_eq!(*ok, 1, "a failed load must not poison later loads");
 }

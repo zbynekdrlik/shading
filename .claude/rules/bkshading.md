@@ -91,10 +91,12 @@ CI is the first compile. The local net that CAUGHT real issues here:
 ## M1 done / M2+ deferred
 Done: the 3 crates + workspace/CI wiring, the 4+4 responsive web panel skeleton (version in the DOM,
 version-on-dashboard), config-driven camera list, relay read+write logic unit-tested with a fake
-runner; ONE workspace-inherited crate version across all four crates (#1154). M2 DONE: live NDI preview (below). SBC/handheld provisioning DONE (below). Deferred (M2+): WS push of the aggregate;
-cloudflare password-protected remote (NOT tailscale — owner decision) DONE; installing
-`gphoto2` on the camboxes (a RUNTIME dep — NOT present on cam1 yet) + provisioning hooks; automating
-the E2E camera pre-run shutter checklist.
+runner; ONE workspace-inherited crate version across all four crates (#1154). M2 DONE: live NDI preview (below). SBC/handheld provisioning DONE (below). ALSO DONE since: WS push of the aggregate
+(`/ws` watch pump); cloudflare password-protected remote (NOT tailscale — owner decision); relay
+provisioning incl. `gphoto2` runtime + the CAMERA_BOX_CAPTURE_FPS env (LIVE on cam2 since
+2026-08-22, camera not yet cabled); CI artifacts + `bkshading-deploy-relay.sh`; the reconnect-safe
+process-shared NDI runtime (below). Still deferred: automating the E2E camera pre-run shutter
+checklist (meaningful once the camera is physically cabled to the relay box).
 
 
 ## M2 — live camera preview (issue 808, `bkshading/service/src/preview/**`)
@@ -138,7 +140,8 @@ in-repo at `scripts/bundle-state-server.py::DEFAULT_NDI_RUNTIME_DLL`) — so `--
 never load on its own ship target.
 - **Discovery is now a PURE, default-feature module** `bkshading/service/src/preview/ndi_paths.rs`
   (Tier-0 unit-tested WITHOUT libndi, mirroring the `convert.rs` split): `NdiOs {Linux,Windows,Macos}`
-  as an INPUT (not `cfg!`) so every OS's candidate set is tested on the Linux runner. `NdiLib::load()`
+  as an INPUT (not `cfg!`) so every OS's candidate set is tested on the Linux runner. The
+  `NdiLib::load_uncached()` loader (reached only via the process-shared `NdiLib::shared()`)
   now consumes `ndi_search_candidates(current_ndi_os(), |k| std::env::var(k).ok())` (env dirs →
   per-OS well-known dirs → bare-name dynamic-linker fallback) instead of a hard-coded Linux list.
   Tests live in `service/tests/preview.rs` (run in the default-feature `bkshading` CI test).
@@ -152,9 +155,18 @@ never load on its own ship target.
   the documented DLL path. `tests/python/test_bkshading_ndi_provision_1157.py` cross-checks the shell
   dirs/names + the Windows DLL AGAINST `ndi_paths.rs` so the two lists cannot drift.
 - **STILL the rig-verify half (supervisor, live):** run the strih service `--features ndi` against a
-  live cambox NDI source + confirm the 4+4 preview updates, and confirm the 2 remaining M2 SDK
-  deferrals (per-source init/destroy refcounting across a reconnect; full FourCC coverage of the
-  real low-bandwidth stream). The 3rd — the color-format meaning vs the installed header — is
+  live cambox NDI source + confirm the 4+4 preview updates, and confirm the 1 remaining M2 SDK
+  deferral (full FourCC coverage of the real low-bandwidth stream). The refcounting one —
+  per-source init/destroy across a reconnect — is RESOLVED IN CODE (issue 808, 2026-08-23):
+  `preview/shared_runtime.rs` is a pure default-feature keep-alive slot (`SharedRuntime<T>`,
+  const-init static; load-once for the process lifetime, failed load never cached) and
+  `ndi_source.rs` acquires the runtime ONLY through `NdiLib::shared()` — a per-connect load
+  would let one camera's reconnect run the process-GLOBAL `NDIlib_destroy()` under every other
+  live receiver (the worker drops its source before every backoff). Deliberately keep-alive, NOT
+  a destroy-on-last-drop Weak pool: with a single preview camera the worker's drop-before-backoff
+  would otherwise cycle full SDK destroy→init every ~2 s while the feed is down. Structural pins +
+  behavior tests live in `service/tests/preview.rs` (default features).
+  The 3rd — the color-format meaning vs the installed header — is
   RESOLVED (#808 SBC lane): value 0 is `BGRX_BGRA` per `Processing.NDI.Recv.h`, so the misnamed
   constant was renamed `COLOR_FORMAT_UYVY_BGRA` → `COLOR_FORMAT_BGRX_BGRA` (behaviour unchanged; the
   same harmless mislabel still stands in the main display path `src/ndi.rs`, a separate subsystem).

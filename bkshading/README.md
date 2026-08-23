@@ -57,8 +57,12 @@ remote. Implements the owner architecture decided 2026-08-20 (issue 808 comments
 ## Deferred to M2+
 
 - Verifying the **real** libndi preview receive (`--features ndi`) end-to-end against a live
-  cambox NDI source + provisioning libndi on the strih box + full FourCC coverage.
-- Automating the E2E camera pre-run shutter checklist. Cloudflare remote access with password
+  cambox NDI source + provisioning libndi on the strih box + full FourCC coverage. (The runtime
+  LIFECYCLE half is already in code: the receiver acquires ONE process-shared, load-once NDI
+  runtime — `preview/shared_runtime.rs` keep-alive slot — so a single camera's reconnect can
+  never run the process-global SDK destroy under other live receivers.)
+- Automating the E2E camera pre-run shutter checklist (meaningful once the shading camera is
+  physically cabled to the relay box). Cloudflare remote access with password
   protection is DONE (see "Remote access (cloudflare)" below), and the SBC handheld provisioning is
   DONE (see "SBC / handheld image" below).
 

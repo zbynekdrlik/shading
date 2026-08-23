@@ -8,9 +8,15 @@
 //! math is delegated to the pure, unit-tested [`crate::preview::convert`] functions.
 //!
 //! This path is UNVERIFIED against a live cambox NDI source in this lane (there is no way to
-//! exercise it on CI, and libndi is not provisioned on the strih box yet). It is gated OFF so
-//! the default build/CI uses the stub; end-to-end verification + libndi provisioning + full
-//! FourCC coverage are the named M2 follow-up (issue 808).
+//! exercise it on CI). It is gated OFF so the default build/CI uses the stub; end-to-end
+//! verification + full FourCC coverage of the real low-bandwidth stream are the remaining
+//! live rig-verify half (issue 1157).
+//!
+//! LIFECYCLE (issue 808, reconnect-safe): the loaded runtime is PROCESS-SHARED and load-once
+//! ([`SharedRuntime`] keep-alive static below). The SDK's initialize/destroy pair is
+//! application-lifetime and the destroy is process-GLOBAL — with a per-source runtime, one
+//! camera's routine reconnect (the worker drops its source before every backoff) would tear
+//! the SDK down under every other live receiver. Only the RECEIVER handle is per-source.
 
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::ptr;
@@ -23,6 +29,7 @@ use libloading::Library;
 use crate::preview::convert::{bgra_to_rgb, rgba_to_rgb, uyvy_to_rgb};
 use crate::preview::frame::RawFrame;
 use crate::preview::ndi_paths::{current_ndi_os, ndi_search_candidates};
+use crate::preview::shared_runtime::SharedRuntime;
 use crate::preview::source::PreviewSource;
 
 // --- FFI layout (recv subset, copied verbatim from the appliance src/ndi.rs) --------------
@@ -122,8 +129,24 @@ struct NdiLib {
 unsafe impl Send for NdiLib {}
 unsafe impl Sync for NdiLib {}
 
+/// The ONE process-wide NDI runtime slot (issue 808 reconnect-safe lifecycle): loaded +
+/// initialized on the first connect, shared by every preview source, kept alive for the
+/// process lifetime. The SDK destroy is process-GLOBAL, so a mid-flight release (e.g. one
+/// camera's reconnect while others stream) must be structurally impossible.
+static SHARED_NDI: SharedRuntime<NdiLib> = SharedRuntime::new();
+
 impl NdiLib {
-    fn load() -> Result<Self> {
+    /// The process-shared runtime: the first call loads (dlopen + SDK initialize), later
+    /// calls return the SAME handle; a failed load is not cached, so the worker's backoff
+    /// retry loads again.
+    fn shared() -> Result<Arc<Self>> {
+        SHARED_NDI.acquire(|| Self::load_uncached().map(Arc::new))
+    }
+
+    /// Load + initialize a FRESH runtime. Callers go through [`NdiLib::shared`] — a fresh
+    /// per-source runtime is exactly the reconnect-destroy hazard the shared slot exists
+    /// to prevent.
+    fn load_uncached() -> Result<Self> {
         // Cross-platform ordered candidate library paths (env dirs, then per-OS well-known dirs,
         // then bare names for the dynamic-linker fallback). The DECISION lives in the pure,
         // CI-unit-tested `ndi_paths` module (issue 1157): the bkshading service ships to the
@@ -203,6 +226,9 @@ impl NdiLib {
 }
 
 impl Drop for NdiLib {
+    // With the keep-alive SHARED_NDI slot holding an Arc for the process lifetime, this
+    // never fires mid-flight (the SDK destroy is application-exit territory); it stays
+    // correct for any future non-cached use.
     fn drop(&mut self) {
         unsafe { (self.destroy)() }
     }
@@ -225,7 +251,8 @@ impl NdiPreviewSource {
     /// Find `source_name` (substring match, e.g. `"CAM1 (usb)"`) and connect a LOWEST-bandwidth
     /// receiver. Bounded find (~5 s) so a missing source becomes an error the worker retries.
     pub fn connect(source_name: &str) -> Result<Self> {
-        let lib = Arc::new(NdiLib::load()?);
+        // Process-shared runtime (never a fresh per-connect load — see the module doc).
+        let lib = NdiLib::shared()?;
 
         let find_create = NDIlibFindCreateT {
             show_local_sources: true,

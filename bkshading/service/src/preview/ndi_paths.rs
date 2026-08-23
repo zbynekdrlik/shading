@@ -3,7 +3,8 @@
 //! PURE + compiled on DEFAULT features (NOT behind `feature = "ndi"`), so the ordered
 //! candidate-path DECISION is unit-tested on CI without libndi — the bkshading Tier-0 doctrine
 //! (pure logic lives un-gated + testable; only the `unsafe` FFI glue in `ndi_source.rs` is
-//! feature-gated + CI-only). The feature-gated `NdiLib::load()` consumes [`ndi_search_candidates`].
+//! feature-gated + CI-only). The feature-gated `NdiLib::load_uncached()` (reached only through
+//! the process-shared `NdiLib::shared()` slot) consumes [`ndi_search_candidates`].
 //!
 //! WHY this exists (issue 1157): `ndi_source.rs` copied the appliance `src/ndi.rs` `load()`
 //! verbatim, and that is deliberately Linux-only (the camboxes are Ubuntu). The bkshading
@@ -79,7 +80,8 @@ pub fn current_ndi_os() -> NdiOs {
 /// Ordered candidate library paths for `os`. `env` resolves an env-var name to its value
 /// (`|k| std::env::var(k).ok()` at runtime; a fixed map in tests).
 ///
-/// Order (first match wins in [`NdiLib::load`]): each [`NDI_ENV_DIRS`] dir (priority order) ×
+/// Order (first match wins in the `NdiLib::load_uncached` loader): each [`NDI_ENV_DIRS`] dir
+/// (priority order) ×
 /// each name, then each well-known dir × each name, then each bare name as the dynamic-linker
 /// fallback (LD_LIBRARY_PATH on Linux, PATH on Windows, dyld search on macOS).
 pub fn ndi_search_candidates<F>(os: NdiOs, env: F) -> Vec<PathBuf>
