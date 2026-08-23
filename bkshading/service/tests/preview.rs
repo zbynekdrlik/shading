@@ -177,7 +177,7 @@ fn preview_config_defaults_are_sane() {
 // The bkshading SERVICE ships to the strih PC (Windows first), so the real-preview receiver's
 // libndi discovery MUST look for the Windows runtime DLL, not only the appliance's Linux `.so`
 // names. These pin the PURE, default-feature discovery decision (the `#[cfg(feature="ndi")]`
-// `NdiLib::load()` consumes it), so they run on CI with no libndi.
+// `NdiLib::load_uncached()` loader consumes it), so they run on CI with no libndi.
 
 use bkshading::preview::ndi_paths::{ndi_search_candidates, NdiOs};
 
@@ -270,6 +270,11 @@ fn ndi_connect_acquires_the_process_shared_runtime_never_a_per_connect_load() {
          process-global NDI destroy under every other live preview receiver"
     );
     assert!(
+        !connect_body.contains("load_uncached"),
+        "connect() must never reach the uncached loader directly — only through the \
+         process-shared keep-alive slot"
+    );
+    assert!(
         connect_body.contains("NdiLib::shared()"),
         "connect() must acquire the process-shared NDI runtime via NdiLib::shared()"
     );
@@ -332,6 +337,26 @@ fn shared_runtime_keeps_the_instance_alive_after_all_handles_drop() {
         first_ptr,
         "reconnect must reuse the SAME live runtime instance"
     );
+}
+
+#[test]
+fn shared_runtime_recovers_from_a_poisoned_lock() {
+    use bkshading::preview::shared_runtime::SharedRuntime;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::sync::Arc;
+
+    let rt: SharedRuntime<u32> = SharedRuntime::new();
+    // A loader that panics unwinds while the slot lock is held -> the mutex poisons.
+    let panicked = catch_unwind(AssertUnwindSafe(|| {
+        let _ = rt.acquire(|| -> Result<Arc<u32>, ()> { panic!("loader panicked mid-acquire") });
+    }));
+    assert!(panicked.is_err(), "the loader panic must propagate");
+    // A one-off panic must self-heal: the next reconnect's acquire still works (the slot is
+    // only written after a fully successful load, so the guarded data stayed valid).
+    let ok = rt
+        .acquire(|| -> Result<Arc<u32>, ()> { Ok(Arc::new(9)) })
+        .expect("acquire after a poisoned lock must recover, not panic forever");
+    assert_eq!(*ok, 9);
 }
 
 #[test]

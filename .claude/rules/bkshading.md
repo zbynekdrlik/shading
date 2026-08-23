@@ -140,7 +140,8 @@ in-repo at `scripts/bundle-state-server.py::DEFAULT_NDI_RUNTIME_DLL`) — so `--
 never load on its own ship target.
 - **Discovery is now a PURE, default-feature module** `bkshading/service/src/preview/ndi_paths.rs`
   (Tier-0 unit-tested WITHOUT libndi, mirroring the `convert.rs` split): `NdiOs {Linux,Windows,Macos}`
-  as an INPUT (not `cfg!`) so every OS's candidate set is tested on the Linux runner. `NdiLib::load()`
+  as an INPUT (not `cfg!`) so every OS's candidate set is tested on the Linux runner. The
+  `NdiLib::load_uncached()` loader (reached only via the process-shared `NdiLib::shared()`)
   now consumes `ndi_search_candidates(current_ndi_os(), |k| std::env::var(k).ok())` (env dirs →
   per-OS well-known dirs → bare-name dynamic-linker fallback) instead of a hard-coded Linux list.
   Tests live in `service/tests/preview.rs` (run in the default-feature `bkshading` CI test).

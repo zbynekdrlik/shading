@@ -37,7 +37,14 @@ impl<T> SharedRuntime<T> {
     ///   again — even after every caller has dropped its handle (keep-alive).
     /// - A failed load caches NOTHING: the error is returned and the next call retries.
     pub fn acquire<E>(&self, loader: impl FnOnce() -> Result<Arc<T>, E>) -> Result<Arc<T>, E> {
-        let mut slot = self.slot.lock().expect("shared runtime mutex poisoned");
+        // A poisoned lock (a loader panicked mid-acquire) must NOT permanently kill every
+        // preview worker's next reconnect: the guarded data is valid by invariant (the slot
+        // is only ever written AFTER a fully successful load), so recover the guard and let
+        // this acquire retry — a one-off panic self-heals instead of poisoning forever.
+        let mut slot = self
+            .slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(existing) = slot.as_ref() {
             return Ok(Arc::clone(existing));
         }
