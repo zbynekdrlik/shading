@@ -145,10 +145,16 @@ never load on its own ship target.
   now consumes `ndi_search_candidates(current_ndi_os(), |k| std::env::var(k).ok())` (env dirs →
   per-OS well-known dirs → bare-name dynamic-linker fallback) instead of a hard-coded Linux list.
   Tests live in `service/tests/preview.rs` (run in the default-feature `bkshading` CI test).
-- **CI compiles + verifies the feature on BOTH ship targets:** the `bkshading` job gained
-  `cargo test -p bkshading --features ndi` + a `--features ndi` bins build; `bkshading-windows`
-  gained `cargo check -p bkshading --features ndi` (the strih deploy ships this exact binary — the
-  M2 lane only ever clippy-compiled the feature for Linux).
+- **CI compiles + verifies the feature on BOTH ship targets.** Since issue 1157 made `ndi` the
+  DEFAULT service build (below), the PLAIN default-feature steps carry the real-ndi coverage: the
+  `bkshading` job's `cargo clippy/test -p bkshading` compile+run the ndi path on Linux, and
+  `bkshading-windows`'s `cargo check -p bkshading` compiles it on the strih Windows target. The two
+  previously-explicit `--features ndi` clippy/test steps were REPURPOSED to `--no-default-features`
+  so the stub (libndi-free) path stays proven and can't bit-rot; the RELEASE/deploy builds keep
+  `--features ndi` written explicitly (it now equals the default, kept for intent/deploy-shape
+  clarity + to satisfy `test_bkshading_deploy_relay_808.py`). `test_bkshading_ndi_default_1157.py`
+  pins the default-includes-ndi decision + the `--no-default-features` CI coverage (tomllib + yaml,
+  no cargo).
 - **Provisioning/verify:** `scripts/bkshading-provision-ndi.sh` (+ source-only pure helper
   `scripts/lib/bkshading-ndi-runtime.sh`) — idempotent, fail-loud, enable-only. Linux `--check`
   verifies discovery / `--install` delegates to `vendor/distroav/CI/libndi-get.sh`; Windows reports
@@ -170,9 +176,20 @@ never load on its own ship target.
   RESOLVED (#808 SBC lane): value 0 is `BGRX_BGRA` per `Processing.NDI.Recv.h`, so the misnamed
   constant was renamed `COLOR_FORMAT_UYVY_BGRA` → `COLOR_FORMAT_BGRX_BGRA` (behaviour unchanged; the
   same harmless mislabel still stands in the main display path `src/ndi.rs`, a separate subsystem).
-  Task 4
-  (make `--features ndi` the default strih build, or keep opt-in) is the owner's call AFTER that
-  live verify — left opt-in for now.
+  Task 4 (make `--features ndi` the default build, or keep opt-in) is RESOLVED — owner decision
+  2026-08-24 (issue 1157 comment 5393834171, možnosť 1; features-default-on rule): **`ndi` is now
+  the DEFAULT bkshading service build** (`bkshading/service/Cargo.toml` `[features] default =
+  ["ndi"]`). The appliance crate is byte-untouched (separate workspace member; appliance CI runs
+  cargo at the root without `--workspace`/`-p bkshading`). libloading stays an optional dep
+  activated by the default feature — a RUNTIME dynamic load, so the default build still compiles on
+  CI with no libndi. **Graceful degrade on a libndi-less host:** with ndi default,
+  `source::build_default_source` always builds the real `NdiPreviewSource` (never a stub fallback);
+  a missing runtime bails from `ndi_source::load_uncached()` with a platform-neutral message
+  (`"NDI runtime not found (install the NDI SDK / NDI Tools, or set NDI_RUNTIME_DIR_V6); ..."`),
+  and `worker::run_forever` logs it as a `tracing::warn!` (cam+source+error) then backs off and
+  retries forever — fail-loud, non-crashing, no silent stub. **libndi provisioning on the strih
+  service host + the live end-to-end verify against a cambox NDI source remain the supervisor's rig
+  steps.**
 
 
 ## Camera fps ↔ box grab-mode sync (issue 809)

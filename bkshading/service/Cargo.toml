@@ -16,13 +16,21 @@ name = "bkshading"
 path = "src/main.rs"
 
 [features]
-default = []
-# Real NDI receive for the live preview (issue 808 M2). OFF by default: the service compiles
-# + runs with the STUB test-pattern source on CI (no libndi needed). The real recv path
-# (src/preview/ndi_source.rs) loads libndi at RUNTIME via libloading and mirrors the
-# appliance's verified src/ndi.rs at bandwidth LOWEST; it is UNVERIFIED against a live source
-# in this lane (see the issue 808 M2 follow-up). libloading is dynamic, so this compiles on CI
-# even without libndi installed — the dedicated `cargo clippy --features ndi` CI step proves it.
+# Real NDI receive for the live preview is ON by default (issue 1157, owner decision 2026-08-24
+# — možnosť 1; the features-default-on rule: a needed feature is on by default, never a
+# forgettable toggle). The real recv path (src/preview/ndi_source.rs) loads libndi at RUNTIME
+# via libloading and mirrors the appliance's verified src/ndi.rs at bandwidth LOWEST. libloading
+# is a dynamic load, so the DEFAULT build still compiles on CI with NO libndi installed — the
+# plain `cargo clippy/test/check -p bkshading` steps now verify the ndi path on both ship
+# targets (Linux + the strih Windows deploy). A host WITHOUT libndi degrades gracefully: the
+# preview worker logs a loud WARN naming the missing runtime + how to provision and retries with
+# backoff — it never crashes and never silently falls back to the stub (source::build_default_source
+# under `ndi` always builds the real receiver). The live end-to-end verify against a cambox NDI
+# source + libndi provisioning on the strih host are the supervisor's rig steps.
+default = ["ndi"]
+# The stub (test-pattern) source is the `--no-default-features` build: a libndi-free source for a
+# quick local compile / a host that genuinely has no NDI. CI keeps a `--no-default-features` step
+# so this path stays proven (it was the free default coverage before ndi became the default).
 ndi = ["dep:libloading"]
 
 [dependencies]
