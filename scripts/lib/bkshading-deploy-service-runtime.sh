@@ -49,3 +49,16 @@ bkshading_service_port() { printf '%s\n' 8770; }
 # (.claude/rules/avsync-monitoring.md); shading is colour/exposure not motion, so a few minutes is
 # plenty for a service the operator opens on demand.
 bkshading_service_keepalive_minutes() { printf '%s\n' 5; }
+
+# Byte-verify decision (deploy-from-clean-tree.md Layer 3, mirroring bkshading-deploy-runtime.sh's
+# relay sibling): compare the local sha256 of the exe we scp'd against the sha256 the box reports
+# back (via certutil). `match` ONLY when both are non-empty AND equal -- an empty side (a failed
+# remote read / a truncated scp) is `mismatch`, never a false `match`.
+bkshading_service_sha_match() {  # $1 = local sha, $2 = remote sha
+  local l="${1:-}" r="${2:-}"
+  if [ -n "$l" ] && [ -n "$r" ] && [ "$l" = "$r" ]; then
+    printf '%s\n' match
+  else
+    printf '%s\n' mismatch
+  fi
+}

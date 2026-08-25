@@ -111,6 +111,14 @@ def test_lib_is_source_only_no_set_e_leak():
     assert "set -euo pipefail" not in text, "source-only lib must not set -euo pipefail"
 
 
+def test_lib_sha_match_decision():
+    # byte-verify decision (mirrors the relay sibling): match ONLY on two equal non-empty shas.
+    assert _bash("bkshading_service_sha_match abc123 abc123") == "match"
+    assert _bash("bkshading_service_sha_match abc123 def456") == "mismatch"
+    assert _bash('bkshading_service_sha_match "" ""') == "mismatch"
+    assert _bash('bkshading_service_sha_match abc123 ""') == "mismatch"
+
+
 def test_port_matches_service_config_default():
     # The port the deploy verifies MUST equal the service's own default_bind port (config.rs).
     cfg = open(CONFIG_EXAMPLE, encoding="utf-8").read()
@@ -126,8 +134,12 @@ def test_sh_and_ps1_agree_on_shared_invariants():
     # install dir, exe, task name, port, config name, installer ps1 name — must appear in BOTH files.
     for literal in (INSTALL_DIR, EXE_NAME, TASK_NAME, PORT, CONFIG_NAME, INSTALLER_PS1_NAME):
         assert literal in sh, ".sh must reference %r (shared invariant)" % literal
-    for literal in (INSTALL_DIR, EXE_NAME, TASK_NAME, PORT, CONFIG_NAME):
+    for literal in (INSTALL_DIR, EXE_NAME, TASK_NAME, PORT, CONFIG_NAME, CONFIG_EXAMPLE_NAME):
         assert literal in ps1, ".ps1 must reference %r (shared invariant)" % literal
+    # keepalive cadence: the .sh (via the lib) and the .ps1 (as its param default) must agree.
+    km = _bash("bkshading_service_keepalive_minutes")
+    assert re.search(r"\$KeepAliveMinutes\s*=\s*%s\b" % re.escape(km), ps1), \
+        ".ps1 default KeepAliveMinutes must equal the lib's %s" % km
 
 
 # ---------------------------------------------------------------------------------------------
@@ -202,14 +214,22 @@ def _write_fake(path, body):
 
 
 def _fake_env(tmp, remote_sha):
-    """Fake ssh/scp that log argv into one file; ssh prints remote_sha for any sha256 probe."""
+    """Fake ssh/scp that log argv into one file; the ssh fake answers a `certutil -hashfile ... SHA256`
+    byte-verify probe with `remote_sha` in certutil's real 3-line shape (line 2 = the hash), and is a
+    no-op for the installer-run command. Pass the staged exe's real local sha as `remote_sha` for a
+    matching (passing) byte-verify."""
     log = os.path.join(tmp, "calls.log")
     fake_ssh = os.path.join(tmp, "fake-ssh")
     ssh_body = (
         "#!/usr/bin/env bash\n"
         'printf "SSH %s\\n" "$*" >> "__LOG__"\n'
+        'cmd="${!#}"\n'
+        'case "$cmd" in\n'
+        '  *certutil*) printf "SHA256 hash of x:\\n__SHA__\\nCertUtil: -hashfile command completed successfully.\\n" ;;\n'
+        "  *) : ;;\n"
+        "esac\n"
         "exit 0\n"
-    ).replace("__LOG__", log)
+    ).replace("__LOG__", log).replace("__SHA__", remote_sha)
     _write_fake(fake_ssh, ssh_body)
     fake_scp = os.path.join(tmp, "fake-scp")
     scp_body = (
@@ -226,6 +246,10 @@ def _fake_env(tmp, remote_sha):
     return env, log
 
 
+def _sha256(path):
+    return subprocess.run(["sha256sum", path], capture_output=True, text=True, check=True).stdout.split()[0]
+
+
 def test_execute_scps_the_three_files_then_runs_installer():
     with tempfile.TemporaryDirectory() as tmp:
         fake_bin = os.path.join(tmp, EXE_NAME)
@@ -234,7 +258,7 @@ def test_execute_scps_the_three_files_then_runs_installer():
         seed = os.path.join(tmp, CONFIG_EXAMPLE_NAME)
         with open(seed, "w") as f:
             f.write("bind = \"0.0.0.0:%s\"\n" % PORT)
-        env, log = _fake_env(tmp, "x")
+        env, log = _fake_env(tmp, _sha256(fake_bin))  # matching sha -> byte-verify passes
         r = _run_script(
             ["--host", "10.77.9.202", "--binary", fake_bin, "--config-seed", seed, "--execute"],
             env=env,
@@ -252,10 +276,13 @@ def test_execute_scps_the_three_files_then_runs_installer():
             "must invoke the installer via powershell -File"
         assert "-Execute" in calls, "the installer must be run with -Execute on a real deploy"
         assert "-Command" not in calls, "NEVER a nested powershell -Command over ssh"
+        # byte-verify the staged exe before running the installer (mirrors the relay sibling).
+        assert "certutil" in calls, "must byte-verify the staged exe (certutil sha256)"
         # ordering: every scp happens before the installer-run ssh call.
         i_ssh_run = calls.index(INSTALLER_PS1_NAME + '" -')  # the run-installer ssh command
         i_last_scp = calls.rfind("SCP ")
         assert i_last_scp < i_ssh_run, "all scp uploads must precede the installer run"
+        assert calls.index("certutil") < i_ssh_run, "byte-verify must precede the installer run"
 
 
 def test_execute_passes_port_and_task_to_installer():
@@ -264,7 +291,7 @@ def test_execute_passes_port_and_task_to_installer():
         open(fake_bin, "w").close()
         seed = os.path.join(tmp, CONFIG_EXAMPLE_NAME)
         open(seed, "w").close()
-        env, log = _fake_env(tmp, "x")
+        env, log = _fake_env(tmp, _sha256(fake_bin))  # matching sha -> byte-verify passes
         r = _run_script(
             ["--host", "10.77.9.202", "--binary", fake_bin, "--config-seed", seed, "--execute"],
             env=env,
@@ -273,6 +300,26 @@ def test_execute_passes_port_and_task_to_installer():
         calls = open(log).read()
         assert "-Port %s" % PORT in calls, "installer run must pass -Port %s" % PORT
         assert "-TaskName %s" % TASK_NAME in calls, "installer run must pass -TaskName"
+
+
+def test_execute_byte_verify_sha_mismatch_fails():
+    # A truncated / wrong-sha staged exe must fail the deploy at the byte-verify (never a false OK).
+    with tempfile.TemporaryDirectory() as tmp:
+        fake_bin = os.path.join(tmp, EXE_NAME)
+        with open(fake_bin, "w") as f:
+            f.write("MZ-exe")
+        seed = os.path.join(tmp, CONFIG_EXAMPLE_NAME)
+        open(seed, "w").close()
+        env, log = _fake_env(tmp, "deadbeef_wrong_sha")  # remote sha != local -> mismatch
+        r = _run_script(
+            ["--host", "10.77.9.202", "--binary", fake_bin, "--config-seed", seed, "--execute"],
+            env=env,
+        )
+        assert r.returncode != 0, "a sha256 mismatch must fail the deploy"
+        assert re.search(r"mismatch", r.stdout + r.stderr, re.I), "the failure must name the byte-verify mismatch"
+        # the installer must NOT run after a failed byte-verify.
+        calls = open(log).read() if os.path.exists(log) else ""
+        assert (INSTALLER_PS1_NAME + '" -') not in calls, "installer must not run when byte-verify failed"
 
 
 # ---------------------------------------------------------------------------------------------
@@ -307,10 +354,23 @@ def test_ps1_registers_keepalive_scheduled_task():
 def test_ps1_keepalive_pass_relaunches_when_absent():
     s = _ps1()
     # the -KeepAlive pass must check the running process by its EXACT exe path (never a bare name —
-    # avsync-monitoring.md gotcha #2) and relaunch via Start-Process if absent.
-    assert "Get-CimInstance" in s or "Get-Process" in s
-    assert "Win32_Process" in s or "ExecutablePath" in s
+    # avsync-monitoring.md gotcha #2) and relaunch via Start-Process if absent. Pin the LITERAL
+    # exact-path match so a regression to a bare-name match is caught (issue 808 review).
+    assert "Win32_Process" in s, "keep-alive must query Win32_Process"
+    assert re.search(r"\$_\.ExecutablePath\s*-eq\s*\$ExePath", s), \
+        "the process match must be the EXACT exe path ($_.ExecutablePath -eq $ExePath), never a bare name"
     assert "Start-Process" in s, "keep-alive must relaunch the service when it is not running"
+
+
+def test_ps1_port_verify_confirms_owner_not_just_any_listener():
+    # issue 808 review: a stale/foreign instance on :8770 must NOT false-green the deploy — the verify
+    # must resolve the listening connection's owning process and require it be the deployed exe.
+    s = _ps1()
+    assert "OwningProcess" in s, "port verify must resolve the connection's OwningProcess"
+    assert re.search(r"ProcessId=\$\(\$conn\.OwningProcess\)", s), \
+        "must look up the owning process by the connection's OwningProcess id"
+    assert re.search(r"\$owner\s*-eq\s*\$ExePath", s), \
+        "must require the port owner to be exactly the deployed exe path"
 
 
 def test_ps1_verifies_port_listening():

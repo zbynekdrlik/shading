@@ -76,11 +76,21 @@ $ProgressPreference    = 'SilentlyContinue'
 $ExePath     = Join-Path $InstallDir $ExeName
 $ConfigPath  = Join-Path $InstallDir $ConfigName
 $DeployedPs1 = Join-Path $InstallDir (Split-Path -Leaf $PSCommandPath)
-$LogFile     = Join-Path $InstallDir 'bkshading-service.log'
+$LogFile     = Join-Path $InstallDir 'bkshading-service-keepalive.log'  # keep-alive decisions
+$OutLog      = Join-Path $InstallDir 'bkshading-service.out.log'        # service stdout
+$ErrLog      = Join-Path $InstallDir 'bkshading-service.err.log'        # service stderr
 
-# Match the running service by its EXACT exe path, never a bare process name -- several unrelated
-# processes can share a name, and only the full ExecutablePath proves THIS install is the one running
-# (.claude/rules/avsync-monitoring.md gotcha #2).
+# Append a keep-alive decision line to the log (best-effort: the scheduled task runs -WindowStyle
+# Hidden, so Write-Output alone would be discarded -- this is what makes $LogFile a REAL, readable
+# record of every relaunch/no-op pass).
+function Write-KeepAliveLog([string]$msg) {
+  try { Add-Content -LiteralPath $LogFile -Value $msg -ErrorAction Stop } catch { }
+}
+
+# Match THIS install's running service by its EXACT exe path, never a bare process name -- several
+# unrelated processes can share a name, and only the full ExecutablePath proves the C:\bkshading
+# install is the one running (.claude/rules/avsync-monitoring.md gotcha #2). Used by the steady-state
+# keep-alive pass, where the only legitimate instance is the deployed one.
 function Test-ServiceRunning {
   $procs = Get-CimInstance Win32_Process -Filter "Name='$ExeName'" -ErrorAction SilentlyContinue |
     Where-Object { $_.ExecutablePath -eq $ExePath }
@@ -93,24 +103,45 @@ function Stop-ServiceInstances {
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 }
 
-# Launch the service detached with its --config flag (bkshading main.rs --config <path>).
+# Stop EVERY bkshading.exe regardless of path -- used ONCE at install time to migrate off a manual
+# stage (e.g. an old C:\stage-bkshading instance, issue #1157) that would otherwise keep holding
+# port 8770 after we replace the binary, producing a false-green port verify. The keep-alive pass
+# never uses this (it must only ever act on the deployed exact-path instance).
+function Stop-AllServiceByName {
+  Get-CimInstance Win32_Process -Filter "Name='$ExeName'" -ErrorAction SilentlyContinue |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+}
+
+# Launch the service detached, redirecting its stdout/stderr to log files so its own output is
+# observable (comprehensive-logging). Pass --config only when the config file EXISTS: a MISSING
+# config file is a hard error in the service (config.rs from_path), so with no config we launch bare
+# -- which starts with an empty camera list (main.rs), never a crash-loop.
 function Start-BkshadingService {
-  Start-Process -FilePath $ExePath -ArgumentList '--config', $ConfigPath -WindowStyle Hidden | Out-Null
+  $psArgs = @{
+    FilePath               = $ExePath
+    WindowStyle            = 'Hidden'
+    RedirectStandardOutput = $OutLog
+    RedirectStandardError  = $ErrLog
+  }
+  if (Test-Path -LiteralPath $ConfigPath) { $psArgs['ArgumentList'] = @('--config', $ConfigPath) }
+  Start-Process @psArgs | Out-Null
 }
 
 # --- -KeepAlive: the per-tick check-and-relaunch pass (the scheduled-task action) ----------------
 if ($KeepAlive) {
   $stamp = (Get-Date).ToString('s')
   if (Test-ServiceRunning) {
-    Write-Output "$stamp keep-alive: bkshading service already running ($ExePath) - no-op"
+    $line = "$stamp keep-alive: bkshading service already running ($ExePath) - no-op"
   }
   elseif ($Execute) {
     Start-BkshadingService
-    Write-Output "$stamp keep-alive: bkshading service was not running - relaunched"
+    $line = "$stamp keep-alive: bkshading service was not running - relaunched"
   }
   else {
-    Write-Output "$stamp keep-alive DRY-RUN: bkshading service not running - would relaunch (pass -Execute)"
+    $line = "$stamp keep-alive DRY-RUN: bkshading service not running - would relaunch (pass -Execute)"
   }
+  Write-Output $line
+  Write-KeepAliveLog $line
   exit 0
 }
 
@@ -155,15 +186,20 @@ if (-not (Test-Path -LiteralPath $stageExe)) {
   Write-Error "staged service exe not found: $stageExe"
   exit 1
 }
-# A running exe cannot be overwritten on Windows -- stop the current instance before copying.
-Stop-ServiceInstances
+# A running exe cannot be overwritten on Windows -- stop ANY bkshading.exe first (by name), which
+# also MIGRATES off a manual stage (e.g. an old C:\stage-bkshading instance, issue #1157) that would
+# otherwise keep holding port 8770 and make the verify below a false green (issue 808 review).
+Stop-AllServiceByName
 Start-Sleep -Milliseconds 500
 Copy-Item -LiteralPath $stageExe -Destination $ExePath -Force
 Write-Output "deployed exe -> $ExePath"
 
 # Copy THIS installer into the install dir so the keep-alive task runs the deployed copy, not the
-# transient staging copy.
-Copy-Item -LiteralPath $PSCommandPath -Destination $DeployedPs1 -Force
+# transient staging copy. Guard the self-copy for the case the installer is already run in-place from
+# InstallDir (Copy-Item -Force onto itself would throw).
+if ($PSCommandPath -ne $DeployedPs1) {
+  Copy-Item -LiteralPath $PSCommandPath -Destination $DeployedPs1 -Force
+}
 
 # Seed the config ONLY IF the operator config is absent -- never clobber a tuned config.
 $stageSeed = Join-Path $StageDir $ConfigExampleName
@@ -173,7 +209,7 @@ if (-not (Test-Path -LiteralPath $ConfigPath)) {
     Write-Output "seeded config -> $ConfigPath (from $ConfigExampleName)"
   }
   else {
-    Write-Output "WARNING: no config seed at $stageSeed and no existing $ConfigPath; the service starts with an empty camera list"
+    Write-Output "WARNING: no config seed at $stageSeed and no existing $ConfigPath; the service will launch WITHOUT --config (an empty camera list) until you place $ConfigName"
   }
 }
 else {
@@ -202,22 +238,34 @@ Register-ScheduledTask -TaskName $TaskName -Action $action `
   -Force | Out-Null
 Write-Output "registered keep-alive task '$TaskName' (AtLogOn + every $KeepAliveMinutes min)"
 
-# Start it now and verify the panel port reaches a Listening state.
+# Start it now and verify the panel port reaches a Listening state OWNED BY THE DEPLOYED EXE. A bare
+# "something is Listening on 8770" check would false-green when a stale/foreign instance holds the
+# port while our exe fails to bind (issue 808 review) -- so resolve the connection's owning process
+# and require its path to be exactly $ExePath.
 if (-not (Test-ServiceRunning)) { Start-BkshadingService }
-Write-Output "waiting for port $Port to Listen ..."
+Write-Output "waiting for port $Port to Listen (owned by $ExePath) ..."
 $listening = $false
+$foreignOwner = $null
 for ($i = 0; $i -lt 15; $i++) {
   Start-Sleep -Seconds 1
-  $conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
-  if ($conn) { $listening = $true; break }
+  $conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($conn) {
+    $owner = (Get-CimInstance Win32_Process -Filter "ProcessId=$($conn.OwningProcess)" -ErrorAction SilentlyContinue).ExecutablePath
+    if ($owner -eq $ExePath) { $listening = $true; break }
+    else { $foreignOwner = $owner }
+  }
 }
 if ($listening) {
-  Write-Output "OK: bkshading service Listening on port $Port (open http://<host>:$Port/ to confirm the panel)."
+  Write-Output "OK: bkshading service Listening on port $Port owned by $ExePath (open http://<host>:$Port/ to confirm the panel)."
   Write-Output "  verify:   Get-ScheduledTask -TaskName $TaskName | Format-List"
   Write-Output "  keepalive log: $LogFile"
   exit 0
 }
+elseif ($foreignOwner) {
+  Write-Error "port $Port is held by a DIFFERENT process ($foreignOwner), not the deployed $ExePath -- stop that instance (e.g. an old C:\stage-bkshading service) and re-run -Execute."
+  exit 1
+}
 else {
-  Write-Error "bkshading service did NOT reach a Listening state on port $Port within 15s -- run '$ExePath --config `"$ConfigPath`"' manually to see the error."
+  Write-Error "bkshading service did NOT reach a Listening state on port $Port within 15s -- check $ErrLog, or run '$ExePath --config `"$ConfigPath`"' manually to see the error."
   exit 1
 }

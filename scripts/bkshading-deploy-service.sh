@@ -192,6 +192,17 @@ if ! scp_box "$LOCAL_PS1" "$REMOTE_PS1"; then
   echo "ERROR: scp of the installer ps1 to $HOST failed" >&2; exit 1
 fi
 
+# Byte-verify the staged exe (deploy-from-clean-tree.md Layer 3, mirroring the relay sibling): a
+# truncated / interrupted scp would otherwise pass unnoticed until the service fails to launch. Read
+# the box's sha256 via certutil (cmd.exe builtin; line 2 is the hash) and compare to the local sha.
+LOCAL_SHA="$(sha256sum "$BINARY" | awk '{print $1}')"
+REMOTE_SHA="$(ssh_box "certutil -hashfile \"$REMOTE_EXE\" SHA256" 2>/dev/null | sed -n 2p | tr -d '[:space:]\r' | tr 'A-F' 'a-f' || echo "")"
+if [ "$(bkshading_service_sha_match "$LOCAL_SHA" "$REMOTE_SHA")" != "match" ]; then
+  echo "ERROR: sha256 mismatch after scp (local=$LOCAL_SHA remote=${REMOTE_SHA:-<none>}) -- deploy NOT verified" >&2
+  exit 1
+fi
+echo "[bkshading-deploy-service] byte-verified staged exe on $HOST (sha256 $LOCAL_SHA)"
+
 echo "[bkshading-deploy-service] running installer on $HOST (-Execute) ..."
 if ! ssh_box "$(installer_cmd -Execute)"; then
   echo "ERROR: the on-box installer failed on $HOST — see its output above" >&2; exit 1
