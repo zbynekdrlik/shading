@@ -273,6 +273,16 @@ CI / the .sh / the .ps1 cannot drift (`tests/python/test_bkshading_deploy_servic
   never clobbers an operator-tuned config. The service config carries NO credential (pure camera
   list + bind + `[preview]`), so nothing secret is ever written by the deploy. The `.ps1` is pure
   ASCII (scp'd → non-UTF-8 codepage on the box, `.claude/rules/recordings-retention.md`).
+- **Two verify gotchas hardened by the #808 review (reusable for ANY Windows-service deploy here):**
+  (1) the port check must confirm the LISTENER'S OWNER, not just that *something* listens — resolve
+  `(Get-NetTCPConnection -LocalPort N -State Listen).OwningProcess` → that process's `ExecutablePath`
+  and require it be the DEPLOYED exe; a bare "port N is Listening" false-greens when a stale/foreign
+  instance (e.g. the manual `C:\stage-bkshading` from #1157) holds the port while the new exe fails to
+  bind. Pair it with an install-time **by-NAME** stop (migration off the manual stage) while the
+  steady-state keep-alive pass keeps the EXACT-path match. (2) byte-verify the scp'd exe:
+  local `sha256sum` vs remote `certutil -hashfile <path> SHA256` (line 2 is the hash — strip
+  whitespace, lowercase; empty side = mismatch), mirroring the relay sibling — a truncated scp is
+  otherwise caught only by scp's exit code.
 - **UNVERIFIED (supervisor rig step):** the LIVE `--execute` install against strih (scp +
   `Register-ScheduledTask` + `:8770` verify) + confirming the panel is up — done from a session with
   win-strih MCP / rig access, not an isolated worktree lane. This complements the deferred libndi
