@@ -247,3 +247,33 @@ mirroring the relay/cloudflared provisioning canon but with two deliberate delta
   reboot) is the owner's/supervisor's rig step. Transports stay USB-PTP (gphoto2/libusb) / USB-Eth
   REST — NEVER Bluetooth; a gphoto2 camera is a USB device, not a network link, so the netplan
   `enx*` CDC-NCM trap (#1155) does not touch the handheld.
+
+
+## Service DEPLOY path onto strih (Windows) — issue 808 (repeatable, mirrors the relay canon)
+
+The `bkshading-windows` CI job release-builds + uploads the deployable service as
+`bkshading-windows-amd64` (`target/release/bkshading.exe`). The repeatable deploy of THAT onto strih
+is `scripts/bkshading-deploy-service.sh` (dev1 orchestrator) + `scripts/bkshading-install-service.ps1`
+(on-box installer) + the pure-invariant lib `scripts/lib/bkshading-deploy-service-runtime.sh` — the
+ONE source of truth for the artifact name, exe, install dir (`C:\bkshading`), config filename, task
+name (`bkshading-service`), port (`8770` == `config.rs` `default_bind`), and keep-alive cadence, so
+CI / the .sh / the .ps1 cannot drift (`tests/python/test_bkshading_deploy_service_808.py` cross-checks).
+
+- **Transport = the recordings-retention style:** `scp -O` the exe + config seed + installer to the
+  box, then run the installer via `powershell -NoProfile -ExecutionPolicy Bypass -File` — NEVER a
+  nested `powershell -Command` over ssh. DRY-RUN is the DEFAULT for BOTH the `.sh` and the `.ps1`;
+  `--execute` / `-Execute` performs the mutating half. The `.sh` DRY-RUN touches nothing remote.
+- **Keep-alive, NOT Task Scheduler RestartCount:** Task Scheduler has no real Restart=on-failure for
+  a long-lived process, so the installer registers ONE task with two triggers (AtLogOn + a repetition
+  every N min) whose action re-runs the DEPLOYED installer `-KeepAlive -Execute` — the idempotent
+  check-and-relaunch idiom (obs-self-heal / avsync-keepalive, `.claude/rules/avsync-monitoring.md`).
+  The `-KeepAlive` pass matches the running service by its EXACT `ExecutablePath` (never a bare
+  process name — the avsync gotcha) and relaunches via `Start-Process ... --config <toml>` if absent.
+- **Config is seeded ONLY IF absent** (`bkshading.example.toml` -> `bkshading.toml`) — a redeploy
+  never clobbers an operator-tuned config. The service config carries NO credential (pure camera
+  list + bind + `[preview]`), so nothing secret is ever written by the deploy. The `.ps1` is pure
+  ASCII (scp'd → non-UTF-8 codepage on the box, `.claude/rules/recordings-retention.md`).
+- **UNVERIFIED (supervisor rig step):** the LIVE `--execute` install against strih (scp +
+  `Register-ScheduledTask` + `:8770` verify) + confirming the panel is up — done from a session with
+  win-strih MCP / rig access, not an isolated worktree lane. This complements the deferred libndi
+  provisioning + live NDI-preview verify already noted above.
