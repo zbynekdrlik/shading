@@ -302,6 +302,43 @@ def test_execute_passes_port_and_task_to_installer():
         assert "-TaskName %s" % TASK_NAME in calls, "installer run must pass -TaskName"
 
 
+def test_execute_passes_stagedir_and_ps1_default_is_ssh_safe():
+    # `powershell -File` over Windows OpenSSH leaves $PSCommandPath / $PSScriptRoot EMPTY, so a ps1
+    # param default of `(Split-Path -Parent $PSCommandPath)` dies at BIND time ("Cannot bind argument
+    # to parameter 'Path' because it is an empty string") before a single body line runs — the exact
+    # live failure of the first real strih install (issue 808). Two pins:
+    #   (1) the orchestrator passes an EXPLICIT -StageDir (the staging dir it scp'd into), and
+    #   (2) the ps1's $StageDir param default carries NO bind-time Split-Path/$PSCommandPath
+    #       expression (in-body resolution with an $env:USERPROFILE fallback is the ssh-safe shape).
+    with tempfile.TemporaryDirectory() as tmp:
+        fake_bin = os.path.join(tmp, EXE_NAME)
+        open(fake_bin, "w").close()
+        seed = os.path.join(tmp, CONFIG_EXAMPLE_NAME)
+        open(seed, "w").close()
+        env, log = _fake_env(tmp, _sha256(fake_bin))  # matching sha -> byte-verify passes
+        r = _run_script(
+            ["--host", "10.77.9.202", "--binary", fake_bin, "--config-seed", seed, "--execute"],
+            env=env,
+        )
+        assert r.returncode == 0
+        calls = open(log).read()
+        assert re.search(r'-StageDir "C:\\Users\\', calls), \
+            "installer run must pass an explicit -StageDir ($PSCommandPath is empty over ssh)"
+    s = _ps1()
+    m = re.search(r"\[string\]\$StageDir\s*=\s*([^,\n]*)[,\n]", s)
+    assert m, "ps1 must keep a $StageDir param"
+    assert "PSCommandPath" not in m.group(1) and "Split-Path" not in m.group(1), \
+        "ps1 $StageDir default must not evaluate $PSCommandPath at bind time (empty over ssh)"
+    # the OTHER bind-time uses must be ssh-safe too: no bare `Split-Path ... $PSCommandPath` outside
+    # a guarded `if ($PSCommandPath)` — pin that every remaining $PSCommandPath use is guarded.
+    for ln in s.splitlines():
+        if ln.strip().startswith("#"):
+            continue  # comment lines may cite the failure shape verbatim
+        if "Split-Path" in ln and "$PSCommandPath" in ln:
+            assert "if (" in ln and "$PSCommandPath)" in ln, \
+                "unguarded Split-Path over $PSCommandPath (empty over ssh): %s" % ln.strip()
+
+
 def test_execute_byte_verify_sha_mismatch_fails():
     # A truncated / wrong-sha staged exe must fail the deploy at the byte-verify (never a false OK).
     with tempfile.TemporaryDirectory() as tmp:
