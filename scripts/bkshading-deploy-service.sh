@@ -133,7 +133,10 @@ scp_box() {  # $1 = local src, $2 = remote dest path
 # The exact installer invocation run on the box (also printed in the DRY-RUN plan, so the plan and
 # the real run cannot diverge). `powershell -File`, NEVER a nested `powershell -Command`.
 installer_cmd() {  # $1 = "-Execute" or ""
+  # -StageDir is EXPLICIT: `powershell -File` over Windows OpenSSH leaves $PSCommandPath empty,
+  # so the ps1 cannot derive its own directory there (live issue-808 bind-time failure).
   printf '%s' "powershell -NoProfile -ExecutionPolicy Bypass -File \"${REMOTE_PS1}\"" \
+    " -StageDir \"${STAGE_DIR}\"" \
     " -InstallDir \"${INSTALL_DIR}\" -Port ${PORT} -TaskName ${TASK_NAME}" \
     " -KeepAliveMinutes ${KEEPALIVE_MIN} $1"
 }
