@@ -58,7 +58,7 @@
 #>
 [CmdletBinding()]
 param(
-  [string]$StageDir          = (Split-Path -Parent $PSCommandPath),
+  [string]$StageDir          = '',
   [string]$InstallDir        = 'C:\bkshading',
   [int]$Port                 = 8770,
   [string]$TaskName          = 'bkshading-service',
@@ -73,9 +73,21 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProgressPreference    = 'SilentlyContinue'
 
+# `powershell -File` over Windows OpenSSH leaves $PSCommandPath / $PSScriptRoot EMPTY (the first
+# live strih install died at bind time on a `Split-Path -Parent $PSCommandPath` param default —
+# issue 808). Resolve self identity ssh-safe: prefer the automatic vars when present, fall back to
+# the staged copy the orchestrator scp'd next to us.
+if (-not $StageDir) {
+  if ($PSScriptRoot)          { $StageDir = $PSScriptRoot }
+  elseif ($PSCommandPath)     { $StageDir = Split-Path -Parent $PSCommandPath }
+  else                        { $StageDir = $env:USERPROFILE }
+}
+$SelfName = if ($PSCommandPath) { Split-Path -Leaf $PSCommandPath } else { 'bkshading-install-service.ps1' }
+$SelfPath = if ($PSCommandPath) { $PSCommandPath } else { Join-Path $StageDir $SelfName }
+
 $ExePath     = Join-Path $InstallDir $ExeName
 $ConfigPath  = Join-Path $InstallDir $ConfigName
-$DeployedPs1 = Join-Path $InstallDir (Split-Path -Leaf $PSCommandPath)
+$DeployedPs1 = Join-Path $InstallDir $SelfName
 $LogFile     = Join-Path $InstallDir 'bkshading-service-keepalive.log'  # keep-alive decisions
 $OutLog      = Join-Path $InstallDir 'bkshading-service.out.log'        # service stdout
 $ErrLog      = Join-Path $InstallDir 'bkshading-service.err.log'        # service stderr
@@ -197,8 +209,8 @@ Write-Output "deployed exe -> $ExePath"
 # Copy THIS installer into the install dir so the keep-alive task runs the deployed copy, not the
 # transient staging copy. Guard the self-copy for the case the installer is already run in-place from
 # InstallDir (Copy-Item -Force onto itself would throw).
-if ($PSCommandPath -ne $DeployedPs1) {
-  Copy-Item -LiteralPath $PSCommandPath -Destination $DeployedPs1 -Force
+if ($SelfPath -ne $DeployedPs1) {
+  Copy-Item -LiteralPath $SelfPath -Destination $DeployedPs1 -Force
 }
 
 # Seed the config ONLY IF the operator config is absent -- never clobber a tuned config.
