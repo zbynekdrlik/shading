@@ -287,3 +287,35 @@ CI / the .sh / the .ps1 cannot drift (`tests/python/test_bkshading_deploy_servic
   `Register-ScheduledTask` + `:8770` verify) + confirming the panel is up — done from a session with
   win-strih MCP / rig access, not an isolated worktree lane. This complements the deferred libndi
   provisioning + live NDI-preview verify already noted above.
+
+
+## E2E harness must PAUSE the relay on the two measurement-critical camboxes (issue 808, live evidence)
+
+The relay is a fleet-standby service — owner directive: it runs on EVERY cambox so any camera can
+be shaded on demand — but its gphoto2 USB-PTP polling causally degrades the E2E harness's own
+measurement quality on the two boxes it needs to trust most: the SOURCE camera (USB-bus
+contention with the physical camera's Cam Link 4K capture device — cam1 measured 58.3-58.9 fps vs
+a healthy 60.0, confirmed by stop/start isolation) and cam2/painter (a 3-core box already running
+camera-box RT + the painter, where the extra CPU/jitter correlates with worse dual-QR window
+quality — 2/2 clean relay-off vs 4/5 over-tolerance relay-on). Evidence: issue 808 comments
+2026-08-29T09:59:31Z / 2026-08-29T15:54:47Z. If you ever see a mysteriously degraded/dropped-frame
+E2E run and a camera happens to be physically cabled to a cambox at the time, check
+`systemctl is-active bkshading-relay` on the SOURCE box and cam2 first — it is a known, already-
+mitigated contention source, not a mystery regression in camera-box/genlock code.
+
+- **The fix is `scripts/lib/bkshading-e2e-pause.sh`** (mirrors the sibling
+  `bkshading-preflight.sh` split: pure remote-text builders + a fail-safe pure parser + two thin
+  ssh orchestrators). `scripts/recording-e2e.sh` pauses (`systemctl stop`) the relay on the
+  run-resolved `$CAM1_IP` (the SOURCE camera, whichever of cam1/cam3/cam4/cam5/cam6 was selected)
+  and `$PAINTER_IP` (cam2) right after the existing `bkshading_preflight_report` call, recording
+  each box's PRIOR active state; `cleanup()` restores it at the very end, but ONLY on a box where
+  the pause step found it genuinely active beforehand — a box the operator deliberately silenced
+  (e.g. via the interim manual `systemctl stop`) is never woken back up by a run.
+- **Do not conflate this with the M3 preflight check** (`scripts/lib/bkshading-preflight.sh`,
+  automated shutter-checklist WARNING) — that reads the camera's state; this pauses the relay
+  process entirely, and both run back-to-back at `[0/8]`.
+- **This is deliberately its OWN, dedicated ssh call — never spliced into the existing
+  `CAMBOX_PARALLEL_*` device-restore group** in `cleanup()` (`cambox_parallel_retry_failed`'s own
+  retry command is camera-box-specific and would be wrong to apply to a bkshading-relay-only
+  restore). It runs LAST in `cleanup()`, after the `#684`-class FINAL camera-box.service verify,
+  so this non-safety-critical restore never delays the safety-critical device-restore phase.
