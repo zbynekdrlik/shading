@@ -35,6 +35,11 @@ _BKSH_PREFLIGHT_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/bkshading-relay-runtime.sh
 . "$_BKSH_PREFLIGHT_HERE/bkshading-relay-runtime.sh"
 
+# The #220 checklist's own minimum ("SHUTTER FAST: >= 1/500 s") -- ONE source of truth reused by
+# both bkshading_preflight_classify's default and bkshading_preflight_report's default, mirroring
+# bkshading_relay_port()'s single-source-of-truth convention (review finding, issue 808).
+bkshading_preflight_min_shutter_denom() { printf '%s\n' 500; }
+
 # --- pure JSON scalar extractors (arg1 = the relay's GET /api/state JSON string) ---------------
 # python-only (no jq dependency), mirrors scripts/lib/measurement-eq.sh's "Scalar extractors"
 # convention. A malformed/empty JSON string, or a missing/null field, prints EMPTY ("0" for the
@@ -45,18 +50,19 @@ bkshading_preflight_state_online() {
   python3 -c 'import json,sys
 try:
     d = json.loads(sys.argv[1])
+    online = d.get("online")
 except Exception:
-    print("0"); sys.exit(0)
-print("1" if d.get("online") is True else "0")' "${1:-}"
+    online = None
+print("1" if online is True else "0")' "${1:-}"
 }
 
 bkshading_preflight_state_camera() {
   python3 -c 'import json,sys
 try:
     d = json.loads(sys.argv[1])
+    c = d.get("camera")
 except Exception:
-    print(""); sys.exit(0)
-c = d.get("camera")
+    c = None
 print(c if isinstance(c, str) and c else "")' "${1:-}"
 }
 
@@ -64,10 +70,10 @@ bkshading_preflight_state_shutter() {
   python3 -c 'import json,sys
 try:
     d = json.loads(sys.argv[1])
+    s = (d.get("params") or {}).get("shutter")
 except Exception:
-    print(""); sys.exit(0)
-s = (d.get("params") or {}).get("shutter")
-print(s if isinstance(s, int) else "")' "${1:-}"
+    s = None
+print(s if isinstance(s, int) and not isinstance(s, bool) else "")' "${1:-}"
 }
 
 # --- pure classifier -----------------------------------------------------------------------------
@@ -82,7 +88,7 @@ print(s if isinstance(s, int) else "")' "${1:-}"
 # ok: shutter denominator at/above the minimum (exactly-at-minimum counts as ok, mirrors
 #   audio_preflight_is_silent's own "exactly at the boundary counts as the healthier side").
 bkshading_preflight_classify() {
-  local online="${1:-0}" camera="${2:-}" shutter="${3:-}" min="${4:-500}"
+  local online="${1:-0}" camera="${2:-}" shutter="${3:-}" min="${4:-$(bkshading_preflight_min_shutter_denom)}"
   if [ "$online" != "1" ] || [ -z "$camera" ]; then
     printf 'skip-offline\n'
     return 0
@@ -142,7 +148,7 @@ bkshading_preflight_skip_unreachable_message() {
 # curl-then-dispatch caller over the pure functions above, mirroring
 # audio-presence-preflight.sh's own "the recording-e2e.sh step is a thin caller" convention.
 bkshading_preflight_report() {
-  local label="$1" ip="$2" port="${3:-$(bkshading_relay_port)}" max_time="${4:-5}" min="${5:-500}"
+  local label="$1" ip="$2" port="${3:-$(bkshading_relay_port)}" max_time="${4:-5}" min="${5:-$(bkshading_preflight_min_shutter_denom)}"
   local raw status camera shutter online
   if raw="$(curl -fsS --max-time "$max_time" "http://${ip}:${port}/api/state" 2>/dev/null)" && [ -n "$raw" ]; then
     online="$(bkshading_preflight_state_online "$raw")"
