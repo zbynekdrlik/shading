@@ -66,21 +66,36 @@ echo "$(bkshading_e2e_pause_marker_prefix):$label:\$_bksh_was_active"
 PAUSE
 }
 
-# bkshading_e2e_pause_restore_cmds WAS_ACTIVE -> REMOTE bash text: restart the relay unit ONLY
-# when WAS_ACTIVE is exactly "1" (the pause step found it active beforehand) -- never on a box
-# where it was already stopped (e.g. the #808 interim manual mitigation), so cleanup() never
+# bkshading_e2e_pause_restore_cmds WAS_ACTIVE [LABEL] -> REMOTE bash text: restart the relay unit
+# ONLY when WAS_ACTIVE is exactly "1" (the pause step found it active beforehand) -- never on a
+# box where it was already stopped (e.g. the #808 interim manual mitigation), so cleanup() never
 # re-activates a relay the operator deliberately silenced. WAS_ACTIVE is a LOCAL (dev1-side) bash
 # parameter baked in as a literal "0"/"1" (or anything else, treated the same as "0") at
 # generation time -- this is a pure LOCAL decision, never a remote conditional, so an unset/empty
 # value (the pause step never ran, e.g. an early abort before [0/8]) safely takes the do-nothing
-# branch with no remote-side comparison at all. Tolerant of the unit not being installed (never
-# fails the caller).
+# branch with no remote-side comparison at all. Tolerant of the unit not being installed.
+#
+# review finding (issue 808): the "1" branch now ALSO polls `is-active` after starting (~8s,
+# mirrors camera_box_verify_active_cmds's own poll shape) and WARNs LOUDLY -- never exits, never
+# fails the caller, exactly like every other cleanup() restore in this codebase (#328/#649/#675)
+# -- if the relay does not come back up, so a failed restore is never silent (this repo's own
+# "rig degradation alerts immediately" norm). LABEL is cosmetic (names the box in the message);
+# defaults to "box" when omitted.
 bkshading_e2e_pause_restore_cmds() {
-  local was_active="${1:-0}"
+  local was_active="${1:-0}" label="${2:-box}"
   local unit
   unit="$(bkshading_relay_unit_name)"
   if [ "$was_active" = "1" ]; then
-    printf 'systemctl start %s 2>/dev/null || true\n' "$unit"
+    cat <<RESTORE
+systemctl start $unit 2>/dev/null || true
+_bksh_r=0
+while [ "\$(systemctl is-active $unit 2>/dev/null)" != active ] && [ \$_bksh_r -lt 8 ]; do sleep 1; _bksh_r=\$((_bksh_r+1)); done
+if [ "\$(systemctl is-active $unit 2>/dev/null)" != active ]; then
+  echo "WARNING issue 808: bkshading-relay FAILED to come back active on $label after restore -- shading capability may be degraded, verify manually (systemctl status $unit)" >&2
+else
+  echo "    bkshading-relay restore ($label): active"
+fi
+RESTORE
   else
     printf '%s\n' 'true  # bkshading-relay was not active before this run -- leave it stopped (issue 808)'
   fi
@@ -124,9 +139,13 @@ bkshading_e2e_pause_stop() {
 
 # bkshading_e2e_pause_restore <label> <ip> <pw> <was_active> [timeout_s=8] -> best-effort
 # restart; NEVER fails the caller (cleanup()'s trap must always run to completion, #328/#649).
+# Deliberately NOT redirected to /dev/null (unlike bkshading_e2e_pause_stop's own capture) --
+# review finding: the restore's own success/WARNING line (bkshading_e2e_pause_restore_cmds) must
+# reach the harness's own console/CI log, mirroring camera_box_verify_active_cmds's own
+# not-redirected convention.
 bkshading_e2e_pause_restore() {
   local label="$1" ip="$2" pw="$3" was_active="$4" timeout_s="${5:-8}"
   timeout "$timeout_s" sshpass -p "$pw" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$ip" \
-    "$(bkshading_e2e_pause_restore_cmds "$was_active")" >/dev/null 2>&1 || true
+    "$(bkshading_e2e_pause_restore_cmds "$was_active" "$label")" || true
   return 0
 }

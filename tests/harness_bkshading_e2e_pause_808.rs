@@ -140,6 +140,49 @@ fn restore_cmds_starts_the_unit_when_was_active_is_1() {
         "{out}"
     );
     assert!(out.contains("|| true"), "must be tolerant: {out}");
+    // review finding (issue 808): the "1" branch must ALSO verify the restart actually took,
+    // mirroring camera_box_verify_active_cmds's own poll-then-warn shape.
+    assert!(
+        out.contains("systemctl is-active bkshading-relay.service"),
+        "must poll is-active after starting: {out}"
+    );
+    assert!(
+        out.contains("WARNING issue 808"),
+        "must be able to warn loudly on a failed restore: {out}"
+    );
+}
+
+#[test]
+fn restore_cmds_reports_active_with_the_label_when_the_unit_comes_back_up() {
+    // Simulate remote execution against a fake `systemctl` that reports the unit active
+    // immediately -- the SAME "eval the generated text against a fake systemctl" technique
+    // `stop_cmds_marker_round_trips_through_parse_state` already uses for `bkshading_e2e_pause_
+    // stop_cmds`.
+    let (rc, out, _err) = run_sourced(
+        "systemctl() { [ \"$1\" = is-active ] && { echo active; return 0; }; return 0; }\n\
+         out=\"$(bkshading_e2e_pause_restore_cmds 1 cam3)\"\n\
+         eval \"$out\"",
+    );
+    assert_eq!(rc, 0, "a successful restore must never fail: rc={rc}");
+    assert!(out.contains("cam3"), "must name the box: {out}");
+    assert!(out.contains("active"), "{out}");
+}
+
+#[test]
+fn restore_cmds_warns_loudly_when_the_unit_never_comes_back_active() {
+    let (rc, out, err) = run_sourced(
+        "systemctl() { [ \"$1\" = is-active ] && { echo inactive; return 3; }; return 0; }\n\
+         sleep() { :; }\n\
+         out=\"$(bkshading_e2e_pause_restore_cmds 1 cam1)\"\n\
+         eval \"$out\"",
+    );
+    assert_eq!(
+        rc, 0,
+        "a failed restore must never abort the caller: rc={rc} stdout={out} stderr={err}"
+    );
+    assert!(err.contains("WARNING"), "must warn loudly on stderr: {err}");
+    assert!(err.contains("issue 808"), "must cite the ticket: {err}");
+    assert!(err.contains("cam1"), "must name the box: {err}");
 }
 
 #[test]
@@ -268,13 +311,22 @@ fn stop_cmds_marker_round_trips_through_parse_state() {
 
 // ---------------------------------------------------------------------------------------------
 // bkshading_e2e_pause_stop / bkshading_e2e_pause_restore never fail the caller even against an
-// unreachable box (port 1 is a reserved/unassigned TCP port -- curl/ssh refuses instantly).
+// unreachable box. Mirrors bkshading-preflight.sh's own
+// `report_never_fails_the_caller_on_an_unreachable_relay` convention: port 1 is a reserved/
+// unassigned TCP port, so ssh refuses/times out almost instantly on a REAL network failure.
+//
+// Review finding (issue 808): an earlier draft of these two tests defined local `ssh()`/
+// `sshpass()` shell functions here, as if they intercepted the call -- they did not.
+// `timeout <n> sshpass ...` execs the REAL `sshpass` binary via a PATH lookup; `timeout` never
+// consults the calling shell's function table, so those overrides were dead code. The tests
+// still passed, but for the CORRECT underlying reason (the genuinely-refused connection to
+// 127.0.0.1:1, bounded by the real `timeout`), not the documented one. Fixed by removing the
+// ineffective mocks and relying on the real (fast, deterministic) network refusal instead.
 // ---------------------------------------------------------------------------------------------
 #[test]
 fn stop_orchestrator_never_fails_the_caller_on_an_unreachable_box() {
     let (rc, out, _err) = run_sourced(
-        "set -e; ssh() { return 255; }; sshpass() { return 255; }; \
-         r=\"$(bkshading_e2e_pause_stop cam9 127.0.0.1 fakepw 1)\"; echo \"RESULT:$r\"; echo AFTER",
+        "set -e; r=\"$(bkshading_e2e_pause_stop cam9 127.0.0.1 fakepw 1)\"; echo \"RESULT:$r\"; echo AFTER",
     );
     assert_eq!(rc, 0, "must never fail the caller under set -e");
     assert!(
@@ -286,10 +338,72 @@ fn stop_orchestrator_never_fails_the_caller_on_an_unreachable_box() {
 
 #[test]
 fn restore_orchestrator_never_fails_the_caller_on_an_unreachable_box() {
-    let (rc, out, _err) = run_sourced(
-        "set -e; ssh() { return 255; }; sshpass() { return 255; }; \
-         bkshading_e2e_pause_restore cam9 127.0.0.1 fakepw 1 1; echo AFTER",
-    );
+    let (rc, out, _err) =
+        run_sourced("set -e; bkshading_e2e_pause_restore cam9 127.0.0.1 fakepw 1 1; echo AFTER");
     assert_eq!(rc, 0, "must never fail the caller under set -e");
     assert!(out.contains("AFTER"), "must return control: {out}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// review finding (issue 808, 🔴): scripts/recording-e2e.sh must install a TEMPORARY EXIT trap
+// right after the [0/8] pause calls, so the 30+ ordinary `exit 1` sites in the preflight gates
+// between there and cleanup()'s own real EXIT trap (`trap cleanup EXIT HUP INT TERM`, this file's
+// ONLY other `trap ... EXIT` statement) don't leave the relay stopped for the rest of the run
+// with no restore. Static-anchor checks on the real script TEXT -- mirrors
+// tests/harness_imag_topology.rs's own `.find("trap cleanup")`-based ordering-check convention.
+// ---------------------------------------------------------------------------------------------
+fn read_recording_e2e() -> String {
+    let path = format!("{}/scripts/recording-e2e.sh", env!("CARGO_MANIFEST_DIR"));
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
+}
+
+#[test]
+fn recording_e2e_installs_a_temporary_exit_trap_between_pause_and_the_real_trap() {
+    let s = read_recording_e2e();
+    let pause_call = s
+        .find("bkshading_e2e_pause_stop ")
+        .expect("recording-e2e.sh must call bkshading_e2e_pause_stop");
+    let temp_trap_open = s
+        .find("trap '\n")
+        .expect("recording-e2e.sh must install a temporary EXIT trap after the pause calls");
+    let temp_trap_close = s
+        .find("' EXIT HUP INT TERM")
+        .expect("the temporary trap must close with the same EXIT HUP INT TERM signal set");
+    let real_trap = s
+        .find("trap cleanup EXIT HUP INT TERM")
+        .expect("recording-e2e.sh must install the real cleanup() EXIT trap");
+    assert!(
+        pause_call < temp_trap_open,
+        "the temporary trap must be installed AFTER the pause calls"
+    );
+    assert!(
+        temp_trap_open < temp_trap_close && temp_trap_close < real_trap,
+        "the temporary trap must be installed BEFORE cleanup()'s own real EXIT trap -- without \
+         this, the 30+ ordinary `exit 1` preflight sites between them would leave the relay \
+         stopped with no restore for the rest of the run (issue 808 review finding)"
+    );
+}
+
+#[test]
+fn recording_e2e_temporary_trap_restores_both_paused_boxes_with_a_safe_default() {
+    let s = read_recording_e2e();
+    let open = s.find("trap '\n").expect("temporary trap must exist");
+    let close = s[open..]
+        .find("' EXIT HUP INT TERM")
+        .expect("temporary trap must close");
+    let body = &s[open..open + close];
+    assert!(
+        body.contains("bkshading_e2e_pause_restore \"$CAMERA_NAME\""),
+        "temporary trap must restore the SOURCE camera: {body}"
+    );
+    assert!(
+        body.contains("bkshading_e2e_pause_restore cam2 "),
+        "temporary trap must restore cam2/painter too: {body}"
+    );
+    assert!(
+        body.contains("BKSH_PAUSE_CAM1_WAS_ACTIVE:-0")
+            && body.contains("BKSH_PAUSE_PAINTER_WAS_ACTIVE:-0"),
+        "temporary trap must read the SAME pre-trap-declared was-active vars with a safe \
+         (never-ran) default, exactly like the real cleanup() restore does: {body}"
+    );
 }
