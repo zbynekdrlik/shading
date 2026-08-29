@@ -139,6 +139,92 @@ fn state_shutter_extracts_the_denominator() {
     );
 }
 
+// ---------------------------------------------------------------------------------------------
+// Review finding (issue 808 diff review): a VALID-JSON-but-non-dict top-level body (or a
+// non-dict `params`) must NEVER crash the extractor with an uncaught AttributeError -- it must
+// degrade to the same safe default as malformed/empty JSON. A relay/proxy could plausibly answer
+// with a bare `null`/list/string/number under a transient failure, and the whole POINT of this
+// preflight is to never abort the E2E run over it.
+// ---------------------------------------------------------------------------------------------
+#[test]
+fn state_online_false_on_non_dict_top_level_json() {
+    for body in ["null", "[1,2,3]", "\"a string\"", "42"] {
+        let out = stdout_of(&format!("bkshading_preflight_state_online '{body}'"));
+        assert_eq!(
+            out, "0",
+            "non-dict top-level JSON {body:?} must yield online=0, not crash"
+        );
+    }
+}
+
+#[test]
+fn state_camera_empty_on_non_dict_top_level_json() {
+    for body in ["null", "[1,2,3]", "\"a string\"", "42"] {
+        let out = stdout_of(&format!("bkshading_preflight_state_camera '{body}'"));
+        assert_eq!(
+            out, "",
+            "non-dict top-level JSON {body:?} must yield empty camera, not crash"
+        );
+    }
+}
+
+#[test]
+fn state_shutter_empty_on_non_dict_top_level_json() {
+    for body in ["null", "[1,2,3]", "\"a string\"", "42"] {
+        let out = stdout_of(&format!("bkshading_preflight_state_shutter '{body}'"));
+        assert_eq!(
+            out, "",
+            "non-dict top-level JSON {body:?} must yield empty shutter, not crash"
+        );
+    }
+}
+
+#[test]
+fn state_shutter_empty_when_params_is_not_a_dict() {
+    // params: [1,2] -- (d.get("params") or {}).get("shutter") crashes with AttributeError on a
+    // non-dict params unless the whole access is guarded.
+    let out = stdout_of(
+        r#"bkshading_preflight_state_shutter '{"online":true,"camera":"x","params":[1,2]}'"#,
+    );
+    assert_eq!(
+        out, "",
+        "a non-dict params must yield empty shutter, not crash"
+    );
+}
+
+#[test]
+fn state_shutter_empty_when_shutter_is_a_json_bool() {
+    // Python bool is an int subclass -- isinstance(True, int) is True, so a naive check would
+    // print "True"/"False" instead of treating it as absent.
+    let out = stdout_of(
+        r#"bkshading_preflight_state_shutter '{"online":true,"params":{"shutter":true}}'"#,
+    );
+    assert_eq!(
+        out, "",
+        "a JSON boolean shutter must not be treated as a valid int"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// report must never crash the CALLER even when the relay is reachable but answers with a
+// non-dict body -- the exact review-found gap (a bare command-substitution assignment inside
+// bkshading_preflight_report, unguarded by any `if`/`&&`, propagates a python crash straight
+// through the caller's `set -e`).
+// ---------------------------------------------------------------------------------------------
+#[test]
+fn report_never_fails_the_caller_on_a_non_dict_relay_body() {
+    for body in ["null", "[1,2,3]", "\"a string\"", "42"] {
+        let (rc, out, _err) = run_sourced(&format!(
+            "set -e\ncurl() {{ printf '%s' '{body}'; }}\nbkshading_preflight_report cam1 x 1 1 500\necho AFTER"
+        ));
+        assert_eq!(rc, 0, "must never fail the caller on relay body {body:?}");
+        assert!(
+            out.contains("AFTER"),
+            "must return control to the caller on relay body {body:?}: {out}"
+        );
+    }
+}
+
 #[test]
 fn state_shutter_empty_when_null_absent_or_non_integer() {
     assert_eq!(
