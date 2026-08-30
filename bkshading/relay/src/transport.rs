@@ -133,6 +133,12 @@ pub fn parse_capture_fps_env(raw: Option<String>) -> Option<i64> {
 /// the grabber's isochronous capture stream. Overridable via `BKSHADING_RELAY_MIN_READ_INTERVAL_MS`.
 pub const DEFAULT_MIN_READ_INTERVAL_MS: u64 = 10_000;
 
+/// Upper sanity bound (1 h) on an env-supplied read floor (issue 1229). A generous ceiling for any
+/// real tuning (5–120 s) that rejects an absurd value from a units mistake (seconds instead of ms,
+/// or an extra ×1000) which would otherwise freeze readback for the process lifetime — mirrors
+/// `parse_capture_fps_env`'s own sanity ceiling.
+pub const MAX_MIN_READ_INTERVAL_MS: u64 = 3_600_000;
+
 /// Monotonic clock seam for the read-throttle floor (issue 1229). Only DIFFERENCES between
 /// successive `now_ms` values are meaningful. Injectable so the floor is Tier-0 testable without
 /// real sleeps.
@@ -175,12 +181,15 @@ pub fn read_is_fresh(read_at_ms: Option<u64>, now_ms: u64, floor_ms: u64) -> boo
 }
 
 /// Parses the relay read-throttle floor in ms from the raw `BKSHADING_RELAY_MIN_READ_INTERVAL_MS`
-/// value (issue 1229). A positive integer (ms) is accepted; an unset / empty / non-integer / zero
-/// / negative value yields `None`, and the caller falls back to [`DEFAULT_MIN_READ_INTERVAL_MS`] —
-/// so the floor can be TUNED but never disabled. Pure — unit-tested without any env.
+/// value (issue 1229). A positive integer up to [`MAX_MIN_READ_INTERVAL_MS`] is accepted; an unset
+/// / empty / non-integer / zero / negative / absurdly-large value yields `None`, and the caller
+/// falls back to [`DEFAULT_MIN_READ_INTERVAL_MS`] — so the floor can be TUNED but never disabled
+/// and never frozen by a units mistake. Pure — unit-tested without any env.
 pub fn parse_min_read_interval_env(raw: Option<String>) -> Option<u64> {
     let v: u64 = raw?.trim().parse().ok()?;
-    if v > 0 {
+    // `1..=MAX` rejects 0 (never disable the floor) AND an absurd value; a range-`contains` avoids
+    // the clippy `manual_range_contains` lint the two-comparison form would trip under -D warnings.
+    if (1..=MAX_MIN_READ_INTERVAL_MS).contains(&v) {
         Some(v)
     } else {
         None
@@ -251,7 +260,10 @@ impl CameraSession {
         self.version.clone()
     }
 
-    /// Model string of the attached camera, or `None` if not detected.
+    /// Model string of the attached camera, or `None` if not detected. Deliberately NOT throttled
+    /// by the issue-1229 read floor: `/api/detect` is a rare, manual probe (the service pump polls
+    /// only `/api/state`, never this), so it is not a sustained bus-contention source. If a future
+    /// client ever polls `/api/detect` in a loop, route it through the cache too.
     pub fn detect(&self) -> Option<String> {
         self.runner
             .auto_detect()
@@ -278,7 +290,14 @@ impl CameraSession {
     /// is what keeps the relay bus-friendly on a production cambox — the service pump polls every
     /// ~2 s, but the shared USB bus sees at most one PTP session per floor. Never panics.
     pub fn read_state(&self) -> RelayState {
-        let mut cache = self.read_cache.lock().unwrap();
+        // Poison-immune (recover the inner value): `read_state_uncached` is panic-free today, but
+        // a future panic under the held lock must NOT wedge every later `/api/state` into a
+        // permanent panic — there is no `Restart=` on the unit (issue 1228 is deliberately not
+        // landed). This keeps the "never panics" contract literally true.
+        let mut cache = self
+            .read_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let now_ms = self.clock.now_ms();
         if let Some(cached) = cache.as_ref() {
             if read_is_fresh(Some(cached.read_at_ms), now_ms, self.min_read_interval_ms) {
@@ -339,14 +358,26 @@ impl CameraSession {
         let fps100 = params.fps100.unwrap_or(DEFAULT_FPS100);
         let writes = plan_writes(req, &fnumber_choices, fps100);
         let n = writes.len();
+        // issue 1229: run the writes, but INVALIDATE the cache whether they ALL succeed OR one
+        // fails partway. A mid-apply gphoto2 error (camera busy / unplugged — the handler maps it
+        // to 502) still leaves the camera DIRTY: the earlier writes already landed, so the cached
+        // pre-write snapshot is stale either way and must not be served for up to a floor. (The
+        // top `read_raw()?` stays non-invalidating: nothing was written there.) Writes are
+        // user-initiated + rare, so this cannot reintroduce sustained bus contention.
+        let mut write_err: Option<anyhow::Error> = None;
         for (key, value) in writes {
-            self.runner.set_config(&key, &value)?;
+            if let Err(e) = self.runner.set_config(&key, &value) {
+                write_err = Some(e);
+                break;
+            }
         }
-        // issue 1229: a successful write changed the camera, so any cached read is now stale —
-        // drop it so the next `/api/state` reflects the new state instead of serving the old
-        // cache for up to a floor. Writes are user-initiated + rare, so this cannot reintroduce
-        // sustained bus contention.
-        *self.read_cache.lock().unwrap() = None;
-        Ok(n)
+        *self
+            .read_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        match write_err {
+            Some(e) => Err(e),
+            None => Ok(n),
+        }
     }
 }

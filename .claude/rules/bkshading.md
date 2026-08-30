@@ -348,8 +348,9 @@ can never disable it — 0/negative/junk falls back to the default; features-def
 - **Testability seam:** pure `read_is_fresh(read_at_ms, now_ms, floor_ms)` + a `MonoClock` trait
   (`InstantClock` prod, `FakeClock` in `tests/relay.rs`) let the floor be Tier-0 tested via the
   fake runner with an injected clock (count gphoto2 spawns under a burst / after floor-expiry /
-  after a write) — no real sleeps, no camera. Mirror the decision in a python replica for local
-  RED→GREEN when cargo can't run (Tier-0 #557).
+  after a write) — no real sleeps, no camera. When cargo can't run locally (Tier-0 #557), verify
+  the decision RED→GREEN with a throwaway local python replica of `read_is_fresh` + the
+  burst/floor/invalidate simulation (a dev aid — nothing committed; CI is the first real compile).
 - **REJECTED alternative — a persistent `gphoto2 --shell` session** (approach 2): it only cuts
   per-read RÉŽIU (re-enumeration), NOT the FREQUENCY of control traffic (the actual root), and
   brings its own failure class (shell wedge, camera-unplug holding a dead session, fragile

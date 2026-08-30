@@ -354,6 +354,70 @@ fn apply_invalidates_read_cache_1229() {
     );
 }
 
+/// A runner whose `set_config` always FAILS (camera busy/unplugged mid-apply), so a test can
+/// prove a partially-failed write still invalidates the cache. Detect + get_config succeed.
+struct FailWriteRunner {
+    inner: FakeRunner,
+    detect_calls: Arc<AtomicUsize>,
+}
+
+impl Gphoto2Runner for FailWriteRunner {
+    fn auto_detect(&self) -> Result<String> {
+        self.detect_calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.auto_detect()
+    }
+    fn get_config(&self, key: &str) -> Result<String> {
+        self.inner.get_config(key)
+    }
+    fn set_config(&self, _key: &str, _value: &str) -> Result<()> {
+        bail!("camera busy (simulated mid-apply failure)")
+    }
+}
+
+#[test]
+fn apply_failed_write_also_invalidates_read_cache_1229() {
+    // Review finding (issue 1229): a write that FAILS partway still leaves the camera dirty
+    // (earlier writes landed), so the cached pre-write snapshot is stale and must NOT be served
+    // for up to a floor. A partially-failed apply must invalidate the cache too, not only success.
+    let detect_calls = Arc::new(AtomicUsize::new(0));
+    let clock = Arc::new(AtomicU64::new(0));
+    let session = CameraSession::new(
+        Box::new(FailWriteRunner {
+            inner: FakeRunner::full_camera(),
+            detect_calls: detect_calls.clone(),
+        }),
+        "1.7.0-dev.516",
+    )
+    .with_min_read_interval_ms(10_000)
+    .with_clock(Box::new(FakeClock(clock.clone())));
+
+    let _ = session.read_state(); // real read #1 populates the cache
+    let _ = session.read_state(); // cached (same instant)
+    assert_eq!(detect_calls.load(Ordering::SeqCst), 1);
+
+    let res = session.apply(&SetRequest {
+        aperture_norm: None,
+        iso: Some(200),
+        kelvin: None,
+        tint: None,
+        shutter: None,
+        fps: None,
+        auto_wb: None,
+    });
+    assert!(
+        res.is_err(),
+        "a failing set_config must propagate the error"
+    );
+
+    // Same instant, but the failed write must have invalidated the cache -> fresh read.
+    let _ = session.read_state();
+    assert_eq!(
+        detect_calls.load(Ordering::SeqCst),
+        2,
+        "a partially-failed write must also invalidate the read cache"
+    );
+}
+
 #[test]
 fn read_is_fresh_pure_1229() {
     assert!(!read_is_fresh(None, 0, 10_000)); // no prior read -> never fresh
@@ -382,4 +446,14 @@ fn parse_min_read_interval_env_1229() {
     assert_eq!(parse_min_read_interval_env(Some("abc".into())), None);
     assert_eq!(parse_min_read_interval_env(Some("".into())), None);
     assert_eq!(parse_min_read_interval_env(None), None); // unset -> caller uses the default
+                                                         // Review finding: reject an absurd value (a units mistake would otherwise freeze readback).
+    assert_eq!(
+        parse_min_read_interval_env(Some("3600000".into())),
+        Some(3_600_000)
+    ); // at the 1 h cap -> ok
+    assert_eq!(parse_min_read_interval_env(Some("3600001".into())), None); // over cap -> default
+    assert_eq!(
+        parse_min_read_interval_env(Some("99999999999".into())),
+        None
+    ); // absurd -> default
 }
