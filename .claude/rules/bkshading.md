@@ -82,7 +82,9 @@ CI is the first compile. The local net that CAUGHT real issues here:
    1.98, `chunks_exact(N)` with a CONSTANT N is a clippy-deny lint — use index math or
    `slice::as_chunks::<N>().0`; the main crate was fixed in dev `052da4c5d`;
    `Option::map_or(<bool literal>, |x| …)` trips `unnecessary_map_or` (clippy `style`, stable
-   1.84) — use `is_none_or`/`is_some_and` instead, issue 1157). These clippy traps bite HARDEST
+   1.84) — use `is_none_or`/`is_some_and` instead, issue 1157; a two-comparison bound check
+   `x > a && x <= b` (e.g. a sanity-cap on an env value) trips `manual_range_contains` (clippy
+   `style`) — use `(a+1..=b).contains(&x)` / `(a..=b).contains(&x)`, issue 1229). These clippy traps bite HARDEST
    in the `#[cfg(feature = "ndi")]` code (`ndi_source.rs`): it compiles ONLY under
    `--features ndi` on CI, so a `-D warnings` lint there is invisible to `cargo fmt` and to every
    Tier-0 local check — CI is the first (and only) place it surfaces. Hand-audit feature-gated
@@ -319,3 +321,50 @@ mitigated contention source, not a mystery regression in camera-box/genlock code
   retry command is camera-box-specific and would be wrong to apply to a bkshading-relay-only
   restore). It runs LAST in `cleanup()`, after the `#684`-class FINAL camera-box.service verify,
   so this non-safety-critical restore never delays the safety-critical device-restore phase.
+
+
+## Relay polling is BUS-FRIENDLY — a min-interval floor, never gphoto2-per-poll (issue 1229, P0)
+
+**The relay MUST NOT shell out to `gphoto2` on every `GET /api/state`.** Root cause of the #1229
+production freeze: `read_state()` used to do one `gphoto2 --auto-detect` + seven `--get-config` =
+**8 fresh USB-PTP sessions (open/enumerate/close) per poll**, and the service pump
+(`service/src/main.rs`, `LIVE_PUSH_INTERVAL_MS = 2000`) polls every relay's `/api/state` every 2 s
+UNCONDITIONALLY. On cam1 the BMPCC (PTP) and the ezcap CAM LINK 4K grabber hang on the SAME
+4-port xHCI SuperSpeed bus, so that per-poll PTP traffic disturbed the grabber's isochronous UVC
+stream — capture 60→55 fps within 6 s of relay start, then the #663 capture-rate self-heal
+USB-reset every 600 s cooldown = ~10 s frozen picture, ~6× live during production 30.8.
+
+**The doctrine (the chosen fix — approach 1 of the ticket, and the owner's "kadencia ≥10 s idle"
+half):** `CameraSession` serves `/api/state` from a `read_cache` gated by a **min-interval floor**
+(`DEFAULT_MIN_READ_INTERVAL_MS = 10_000`, env `BKSHADING_RELAY_MIN_READ_INTERVAL_MS` TUNES it but
+can never disable it — 0/negative/junk falls back to the default; features-default-on). Key points:
+- The floor caps the READ RATE regardless of how hard the service polls: a poll within the floor of
+  the last real read is served from cache with ZERO gphoto2 / ZERO USB traffic. So even with a
+  panel open (service pumping every 2 s) the shared bus sees **at most one PTP session per floor**.
+- **The cache `Mutex` is held ACROSS the blocking read on purpose** — a burst of concurrent
+  `/api/state` requests coalesces to ONE real read (the others get the cache). Serializing gphoto2
+  access to the single USB camera is itself correct: concurrent gphoto2 processes on one device
+  would contend on the very bus this protects.
+- **Writes (`apply`/`SetRequest`) stay per-invocation** (user-initiated + rare) and INVALIDATE the
+  cache on success, so the next poll reflects the change instead of a stale cache for up to a floor.
+- **Testability seam:** pure `read_is_fresh(read_at_ms, now_ms, floor_ms)` + a `MonoClock` trait
+  (`InstantClock` prod, `FakeClock` in `tests/relay.rs`) let the floor be Tier-0 tested via the
+  fake runner with an injected clock (count gphoto2 spawns under a burst / after floor-expiry /
+  after a write) — no real sleeps, no camera. When cargo can't run locally (Tier-0 #557), verify
+  the decision RED→GREEN with a throwaway local python replica of `read_is_fresh` + the
+  burst/floor/invalidate simulation (a dev aid — nothing committed; CI is the first real compile).
+- **REJECTED alternative — a persistent `gphoto2 --shell` session** (approach 2): it only cuts
+  per-read RÉŽIU (re-enumeration), NOT the FREQUENCY of control traffic (the actual root), and
+  brings its own failure class (shell wedge, camera-unplug holding a dead session, fragile
+  stdin/stdout parsing needing detect+restart). The `Gphoto2Runner` trait seam keeps it as a
+  possible future 2nd impl, but the floor solves the root far more simply/safely.
+- **Cross-ref issue 1228 (relay `Restart=` lifecycle):** this fix does NOT touch the systemd unit.
+  It is a PRECONDITION for 1228 — auto-restarting the relay is only safe once the relay can't crash
+  capture; do NOT add `Restart=on-failure` before/without this floor or the freeze loop returns.
+- **Complementary idle lever (owner's "poll len on-demand keď je panel otvorený" half, NOT done
+  here):** the service could poll relays only while a WS/panel client is connected, for TRUE-zero
+  idle. It lives in a different crate (service, ships to Windows/strih) with WS-lifecycle
+  subtleties (stale-on-reconnect, immediate-refresh) → a separate focused PR + rig-verify. The
+  floor already bounds the worst case (1 read/floor even with a panel open — the case that matters
+  during live shading), so it is deferred, not dropped; file it with evidence if live-verify shows
+  the residual idle burst still disturbs capture.

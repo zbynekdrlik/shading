@@ -3,12 +3,14 @@
 //! installed on the box).
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, bail, Result};
 use bkshading_proto::wire::SetRequest;
 use bkshading_relay::transport::{
-    parse_capture_fps_env, parse_first_model, CameraSession, Gphoto2Runner,
+    parse_capture_fps_env, parse_first_model, parse_min_read_interval_env, read_is_fresh,
+    CameraSession, Gphoto2Runner, MonoClock,
 };
 
 const AUTO_DETECT: &str = "\
@@ -210,4 +212,248 @@ fn apply_writes_expected_gphoto2_config() {
     assert!(writes.contains(&("d005".into(), "10".into())));
     assert!(writes.contains(&("d007".into(), "30".into())));
     assert!(!writes.iter().any(|(k, _)| k.contains("wb")));
+}
+
+/// A [`Gphoto2Runner`] that COUNTS its gphoto2 invocations (via a shared atomic), so a test can
+/// assert how many real USB-PTP reads a sequence of `/api/state` calls actually triggered. The
+/// `auto_detect` count is the proxy for "one full read cycle" (`read_state` calls it exactly once
+/// before the seven `get_config` reads).
+struct CountingRunner {
+    inner: FakeRunner,
+    detect_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Gphoto2Runner for CountingRunner {
+    fn auto_detect(&self) -> Result<String> {
+        self.detect_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.auto_detect()
+    }
+    fn get_config(&self, key: &str) -> Result<String> {
+        self.inner.get_config(key)
+    }
+    fn set_config(&self, key: &str, value: &str) -> Result<()> {
+        self.inner.set_config(key, value)
+    }
+}
+
+#[test]
+fn read_state_burst_coalesces_to_one_gphoto2_read_1229() {
+    // #1229 root cause: the relay shelled `gphoto2` on EVERY `GET /api/state` (a fresh USB-PTP
+    // session: open/enumerate/close), and the service pump polls every 2 s -> continuous bus
+    // contention that crashed the grabber's capture rate on the shared xHCI bus, tripping the
+    // #663 self-heal USB reset every 600 s (~10 s frozen picture, live during production).
+    // The relay must coalesce a rapid burst of `/api/state` reads into AT MOST ONE real gphoto2
+    // read (served from a min-interval-floored cache). With the default floor (>=10 s), five
+    // reads in the same instant must trigger exactly ONE auto-detect. On the pre-fix code (no
+    // cache/floor) this triggers five -> the test is RED until the floor lands.
+    let detect_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let session = CameraSession::new(
+        Box::new(CountingRunner {
+            inner: FakeRunner::full_camera(),
+            detect_calls: detect_calls.clone(),
+        }),
+        "1.7.0-dev.516",
+    );
+    for _ in 0..5 {
+        let _ = session.read_state();
+    }
+    assert_eq!(
+        detect_calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a burst of 5 rapid /api/state reads must hit gphoto2 at most once (min-interval floor)"
+    );
+}
+
+/// A [`MonoClock`] whose monotonic ms a test controls directly, so the read-throttle floor
+/// (issue 1229) is exercised without real sleeps.
+struct FakeClock(Arc<AtomicU64>);
+
+impl MonoClock for FakeClock {
+    fn now_ms(&self) -> u64 {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+#[test]
+fn read_state_reads_again_after_floor_elapses_1229() {
+    // The floor caps the read RATE: within `min_read_interval_ms` of the last read, `/api/state`
+    // is cached (no gphoto2); once the floor elapses, the next read hits gphoto2 again — so a
+    // panel left open still gets fresh readback, just at most once per floor on the shared bus.
+    let detect_calls = Arc::new(AtomicUsize::new(0));
+    let clock = Arc::new(AtomicU64::new(0));
+    let session = CameraSession::new(
+        Box::new(CountingRunner {
+            inner: FakeRunner::full_camera(),
+            detect_calls: detect_calls.clone(),
+        }),
+        "1.7.0-dev.516",
+    )
+    .with_min_read_interval_ms(10_000)
+    .with_clock(Box::new(FakeClock(clock.clone())));
+
+    let _ = session.read_state(); // t=0 -> real read #1
+    assert_eq!(detect_calls.load(Ordering::SeqCst), 1);
+
+    clock.store(9_999, Ordering::SeqCst); // still within the floor
+    let _ = session.read_state();
+    assert_eq!(
+        detect_calls.load(Ordering::SeqCst),
+        1,
+        "within the floor -> served from cache, no gphoto2"
+    );
+
+    clock.store(10_000, Ordering::SeqCst); // floor elapsed (>=)
+    let _ = session.read_state();
+    assert_eq!(
+        detect_calls.load(Ordering::SeqCst),
+        2,
+        "floor elapsed -> a fresh real read"
+    );
+}
+
+#[test]
+fn apply_invalidates_read_cache_1229() {
+    // A write (SetRequest) is user-initiated and rare, so it stays per-invocation; but after it
+    // succeeds the cached read is stale, so the NEXT /api/state must read fresh (even inside the
+    // same floor window) so the panel reflects the change instead of the pre-write cache.
+    let detect_calls = Arc::new(AtomicUsize::new(0));
+    let clock = Arc::new(AtomicU64::new(0));
+    let session = CameraSession::new(
+        Box::new(CountingRunner {
+            inner: FakeRunner::full_camera(),
+            detect_calls: detect_calls.clone(),
+        }),
+        "1.7.0-dev.516",
+    )
+    .with_min_read_interval_ms(10_000)
+    .with_clock(Box::new(FakeClock(clock.clone())));
+
+    let _ = session.read_state(); // real read #1
+    let _ = session.read_state(); // cached (same instant)
+    assert_eq!(detect_calls.load(Ordering::SeqCst), 1);
+
+    session
+        .apply(&SetRequest {
+            aperture_norm: None,
+            iso: Some(200),
+            kelvin: None,
+            tint: None,
+            shutter: None,
+            fps: None,
+            auto_wb: None,
+        })
+        .expect("apply ok");
+
+    // Same instant, but the write invalidated the cache -> fresh read.
+    let _ = session.read_state();
+    assert_eq!(
+        detect_calls.load(Ordering::SeqCst),
+        2,
+        "a successful write must invalidate the read cache"
+    );
+}
+
+/// A runner whose `set_config` always FAILS (camera busy/unplugged mid-apply), so a test can
+/// prove a partially-failed write still invalidates the cache. Detect + get_config succeed.
+struct FailWriteRunner {
+    inner: FakeRunner,
+    detect_calls: Arc<AtomicUsize>,
+}
+
+impl Gphoto2Runner for FailWriteRunner {
+    fn auto_detect(&self) -> Result<String> {
+        self.detect_calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.auto_detect()
+    }
+    fn get_config(&self, key: &str) -> Result<String> {
+        self.inner.get_config(key)
+    }
+    fn set_config(&self, _key: &str, _value: &str) -> Result<()> {
+        bail!("camera busy (simulated mid-apply failure)")
+    }
+}
+
+#[test]
+fn apply_failed_write_also_invalidates_read_cache_1229() {
+    // Review finding (issue 1229): a write that FAILS partway still leaves the camera dirty
+    // (earlier writes landed), so the cached pre-write snapshot is stale and must NOT be served
+    // for up to a floor. A partially-failed apply must invalidate the cache too, not only success.
+    let detect_calls = Arc::new(AtomicUsize::new(0));
+    let clock = Arc::new(AtomicU64::new(0));
+    let session = CameraSession::new(
+        Box::new(FailWriteRunner {
+            inner: FakeRunner::full_camera(),
+            detect_calls: detect_calls.clone(),
+        }),
+        "1.7.0-dev.516",
+    )
+    .with_min_read_interval_ms(10_000)
+    .with_clock(Box::new(FakeClock(clock.clone())));
+
+    let _ = session.read_state(); // real read #1 populates the cache
+    let _ = session.read_state(); // cached (same instant)
+    assert_eq!(detect_calls.load(Ordering::SeqCst), 1);
+
+    let res = session.apply(&SetRequest {
+        aperture_norm: None,
+        iso: Some(200),
+        kelvin: None,
+        tint: None,
+        shutter: None,
+        fps: None,
+        auto_wb: None,
+    });
+    assert!(
+        res.is_err(),
+        "a failing set_config must propagate the error"
+    );
+
+    // Same instant, but the failed write must have invalidated the cache -> fresh read.
+    let _ = session.read_state();
+    assert_eq!(
+        detect_calls.load(Ordering::SeqCst),
+        2,
+        "a partially-failed write must also invalidate the read cache"
+    );
+}
+
+#[test]
+fn read_is_fresh_pure_1229() {
+    assert!(!read_is_fresh(None, 0, 10_000)); // no prior read -> never fresh
+    assert!(read_is_fresh(Some(0), 0, 10_000)); // same instant -> fresh
+    assert!(read_is_fresh(Some(0), 9_999, 10_000)); // within floor -> fresh
+    assert!(!read_is_fresh(Some(0), 10_000, 10_000)); // at floor (>=) -> stale
+    assert!(!read_is_fresh(Some(0), 20_000, 10_000)); // past floor -> stale
+                                                      // A (monotonic-impossible) backwards step saturates to 0 -> treated fresh: serve cache
+                                                      // rather than hammer the bus.
+    assert!(read_is_fresh(Some(100), 50, 10_000));
+}
+
+#[test]
+fn parse_min_read_interval_env_1229() {
+    assert_eq!(
+        parse_min_read_interval_env(Some("15000".into())),
+        Some(15_000)
+    );
+    assert_eq!(
+        parse_min_read_interval_env(Some(" 15000 ".into())),
+        Some(15_000)
+    ); // trimmed
+    assert_eq!(parse_min_read_interval_env(Some("0".into())), None); // never disable the floor
+    assert_eq!(parse_min_read_interval_env(Some("-5".into())), None);
+    assert_eq!(parse_min_read_interval_env(Some("12.5".into())), None); // non-integer
+    assert_eq!(parse_min_read_interval_env(Some("abc".into())), None);
+    assert_eq!(parse_min_read_interval_env(Some("".into())), None);
+    assert_eq!(parse_min_read_interval_env(None), None); // unset -> caller uses the default
+                                                         // Review finding: reject an absurd value (a units mistake would otherwise freeze readback).
+    assert_eq!(
+        parse_min_read_interval_env(Some("3600000".into())),
+        Some(3_600_000)
+    ); // at the 1 h cap -> ok
+    assert_eq!(parse_min_read_interval_env(Some("3600001".into())), None); // over cap -> default
+    assert_eq!(
+        parse_min_read_interval_env(Some("99999999999".into())),
+        None
+    ); // absurd -> default
 }

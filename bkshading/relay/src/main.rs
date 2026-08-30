@@ -15,7 +15,10 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use bkshading_relay::http;
-use bkshading_relay::transport::{parse_capture_fps_env, CameraSession, Gphoto2Cli};
+use bkshading_relay::transport::{
+    parse_capture_fps_env, parse_min_read_interval_env, CameraSession, Gphoto2Cli,
+    DEFAULT_MIN_READ_INTERVAL_MS,
+};
 use clap::Parser;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -52,6 +55,13 @@ async fn main() -> Result<()> {
     // rate — no appliance change. Unset -> None -> the service falls back to the static config.
     let capture_fps = parse_capture_fps_env(std::env::var("CAMERA_BOX_CAPTURE_FPS").ok());
 
+    // issue 1229: the read-throttle floor makes the relay bus-friendly on a production cambox —
+    // `/api/state` is served from a cache between real gphoto2 reads so the shared USB bus sees at
+    // most one PTP session per floor (the default is bus-friendly; env only tunes it, never off).
+    let min_read_interval_ms =
+        parse_min_read_interval_env(std::env::var("BKSHADING_RELAY_MIN_READ_INTERVAL_MS").ok())
+            .unwrap_or(DEFAULT_MIN_READ_INTERVAL_MS);
+
     let session = Arc::new(
         CameraSession::new(
             Box::new(Gphoto2Cli {
@@ -59,10 +69,17 @@ async fn main() -> Result<()> {
             }),
             VERSION,
         )
-        .with_capture_fps(capture_fps),
+        .with_capture_fps(capture_fps)
+        .with_min_read_interval_ms(min_read_interval_ms),
     );
 
-    tracing::info!(version = VERSION, %addr, ?capture_fps, "bkshading-relay starting");
+    tracing::info!(
+        version = VERSION,
+        %addr,
+        ?capture_fps,
+        min_read_interval_ms,
+        "bkshading-relay starting"
+    );
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, http::router(session))
         .with_graceful_shutdown(shutdown_signal())
