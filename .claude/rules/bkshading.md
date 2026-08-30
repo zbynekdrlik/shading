@@ -82,7 +82,9 @@ CI is the first compile. The local net that CAUGHT real issues here:
    1.98, `chunks_exact(N)` with a CONSTANT N is a clippy-deny lint — use index math or
    `slice::as_chunks::<N>().0`; the main crate was fixed in dev `052da4c5d`;
    `Option::map_or(<bool literal>, |x| …)` trips `unnecessary_map_or` (clippy `style`, stable
-   1.84) — use `is_none_or`/`is_some_and` instead, issue 1157). These clippy traps bite HARDEST
+   1.84) — use `is_none_or`/`is_some_and` instead, issue 1157; a two-comparison bound check
+   `x > a && x <= b` (e.g. a sanity-cap on an env value) trips `manual_range_contains` (clippy
+   `style`) — use `(a+1..=b).contains(&x)` / `(a..=b).contains(&x)`, issue 1229). These clippy traps bite HARDEST
    in the `#[cfg(feature = "ndi")]` code (`ndi_source.rs`): it compiles ONLY under
    `--features ndi` on CI, so a `-D warnings` lint there is invisible to `cargo fmt` and to every
    Tier-0 local check — CI is the first (and only) place it surfaces. Hand-audit feature-gated
