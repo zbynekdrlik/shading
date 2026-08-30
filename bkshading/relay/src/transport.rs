@@ -7,6 +7,9 @@
 //! semantics the dev2 MVP verified. The `Gphoto2Runner` trait is the seam: `Gphoto2Cli`
 //! is the real impl, and tests inject a fake so every path is exercised without a camera.
 
+use std::sync::Mutex;
+use std::time::Instant;
+
 use anyhow::{bail, Context, Result};
 use bkshading_proto::mapping::{parse_choices, DEFAULT_FPS100};
 use bkshading_proto::read::{fps_supported, params_and_caps, plan_writes, RawConfigs};
@@ -124,6 +127,72 @@ pub fn parse_capture_fps_env(raw: Option<String>) -> Option<i64> {
     }
 }
 
+/// Default minimum interval between real gphoto2 read cycles (issue 1229). A `GET /api/state`
+/// arriving within this window of the last real read is served from the cache with NO USB-PTP
+/// session, so the service pump polling every ~2 s cannot hammer the shared xHCI bus and starve
+/// the grabber's isochronous capture stream. Overridable via `BKSHADING_RELAY_MIN_READ_INTERVAL_MS`.
+pub const DEFAULT_MIN_READ_INTERVAL_MS: u64 = 10_000;
+
+/// Monotonic clock seam for the read-throttle floor (issue 1229). Only DIFFERENCES between
+/// successive `now_ms` values are meaningful. Injectable so the floor is Tier-0 testable without
+/// real sleeps.
+pub trait MonoClock: Send + Sync {
+    /// Monotonic milliseconds from an arbitrary fixed base.
+    fn now_ms(&self) -> u64;
+}
+
+/// Production [`MonoClock`]: monotonic ms since construction, via `std::time::Instant` (immune to
+/// wall-clock / NTP steps).
+pub struct InstantClock {
+    base: Instant,
+}
+
+impl InstantClock {
+    pub fn new() -> Self {
+        InstantClock {
+            base: Instant::now(),
+        }
+    }
+}
+
+impl Default for InstantClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MonoClock for InstantClock {
+    fn now_ms(&self) -> u64 {
+        self.base.elapsed().as_millis() as u64
+    }
+}
+
+/// Whether a cached read taken at `read_at_ms` is still within the min-interval floor at `now_ms`
+/// (issue 1229) — i.e. `/api/state` may be served from cache without a real gphoto2 read. `None`
+/// (no prior read) is never fresh. Pure; unit-tested and mirrored by a Tier-0 python/bash replica.
+pub fn read_is_fresh(read_at_ms: Option<u64>, now_ms: u64, floor_ms: u64) -> bool {
+    read_at_ms.is_some_and(|t| now_ms.saturating_sub(t) < floor_ms)
+}
+
+/// Parses the relay read-throttle floor in ms from the raw `BKSHADING_RELAY_MIN_READ_INTERVAL_MS`
+/// value (issue 1229). A positive integer (ms) is accepted; an unset / empty / non-integer / zero
+/// / negative value yields `None`, and the caller falls back to [`DEFAULT_MIN_READ_INTERVAL_MS`] —
+/// so the floor can be TUNED but never disabled. Pure — unit-tested without any env.
+pub fn parse_min_read_interval_env(raw: Option<String>) -> Option<u64> {
+    let v: u64 = raw?.trim().parse().ok()?;
+    if v > 0 {
+        Some(v)
+    } else {
+        None
+    }
+}
+
+/// One cached read cycle (issue 1229): the last `RelayState` and the monotonic ms it was read at.
+struct CachedRead {
+    state: RelayState,
+    read_at_ms: u64,
+}
+
 /// One camera the relay owns, driven through a [`Gphoto2Runner`].
 pub struct CameraSession {
     runner: Box<dyn Gphoto2Runner>,
@@ -132,6 +201,17 @@ pub struct CameraSession {
     /// `None` when the env is unset. Reported in every `RelayState` (even a camera-offline one —
     /// it is a box property, not a camera one).
     capture_fps: Option<i64>,
+    /// Minimum interval between real gphoto2 read cycles (issue 1229). `/api/state` within this
+    /// window of the last read is served from `read_cache` (no USB-PTP session).
+    min_read_interval_ms: u64,
+    /// Monotonic clock seam (issue 1229), injectable for tests; prod uses [`InstantClock`].
+    clock: Box<dyn MonoClock>,
+    /// The last read cycle's state + the monotonic ms it was read at (issue 1229). Behind a
+    /// `Mutex` for interior mutability through the `&self` handler API; the lock is held across
+    /// the (blocking) read so a burst of concurrent `/api/state` requests coalesces to ONE real
+    /// gphoto2 read (serializing gphoto2 access to the single USB camera is correct — concurrent
+    /// gphoto2 processes would contend on the very bus this fix protects).
+    read_cache: Mutex<Option<CachedRead>>,
 }
 
 impl CameraSession {
@@ -140,6 +220,9 @@ impl CameraSession {
             runner,
             version: version.into(),
             capture_fps: None,
+            min_read_interval_ms: DEFAULT_MIN_READ_INTERVAL_MS,
+            clock: Box::new(InstantClock::new()),
+            read_cache: Mutex::new(None),
         }
     }
 
@@ -147,6 +230,20 @@ impl CameraSession {
     /// `parse_capture_fps_env(std::env::var("CAMERA_BOX_CAPTURE_FPS").ok())`.
     pub fn with_capture_fps(mut self, capture_fps: Option<i64>) -> Self {
         self.capture_fps = capture_fps;
+        self
+    }
+
+    /// Sets the read-throttle floor (issue 1229). The binary passes
+    /// `parse_min_read_interval_env(std::env::var("BKSHADING_RELAY_MIN_READ_INTERVAL_MS").ok())`
+    /// falling back to [`DEFAULT_MIN_READ_INTERVAL_MS`].
+    pub fn with_min_read_interval_ms(mut self, ms: u64) -> Self {
+        self.min_read_interval_ms = ms;
+        self
+    }
+
+    /// Injects a [`MonoClock`] (issue 1229) — used by tests to drive the floor without real sleeps.
+    pub fn with_clock(mut self, clock: Box<dyn MonoClock>) -> Self {
+        self.clock = clock;
         self
     }
 
@@ -174,9 +271,32 @@ impl CameraSession {
         })
     }
 
-    /// Reads the camera's live shading state. Never panics: a detect miss or a gphoto2
-    /// read error degrades to an offline [`RelayState`], the server-is-truth model.
+    /// Reads the camera's live shading state, THROTTLED by the min-interval floor (issue 1229):
+    /// a `GET /api/state` within `min_read_interval_ms` of the last real read is served from the
+    /// cache with NO gphoto2 / USB-PTP session. The cache lock is held across the (blocking) real
+    /// read so a burst of concurrent requests coalesces to a SINGLE gphoto2 read per floor. This
+    /// is what keeps the relay bus-friendly on a production cambox — the service pump polls every
+    /// ~2 s, but the shared USB bus sees at most one PTP session per floor. Never panics.
     pub fn read_state(&self) -> RelayState {
+        let mut cache = self.read_cache.lock().unwrap();
+        let now_ms = self.clock.now_ms();
+        if let Some(cached) = cache.as_ref() {
+            if read_is_fresh(Some(cached.read_at_ms), now_ms, self.min_read_interval_ms) {
+                return cached.state.clone();
+            }
+        }
+        let state = self.read_state_uncached();
+        *cache = Some(CachedRead {
+            state: state.clone(),
+            read_at_ms: now_ms,
+        });
+        state
+    }
+
+    /// The real (un-throttled) read cycle: one `gphoto2 --auto-detect` + seven `--get-config`.
+    /// A detect miss or a gphoto2 read error degrades to an offline [`RelayState`], the
+    /// server-is-truth model. Reached only through [`read_state`](Self::read_state)'s floor.
+    fn read_state_uncached(&self) -> RelayState {
         let camera = self.detect();
         if camera.is_none() {
             // The box capture rate is known even with no camera — report it (issue 809).
@@ -222,6 +342,11 @@ impl CameraSession {
         for (key, value) in writes {
             self.runner.set_config(&key, &value)?;
         }
+        // issue 1229: a successful write changed the camera, so any cached read is now stale —
+        // drop it so the next `/api/state` reflects the new state instead of serving the old
+        // cache for up to a floor. Writes are user-initiated + rare, so this cannot reintroduce
+        // sustained bus contention.
+        *self.read_cache.lock().unwrap() = None;
         Ok(n)
     }
 }
