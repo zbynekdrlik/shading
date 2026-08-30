@@ -211,3 +211,54 @@ fn apply_writes_expected_gphoto2_config() {
     assert!(writes.contains(&("d007".into(), "30".into())));
     assert!(!writes.iter().any(|(k, _)| k.contains("wb")));
 }
+
+/// A [`Gphoto2Runner`] that COUNTS its gphoto2 invocations (via a shared atomic), so a test can
+/// assert how many real USB-PTP reads a sequence of `/api/state` calls actually triggered. The
+/// `auto_detect` count is the proxy for "one full read cycle" (`read_state` calls it exactly once
+/// before the seven `get_config` reads).
+struct CountingRunner {
+    inner: FakeRunner,
+    detect_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Gphoto2Runner for CountingRunner {
+    fn auto_detect(&self) -> Result<String> {
+        self.detect_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.auto_detect()
+    }
+    fn get_config(&self, key: &str) -> Result<String> {
+        self.inner.get_config(key)
+    }
+    fn set_config(&self, key: &str, value: &str) -> Result<()> {
+        self.inner.set_config(key, value)
+    }
+}
+
+#[test]
+fn read_state_burst_coalesces_to_one_gphoto2_read_1229() {
+    // #1229 root cause: the relay shelled `gphoto2` on EVERY `GET /api/state` (a fresh USB-PTP
+    // session: open/enumerate/close), and the service pump polls every 2 s -> continuous bus
+    // contention that crashed the grabber's capture rate on the shared xHCI bus, tripping the
+    // #663 self-heal USB reset every 600 s (~10 s frozen picture, live during production).
+    // The relay must coalesce a rapid burst of `/api/state` reads into AT MOST ONE real gphoto2
+    // read (served from a min-interval-floored cache). With the default floor (>=10 s), five
+    // reads in the same instant must trigger exactly ONE auto-detect. On the pre-fix code (no
+    // cache/floor) this triggers five -> the test is RED until the floor lands.
+    let detect_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let session = CameraSession::new(
+        Box::new(CountingRunner {
+            inner: FakeRunner::full_camera(),
+            detect_calls: detect_calls.clone(),
+        }),
+        "1.7.0-dev.516",
+    );
+    for _ in 0..5 {
+        let _ = session.read_state();
+    }
+    assert_eq!(
+        detect_calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a burst of 5 rapid /api/state reads must hit gphoto2 at most once (min-interval floor)"
+    );
+}
