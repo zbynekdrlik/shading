@@ -358,9 +358,17 @@ can never disable it — 0/negative/junk falls back to the default; features-def
   brings its own failure class (shell wedge, camera-unplug holding a dead session, fragile
   stdin/stdout parsing needing detect+restart). The `Gphoto2Runner` trait seam keeps it as a
   possible future 2nd impl, but the floor solves the root far more simply/safely.
-- **Cross-ref issue 1228 (relay `Restart=` lifecycle):** this fix does NOT touch the systemd unit.
-  It is a PRECONDITION for 1228 — auto-restarting the relay is only safe once the relay can't crash
-  capture; do NOT add `Restart=on-failure` before/without this floor or the freeze loop returns.
+- **Cross-ref issue 1228 (relay `Restart=` lifecycle) — STILL BLOCKED even after this floor merged
+  (status 2026-08-30):** this fix does NOT touch the systemd unit. The floor IS merged + live-verified
+  on cam1 (17-30 min, 0× capture-rate self-heal, 0× USB reset), but issue 1229's OWN live-verify comment
+  found a documented residual — occasional capture dips (54.5-58.5 fps, well below the 60.0 baseline
+  but NOT enough to re-trip self-heal) still correlate with individual gphoto2 PTP transactions
+  colliding with the grabber's isochronous stream on the shared xHCI bus. The owner explicitly kept
+  1229 OPEN (`needs-owner-action`) pending a PHYSICAL step — moving the BMPCC's USB cable on cam1 to
+  a USB2 port (PTP only needs 480 Mb/s, isolating it from the grabber's SuperSpeed bandwidth domain)
+  — plus one more clean watch after that. **1228 unblocks only once 1229 actually closes** (or the
+  owner explicitly says otherwise) — do NOT add `Restart=on-failure` just because the floor merged;
+  re-check `gh issue view 1229` state/labels before touching the unit.
 - **Complementary idle lever (owner's "poll len on-demand keď je panel otvorený" half, NOT done
   here):** the service could poll relays only while a WS/panel client is connected, for TRUE-zero
   idle. It lives in a different crate (service, ships to Windows/strih) with WS-lifecycle
@@ -368,3 +376,29 @@ can never disable it — 0/negative/junk falls back to the default; features-def
   floor already bounds the worst case (1 read/floor even with a panel open — the case that matters
   during live shading), so it is deferred, not dropped; file it with evidence if live-verify shows
   the residual idle burst still disturbs capture.
+
+
+## A manual interim `systemctl stop bkshading-relay` is NEVER auto-restored — not even by `Restart=on-failure` (issue 1228 TERM-origin finding)
+
+**Root cause of the 29.8.-30.8. cam1 incident (relay found dead a full day after it was stopped):**
+NOT `bkshading-deploy-relay.sh`'s own stop→start (that always re-starts what it stops, and the
+deploy at 06:22-06:33 UTC on 29.8 was 3+ hours before the observed TERM). The actual cause was a
+**manual interim mitigation** — `systemctl stop bkshading-relay` run by hand on cam1 at
+`2026-08-29T09:56:25Z` while investigating the SAME gphoto2/USB-bus contention issue 1229 later
+fixed properly (issue 808 comment `2026-08-29T09:59:31Z`, 3 minutes after the TERM: *"relay STOP:
+captured 59.8-60.0 fps... Mitigácia TERAZ: bkshading-relay na cam1 STOPNUTÝ"*). `systemctl stop`
+sends `SIGTERM` to the main process — exactly the journal's `code=killed, signal=TERM`. The unit was
+left `enabled` (comes back only on a REBOOT) and nobody manually restarted it, so it stayed dead
+until the owner tried to use shading the next day.
+
+**The lesson generalizes past this one incident: a DELIBERATE `systemctl stop` is never
+auto-recovered by `Restart=on-failure`, by design** — systemd suppresses the restart when a stop was
+requested by the service manager itself (an administrative/clean stop), regardless of the
+`Restart=` policy. So even once issue 1228 lands `Restart=on-failure` on
+`systemd/bkshading-relay.service`, it will **only** protect against a genuine unexpected crash
+(panic, segfault, OOM-kill) — it will NOT bring back a relay that was deliberately silenced as an
+interim mitigation (correct behavior: an operator's deliberate stop should stay off until they
+undo it). **Any interim "stop this on box X while we investigate" mitigation needs its OWN explicit
+tracking** (a ticket comment naming which boxes were stopped + a reminder to restore them) — the
+harness-managed pause (`bkshading-e2e-pause.sh`, above) only covers stops the E2E harness ITSELF
+performs; it has no visibility into an ad-hoc manual stop done directly on the rig.
