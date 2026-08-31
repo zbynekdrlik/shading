@@ -217,6 +217,45 @@ break the one-source-of-truth the owner flagged in the MVP):
   follow-up.
 
 
+## Relay focus-distance exposure + the honest focus/exposure-MODE constraint (issue 1238)
+The relay's `/api/state` now reports the camera's **manual focus DISTANCE** as
+`ShadingParams.focus_distance: Option<i64>` (camelCase `focusDistance`), read from gphoto2
+`d003` (`FOCUS_DISTANCE_KEY` in `transport.rs`), parsed by the existing pure `current_i64` in
+`read.rs::params_and_caps`. It rides the SAME issue-1229 coalesced/min-interval-floored read
+cycle as the seven shading keys (one extra `--get-config` per throttled read — never a
+per-request read, never a second cadence) and is read **best-effort** (`get_config(...).
+unwrap_or_default()`): unlike the core exposure trio (iso/f-number/d002 use `?`), a missing
+`d003` degrades to `None` and must NOT suppress the essential shading state. READ-ONLY by
+design — never in `SetRequest`/`plan_writes` (a focus write during a take is unsafe). Wire
+compat: `#[serde(default)]` (missing → `None`) + no `deny_unknown_fields` (an older reader
+ignores the new key), so relay/service/panel interoperate across versions with no other edit.
+
+- **The BMPCC PTP space exposes NO focus-MODE (AF/MF) selector and NO auto/manual
+  exposure-MODE (program) selector — this is a hardware fact, not a gap in our code.** Verified
+  against the authoritative TalOrg BMPCC-over-PTP control-point list
+  (https://www.tal.org/tutorials/blackmagic-pocket-cinema-camera-usb-control-over-ptp) + the MVP
+  `mapping.rs` "Verified PTP facts". The documented properties are `iso`, `f-number`, and
+  `d001`(unknown RANGE 30–5000), `d002`(shutter angle), **`d003`(manual focus DISTANCE)**,
+  `d004`(WB Kelvin), `d005`(tint), `d006`(sensor fps), `d007`(project fps),
+  `d008`(unknown MENU 2/0), `d009`(unknown ro 0), `d00a`(unknown ro 0). The standard PTP
+  `focusmode`(0x500A)/`expprogram`(0x500E) are absent. So `d003` distance is the ONLY honest
+  focus signal — a STABLE value across reads is the no-AF-hunt proxy and its presence confirms
+  manual focus control is reachable; there is no honest way to report a focus/exposure MODE flag.
+- **Do NOT fabricate a `focusMode`/`exposureMode` field.** An explicit absent field with this
+  documented meaning beats a permanently-`null` field reading a key the BMPCC does not implement,
+  and asserting `d008 = exposure mode` (or any undiscovered d-code) without the live camera is the
+  fabrication the LOUD-UNKNOWN doctrine bans.
+- **Rig-discovery follow-up (supervisor step, needs the live-cabled BMPCC):** `d001`/`d008`/
+  `d009`/`d00a` are undiscovered and MIGHT hold a mode flag. To identify one: `gphoto2
+  --get-config d001` (…d008/d009/d00a) while toggling the camera's Auto Exposure / focus menu and
+  observing which value changes. If a mode d-code is found, add it exactly like `focus_distance`
+  (a new `RawConfigs` field + `FOCUS_DISTANCE_KEY`-style const + a `ShadingParams` field, read
+  best-effort). Until then, no mode field exists — by design.
+- **Consumer wiring is a separate lane.** The issue-1237 `[0/8]` preflight (which surfaces the
+  FOCUS/EXPOSURE checklist items) consumes `focusDistance` once BOTH it and this land; this lane
+  is the RELAY side only (the preflight lib is untouched — it is not on this base).
+
+
 ## SBC / handheld provisioning (issue 808 — the last milestone)
 A handheld camera runs the SAME `bkshading-relay` on a mini SBC (a Pi Zero 2 W): camera USB → Pi,
 Pi on WiFi. The service already understands it (`Transport::SbcRelay`, `handheld-1` /
