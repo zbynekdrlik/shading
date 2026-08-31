@@ -664,6 +664,22 @@ fn state_focus_distance_extracts_a_boundary_value() {
 }
 
 #[test]
+fn state_focus_distance_extracts_a_negative_or_out_of_range_value_without_filtering() {
+    // Review finding (issue 1238 CYCLE-step-6 pass): the extractor must not special-case the
+    // BMPCC's documented 0..65536 range -- ANY int the relay reports must pass through
+    // unfiltered (a malformed/out-of-spec relay answer is not this extractor's job to validate;
+    // it is informational-only downstream, never gated). -1 is outside the documented range but
+    // is still a valid JSON integer and must be extracted, not treated as empty.
+    let json = r#"{"online":true,"camera":"x","params":{"focusDistance":-1}}"#;
+    assert_eq!(
+        stdout_of(&format!(
+            "bkshading_preflight_state_focus_distance '{json}'"
+        )),
+        "-1"
+    );
+}
+
+#[test]
 fn state_focus_distance_empty_when_null_absent_bool_or_non_dict() {
     assert_eq!(
         stdout_of(
