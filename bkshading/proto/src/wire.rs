@@ -42,6 +42,19 @@ pub struct ShadingParams {
     pub fps100: Option<i64>,
     /// Sensor fps x100 (readback only; d006).
     pub sensor_fps100: Option<i64>,
+    /// Manual focus DISTANCE — raw gphoto2 `d003` (RANGE, ~0 = closest .. ~65536 = infinite
+    /// on the BMPCC 4K). `None` when the camera does not report it this cycle. This is the
+    /// ONLY focus-related property the BMPCC's PTP space documents (the TalOrg control-point
+    /// list + the MVP `mapping.rs` "Verified PTP facts"): there is NO AF/MF focus-MODE
+    /// selector and NO auto/manual exposure-MODE (program) selector over PTP (issue 1238).
+    /// So this is the honest focus signal a pre-run check can use — a STABLE value across
+    /// reads is the no-AF-hunt proxy, and its presence confirms manual focus control is
+    /// reachable — never a fabricated "focus mode = manual" flag. READ-ONLY (deliberately
+    /// never in [`SetRequest`]: a focus write during a take is unsafe). `#[serde(default)]`
+    /// so an older relay that does not send it still deserializes (as `None`), mirroring
+    /// [`RelayState::capture_fps`].
+    #[serde(default)]
+    pub focus_distance: Option<i64>,
 }
 
 /// The camera's own fine-grained value lists/ranges — the web UI rebuilds its ISO and

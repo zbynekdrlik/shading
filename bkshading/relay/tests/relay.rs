@@ -52,6 +52,14 @@ impl FakeRunner {
             camera_present: true,
         }
     }
+
+    /// Adds (or overrides) one gphoto2 config block, e.g. the issue-1238 `d003` focus-distance
+    /// block that `full_camera()` deliberately omits (so the best-effort read of an ABSENT d003
+    /// is also exercised).
+    fn with_config(mut self, key: &str, block: &str) -> Self {
+        self.configs.insert(key.into(), block.into());
+        self
+    }
 }
 
 impl Gphoto2Runner for FakeRunner {
@@ -98,9 +106,30 @@ fn read_state_reports_online_camera() {
     assert_eq!(st.params.kelvin, Some(5600));
     assert_eq!(st.params.shutter, Some(50)); // d002 18000 @ 25fps -> 1/50
     assert!(st.fps_supported);
+    // issue 1238: full_camera() deliberately omits d003, so the best-effort focus-distance read
+    // degrades to None WITHOUT breaking the online state — the RED/GREEN guard against reading
+    // d003 with `?` (which would wrongly degrade the whole read to offline when d003 is absent).
+    assert_eq!(st.params.focus_distance, None);
     let caps = st.caps.unwrap();
     assert_eq!(caps.iso_choices, vec![100, 200, 400, 800]);
     assert_eq!(st.version, "1.7.0-dev.516");
+}
+
+#[test]
+fn read_state_reports_d003_focus_distance_1238() {
+    // A camera that DOES answer d003 -> the relay reports the raw manual focus distance, and the
+    // other params are unaffected by the added best-effort read.
+    let session = CameraSession::new(
+        Box::new(
+            FakeRunner::full_camera()
+                .with_config("d003", "Current: 32768\nBottom: 0\nTop: 65536\nEND"),
+        ),
+        "1.7.0-dev.516",
+    );
+    let st = session.read_state();
+    assert!(st.online);
+    assert_eq!(st.params.focus_distance, Some(32768));
+    assert_eq!(st.params.iso, Some(400));
 }
 
 #[test]

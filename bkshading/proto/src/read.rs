@@ -25,6 +25,11 @@ pub struct RawConfigs {
     pub sensor_fps: String,
     /// `d007` — project fps (settable, 5..60).
     pub project_fps: String,
+    /// `d003` — manual focus DISTANCE (RANGE, ~0=closest..65536=infinite). The only
+    /// focus-related property the BMPCC's PTP space documents (issue 1238); read
+    /// best-effort by the relay, so an empty block (a camera that does not answer it)
+    /// degrades to a `None` `focus_distance`, never a crash.
+    pub focus_distance: String,
 }
 
 fn current_i64(block: &str) -> Option<i64> {
@@ -65,6 +70,9 @@ pub fn params_and_caps(raw: &RawConfigs) -> (ShadingParams, CameraCaps) {
         current_i64(&raw.shutter_angle).map(|angle| convert_angle_or_denom(angle, fps100));
     let kelvin = current_i64(&raw.kelvin);
     let tint = current_i64(&raw.tint);
+    // d003 manual focus distance (issue 1238): reported verbatim as the raw current value.
+    // An empty/absent block -> None (the camera did not answer d003 this cycle), never 0.
+    let focus_distance = current_i64(&raw.focus_distance);
 
     let params = ShadingParams {
         aperture_av,
@@ -75,6 +83,7 @@ pub fn params_and_caps(raw: &RawConfigs) -> (ShadingParams, CameraCaps) {
         shutter,
         fps100: project_fps.map(|f| f * 100).or(sensor_fps100),
         sensor_fps100,
+        focus_distance,
     };
 
     let (fps_min, fps_max) =
