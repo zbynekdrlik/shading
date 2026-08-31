@@ -614,3 +614,182 @@ fn report_slow_shutter_and_missing_iso_warns_both_but_never_fails() {
         "a slow shutter + missing iso must WARN: {all}"
     );
 }
+
+// =============================================================================================
+// #1238 — consumer-wiring remainder: the relay's /api/state now reports the camera's manual
+// FOCUS DISTANCE (gphoto2 d003, ShadingParams.focus_distance -> camelCase focusDistance,
+// bkshading/proto/src/wire.rs). This is a REAL, honest signal (its presence confirms manual
+// focus control is reachable over PTP) but it is a DISTANCE, never a MODE flag -- the BMPCC's
+// PTP property space documents no focus-MODE (AF/MF) selector at all (.claude/rules/bkshading.md
+// "Relay focus-distance exposure" section). So a present focusDistance gets ONE new REPORT-ONLY
+// informational line (never a WARNING, never phrased as satisfying the #220 "FOCUS: MANUAL"
+// checklist item); an absent/null focusDistance changes NOTHING -- today's honest
+// bkshading_preflight_focus_note_message NOTE (still unconditionally printed either way, since a
+// present distance never makes the MODE knowable) is the only thing that appears, byte-for-byte
+// unchanged from before this ticket.
+// =============================================================================================
+#[test]
+fn lib_defines_the_1238_focus_distance_functions() {
+    for f in [
+        "bkshading_preflight_state_focus_distance",
+        "bkshading_preflight_focus_distance_message",
+    ] {
+        let out = stdout_of(&format!("type {f} >/dev/null 2>&1 && echo DEFINED"));
+        assert_eq!(out, "DEFINED", "{f} is not defined by the lib");
+    }
+}
+
+// --- state_focus_distance: params.focusDistance integer extractor, same guards as state_iso ----
+#[test]
+fn state_focus_distance_extracts_the_integer() {
+    let json = r#"{"online":true,"camera":"x","params":{"focusDistance":32768}}"#;
+    assert_eq!(
+        stdout_of(&format!(
+            "bkshading_preflight_state_focus_distance '{json}'"
+        )),
+        "32768"
+    );
+}
+
+#[test]
+fn state_focus_distance_extracts_a_boundary_value() {
+    // 0 = closest, a legitimate reported value -- must not be treated as "empty/falsy".
+    let json = r#"{"online":true,"camera":"x","params":{"focusDistance":0}}"#;
+    assert_eq!(
+        stdout_of(&format!(
+            "bkshading_preflight_state_focus_distance '{json}'"
+        )),
+        "0"
+    );
+}
+
+#[test]
+fn state_focus_distance_extracts_a_negative_or_out_of_range_value_without_filtering() {
+    // Review finding (issue 1238 CYCLE-step-6 pass): the extractor must not special-case the
+    // BMPCC's documented 0..65536 range -- ANY int the relay reports must pass through
+    // unfiltered (a malformed/out-of-spec relay answer is not this extractor's job to validate;
+    // it is informational-only downstream, never gated). -1 is outside the documented range but
+    // is still a valid JSON integer and must be extracted, not treated as empty.
+    let json = r#"{"online":true,"camera":"x","params":{"focusDistance":-1}}"#;
+    assert_eq!(
+        stdout_of(&format!(
+            "bkshading_preflight_state_focus_distance '{json}'"
+        )),
+        "-1"
+    );
+}
+
+#[test]
+fn state_focus_distance_empty_when_null_absent_bool_or_non_dict() {
+    assert_eq!(
+        stdout_of(
+            r#"bkshading_preflight_state_focus_distance '{"online":true,"params":{"focusDistance":null}}'"#
+        ),
+        ""
+    );
+    assert_eq!(
+        stdout_of(r#"bkshading_preflight_state_focus_distance '{"online":true,"params":{}}'"#),
+        ""
+    );
+    // a JSON bool must not be treated as a valid int (python bool is an int subclass).
+    assert_eq!(
+        stdout_of(
+            r#"bkshading_preflight_state_focus_distance '{"online":true,"params":{"focusDistance":true}}'"#
+        ),
+        ""
+    );
+    assert_eq!(
+        stdout_of(r#"bkshading_preflight_state_focus_distance '{"online":true,"params":[1,2]}'"#),
+        ""
+    );
+    for body in ["null", "[1,2,3]", "\"a string\"", "42", "garbage"] {
+        assert_eq!(
+            stdout_of(&format!(
+                "bkshading_preflight_state_focus_distance '{body}'"
+            )),
+            "",
+            "non-dict/garbage {body:?} must yield empty focus distance, not crash"
+        );
+    }
+}
+
+// --- message formatter: informational, never a WARNING, never claims a MODE --------------------
+#[test]
+fn focus_distance_message_is_informational_not_a_warning_and_names_camera_and_distance() {
+    let m = stdout_of(
+        "bkshading_preflight_focus_distance_message cam1 10.77.9.1 \"USB PTP Class Camera\" 32768",
+    );
+    assert!(
+        !m.contains("WARNING"),
+        "a present distance value must never be a WARNING: {m}"
+    );
+    assert!(m.contains("cam1"), "{m}");
+    assert!(m.contains("32768"), "must name the distance value: {m}");
+    assert!(m.contains("USB PTP Class Camera"), "{m}");
+    assert!(
+        m.to_lowercase().contains("mode") && m.contains("NOT"),
+        "must NOT claim a focus MODE from the distance value: {m}"
+    );
+}
+
+// --- report integration: focusDistance present adds the informational line, mode NOTE unchanged
+#[test]
+fn report_prints_focus_distance_line_when_present() {
+    let json = r#"{"online":true,"camera":"USB PTP Class Camera","params":{"iso":400,"shutter":1000,"apertureAv":4.0,"focusDistance":32768}}"#;
+    let (rc, out, err) = run_sourced(&format!(
+        "set -e\ncurl() {{ printf '%s' '{json}'; }}\nbkshading_preflight_report cam1 x 1 1 500\necho AFTER"
+    ));
+    let all = format!("{out}\n{err}");
+    assert_eq!(rc, 0, "report must never fail the caller: {all}");
+    assert!(out.contains("AFTER"), "must return control: {out}");
+    assert!(
+        all.contains("32768"),
+        "focus distance informational line must appear: {all}"
+    );
+    assert!(
+        all.to_lowercase().contains("focus"),
+        "the honest focus/exposure-MODE NOTE must still appear: {all}"
+    );
+    assert!(
+        !all.contains("WARNING"),
+        "a present focus distance must never trigger a WARNING: {all}"
+    );
+}
+
+// --- report integration: focusDistance absent -> no new line, existing NOTE unchanged ----------
+#[test]
+fn report_omits_focus_distance_line_when_absent() {
+    // Same JSON as the pre-1238 #1237 full-report test (no focusDistance key at all) -- the
+    // existing "report_full_online_camera_prints_all_three_lines" behaviour must be byte-for-byte
+    // preserved: no new numeric distance line appears, but the mode-honesty NOTE still does.
+    let json = r#"{"online":true,"camera":"USB PTP Class Camera","params":{"iso":400,"shutter":1000,"apertureAv":4.0}}"#;
+    let (rc, out, err) = run_sourced(&format!(
+        "set -e\ncurl() {{ printf '%s' '{json}'; }}\nbkshading_preflight_report cam1 x 1 1 500\necho AFTER"
+    ));
+    let all = format!("{out}\n{err}");
+    assert_eq!(rc, 0, "must never fail the caller: {all}");
+    assert!(out.contains("AFTER"), "must return control: {out}");
+    assert!(
+        !all.contains("d003="),
+        "no focus-distance informational line when the field is absent: {all}"
+    );
+    assert!(
+        all.to_lowercase().contains("focus"),
+        "the honest focus/exposure-MODE NOTE must still appear when distance is absent: {all}"
+    );
+}
+
+// --- report integration: focusDistance == 0 (closest) is still a present value, not "absent" ---
+#[test]
+fn report_prints_focus_distance_line_when_value_is_zero() {
+    let json = r#"{"online":true,"camera":"USB PTP Class Camera","params":{"iso":400,"shutter":1000,"apertureAv":4.0,"focusDistance":0}}"#;
+    let (rc, out, err) = run_sourced(&format!(
+        "set -e\ncurl() {{ printf '%s' '{json}'; }}\nbkshading_preflight_report cam1 x 1 1 500\necho AFTER"
+    ));
+    let all = format!("{out}\n{err}");
+    assert_eq!(rc, 0, "must never fail the caller: {all}");
+    assert!(
+        all.contains("d003=0"),
+        "a distance of exactly 0 (closest) must still print the informational line: {all}"
+    );
+}

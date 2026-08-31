@@ -15,11 +15,19 @@
 #   - SHUTTER >= 1/500 (issue 808): the #216 slow-shutter smear guard.
 #   - EXPOSURE/gain (issue 1237): iso (gain) + aperture (apertureAv) reported as concrete FIXED
 #     values -- the measurable half of the "EXPOSURE: FIXED / manual gain" line.
-#   - FOCUS mode + auto/manual EXPOSURE mode (issue 1237): the relay's /api/state does NOT expose
-#     these (relay/src/transport.rs reads iso/f-number/d002/d004/d005/d006/d007 only, no focus/mode
-#     config), so they are surfaced HONESTLY as a NOTE -- never a fabricated pass (the LOUD-UNKNOWN
-#     doctrine, .claude/rules/imag-ssh-remote-tool-preflight.md) -- and a follow-up extends the
-#     relay so they become auto-checkable. The #220 manual checklist still owns those two lines.
+#   - FOCUS distance (issue 1238): the relay's /api/state now ALSO reports the camera's manual
+#     FOCUS DISTANCE (gphoto2 d003, ShadingParams.focus_distance / camelCase focusDistance) when
+#     the camera answers it -- surfaced as an informational REPORT-ONLY line. Its PRESENCE only
+#     confirms manual focus control is reachable over PTP; it is a DISTANCE, never a mode flag, so
+#     it never claims the #220 "FOCUS: MANUAL" checklist item is satisfied.
+#   - FOCUS mode + auto/manual EXPOSURE mode (issue 1237/1238): the relay's /api/state does NOT
+#     expose either -- confirmed (issue 1238, honest PTP research against the TalOrg BMPCC-over-PTP
+#     control-point list) to be a HARDWARE FACT, not a gap in our code: the BMPCC's documented PTP
+#     property space has no focus-MODE (AF/MF) selector and no auto/manual exposure-MODE (program)
+#     selector at all (see .claude/rules/bkshading.md "Relay focus-distance exposure" section). So
+#     they are surfaced HONESTLY as a NOTE -- never a fabricated pass (the LOUD-UNKNOWN doctrine,
+#     .claude/rules/imag-ssh-remote-tool-preflight.md). The #220 manual checklist still owns
+#     confirming those two MODE lines by hand.
 #
 # REPORT-ONLY BY DESIGN (owner intent recorded on issue 808, M3 discussion): a WARN, never a hard
 # gate, and ABSENCE of the relay/camera is NOT an error -- the physical shading camera is ONE
@@ -115,6 +123,24 @@ elif isinstance(v, int):
 else:
     # round the wire f64 so the operator report shows e.g. 4.33, not 4.333333333333333.
     print(round(v, 2))' "${1:-}"
+}
+
+# issue 1238: params.focusDistance is the camera's manual focus DISTANCE (raw gphoto2 d003 --
+# RANGE, ~0=closest..65536=infinite on the BMPCC 4K; Option<i64> in wire.rs, read best-effort by
+# relay/src/transport.rs so a camera that does not answer it degrades to None WITHOUT suppressing
+# the essential shading read). This is a DISTANCE, never a mode flag -- the BMPCC's PTP property
+# space documents no focus-MODE (AF/MF) selector at all (.claude/rules/bkshading.md). Same
+# non-dict/bool/null guards as the other extractors: a malformed body, a non-dict params, a JSON
+# null/bool, or an absent field all print EMPTY -- never a fabricated value. 0 (closest) is a
+# legitimate reported value and is NOT treated as empty.
+bkshading_preflight_state_focus_distance() {
+  python3 -c 'import json,sys
+try:
+    d = json.loads(sys.argv[1])
+    v = (d.get("params") or {}).get("focusDistance")
+except Exception:
+    v = None
+print(v if isinstance(v, int) and not isinstance(v, bool) else "")' "${1:-}"
 }
 
 # --- pure classifier -----------------------------------------------------------------------------
@@ -233,15 +259,33 @@ bkshading_preflight_warn_exposure_message() {
     "$label" "$ip" "$camera" "$missing"
 }
 
-# issue 1237: FOCUS + auto/manual EXPOSURE-MODE honesty NOTE. The relay's GET /api/state does NOT
-# expose the camera's focus mode or its auto/manual exposure mode (relay/src/transport.rs reads only
-# iso, f-number, d002/d004/d005/d006/d007 -- no focus/exposure-mode config). Per the LOUD-UNKNOWN
-# doctrine (.claude/rules/imag-ssh-remote-tool-preflight.md) an unmeasurable signal is NEVER a silent
-# pass: surface it as a NOTE so the #220 manual checklist still visibly owns FOCUS: MANUAL and
-# no-auto-exposure-drift, and a follow-up extends the relay to make them auto-checkable.
+# issue 1238: informational manual-focus DISTANCE line. The relay's GET /api/state can now report
+# params.focusDistance (raw gphoto2 d003) -- a REAL, honest signal, but a DISTANCE, never a mode
+# flag: its PRESENCE only confirms manual focus control is reachable over PTP, and a value that
+# stays STABLE across reads spaced beyond the relay's issue-1229 read-floor (default 10s) is a
+# no-AF-hunt proxy (.claude/rules/bkshading.md "Relay focus-distance exposure" section) -- NEVER a
+# claim that manual-focus MODE is engaged. Printed to stdout, never a WARNING (a present value is
+# informational, never a fail signal); deliberately does NOT say "satisfied automatically" for the
+# same reason bkshading_preflight_exposure_ok_message doesn't -- see
+# bkshading_preflight_focus_note_message immediately below, which still applies unconditionally.
+bkshading_preflight_focus_distance_message() {
+  local label="$1" ip="$2" camera="$3" distance="$4"
+  printf "    bkshading relay check (%s, %s): camera '%s' reports manual focus distance d003=%s (informational only -- a present distance value does NOT prove manual-focus MODE is engaged; see NOTE below for the focus/exposure-MODE constraint)\n" \
+    "$label" "$ip" "$camera" "$distance"
+}
+
+# issue 1237/1238: FOCUS-MODE + auto/manual EXPOSURE-MODE honesty NOTE. The relay's GET /api/state
+# does NOT expose either -- confirmed (issue 1238, honest research against the authoritative TalOrg
+# BMPCC-over-PTP control-point list) to be a HARDWARE FACT, not merely unread: the BMPCC's documented
+# PTP property space has no focus-MODE (AF/MF) selector and no auto/manual exposure-MODE (program)
+# selector at all. Per the LOUD-UNKNOWN doctrine (.claude/rules/imag-ssh-remote-tool-preflight.md) an
+# unmeasurable signal is NEVER a silent pass: surface it as a NOTE so the #220 manual checklist still
+# visibly owns FOCUS: MANUAL and no-auto-exposure-drift. This NOTE is printed UNCONDITIONALLY --
+# whether or not a focus DISTANCE value is also readable (see bkshading_preflight_focus_distance_message
+# above) makes no difference: a present distance never proves the MODE.
 bkshading_preflight_focus_note_message() {
   local label="$1"
-  printf "    NOTE: bkshading relay does not expose FOCUS mode or the auto/manual EXPOSURE mode for %s -- the #220 manual checklist still owns 'FOCUS: MANUAL' and 'no auto-exposure drift'. Auto-checking those needs the relay to read those camera configs (tracked as a follow-up).\n" \
+  printf "    NOTE: bkshading relay does not expose a FOCUS MODE (AF/MF) selector or an auto/manual EXPOSURE MODE for %s -- this is a hardware fact (the camera's PTP property space has no such selector), not a gap in our code. The #220 manual checklist still owns 'FOCUS: MANUAL' and 'no auto-exposure drift'.\n" \
     "$label"
 }
 
@@ -267,7 +311,7 @@ bkshading_preflight_skip_unreachable_message() {
 # audio-presence-preflight.sh's own "the recording-e2e.sh step is a thin caller" convention.
 bkshading_preflight_report() {
   local label="$1" ip="$2" port="${3:-$(bkshading_relay_port)}" max_time="${4:-5}" min="${5:-$(bkshading_preflight_min_shutter_denom)}"
-  local raw status camera shutter online iso aperture exp_status
+  local raw status camera shutter online iso aperture exp_status focus_distance
   # The JSON extractors below are python3-backed. If python3 is absent (or unusable) this report
   # must fail LOUD-BY-NAME and non-fatally (imag-ssh-remote-tool-preflight.md: a missing tool is
   # never a silent measured zero; the owner M3 report-only contract: never abort the run). Without
@@ -303,6 +347,15 @@ bkshading_preflight_report() {
         warn-*) bkshading_preflight_warn_exposure_message "$label" "$ip" "$camera" "$exp_status" >&2 ;;
         *)      : ;;
       esac
+      # issue 1238: the manual focus DISTANCE informational line -- ONLY when the relay reports one
+      # this cycle (an older relay / a camera that doesn't answer d003 stays exactly as before:
+      # no new line at all). Printed BEFORE the unconditional mode-honesty NOTE so the operator
+      # reads "here's the one real focus signal we have" immediately followed by "here's what we
+      # still can't know" -- the NOTE never changes based on whether a distance was read.
+      focus_distance="$(bkshading_preflight_state_focus_distance "$raw" || true)"
+      if [ -n "$focus_distance" ]; then
+        bkshading_preflight_focus_distance_message "$label" "$ip" "$camera" "$focus_distance"
+      fi
       bkshading_preflight_focus_note_message "$label"
     fi
   else
