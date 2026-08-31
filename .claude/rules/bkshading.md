@@ -239,8 +239,13 @@ ignores the new key), so relay/service/panel interoperate across versions with n
   `d004`(WB Kelvin), `d005`(tint), `d006`(sensor fps), `d007`(project fps),
   `d008`(unknown MENU 2/0), `d009`(unknown ro 0), `d00a`(unknown ro 0). The standard PTP
   `focusmode`(0x500A)/`expprogram`(0x500E) are absent. So `d003` distance is the ONLY honest
-  focus signal — a STABLE value across reads is the no-AF-hunt proxy and its presence confirms
-  manual focus control is reachable; there is no honest way to report a focus/exposure MODE flag.
+  focus signal — its presence confirms manual focus control is reachable, and a value that is
+  STABLE across reads is a no-AF-hunt proxy; there is no honest way to report a focus/exposure
+  MODE flag. **Cache caveat for the consumer (issue 1229):** two `/api/state` samples within the
+  relay's `min_read_interval_ms` floor (default 10 s) return the SAME cached snapshot and
+  `RelayState` has no read-timestamp/cycle id, so a stability-based no-hunt check MUST space its
+  samples further apart than the floor (or add a `readAtMs`/cycle field to `RelayState` first) —
+  a naive "changed between two quick polls?" check would always read "stable".
 - **Do NOT fabricate a `focusMode`/`exposureMode` field.** An explicit absent field with this
   documented meaning beats a permanently-`null` field reading a key the BMPCC does not implement,
   and asserting `d008 = exposure mode` (or any undiscovered d-code) without the live camera is the
@@ -251,9 +256,14 @@ ignores the new key), so relay/service/panel interoperate across versions with n
   observing which value changes. If a mode d-code is found, add it exactly like `focus_distance`
   (a new `RawConfigs` field + `FOCUS_DISTANCE_KEY`-style const + a `ShadingParams` field, read
   best-effort). Until then, no mode field exists — by design.
-- **Consumer wiring is a separate lane.** The issue-1237 `[0/8]` preflight (which surfaces the
-  FOCUS/EXPOSURE checklist items) consumes `focusDistance` once BOTH it and this land; this lane
-  is the RELAY side only (the preflight lib is untouched — it is not on this base).
+- **Consumer wiring is the open remainder of issue 1238 (a separate step, tracked on that ticket).**
+  This change is the RELAY side only — it exposes `focusDistance`; nothing consumes it yet. The
+  issue-1237 `[0/8]` preflight (`scripts/lib/bkshading-preflight.sh`) is already on `dev` (it
+  merged after this lane branched off an older `dev`), so wiring it to read `focusDistance` is the
+  remaining work: fold a FOCUS signal into the preflight (absent → keep the honest LOUD-UNKNOWN
+  NOTE; present → the stability-across-reads no-hunt proxy above, sampled beyond the 1229 floor;
+  REPORT-ONLY) and correct that lib's own header NOTE, which still says the relay reads no focus
+  config (d003 distance IS read now — only the MODE claim stays true).
 
 
 ## SBC / handheld provisioning (issue 808 — the last milestone)

@@ -246,7 +246,7 @@ fn apply_writes_expected_gphoto2_config() {
 /// A [`Gphoto2Runner`] that COUNTS its gphoto2 invocations (via a shared atomic), so a test can
 /// assert how many real USB-PTP reads a sequence of `/api/state` calls actually triggered. The
 /// `auto_detect` count is the proxy for "one full read cycle" (`read_state` calls it exactly once
-/// before the seven `get_config` reads).
+/// before the eight `get_config` reads — the seven shading keys + the issue-1238 `d003`).
 struct CountingRunner {
     inner: FakeRunner,
     detect_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,

@@ -141,7 +141,8 @@ pub const MAX_MIN_READ_INTERVAL_MS: u64 = 3_600_000;
 
 /// gphoto2 config key for the BMPCC manual focus DISTANCE (issue 1238). Documented as PTP
 /// property `0xd003` (RANGE, ~0=closest..65536=infinite) in the TalOrg BMPCC-over-PTP
-/// control-point list + the MVP mapping. It is read BEST-EFFORT (see `read_raw`): a camera /
+/// control-point list (the MVP mapping covers the shading d-codes, not d003). It is read
+/// BEST-EFFORT (see `read_raw`): a camera /
 /// firmware / lens that does not answer it yields an empty block (-> a `None` `focus_distance`),
 /// never a failed read that would degrade the whole shading state to offline.
 ///
@@ -301,7 +302,10 @@ impl CameraSession {
             // means the read is fundamentally broken and correctly degrades to offline via `?`,
             // focus_distance is a supplementary pre-run-check signal — a camera/firmware/lens that
             // does not answer d003 must NOT suppress the essential shading state, so its error maps
-            // to an empty block (-> a `None` focus_distance), not a whole-read failure.
+            // to an empty block (-> a `None` focus_distance), not a whole-read failure. NB: `apply`
+            // also calls `read_raw`, so a write pays this one extra `--get-config` that `plan_writes`
+            // never uses — negligible (writes are rare + user-initiated), and not worth splitting the
+            // read paths for.
             focus_distance: self
                 .runner
                 .get_config(FOCUS_DISTANCE_KEY)
@@ -338,7 +342,8 @@ impl CameraSession {
         state
     }
 
-    /// The real (un-throttled) read cycle: one `gphoto2 --auto-detect` + seven `--get-config`.
+    /// The real (un-throttled) read cycle: one `gphoto2 --auto-detect` + eight `--get-config`
+    /// (the seven shading keys + the issue-1238 best-effort `d003` focus distance).
     /// A detect miss or a gphoto2 read error degrades to an offline [`RelayState`], the
     /// server-is-truth model. Reached only through [`read_state`](Self::read_state)'s floor.
     fn read_state_uncached(&self) -> RelayState {

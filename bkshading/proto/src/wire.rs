@@ -44,15 +44,22 @@ pub struct ShadingParams {
     pub sensor_fps100: Option<i64>,
     /// Manual focus DISTANCE — raw gphoto2 `d003` (RANGE, ~0 = closest .. ~65536 = infinite
     /// on the BMPCC 4K). `None` when the camera does not report it this cycle. This is the
-    /// ONLY focus-related property the BMPCC's PTP space documents (the TalOrg control-point
-    /// list + the MVP `mapping.rs` "Verified PTP facts"): there is NO AF/MF focus-MODE
-    /// selector and NO auto/manual exposure-MODE (program) selector over PTP (issue 1238).
-    /// So this is the honest focus signal a pre-run check can use — a STABLE value across
-    /// reads is the no-AF-hunt proxy, and its presence confirms manual focus control is
-    /// reachable — never a fabricated "focus mode = manual" flag. READ-ONLY (deliberately
-    /// never in [`SetRequest`]: a focus write during a take is unsafe). `#[serde(default)]`
-    /// so an older relay that does not send it still deserializes (as `None`), mirroring
-    /// [`RelayState::capture_fps`].
+    /// ONLY focus-related property the BMPCC's PTP space documents (the TalOrg BMPCC-over-PTP
+    /// control-point list; the MVP `mapping.rs` maps the shading d-codes but not d003): there
+    /// is NO AF/MF focus-MODE selector and NO auto/manual exposure-MODE (program) selector
+    /// over PTP (issue 1238). So this is the honest focus signal a pre-run check can use — its
+    /// presence confirms manual focus control is reachable, and a value that is STABLE across
+    /// reads is a no-AF-hunt proxy — never a fabricated "focus mode = manual" flag.
+    ///
+    /// CONSUMER CAVEAT (issue 1229 read cache): two `/api/state` samples taken within the
+    /// relay's `min_read_interval_ms` floor (default 10 s) return the SAME cached snapshot, and
+    /// `RelayState` carries no read-timestamp/cycle id — so a naive "did it change between two
+    /// polls" check always sees "stable". A stability-based no-hunt check MUST space its samples
+    /// further apart than the floor (or a future `readAtMs`/cycle field on `RelayState` would let
+    /// a consumer distinguish a cache hit from a real read); the single-read presence check is
+    /// unaffected. READ-ONLY (deliberately never in [`SetRequest`]: a focus write during a take
+    /// is unsafe). `#[serde(default)]` so an older relay that does not send it still deserializes
+    /// (as `None`), mirroring [`RelayState::capture_fps`].
     #[serde(default)]
     pub focus_distance: Option<i64>,
 }
