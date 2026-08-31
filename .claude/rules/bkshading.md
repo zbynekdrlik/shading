@@ -402,3 +402,36 @@ undo it). **Any interim "stop this on box X while we investigate" mitigation nee
 tracking** (a ticket comment naming which boxes were stopped + a reminder to restore them) — the
 harness-managed pause (`bkshading-e2e-pause.sh`, above) only covers stops the E2E harness ITSELF
 performs; it has no visibility into an ad-hoc manual stop done directly on the rig.
+
+## E2E `[0/8]` camera pre-run auto-check reads `/api/state` — shutter+iso+aperture, NOT focus/exposure-MODE (issue 808 shutter half + issue 1237 exposure half)
+
+`scripts/lib/bkshading-preflight.sh` (wired at `recording-e2e.sh:650`, `bkshading_preflight_report
+"$CAMERA_NAME" "$CAM1_IP"`, tested by `tests/harness_bkshading_preflight_808.rs`) automates the
+`#220` CAMERA PRE-RUN checklist by reading the relay's `GET /api/state` — ONE `curl -fsS`, served
+from the relay's issue-1229 read-floor cache (never a direct gphoto2 call). It is REPORT-ONLY
+(always `return 0`, WARN never abort — owner M3 decision).
+
+- **What is measurable from `/api/state`, and what is NOT.** `RelayState`/`ShadingParams`
+  (`bkshading/proto/src/wire.rs`) + the relay read plan (`relay/src/transport.rs` reads only
+  `iso, f-number, d002, d004/d005, d006/d007`) expose SHUTTER (`params.shutter`, a DENOMINATOR —
+  500 == 1/500s, LARGER = faster), ISO/gain (`params.iso`), and APERTURE (`params.apertureAv`).
+  There is **NO focus-mode field and NO auto/manual exposure-MODE field.** So the shutter check
+  (issue 808) and the exposure-VALUES-readable check (iso+aperture, issue 1237) are real; manual
+  FOCUS and auto/manual EXPOSURE MODE are genuinely unreadable → surfaced as a report-only
+  `bkshading_preflight_focus_note_message` NOTE (LOUD-UNKNOWN, never a fabricated pass), with the
+  relay extension tracked in the follow-up (#1238). **Do NOT let an OK line claim "exposure fixed /
+  satisfied automatically" — presence of a value ≠ a fixed MODE; a BMPCC in auto still reports
+  concrete iso/f-number.** (The exposure OK line was caught doing exactly this in review.)
+- **Report-only python3-safety pattern (reuse for any python3-backed preflight lib).** The JSON
+  extractors are python3 one-liners. Under the caller's `set -euo pipefail`, a bare
+  `x="$(py_extractor "$raw")"` will ABORT the whole E2E if python3 is missing/crashes — the exact
+  opposite of a report-only check. Guard it: a LOUD-BY-NAME `command -v python3 || { NOTE; return
+  0; }` gate at the top of the orchestrator + `|| true` on every python3-backed substitution (a
+  transient failure degrades to EMPTY → a report-only warn, never a crash). The extractors treat a
+  JSON bool as ABSENT (`not isinstance(v, bool)` — python bool is an int subclass) and print EMPTY
+  on a non-dict body / non-dict `params` / null (never a fabricated value).
+- **Extending it is anchor-safe by construction.** New behavior goes into the LIB
+  (`bkshading_preflight_report` + pure fns) — `recording-e2e.sh`'s one call line stays
+  byte-identical, so the #675 anchor sweep is trivially clean. Keep the classifier's decision the
+  single source of truth for a WARN's named parameter (pass the STATUS into the message, don't
+  re-derive the missing set from the values in two places).

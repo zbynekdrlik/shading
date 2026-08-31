@@ -377,3 +377,240 @@ fn report_never_fails_the_caller_on_an_unreachable_relay() {
         "must name the box in its output: {out}"
     );
 }
+
+// =============================================================================================
+// #1237 — complete the pre-run auto-check: the EXPOSURE/gain half (iso + aperture, measurable
+// from the same GET /api/state) + honest surfacing of the FOCUS + auto/manual EXPOSURE-MODE that
+// the relay does NOT expose. REPORT-ONLY, same as the shutter half (owner M3 decision on #808 +
+// the ticket's report-only-first default). The relay's read plan (bkshading/relay/src/transport.rs)
+// reads iso + f-number(aperture) but NO focus/exposure-mode config, so those stay a NOTE + a
+// filed follow-up, never a fabricated pass (imag-ssh-remote-tool-preflight.md LOUD-UNKNOWN).
+// =============================================================================================
+#[test]
+fn lib_defines_the_1237_exposure_functions() {
+    for f in [
+        "bkshading_preflight_state_iso",
+        "bkshading_preflight_state_aperture",
+        "bkshading_preflight_classify_exposure",
+        "bkshading_preflight_exposure_ok_message",
+        "bkshading_preflight_warn_exposure_message",
+        "bkshading_preflight_focus_note_message",
+    ] {
+        let out = stdout_of(&format!("type {f} >/dev/null 2>&1 && echo DEFINED"));
+        assert_eq!(out, "DEFINED", "{f} is not defined by the lib");
+    }
+}
+
+// --- state_iso: params.iso (gain) integer extractor, same guards as the shutter extractor -------
+#[test]
+fn state_iso_extracts_the_integer_gain() {
+    let json = r#"{"online":true,"camera":"x","params":{"iso":400,"shutter":1000}}"#;
+    assert_eq!(
+        stdout_of(&format!("bkshading_preflight_state_iso '{json}'")),
+        "400"
+    );
+}
+
+#[test]
+fn state_iso_empty_when_null_absent_bool_or_non_dict() {
+    assert_eq!(
+        stdout_of(r#"bkshading_preflight_state_iso '{"online":true,"params":{"iso":null}}'"#),
+        ""
+    );
+    assert_eq!(
+        stdout_of(r#"bkshading_preflight_state_iso '{"online":true,"params":{}}'"#),
+        ""
+    );
+    // a JSON bool must not be treated as a valid int (python bool is an int subclass).
+    assert_eq!(
+        stdout_of(r#"bkshading_preflight_state_iso '{"online":true,"params":{"iso":true}}'"#),
+        ""
+    );
+    assert_eq!(
+        stdout_of(r#"bkshading_preflight_state_iso '{"online":true,"params":[1,2]}'"#),
+        ""
+    );
+    for body in ["null", "[1,2,3]", "\"a string\"", "42", "garbage"] {
+        assert_eq!(
+            stdout_of(&format!("bkshading_preflight_state_iso '{body}'")),
+            "",
+            "non-dict/garbage {body:?} must yield empty iso, not crash"
+        );
+    }
+}
+
+// --- state_aperture: params.apertureAv (float or int) presence extractor -----------------------
+#[test]
+fn state_aperture_extracts_the_av_value() {
+    let json = r#"{"online":true,"camera":"x","params":{"apertureAv":4.0}}"#;
+    assert_eq!(
+        stdout_of(&format!("bkshading_preflight_state_aperture '{json}'")),
+        "4.0"
+    );
+    // an integer AV must also be accepted (isinstance int).
+    let json2 = r#"{"online":true,"camera":"x","params":{"apertureAv":5}}"#;
+    assert_eq!(
+        stdout_of(&format!("bkshading_preflight_state_aperture '{json2}'")),
+        "5"
+    );
+}
+
+#[test]
+fn state_aperture_empty_when_null_absent_bool_or_non_dict() {
+    assert_eq!(
+        stdout_of(
+            r#"bkshading_preflight_state_aperture '{"online":true,"params":{"apertureAv":null}}'"#
+        ),
+        ""
+    );
+    assert_eq!(
+        stdout_of(r#"bkshading_preflight_state_aperture '{"online":true,"params":{}}'"#),
+        ""
+    );
+    assert_eq!(
+        stdout_of(
+            r#"bkshading_preflight_state_aperture '{"online":true,"params":{"apertureAv":true}}'"#
+        ),
+        ""
+    );
+    for body in ["null", "[1,2,3]", "\"a string\"", "42", "garbage"] {
+        assert_eq!(
+            stdout_of(&format!("bkshading_preflight_state_aperture '{body}'")),
+            "",
+            "non-dict/garbage {body:?} must yield empty aperture, not crash"
+        );
+    }
+}
+
+// --- classify_exposure <online> <camera> <iso> <aperture> -------------------------------------
+//   skip-offline | ok | warn-iso | warn-aperture | warn-both
+fn classify_exposure(online: &str, camera: &str, iso: &str, aperture: &str) -> String {
+    stdout_of(&format!(
+        "bkshading_preflight_classify_exposure {online} \"{camera}\" \"{iso}\" \"{aperture}\""
+    ))
+}
+
+#[test]
+fn classify_exposure_offline_or_no_camera_is_skip() {
+    assert_eq!(classify_exposure("0", "", "", ""), "skip-offline");
+    assert_eq!(classify_exposure("0", "", "400", "4.0"), "skip-offline");
+    assert_eq!(classify_exposure("1", "", "400", "4.0"), "skip-offline");
+}
+
+#[test]
+fn classify_exposure_both_present_is_ok() {
+    assert_eq!(classify_exposure("1", "cam", "400", "4.0"), "ok");
+}
+
+#[test]
+fn classify_exposure_names_the_missing_param() {
+    assert_eq!(classify_exposure("1", "cam", "", "4.0"), "warn-iso");
+    assert_eq!(classify_exposure("1", "cam", "400", ""), "warn-aperture");
+    assert_eq!(classify_exposure("1", "cam", "", ""), "warn-both");
+}
+
+// --- message formatters -----------------------------------------------------------------------
+#[test]
+fn exposure_ok_message_names_camera_iso_and_aperture() {
+    let m = stdout_of(
+        "bkshading_preflight_exposure_ok_message cam1 10.77.9.1 \"USB PTP Class Camera\" 400 4.0",
+    );
+    assert!(
+        !m.contains("WARNING"),
+        "an OK exposure must not be a WARNING: {m}"
+    );
+    assert!(m.contains("cam1"), "{m}");
+    assert!(m.contains("400"), "must name the ISO/gain: {m}");
+    assert!(m.contains("4.0"), "must name the aperture AV: {m}");
+    assert!(m.contains("USB PTP Class Camera"), "{m}");
+}
+
+#[test]
+fn warn_exposure_message_is_loud_and_names_the_missing_param() {
+    // The message keys off the classifier STATUS (single source of truth for the missing set), so
+    // the classifier and the message can never disagree about which parameter is absent.
+    // warn-iso -> names ISO/gain
+    let m = stdout_of(
+        "bkshading_preflight_warn_exposure_message cam1 10.77.9.1 \"USB PTP Class Camera\" warn-iso",
+    );
+    assert!(m.contains("WARNING"), "must be loud: {m}");
+    assert!(m.contains("#1237"), "must cite the ticket: {m}");
+    assert!(
+        m.contains("ISO") || m.contains("gain"),
+        "must name the missing ISO/gain: {m}"
+    );
+    assert!(m.contains("cam1") && m.contains("10.77.9.1"), "{m}");
+    // warn-aperture -> names aperture
+    let m2 = stdout_of(
+        "bkshading_preflight_warn_exposure_message cam1 10.77.9.1 \"USB PTP Class Camera\" warn-aperture",
+    );
+    assert!(m2.contains("WARNING"), "{m2}");
+    assert!(
+        m2.contains("aperture"),
+        "must name the missing aperture: {m2}"
+    );
+    // warn-both -> names both
+    let m3 = stdout_of(
+        "bkshading_preflight_warn_exposure_message cam1 10.77.9.1 \"USB PTP Class Camera\" warn-both",
+    );
+    assert!(
+        (m3.contains("ISO") || m3.contains("gain")) && m3.contains("aperture"),
+        "warn-both must name both: {m3}"
+    );
+}
+
+#[test]
+fn focus_note_is_a_note_not_a_warning_and_names_focus_and_the_box() {
+    let m = stdout_of("bkshading_preflight_focus_note_message cam1");
+    assert!(
+        !m.contains("WARNING"),
+        "an unmeasurable-by-design note must NOT be a WARNING (never a fabricated pass either): {m}"
+    );
+    assert!(m.to_lowercase().contains("focus"), "must name focus: {m}");
+    assert!(m.contains("cam1"), "must name the box: {m}");
+}
+
+// --- report integration: a fully-good online camera prints shutter OK + exposure OK + focus NOTE
+#[test]
+fn report_full_online_camera_prints_all_three_lines() {
+    let json = r#"{"online":true,"camera":"USB PTP Class Camera","params":{"iso":400,"shutter":1000,"apertureAv":4.0}}"#;
+    let (rc, out, err) = run_sourced(&format!(
+        "set -e\ncurl() {{ printf '%s' '{json}'; }}\nbkshading_preflight_report cam1 x 1 1 500\necho AFTER"
+    ));
+    let all = format!("{out}\n{err}");
+    assert_eq!(rc, 0, "report must never fail the caller: {all}");
+    assert!(
+        out.contains("AFTER"),
+        "must return control to the caller: {out}"
+    );
+    assert!(all.contains("1000"), "shutter OK line must appear: {all}");
+    assert!(
+        all.contains("400"),
+        "exposure OK line must name the ISO/gain: {all}"
+    );
+    assert!(
+        all.to_lowercase().contains("focus"),
+        "focus honesty NOTE must appear: {all}"
+    );
+    // a fully-good camera never emits a WARNING.
+    assert!(
+        !all.contains("WARNING"),
+        "a fully-good camera must not WARN: {all}"
+    );
+}
+
+// a slow shutter AND a missing iso: shutter warns AND exposure warns, still returns 0.
+#[test]
+fn report_slow_shutter_and_missing_iso_warns_both_but_never_fails() {
+    let json = r#"{"online":true,"camera":"USB PTP Class Camera","params":{"shutter":60,"apertureAv":4.0}}"#;
+    let (rc, out, err) = run_sourced(&format!(
+        "set -e\ncurl() {{ printf '%s' '{json}'; }}\nbkshading_preflight_report cam1 x 1 1 500\necho AFTER"
+    ));
+    let all = format!("{out}\n{err}");
+    assert_eq!(rc, 0, "must never fail the caller: {all}");
+    assert!(out.contains("AFTER"), "must return control: {out}");
+    assert!(
+        all.contains("WARNING"),
+        "a slow shutter + missing iso must WARN: {all}"
+    );
+}
