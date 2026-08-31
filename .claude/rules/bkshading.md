@@ -256,14 +256,19 @@ ignores the new key), so relay/service/panel interoperate across versions with n
   observing which value changes. If a mode d-code is found, add it exactly like `focus_distance`
   (a new `RawConfigs` field + `FOCUS_DISTANCE_KEY`-style const + a `ShadingParams` field, read
   best-effort). Until then, no mode field exists — by design.
-- **Consumer wiring is the open remainder of issue 1238 (a separate step, tracked on that ticket).**
-  This change is the RELAY side only — it exposes `focusDistance`; nothing consumes it yet. The
-  issue-1237 `[0/8]` preflight (`scripts/lib/bkshading-preflight.sh`) is already on `dev` (it
-  merged after this lane branched off an older `dev`), so wiring it to read `focusDistance` is the
-  remaining work: fold a FOCUS signal into the preflight (absent → keep the honest LOUD-UNKNOWN
-  NOTE; present → the stability-across-reads no-hunt proxy above, sampled beyond the 1229 floor;
-  REPORT-ONLY) and correct that lib's own header NOTE, which still says the relay reads no focus
-  config (d003 distance IS read now — only the MODE claim stays true).
+- **Consumer wiring landed (issue 1238, follow-up lane).** The issue-1237 `[0/8]` preflight
+  (`scripts/lib/bkshading-preflight.sh`) now reads `params.focusDistance` via
+  `bkshading_preflight_state_focus_distance` and, when the relay reports a value this cycle,
+  prints ONE new informational REPORT-ONLY line (`bkshading_preflight_focus_distance_message`,
+  `d003=<value>`) — never phrased as satisfying the #220 "FOCUS: MANUAL" checklist item, since
+  presence only confirms manual focus control is reachable (the stability-across-reads no-hunt
+  proxy above still needs samples spaced beyond the issue-1229 read floor; the preflight's single
+  `curl` per E2E run does not attempt that). Absent/null `focusDistance` prints nothing new — the
+  behavior from before this ticket is preserved exactly. The honest
+  `bkshading_preflight_focus_note_message` NOTE (FOCUS-MODE / auto-manual EXPOSURE-MODE are
+  hardware-unexposed) is printed UNCONDITIONALLY either way — a present distance never makes the
+  MODE knowable. Live BMPCC verification of the printed `d003=` value against the physical lens
+  ring is a supervisor rig step (needs the camera cabled to a relay box), not a code-lane task.
 
 
 ## SBC / handheld provisioning (issue 808 — the last milestone)
@@ -467,8 +472,10 @@ from the relay's issue-1229 read-floor cache (never a direct gphoto2 call). It i
   There is **NO focus-mode field and NO auto/manual exposure-MODE field.** So the shutter check
   (issue 808) and the exposure-VALUES-readable check (iso+aperture, issue 1237) are real; manual
   FOCUS and auto/manual EXPOSURE MODE are genuinely unreadable → surfaced as a report-only
-  `bkshading_preflight_focus_note_message` NOTE (LOUD-UNKNOWN, never a fabricated pass), with the
-  relay extension tracked in the follow-up (#1238). **Do NOT let an OK line claim "exposure fixed /
+  `bkshading_preflight_focus_note_message` NOTE (LOUD-UNKNOWN, never a fabricated pass); issue 1238
+  additionally wired an informational `bkshading_preflight_focus_distance_message` line for the one
+  honest focus signal that IS readable (manual focus DISTANCE, d003) — see the "Relay
+  focus-distance exposure" section above. **Do NOT let an OK line claim "exposure fixed /
   satisfied automatically" — presence of a value ≠ a fixed MODE; a BMPCC in auto still reports
   concrete iso/f-number.** (The exposure OK line was caught doing exactly this in review.)
 - **Report-only python3-safety pattern (reuse for any python3-backed preflight lib).** The JSON
