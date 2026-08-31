@@ -527,9 +527,11 @@ fn exposure_ok_message_names_camera_iso_and_aperture() {
 
 #[test]
 fn warn_exposure_message_is_loud_and_names_the_missing_param() {
-    // iso missing -> names ISO/gain
+    // The message keys off the classifier STATUS (single source of truth for the missing set), so
+    // the classifier and the message can never disagree about which parameter is absent.
+    // warn-iso -> names ISO/gain
     let m = stdout_of(
-        "bkshading_preflight_warn_exposure_message cam1 10.77.9.1 \"USB PTP Class Camera\" \"\" 4.0",
+        "bkshading_preflight_warn_exposure_message cam1 10.77.9.1 \"USB PTP Class Camera\" warn-iso",
     );
     assert!(m.contains("WARNING"), "must be loud: {m}");
     assert!(m.contains("#1237"), "must cite the ticket: {m}");
@@ -538,14 +540,22 @@ fn warn_exposure_message_is_loud_and_names_the_missing_param() {
         "must name the missing ISO/gain: {m}"
     );
     assert!(m.contains("cam1") && m.contains("10.77.9.1"), "{m}");
-    // aperture missing -> names aperture
+    // warn-aperture -> names aperture
     let m2 = stdout_of(
-        "bkshading_preflight_warn_exposure_message cam1 10.77.9.1 \"USB PTP Class Camera\" 400 \"\"",
+        "bkshading_preflight_warn_exposure_message cam1 10.77.9.1 \"USB PTP Class Camera\" warn-aperture",
     );
     assert!(m2.contains("WARNING"), "{m2}");
     assert!(
         m2.contains("aperture"),
         "must name the missing aperture: {m2}"
+    );
+    // warn-both -> names both
+    let m3 = stdout_of(
+        "bkshading_preflight_warn_exposure_message cam1 10.77.9.1 \"USB PTP Class Camera\" warn-both",
+    );
+    assert!(
+        (m3.contains("ISO") || m3.contains("gain")) && m3.contains("aperture"),
+        "warn-both must name both: {m3}"
     );
 }
 

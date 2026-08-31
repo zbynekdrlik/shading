@@ -108,7 +108,13 @@ try:
     v = (d.get("params") or {}).get("apertureAv")
 except Exception:
     v = None
-print(v if isinstance(v, (int, float)) and not isinstance(v, bool) else "")' "${1:-}"
+if isinstance(v, bool) or not isinstance(v, (int, float)):
+    print("")
+elif isinstance(v, int):
+    print(v)
+else:
+    # round the wire f64 so the operator report shows e.g. 4.33, not 4.333333333333333.
+    print(round(v, 2))' "${1:-}"
 }
 
 # --- pure classifier -----------------------------------------------------------------------------
@@ -160,9 +166,12 @@ bkshading_preflight_classify_exposure() {
     printf 'skip-offline\n'
     return 0
   fi
+  # Defensive numeric validation, symmetric with bkshading_preflight_classify's shutter guard:
+  # empty OR non-numeric counts as "missing" so a direct caller passing garbage can never get a
+  # false `ok` (the composed extractors already yield int/float-or-empty; this hardens direct use).
   local iso_missing=0 ap_missing=0
-  [ -z "$iso" ] && iso_missing=1
-  [ -z "$aperture" ] && ap_missing=1
+  case "$iso" in '' | *[!0-9]*) iso_missing=1 ;; esac
+  case "$aperture" in '' | *[!0-9.-]*) ap_missing=1 ;; esac
   if [ "$iso_missing" = 1 ] && [ "$ap_missing" = 1 ]; then
     printf 'warn-both\n'
   elif [ "$iso_missing" = 1 ]; then
@@ -195,23 +204,32 @@ bkshading_preflight_warn_unknown_message() {
     "$label" "$ip" "$camera" "$min"
 }
 
-# issue 1237: exposure/gain OK line -- names the fixed ISO/gain + aperture AV the relay reported.
+# issue 1237: exposure/gain OK line. Claims ONLY what /api/state measures -- that concrete ISO/gain
+# + aperture VALUES are readable -- NOT that a fixed/manual exposure MODE is set (the relay does not
+# expose the auto/manual mode; see bkshading_preflight_focus_note_message). Deliberately does NOT
+# say "satisfied automatically": the #220 EXPOSURE line ("no auto-exposure drift") is only PARTLY
+# covered, so overclaiming it would invite the operator to skip the manual mode check the NOTE below
+# says they still own (the LOUD-UNKNOWN doctrine: never a measured pass of an unmeasurable signal).
 bkshading_preflight_exposure_ok_message() {
   local label="$1" ip="$2" camera="$3" iso="$4" aperture="$5"
-  printf "    bkshading relay check (%s, %s): camera '%s' exposure fixed -- ISO/gain %s, aperture AV %s reported (#220 exposure/gain line satisfied automatically)\n" \
+  printf "    bkshading relay check (%s, %s): camera '%s' exposure values readable -- ISO/gain %s, aperture AV %s (the FIXED/auto exposure MODE is NOT verifiable via the relay -- see NOTE below)\n" \
     "$label" "$ip" "$camera" "$iso" "$aperture"
 }
 
-# issue 1237: exposure/gain WARNING -- names whichever of ISO/gain or aperture the relay could not
-# read for an online camera (self-derives the missing set from the empty value(s), so the ONE
-# message covers warn-iso / warn-aperture / warn-both). REPORT-ONLY (never a hard gate).
+# issue 1237: exposure/gain WARNING. Keys off the classifier STATUS (warn-iso | warn-aperture |
+# warn-both) as the SINGLE source of the missing set, so the classifier and this message can never
+# disagree about which parameter is absent (review finding). Claims only that the VALUE(S) could not
+# be READ -- not the stronger "not fixed" -- because readability is all /api/state measures.
+# REPORT-ONLY (never a hard gate).
 bkshading_preflight_warn_exposure_message() {
-  local label="$1" ip="$2" camera="$3" iso="$4" aperture="$5" missing=""
-  [ -z "$iso" ] && missing="ISO/gain"
-  if [ -z "$aperture" ]; then
-    if [ -n "$missing" ]; then missing="$missing + aperture"; else missing="aperture"; fi
-  fi
-  printf "WARNING #1237: bkshading relay on %s (%s) reports camera '%s' online but %s not read -- cannot confirm a FIXED exposure/gain (#220 checklist: EXPOSURE FIXED / manual gain, no auto-exposure drift). Verify the camera's exposure manually, THEN run.\n" \
+  local label="$1" ip="$2" camera="$3" status="$4" missing=""
+  case "$status" in
+    warn-iso)      missing="ISO/gain" ;;
+    warn-aperture) missing="aperture" ;;
+    warn-both)     missing="ISO/gain + aperture" ;;
+    *)             missing="exposure value(s)" ;;
+  esac
+  printf "WARNING #1237: bkshading relay on %s (%s) reports camera '%s' online but %s not read -- cannot read the exposure/gain values for the #220 EXPOSURE check (EXPOSURE FIXED / manual gain, no auto-exposure drift). Verify the camera's exposure manually, THEN run.\n" \
     "$label" "$ip" "$camera" "$missing"
 }
 
@@ -250,11 +268,23 @@ bkshading_preflight_skip_unreachable_message() {
 bkshading_preflight_report() {
   local label="$1" ip="$2" port="${3:-$(bkshading_relay_port)}" max_time="${4:-5}" min="${5:-$(bkshading_preflight_min_shutter_denom)}"
   local raw status camera shutter online iso aperture exp_status
+  # The JSON extractors below are python3-backed. If python3 is absent (or unusable) this report
+  # must fail LOUD-BY-NAME and non-fatally (imag-ssh-remote-tool-preflight.md: a missing tool is
+  # never a silent measured zero; the owner M3 report-only contract: never abort the run). Without
+  # this gate a missing/broken python3 would abort the caller under `set -euo pipefail` at the first
+  # bare `online="$(...)"` substitution, before `return 0` -- silently killing a hardware E2E run
+  # over a report-only check (review finding). The `|| true` on each substitution below additionally
+  # degrades a transient python3 failure (e.g. OOM) to EMPTY -> a report-only warn, never a crash.
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf "    NOTE: python3 not available -- cannot parse the bkshading relay /api/state for %s; skipping the automated #220 shutter/exposure check (the manual checklist above still applies).\n" \
+      "$label"
+    return 0
+  fi
   if raw="$(curl -fsS --max-time "$max_time" "http://${ip}:${port}/api/state" 2>/dev/null)" && [ -n "$raw" ]; then
-    online="$(bkshading_preflight_state_online "$raw")"
-    camera="$(bkshading_preflight_state_camera "$raw")"
-    shutter="$(bkshading_preflight_state_shutter "$raw")"
-    status="$(bkshading_preflight_classify "$online" "$camera" "$shutter" "$min")"
+    online="$(bkshading_preflight_state_online "$raw" || true)"
+    camera="$(bkshading_preflight_state_camera "$raw" || true)"
+    shutter="$(bkshading_preflight_state_shutter "$raw" || true)"
+    status="$(bkshading_preflight_classify "$online" "$camera" "$shutter" "$min" || true)"
     case "$status" in
       ok)           bkshading_preflight_ok_message "$label" "$ip" "$camera" "$shutter" "$min" ;;
       warn-slow)    bkshading_preflight_warn_slow_message "$label" "$ip" "$camera" "$shutter" "$min" >&2 ;;
@@ -265,12 +295,12 @@ bkshading_preflight_report() {
     # on this box (status != skip-offline). skip-offline (the portable-camera common case) stays as
     # quiet as the shutter path -- no exposure/focus lines for a box with no camera attached.
     if [ "$status" != skip-offline ]; then
-      iso="$(bkshading_preflight_state_iso "$raw")"
-      aperture="$(bkshading_preflight_state_aperture "$raw")"
-      exp_status="$(bkshading_preflight_classify_exposure "$online" "$camera" "$iso" "$aperture")"
+      iso="$(bkshading_preflight_state_iso "$raw" || true)"
+      aperture="$(bkshading_preflight_state_aperture "$raw" || true)"
+      exp_status="$(bkshading_preflight_classify_exposure "$online" "$camera" "$iso" "$aperture" || true)"
       case "$exp_status" in
         ok)     bkshading_preflight_exposure_ok_message "$label" "$ip" "$camera" "$iso" "$aperture" ;;
-        warn-*) bkshading_preflight_warn_exposure_message "$label" "$ip" "$camera" "$iso" "$aperture" >&2 ;;
+        warn-*) bkshading_preflight_warn_exposure_message "$label" "$ip" "$camera" "$exp_status" >&2 ;;
         *)      : ;;
       esac
       bkshading_preflight_focus_note_message "$label"
