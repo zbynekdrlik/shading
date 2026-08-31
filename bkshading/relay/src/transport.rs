@@ -139,6 +139,21 @@ pub const DEFAULT_MIN_READ_INTERVAL_MS: u64 = 10_000;
 /// `parse_capture_fps_env`'s own sanity ceiling.
 pub const MAX_MIN_READ_INTERVAL_MS: u64 = 3_600_000;
 
+/// gphoto2 config key for the BMPCC manual focus DISTANCE (issue 1238). Documented as PTP
+/// property `0xd003` (RANGE, ~0=closest..65536=infinite) in the TalOrg BMPCC-over-PTP
+/// control-point list (the MVP mapping covers the shading d-codes, not d003). It is read
+/// BEST-EFFORT (see `read_raw`): a camera /
+/// firmware / lens that does not answer it yields an empty block (-> a `None` `focus_distance`),
+/// never a failed read that would degrade the whole shading state to offline.
+///
+/// NB — the honest constraint (issue 1238): the BMPCC's documented PTP property space exposes NO
+/// AF/MF focus-MODE selector and NO auto/manual exposure-MODE (program) selector; `d003` is focus
+/// DISTANCE, not a mode flag. The undiscovered `d001`/`d008`/`d009`/`d00a` MIGHT hold a mode, but
+/// identifying any needs a live-cabled `--get-config` + camera-menu-toggle discovery step (the
+/// supervisor's rig step) before it could ever be wired as a field. Until then this key is the
+/// only honest focus signal, and no mode field is fabricated.
+pub const FOCUS_DISTANCE_KEY: &str = "d003";
+
 /// Monotonic clock seam for the read-throttle floor (issue 1229). Only DIFFERENCES between
 /// successive `now_ms` values are meaningful. Injectable so the floor is Tier-0 testable without
 /// real sleeps.
@@ -280,6 +295,21 @@ impl CameraSession {
             tint: self.runner.get_config("d005")?,
             sensor_fps: self.runner.get_config("d006")?,
             project_fps: self.runner.get_config("d007")?,
+            // issue 1238: the manual focus distance (d003) rides the SAME coalesced read cycle as
+            // the seven keys above (one more `--get-config` per throttled read, NEVER a per-request
+            // read and NEVER a second cadence — the issue-1229 bus-friendly floor is preserved). It
+            // is read BEST-EFFORT: unlike the core exposure trio (iso/f-number/d002) whose failure
+            // means the read is fundamentally broken and correctly degrades to offline via `?`,
+            // focus_distance is a supplementary pre-run-check signal — a camera/firmware/lens that
+            // does not answer d003 must NOT suppress the essential shading state, so its error maps
+            // to an empty block (-> a `None` focus_distance), not a whole-read failure. NB: `apply`
+            // also calls `read_raw`, so a write pays this one extra `--get-config` that `plan_writes`
+            // never uses — negligible (writes are rare + user-initiated), and not worth splitting the
+            // read paths for.
+            focus_distance: self
+                .runner
+                .get_config(FOCUS_DISTANCE_KEY)
+                .unwrap_or_default(),
         })
     }
 
@@ -312,7 +342,8 @@ impl CameraSession {
         state
     }
 
-    /// The real (un-throttled) read cycle: one `gphoto2 --auto-detect` + seven `--get-config`.
+    /// The real (un-throttled) read cycle: one `gphoto2 --auto-detect` + eight `--get-config`
+    /// (the seven shading keys + the issue-1238 best-effort `d003` focus distance).
     /// A detect miss or a gphoto2 read error degrades to an offline [`RelayState`], the
     /// server-is-truth model. Reached only through [`read_state`](Self::read_state)'s floor.
     fn read_state_uncached(&self) -> RelayState {

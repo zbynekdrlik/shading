@@ -92,6 +92,9 @@ const D005_BLOCK: &str = "Label: PTP Property 0xd005\nType: MENU\nCurrent: 0\nEN
 const D006_BLOCK: &str = "Label: PTP Property 0xd006\nType: MENU\nCurrent: 2500\nEND";
 const D007_BLOCK: &str =
     "Label: PTP Property 0xd007\nType: RANGE\nCurrent: 25\nBottom: 5\nTop: 60\nEND";
+// issue 1238: d003 manual focus distance (RANGE, ~0=closest..65536=infinite).
+const D003_BLOCK: &str =
+    "Label: PTP Property 0xd003\nType: RANGE\nCurrent: 32768\nBottom: 0\nTop: 65536\nEND";
 
 #[test]
 fn parse_current_extracts_value() {
@@ -153,6 +156,7 @@ fn full_raw() -> RawConfigs {
         tint: D005_BLOCK.to_string(),
         sensor_fps: D006_BLOCK.to_string(),
         project_fps: D007_BLOCK.to_string(),
+        focus_distance: D003_BLOCK.to_string(),
     }
 }
 
@@ -166,6 +170,8 @@ fn params_and_caps_from_full_camera() {
     // project fps 25 -> fps100 2500; d002 18000 at 2500 -> shutter denom 50.
     assert_eq!(params.fps100, Some(2500));
     assert_eq!(params.shutter, Some(50));
+    // issue 1238: d003 manual focus distance lifts through verbatim.
+    assert_eq!(params.focus_distance, Some(32768));
     // f/5.2 is choice index 2 of 4 -> norm 2/3.
     let norm = params.aperture_norm.unwrap();
     assert!((norm - (2.0 / 3.0)).abs() < 1e-9, "norm was {norm}");
@@ -239,11 +245,14 @@ fn shading_params_wire_is_camel_case() {
         shutter: Some(50),
         fps100: Some(2500),
         sensor_fps100: Some(2500),
+        focus_distance: Some(32768),
     };
     let json = serde_json::to_string(&p).unwrap();
     assert!(json.contains("\"apertureAv\""));
     assert!(json.contains("\"apertureNorm\""));
     assert!(json.contains("\"sensorFps100\""));
+    // issue 1238: the new focus-distance field serialises camelCase.
+    assert!(json.contains("\"focusDistance\""));
     // round-trips
     let back: bkshading_proto::wire::ShadingParams = serde_json::from_str(&json).unwrap();
     assert_eq!(back, p);
