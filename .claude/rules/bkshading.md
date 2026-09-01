@@ -82,7 +82,9 @@ CI is the first compile. The local net that CAUGHT real issues here:
    1.98, `chunks_exact(N)` with a CONSTANT N is a clippy-deny lint — use index math or
    `slice::as_chunks::<N>().0`; the main crate was fixed in dev `052da4c5d`;
    `Option::map_or(<bool literal>, |x| …)` trips `unnecessary_map_or` (clippy `style`, stable
-   1.84) — use `is_none_or`/`is_some_and` instead, issue 1157). These clippy traps bite HARDEST
+   1.84) — use `is_none_or`/`is_some_and` instead, issue 1157; a two-comparison bound check
+   `x > a && x <= b` (e.g. a sanity-cap on an env value) trips `manual_range_contains` (clippy
+   `style`) — use `(a+1..=b).contains(&x)` / `(a..=b).contains(&x)`, issue 1229). These clippy traps bite HARDEST
    in the `#[cfg(feature = "ndi")]` code (`ndi_source.rs`): it compiles ONLY under
    `--features ndi` on CI, so a `-D warnings` lint there is invisible to `cargo fmt` and to every
    Tier-0 local check — CI is the first (and only) place it surfaces. Hand-audit feature-gated
@@ -215,6 +217,60 @@ break the one-source-of-truth the owner flagged in the MVP):
   follow-up.
 
 
+## Relay focus-distance exposure + the honest focus/exposure-MODE constraint (issue 1238)
+The relay's `/api/state` now reports the camera's **manual focus DISTANCE** as
+`ShadingParams.focus_distance: Option<i64>` (camelCase `focusDistance`), read from gphoto2
+`d003` (`FOCUS_DISTANCE_KEY` in `transport.rs`), parsed by the existing pure `current_i64` in
+`read.rs::params_and_caps`. It rides the SAME issue-1229 coalesced/min-interval-floored read
+cycle as the seven shading keys (one extra `--get-config` per throttled read — never a
+per-request read, never a second cadence) and is read **best-effort** (`get_config(...).
+unwrap_or_default()`): unlike the core exposure trio (iso/f-number/d002 use `?`), a missing
+`d003` degrades to `None` and must NOT suppress the essential shading state. READ-ONLY by
+design — never in `SetRequest`/`plan_writes` (a focus write during a take is unsafe). Wire
+compat: `#[serde(default)]` (missing → `None`) + no `deny_unknown_fields` (an older reader
+ignores the new key), so relay/service/panel interoperate across versions with no other edit.
+
+- **The BMPCC PTP space exposes NO focus-MODE (AF/MF) selector and NO auto/manual
+  exposure-MODE (program) selector — this is a hardware fact, not a gap in our code.** Verified
+  against the authoritative TalOrg BMPCC-over-PTP control-point list
+  (https://www.tal.org/tutorials/blackmagic-pocket-cinema-camera-usb-control-over-ptp) + the MVP
+  `mapping.rs` "Verified PTP facts". The documented properties are `iso`, `f-number`, and
+  `d001`(unknown RANGE 30–5000), `d002`(shutter angle), **`d003`(manual focus DISTANCE)**,
+  `d004`(WB Kelvin), `d005`(tint), `d006`(sensor fps), `d007`(project fps),
+  `d008`(unknown MENU 2/0), `d009`(unknown ro 0), `d00a`(unknown ro 0). The standard PTP
+  `focusmode`(0x500A)/`expprogram`(0x500E) are absent. So `d003` distance is the ONLY honest
+  focus signal — its presence confirms manual focus control is reachable, and a value that is
+  STABLE across reads is a no-AF-hunt proxy; there is no honest way to report a focus/exposure
+  MODE flag. **Cache caveat for the consumer (issue 1229):** two `/api/state` samples within the
+  relay's `min_read_interval_ms` floor (default 10 s) return the SAME cached snapshot and
+  `RelayState` has no read-timestamp/cycle id, so a stability-based no-hunt check MUST space its
+  samples further apart than the floor (or add a `readAtMs`/cycle field to `RelayState` first) —
+  a naive "changed between two quick polls?" check would always read "stable".
+- **Do NOT fabricate a `focusMode`/`exposureMode` field.** An explicit absent field with this
+  documented meaning beats a permanently-`null` field reading a key the BMPCC does not implement,
+  and asserting `d008 = exposure mode` (or any undiscovered d-code) without the live camera is the
+  fabrication the LOUD-UNKNOWN doctrine bans.
+- **Rig-discovery follow-up (supervisor step, needs the live-cabled BMPCC):** `d001`/`d008`/
+  `d009`/`d00a` are undiscovered and MIGHT hold a mode flag. To identify one: `gphoto2
+  --get-config d001` (…d008/d009/d00a) while toggling the camera's Auto Exposure / focus menu and
+  observing which value changes. If a mode d-code is found, add it exactly like `focus_distance`
+  (a new `RawConfigs` field + `FOCUS_DISTANCE_KEY`-style const + a `ShadingParams` field, read
+  best-effort). Until then, no mode field exists — by design.
+- **Consumer wiring landed (issue 1238, follow-up lane).** The issue-1237 `[0/8]` preflight
+  (`scripts/lib/bkshading-preflight.sh`) now reads `params.focusDistance` via
+  `bkshading_preflight_state_focus_distance` and, when the relay reports a value this cycle,
+  prints ONE new informational REPORT-ONLY line (`bkshading_preflight_focus_distance_message`,
+  `d003=<value>`) — never phrased as satisfying the #220 "FOCUS: MANUAL" checklist item, since
+  presence only confirms manual focus control is reachable (the stability-across-reads no-hunt
+  proxy above still needs samples spaced beyond the issue-1229 read floor; the preflight's single
+  `curl` per E2E run does not attempt that). Absent/null `focusDistance` prints nothing new — the
+  behavior from before this ticket is preserved exactly. The honest
+  `bkshading_preflight_focus_note_message` NOTE (FOCUS-MODE / auto-manual EXPOSURE-MODE are
+  hardware-unexposed) is printed UNCONDITIONALLY either way — a present distance never makes the
+  MODE knowable. Live BMPCC verification of the printed `d003=` value against the physical lens
+  ring is a supervisor rig step (needs the camera cabled to a relay box), not a code-lane task.
+
+
 ## SBC / handheld provisioning (issue 808 — the last milestone)
 A handheld camera runs the SAME `bkshading-relay` on a mini SBC (a Pi Zero 2 W): camera USB → Pi,
 Pi on WiFi. The service already understands it (`Transport::SbcRelay`, `handheld-1` /
@@ -287,3 +343,151 @@ CI / the .sh / the .ps1 cannot drift (`tests/python/test_bkshading_deploy_servic
   `Register-ScheduledTask` + `:8770` verify) + confirming the panel is up — done from a session with
   win-strih MCP / rig access, not an isolated worktree lane. This complements the deferred libndi
   provisioning + live NDI-preview verify already noted above.
+
+
+## E2E harness must PAUSE the relay on the two measurement-critical camboxes (issue 808, live evidence)
+
+The relay is a fleet-standby service — owner directive: it runs on EVERY cambox so any camera can
+be shaded on demand — but its gphoto2 USB-PTP polling causally degrades the E2E harness's own
+measurement quality on the two boxes it needs to trust most: the SOURCE camera (USB-bus
+contention with the physical camera's Cam Link 4K capture device — cam1 measured 58.3-58.9 fps vs
+a healthy 60.0, confirmed by stop/start isolation) and cam2/painter (a 3-core box already running
+camera-box RT + the painter, where the extra CPU/jitter correlates with worse dual-QR window
+quality — 2/2 clean relay-off vs 4/5 over-tolerance relay-on). Evidence: issue 808 comments
+2026-08-29T09:59:31Z / 2026-08-29T15:54:47Z. If you ever see a mysteriously degraded/dropped-frame
+E2E run and a camera happens to be physically cabled to a cambox at the time, check
+`systemctl is-active bkshading-relay` on the SOURCE box and cam2 first — it is a known, already-
+mitigated contention source, not a mystery regression in camera-box/genlock code.
+
+- **The fix is `scripts/lib/bkshading-e2e-pause.sh`** (mirrors the sibling
+  `bkshading-preflight.sh` split: pure remote-text builders + a fail-safe pure parser + two thin
+  ssh orchestrators). `scripts/recording-e2e.sh` pauses (`systemctl stop`) the relay on the
+  run-resolved `$CAM1_IP` (the SOURCE camera, whichever of cam1/cam3/cam4/cam5/cam6 was selected)
+  and `$PAINTER_IP` (cam2) right after the existing `bkshading_preflight_report` call, recording
+  each box's PRIOR active state; `cleanup()` restores it at the very end, but ONLY on a box where
+  the pause step found it genuinely active beforehand — a box the operator deliberately silenced
+  (e.g. via the interim manual `systemctl stop`) is never woken back up by a run.
+- **Do not conflate this with the M3 preflight check** (`scripts/lib/bkshading-preflight.sh`,
+  automated shutter-checklist WARNING) — that reads the camera's state; this pauses the relay
+  process entirely, and both run back-to-back at `[0/8]`.
+- **This is deliberately its OWN, dedicated ssh call — never spliced into the existing
+  `CAMBOX_PARALLEL_*` device-restore group** in `cleanup()` (`cambox_parallel_retry_failed`'s own
+  retry command is camera-box-specific and would be wrong to apply to a bkshading-relay-only
+  restore). It runs LAST in `cleanup()`, after the `#684`-class FINAL camera-box.service verify,
+  so this non-safety-critical restore never delays the safety-critical device-restore phase.
+
+
+## Relay polling is BUS-FRIENDLY — a min-interval floor, never gphoto2-per-poll (issue 1229, P0)
+
+**The relay MUST NOT shell out to `gphoto2` on every `GET /api/state`.** Root cause of the #1229
+production freeze: `read_state()` used to do one `gphoto2 --auto-detect` + seven `--get-config` =
+**8 fresh USB-PTP sessions (open/enumerate/close) per poll**, and the service pump
+(`service/src/main.rs`, `LIVE_PUSH_INTERVAL_MS = 2000`) polls every relay's `/api/state` every 2 s
+UNCONDITIONALLY. On cam1 the BMPCC (PTP) and the ezcap CAM LINK 4K grabber hang on the SAME
+4-port xHCI SuperSpeed bus, so that per-poll PTP traffic disturbed the grabber's isochronous UVC
+stream — capture 60→55 fps within 6 s of relay start, then the #663 capture-rate self-heal
+USB-reset every 600 s cooldown = ~10 s frozen picture, ~6× live during production 30.8.
+
+**The doctrine (the chosen fix — approach 1 of the ticket, and the owner's "kadencia ≥10 s idle"
+half):** `CameraSession` serves `/api/state` from a `read_cache` gated by a **min-interval floor**
+(`DEFAULT_MIN_READ_INTERVAL_MS = 10_000`, env `BKSHADING_RELAY_MIN_READ_INTERVAL_MS` TUNES it but
+can never disable it — 0/negative/junk falls back to the default; features-default-on). Key points:
+- The floor caps the READ RATE regardless of how hard the service polls: a poll within the floor of
+  the last real read is served from cache with ZERO gphoto2 / ZERO USB traffic. So even with a
+  panel open (service pumping every 2 s) the shared bus sees **at most one PTP session per floor**.
+- **The cache `Mutex` is held ACROSS the blocking read on purpose** — a burst of concurrent
+  `/api/state` requests coalesces to ONE real read (the others get the cache). Serializing gphoto2
+  access to the single USB camera is itself correct: concurrent gphoto2 processes on one device
+  would contend on the very bus this protects.
+- **Writes (`apply`/`SetRequest`) stay per-invocation** (user-initiated + rare) and INVALIDATE the
+  cache on success, so the next poll reflects the change instead of a stale cache for up to a floor.
+- **Testability seam:** pure `read_is_fresh(read_at_ms, now_ms, floor_ms)` + a `MonoClock` trait
+  (`InstantClock` prod, `FakeClock` in `tests/relay.rs`) let the floor be Tier-0 tested via the
+  fake runner with an injected clock (count gphoto2 spawns under a burst / after floor-expiry /
+  after a write) — no real sleeps, no camera. When cargo can't run locally (Tier-0 #557), verify
+  the decision RED→GREEN with a throwaway local python replica of `read_is_fresh` + the
+  burst/floor/invalidate simulation (a dev aid — nothing committed; CI is the first real compile).
+- **REJECTED alternative — a persistent `gphoto2 --shell` session** (approach 2): it only cuts
+  per-read RÉŽIU (re-enumeration), NOT the FREQUENCY of control traffic (the actual root), and
+  brings its own failure class (shell wedge, camera-unplug holding a dead session, fragile
+  stdin/stdout parsing needing detect+restart). The `Gphoto2Runner` trait seam keeps it as a
+  possible future 2nd impl, but the floor solves the root far more simply/safely.
+- **Cross-ref issue 1228 (relay `Restart=` lifecycle) — STILL BLOCKED even after this floor merged
+  (status 2026-08-30):** this fix does NOT touch the systemd unit. The floor IS merged + live-verified
+  on cam1 (17-30 min, 0× capture-rate self-heal, 0× USB reset), but issue 1229's OWN live-verify comment
+  found a documented residual — occasional capture dips (54.5-58.5 fps, well below the 60.0 baseline
+  but NOT enough to re-trip self-heal) still correlate with individual gphoto2 PTP transactions
+  colliding with the grabber's isochronous stream on the shared xHCI bus. The owner explicitly kept
+  1229 OPEN (`needs-owner-action`) pending a PHYSICAL step — moving the BMPCC's USB cable on cam1 to
+  a USB2 port (PTP only needs 480 Mb/s, isolating it from the grabber's SuperSpeed bandwidth domain)
+  — plus one more clean watch after that. **1228 unblocks only once 1229 actually closes** (or the
+  owner explicitly says otherwise) — do NOT add `Restart=on-failure` just because the floor merged;
+  re-check `gh issue view 1229` state/labels before touching the unit.
+- **Complementary idle lever (owner's "poll len on-demand keď je panel otvorený" half, NOT done
+  here):** the service could poll relays only while a WS/panel client is connected, for TRUE-zero
+  idle. It lives in a different crate (service, ships to Windows/strih) with WS-lifecycle
+  subtleties (stale-on-reconnect, immediate-refresh) → a separate focused PR + rig-verify. The
+  floor already bounds the worst case (1 read/floor even with a panel open — the case that matters
+  during live shading), so it is deferred, not dropped; file it with evidence if live-verify shows
+  the residual idle burst still disturbs capture.
+
+
+## A manual interim `systemctl stop bkshading-relay` is NEVER auto-restored — not even by `Restart=on-failure` (issue 1228 TERM-origin finding)
+
+**Root cause of the 29.8.-30.8. cam1 incident (relay found dead a full day after it was stopped):**
+NOT `bkshading-deploy-relay.sh`'s own stop→start (that always re-starts what it stops, and the
+deploy at 06:22-06:33 UTC on 29.8 was 3+ hours before the observed TERM). The actual cause was a
+**manual interim mitigation** — `systemctl stop bkshading-relay` run by hand on cam1 at
+`2026-08-29T09:56:25Z` while investigating the SAME gphoto2/USB-bus contention issue 1229 later
+fixed properly (issue 808 comment `2026-08-29T09:59:31Z`, 3 minutes after the TERM: *"relay STOP:
+captured 59.8-60.0 fps... Mitigácia TERAZ: bkshading-relay na cam1 STOPNUTÝ"*). `systemctl stop`
+sends `SIGTERM` to the main process — exactly the journal's `code=killed, signal=TERM`. The unit was
+left `enabled` (comes back only on a REBOOT) and nobody manually restarted it, so it stayed dead
+until the owner tried to use shading the next day.
+
+**The lesson generalizes past this one incident: a DELIBERATE `systemctl stop` is never
+auto-recovered by `Restart=on-failure`, by design** — systemd suppresses the restart when a stop was
+requested by the service manager itself (an administrative/clean stop), regardless of the
+`Restart=` policy. So even once issue 1228 lands `Restart=on-failure` on
+`systemd/bkshading-relay.service`, it will **only** protect against a genuine unexpected crash
+(panic, segfault, OOM-kill) — it will NOT bring back a relay that was deliberately silenced as an
+interim mitigation (correct behavior: an operator's deliberate stop should stay off until they
+undo it). **Any interim "stop this on box X while we investigate" mitigation needs its OWN explicit
+tracking** (a ticket comment naming which boxes were stopped + a reminder to restore them) — the
+harness-managed pause (`bkshading-e2e-pause.sh`, above) only covers stops the E2E harness ITSELF
+performs; it has no visibility into an ad-hoc manual stop done directly on the rig.
+
+## E2E `[0/8]` camera pre-run auto-check reads `/api/state` — shutter+iso+aperture, NOT focus/exposure-MODE (issue 808 shutter half + issue 1237 exposure half)
+
+`scripts/lib/bkshading-preflight.sh` (wired at `recording-e2e.sh:650`, `bkshading_preflight_report
+"$CAMERA_NAME" "$CAM1_IP"`, tested by `tests/harness_bkshading_preflight_808.rs`) automates the
+`#220` CAMERA PRE-RUN checklist by reading the relay's `GET /api/state` — ONE `curl -fsS`, served
+from the relay's issue-1229 read-floor cache (never a direct gphoto2 call). It is REPORT-ONLY
+(always `return 0`, WARN never abort — owner M3 decision).
+
+- **What is measurable from `/api/state`, and what is NOT.** `RelayState`/`ShadingParams`
+  (`bkshading/proto/src/wire.rs`) + the relay read plan (`relay/src/transport.rs` reads only
+  `iso, f-number, d002, d004/d005, d006/d007`) expose SHUTTER (`params.shutter`, a DENOMINATOR —
+  500 == 1/500s, LARGER = faster), ISO/gain (`params.iso`), and APERTURE (`params.apertureAv`).
+  There is **NO focus-mode field and NO auto/manual exposure-MODE field.** So the shutter check
+  (issue 808) and the exposure-VALUES-readable check (iso+aperture, issue 1237) are real; manual
+  FOCUS and auto/manual EXPOSURE MODE are genuinely unreadable → surfaced as a report-only
+  `bkshading_preflight_focus_note_message` NOTE (LOUD-UNKNOWN, never a fabricated pass); issue 1238
+  additionally wired an informational `bkshading_preflight_focus_distance_message` line for the one
+  honest focus signal that IS readable (manual focus DISTANCE, d003) — see the "Relay
+  focus-distance exposure" section above. **Do NOT let an OK line claim "exposure fixed /
+  satisfied automatically" — presence of a value ≠ a fixed MODE; a BMPCC in auto still reports
+  concrete iso/f-number.** (The exposure OK line was caught doing exactly this in review.)
+- **Report-only python3-safety pattern (reuse for any python3-backed preflight lib).** The JSON
+  extractors are python3 one-liners. Under the caller's `set -euo pipefail`, a bare
+  `x="$(py_extractor "$raw")"` will ABORT the whole E2E if python3 is missing/crashes — the exact
+  opposite of a report-only check. Guard it: a LOUD-BY-NAME `command -v python3 || { NOTE; return
+  0; }` gate at the top of the orchestrator + `|| true` on every python3-backed substitution (a
+  transient failure degrades to EMPTY → a report-only warn, never a crash). The extractors treat a
+  JSON bool as ABSENT (`not isinstance(v, bool)` — python bool is an int subclass) and print EMPTY
+  on a non-dict body / non-dict `params` / null (never a fabricated value).
+- **Extending it is anchor-safe by construction.** New behavior goes into the LIB
+  (`bkshading_preflight_report` + pure fns) — `recording-e2e.sh`'s one call line stays
+  byte-identical, so the #675 anchor sweep is trivially clean. Keep the classifier's decision the
+  single source of truth for a WARN's named parameter (pass the STATUS into the message, don't
+  re-derive the missing set from the values in two places).
