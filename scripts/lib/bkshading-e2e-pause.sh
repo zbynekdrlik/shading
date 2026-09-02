@@ -41,6 +41,16 @@ _BKSH_PAUSE_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # side can never drift on the literal prefix.
 bkshading_e2e_pause_marker_prefix() { printf '%s\n' BKSHADING_PAUSE_STATE; }
 
+# bkshading_e2e_pause_marker_path -> the ON-BOX file path bkshading_e2e_pause_stop_cmds writes and
+# bkshading_e2e_pause_restore_cmds clears (issue 1278). LOCAL generation-time value, baked as a
+# literal into both independently-generated remote command strings -- ONE source of truth for the
+# marker path, mirroring how bkshading_relay_unit_name is the one source of truth for the unit
+# name. /run is tmpfs -- writable even on the cambox's read-only rootfs -- and the marker vanishes
+# on reboot, after which the enabled relay unit starts on its own anyway (systemd `enabled`).
+# Overridable via BKSHADING_E2E_PAUSE_MARKER (Tier-0 testability -- a test points this at a temp
+# path instead of touching a real /run); unset/empty always falls back to the real default.
+bkshading_e2e_pause_marker_path() { printf '%s\n' "${BKSHADING_E2E_PAUSE_MARKER:-/run/bkshading-e2e-paused}"; }
+
 # --- pure remote-text builders --------------------------------------------------------------
 # Every remote-side `$`/`$(...)` in each heredoc is backslash-escaped so THIS function's own
 # LOCAL evaluation (on dev1, where recording-e2e.sh calls it) never expands them -- only real
@@ -50,17 +60,24 @@ bkshading_e2e_pause_marker_prefix() { printf '%s\n' BKSHADING_PAUSE_STATE; }
 # shape exactly (scripts/lib/camera-box-restart-verify.sh).
 
 # bkshading_e2e_pause_stop_cmds LABEL -> REMOTE bash text: probe whether the relay unit is
-# currently active, echo a `BKSHADING_PAUSE_STATE:LABEL:0|1` marker line recording that prior
-# state, then stop the unit -- tolerant of it not being installed or already stopped (never fails
-# the caller, `|| true` throughout). Meant to be embedded via `$(bkshading_e2e_pause_stop_cmds
-# "$LABEL")` as the WHOLE remote command string of a brand-new ssh call.
+# currently active OR a persisted PAUSE MARKER already exists on the box (issue 1278 -- a prior
+# run's pause that a cancelled/killed run never got to restore, so the unit is genuinely already
+# stopped-by-us, not stopped-by-the-operator), echo a `BKSHADING_PAUSE_STATE:LABEL:0|1` marker line
+# recording that combined prior state, write the marker when was-active=1 (BEFORE stopping, so a
+# run killed between the write and the stop still leaves the marker on disk), then stop the unit --
+# tolerant of it not being installed or already stopped (never fails the caller, `|| true`
+# throughout). Meant to be embedded via `$(bkshading_e2e_pause_stop_cmds "$LABEL")` as the WHOLE
+# remote command string of a brand-new ssh call.
 bkshading_e2e_pause_stop_cmds() {
   local label="$1"
-  local unit
+  local unit marker
   unit="$(bkshading_relay_unit_name)"
+  marker="$(bkshading_e2e_pause_marker_path)"
   cat <<PAUSE
 _bksh_was_active=0
 systemctl is-active --quiet $unit 2>/dev/null && _bksh_was_active=1 || true
+[ -e $marker ] && _bksh_was_active=1 || true
+if [ "\$_bksh_was_active" = 1 ]; then touch $marker 2>/dev/null || true; fi
 systemctl stop $unit 2>/dev/null || true
 echo "$(bkshading_e2e_pause_marker_prefix):$label:\$_bksh_was_active"
 PAUSE
@@ -81,10 +98,17 @@ PAUSE
 # -- if the relay does not come back up, so a failed restore is never silent (this repo's own
 # "rig degradation alerts immediately" norm). LABEL is cosmetic (names the box in the message);
 # defaults to "box" when omitted.
+#
+# issue 1278: the "1" branch clears the persisted pause marker (bkshading_e2e_pause_marker_path)
+# ONLY in the SUCCESS branch, once `is-active` has actually confirmed the relay came back up --
+# the WARNING/failure branch deliberately LEAVES the marker in place, so a genuinely-failed restore
+# is retried by the NEXT run's pause step (or a future watchdog) instead of the marker being lost
+# and the relay silently staying dead forever.
 bkshading_e2e_pause_restore_cmds() {
   local was_active="${1:-0}" label="${2:-box}"
-  local unit
+  local unit marker
   unit="$(bkshading_relay_unit_name)"
+  marker="$(bkshading_e2e_pause_marker_path)"
   if [ "$was_active" = "1" ]; then
     cat <<RESTORE
 systemctl start $unit 2>/dev/null || true
@@ -93,6 +117,7 @@ while [ "\$(systemctl is-active $unit 2>/dev/null)" != active ] && [ \$_bksh_r -
 if [ "\$(systemctl is-active $unit 2>/dev/null)" != active ]; then
   echo "WARNING issue 808: bkshading-relay FAILED to come back active on $label after restore -- shading capability may be degraded, verify manually (systemctl status $unit)" >&2
 else
+  rm -f $marker 2>/dev/null || true
   echo "    bkshading-relay restore ($label): active"
 fi
 RESTORE
