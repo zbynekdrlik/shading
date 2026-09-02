@@ -56,6 +56,28 @@ fn stdout_of(body: &str) -> String {
     out.trim().to_string()
 }
 
+/// Same as `run_sourced`, but with extra env vars set on the child process -- used by the issue
+/// 1278 marker tests to hand the harness a per-test temp marker/state PATH without having to
+/// interpolate it into the bash BODY text (avoids any quoting/escaping risk from a temp path
+/// containing shell-meaningful characters; the body just reads the env var by name).
+fn run_sourced_with_env(body: &str, envs: &[(&str, &str)]) -> (i32, String, String) {
+    let harness = format!("set -uo pipefail\n. \"$LIB\"\n{body}", body = body);
+    let mut cmd = Command::new("bash");
+    cmd.arg("-c")
+        .arg(&harness)
+        .env("LIB", lib())
+        .current_dir(manifest_dir());
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().expect("failed to run bash harness");
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
 // ---------------------------------------------------------------------------------------------
 // lib shape — the pure functions (AND the two thin orchestrators) must be defined
 // ---------------------------------------------------------------------------------------------
@@ -63,6 +85,7 @@ fn stdout_of(body: &str) -> String {
 fn lib_defines_the_pure_functions_and_orchestrators() {
     for f in [
         "bkshading_e2e_pause_marker_prefix",
+        "bkshading_e2e_pause_marker_path",
         "bkshading_e2e_pause_stop_cmds",
         "bkshading_e2e_pause_restore_cmds",
         "bkshading_e2e_pause_parse_state",
@@ -83,6 +106,30 @@ fn marker_prefix_is_the_expected_literal() {
         stdout_of("bkshading_e2e_pause_marker_prefix"),
         "BKSHADING_PAUSE_STATE"
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// bkshading_e2e_pause_marker_path -- issue 1278: the ON-BOX persisted-pause marker path, ONE
+// source of truth shared by bkshading_e2e_pause_stop_cmds/bkshading_e2e_pause_restore_cmds.
+// ---------------------------------------------------------------------------------------------
+#[test]
+fn marker_path_defaults_to_run_bkshading_e2e_paused() {
+    // run_sourced's own harness never sets BKSHADING_E2E_PAUSE_MARKER, so this proves the REAL
+    // production default a live cambox would actually use.
+    assert_eq!(
+        stdout_of("bkshading_e2e_pause_marker_path"),
+        "/run/bkshading-e2e-paused"
+    );
+}
+
+#[test]
+fn marker_path_honors_the_env_override() {
+    let (rc, out, err) = run_sourced_with_env(
+        "bkshading_e2e_pause_marker_path",
+        &[("BKSHADING_E2E_PAUSE_MARKER", "/tmp/fake-marker-1278")],
+    );
+    assert_eq!(rc, 0, "stderr={err}");
+    assert_eq!(out.trim(), "/tmp/fake-marker-1278");
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -125,6 +172,58 @@ fn stop_cmds_never_leaks_a_local_dollar_sign_meant_for_the_remote_side() {
     assert!(
         out.contains("$_bksh_was_active"),
         "the remote variable reference must survive as a literal $ in the output: {out}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// issue 1278: stop_cmds must ALSO treat a persisted on-box marker (from a prior run's pause that
+// a cancelled/killed run never got to restore) as was-active=1, and must write that marker BEFORE
+// stopping the unit -- so a run killed between the write and the stop still leaves it on disk.
+// ---------------------------------------------------------------------------------------------
+#[test]
+fn stop_cmds_treats_an_existing_marker_file_as_was_active() {
+    let out = stdout_of("bkshading_e2e_pause_stop_cmds cam1");
+    assert!(
+        out.contains("[ -e /run/bkshading-e2e-paused ] && _bksh_was_active=1"),
+        "must treat an existing pause marker as was-active=1, even if the unit itself already \
+         reads inactive (issue 1278): {out}"
+    );
+}
+
+#[test]
+fn stop_cmds_writes_the_marker_before_stopping_the_unit_when_was_active_becomes_1() {
+    let out = stdout_of("bkshading_e2e_pause_stop_cmds cam1");
+    assert!(
+        out.contains("if [ \"$_bksh_was_active\" = 1 ]; then touch /run/bkshading-e2e-paused"),
+        "the marker write must be gated on was_active, not unconditional: {out}"
+    );
+    let touch_pos = out
+        .find("touch /run/bkshading-e2e-paused")
+        .expect("must write the marker");
+    let stop_pos = out
+        .find("systemctl stop bkshading-relay.service")
+        .expect("must stop the unit");
+    assert!(
+        touch_pos < stop_pos,
+        "the marker must be written BEFORE the unit is stopped -- a run killed between the two \
+         must still leave the marker on disk (issue 1278): {out}"
+    );
+}
+
+#[test]
+fn stop_cmds_honors_the_marker_env_override_for_a_relocated_marker_path() {
+    let (rc, out, err) = run_sourced_with_env(
+        "bkshading_e2e_pause_stop_cmds cam1",
+        &[("BKSHADING_E2E_PAUSE_MARKER", "/tmp/relocated-marker-1278")],
+    );
+    assert_eq!(rc, 0, "stderr={err}");
+    assert!(
+        out.contains("[ -e /tmp/relocated-marker-1278 ]"),
+        "must generate the existence check against the OVERRIDDEN path, not the default: {out}"
+    );
+    assert!(
+        out.contains("touch /tmp/relocated-marker-1278"),
+        "must generate the touch against the OVERRIDDEN path too: {out}"
     );
 }
 
@@ -183,6 +282,60 @@ fn restore_cmds_warns_loudly_when_the_unit_never_comes_back_active() {
     assert!(err.contains("WARNING"), "must warn loudly on stderr: {err}");
     assert!(err.contains("issue 808"), "must cite the ticket: {err}");
     assert!(err.contains("cam1"), "must name the box: {err}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// issue 1278: restore_cmds' "1" branch must clear the persisted pause marker ONLY once `is-active`
+// has actually confirmed the relay came back up -- a FAILED restore must LEAVE the marker in
+// place, so a later run's pause step (or a future watchdog) can retry instead of the marker being
+// lost and the relay silently staying dead forever (exactly the pre-1278 incident, minus the
+// marker: this proves the marker's own lifecycle is correct on both branches).
+// ---------------------------------------------------------------------------------------------
+#[test]
+fn restore_cmds_removes_the_marker_only_after_a_confirmed_successful_restore() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let marker = tmp.path().join("marker");
+    std::fs::write(&marker, "").expect("seed marker");
+
+    let (rc, out, err) = run_sourced_with_env(
+        "systemctl() { [ \"$1\" = is-active ] && { echo active; return 0; }; return 0; }\n\
+         out=\"$(bkshading_e2e_pause_restore_cmds 1 cam3)\"\n\
+         eval \"$out\"",
+        &[("BKSHADING_E2E_PAUSE_MARKER", marker.to_str().unwrap())],
+    );
+    assert_eq!(
+        rc, 0,
+        "a successful restore must never fail: stderr={err}\nstdout={out}"
+    );
+    assert!(
+        !marker.exists(),
+        "the marker must be removed once the restore is CONFIRMED successful (issue 1278)"
+    );
+}
+
+#[test]
+fn restore_cmds_leaves_the_marker_in_place_when_the_restore_fails() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let marker = tmp.path().join("marker");
+    std::fs::write(&marker, "").expect("seed marker");
+
+    let (rc, _out, err) = run_sourced_with_env(
+        "systemctl() { [ \"$1\" = is-active ] && { echo inactive; return 3; }; return 0; }\n\
+         sleep() { :; }\n\
+         out=\"$(bkshading_e2e_pause_restore_cmds 1 cam1)\"\n\
+         eval \"$out\"",
+        &[("BKSHADING_E2E_PAUSE_MARKER", marker.to_str().unwrap())],
+    );
+    assert_eq!(
+        rc, 0,
+        "a failed restore must never abort the caller: stderr={err}"
+    );
+    assert!(err.contains("WARNING"), "must still warn loudly: {err}");
+    assert!(
+        marker.exists(),
+        "a FAILED restore must RETAIN the marker so a later run/watchdog can retry -- losing it \
+         here would silently strand the relay stopped forever (issue 1278): {err}"
+    );
 }
 
 #[test]
@@ -307,6 +460,137 @@ fn stop_cmds_marker_round_trips_through_parse_state() {
             "round trip failed for {was_active}: marker={out}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// issue 1278 -- full functional simulation of the LIVE incident (run 33640143227): a run's [0/8]
+// pause finds the relay genuinely ACTIVE and stops it; that run is CANCELLED before cleanup()
+// ever gets to restore it (simulated here by simply never invoking restore between "run 1" and
+// "run 2" -- no ssh call happens at all for a cancelled run); the NEXT run's own pause step must
+// recognize the box is STILL paused-by-us (via the persisted marker, even though the unit itself
+// already reads inactive from run 1's own stop) and report was-active=1, so ITS OWN restore
+// actually brings the relay back -- instead of the pre-1278 bug, which read was-active=0 (unit
+// inactive, no marker existed) and left the relay silently dead until a human intervened (76
+// minutes on cam1+cam2 in the live incident). A fake `systemctl` + a fake unit-state FILE (both
+// injected via env, never a real host) drive the whole two-run sequence through the REAL
+// stop_cmds/restore_cmds/parse_state functions -- no mocking of the functions under test.
+// ---------------------------------------------------------------------------------------------
+#[test]
+fn cancelled_run_then_recovers_via_persisted_marker_round_trip_1278() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let marker = tmp.path().join("marker");
+    let state = tmp.path().join("unit-state");
+    std::fs::write(&state, "active\n").expect("seed unit state");
+
+    let body = r#"
+systemctl() {
+  case "$1" in
+    is-active)
+      st="$(cat "$FAKE_STATE_FILE" 2>/dev/null)"
+      if [ "$st" = active ]; then echo active; return 0; else echo inactive; return 3; fi
+      ;;
+    stop) echo inactive > "$FAKE_STATE_FILE"; return 0 ;;
+    start) echo active > "$FAKE_STATE_FILE"; return 0 ;;
+    *) return 0 ;;
+  esac
+}
+out1="$(bkshading_e2e_pause_stop_cmds cam1)"
+captured1="$(eval "$out1")"
+r1="$(bkshading_e2e_pause_parse_state cam1 "$captured1")"
+echo "R1=$r1"
+# run 1 CANCELLED here -- no restore call ever runs
+out2="$(bkshading_e2e_pause_stop_cmds cam1)"
+captured2="$(eval "$out2")"
+r2="$(bkshading_e2e_pause_parse_state cam1 "$captured2")"
+echo "R2=$r2"
+out3="$(bkshading_e2e_pause_restore_cmds "$r2" cam1)"
+eval "$out3"
+echo "UNIT_STATE=$(cat "$FAKE_STATE_FILE")"
+echo "MARKER_EXISTS=$([ -e "$BKSHADING_E2E_PAUSE_MARKER" ] && echo yes || echo no)"
+"#;
+
+    let (rc, out, err) = run_sourced_with_env(
+        body,
+        &[
+            ("BKSHADING_E2E_PAUSE_MARKER", marker.to_str().unwrap()),
+            ("FAKE_STATE_FILE", state.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(rc, 0, "stderr={err}\nstdout={out}");
+    assert!(
+        out.contains("R1=1"),
+        "run 1's pause must find the relay genuinely active: {out}"
+    );
+    assert!(
+        out.contains("R2=1"),
+        "run 2's pause must read was-active=1 from the persisted marker even though the unit \
+         itself is already inactive from run 1's own stop (issue 1278 -- the pre-fix bug read 0 \
+         here and left the relay silently dead for 76 minutes): {out}"
+    );
+    assert!(
+        out.contains("UNIT_STATE=active"),
+        "run 2's own restore must actually bring the relay back up: {out}"
+    );
+    assert!(
+        out.contains("MARKER_EXISTS=no"),
+        "the marker must be cleared once the relay is confirmed restored: {out}"
+    );
+}
+
+#[test]
+fn operator_silenced_relay_stop_cmds_reports_0_and_restore_leaves_it_stopped_1278() {
+    // The COMPANION negative case: NO marker exists (no run ever paused it) and the unit is
+    // already inactive (e.g. the #808 interim manual `systemctl stop` mitigation) -- this must
+    // stay read as was-active=0 and restore must remain a no-op, so an operator's deliberate
+    // silence is NEVER woken back up by a run (the pre-existing #808 guarantee, proven still
+    // intact after the 1278 marker logic was added).
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let marker = tmp.path().join("marker"); // never created
+    let state = tmp.path().join("unit-state");
+    std::fs::write(&state, "inactive\n").expect("seed unit state");
+
+    let body = r#"
+systemctl() {
+  case "$1" in
+    is-active)
+      st="$(cat "$FAKE_STATE_FILE" 2>/dev/null)"
+      if [ "$st" = active ]; then echo active; return 0; else echo inactive; return 3; fi
+      ;;
+    stop) echo inactive > "$FAKE_STATE_FILE"; return 0 ;;
+    start) echo active > "$FAKE_STATE_FILE"; return 0 ;;
+    *) return 0 ;;
+  esac
+}
+out="$(bkshading_e2e_pause_stop_cmds cam1)"
+captured="$(eval "$out")"
+r="$(bkshading_e2e_pause_parse_state cam1 "$captured")"
+echo "R=$r"
+out2="$(bkshading_e2e_pause_restore_cmds "$r" cam1)"
+eval "$out2"
+echo "UNIT_STATE=$(cat "$FAKE_STATE_FILE")"
+echo "MARKER_EXISTS=$([ -e "$BKSHADING_E2E_PAUSE_MARKER" ] && echo yes || echo no)"
+"#;
+
+    let (rc, out, err) = run_sourced_with_env(
+        body,
+        &[
+            ("BKSHADING_E2E_PAUSE_MARKER", marker.to_str().unwrap()),
+            ("FAKE_STATE_FILE", state.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(rc, 0, "stderr={err}\nstdout={out}");
+    assert!(
+        out.contains("R=0"),
+        "no marker + an already-inactive unit must stay read as was-active=0: {out}"
+    );
+    assert!(
+        out.contains("UNIT_STATE=inactive"),
+        "restore must be a no-op, leaving the operator-silenced relay stopped: {out}"
+    );
+    assert!(
+        out.contains("MARKER_EXISTS=no"),
+        "no marker must ever be created for a box the pause step never found active: {out}"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
