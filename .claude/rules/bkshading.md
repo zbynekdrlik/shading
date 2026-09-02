@@ -405,8 +405,14 @@ shading-dead for 76 minutes until a human noticed and ran `systemctl start` by h
   WARNING/failure branch (unit never comes back active) deliberately LEAVES the marker in place,
   so a genuinely-failed restore is retried by a LATER run's pause step (or a future watchdog)
   instead of the marker being lost and the relay staying silently dead forever. The "0" (no-op)
-  branch is untouched — an operator's deliberate manual stop (no marker, unit already inactive)
-  is still NEVER woken back up by a run, exactly the pre-existing #808 guarantee.
+  branch is untouched — an operator's deliberate manual stop, WITH NO UNRESOLVED E2E-CAUSED
+  MARKER ON THE BOX (unit already inactive, no marker), is still never woken back up by a run,
+  exactly the pre-existing #808 guarantee. **Precision caveat (review finding):** the marker
+  itself can't distinguish "we still owe a restore" from "the operator separately silenced it in
+  that same window" — if an earlier CANCELLED run's marker is still on disk when an operator
+  independently `systemctl stop`s the relay by hand, the NEXT run's restore will re-activate it
+  against that fresh manual intent (a narrow coincidence-window residual, not a regression: the
+  pre-1278 code had no better answer here either — it just silently left the relay broken).
 - **No `scripts/recording-e2e.sh` edit at all** — the whole fix lives in the sourced lib (the #675
   pattern); both existing anchored call sites (the `[0/8]` pause + both cleanup/temp-trap restore
   calls) stay byte-identical. Tests: `tests/harness_bkshading_e2e_pause_808.rs` — pure builder/
