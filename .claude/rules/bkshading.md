@@ -376,6 +376,58 @@ mitigated contention source, not a mystery regression in camera-box/genlock code
   restore). It runs LAST in `cleanup()`, after the `#684`-class FINAL camera-box.service verify,
   so this non-safety-critical restore never delays the safety-critical device-restore phase.
 
+### The CANCELLED-run case — a persistent ON-BOX marker, not just the in-memory was-active var (issue 1278)
+
+**The pause/restore pair above has a gap the runner's own kill semantics create: a CANCELLED (`gh
+run cancel`) or otherwise KILLED run never reaches its restore call at all.** `_bksh_was_active`
+(and the `$BKSH_PAUSE_*_WAS_ACTIVE` vars that carry it) live ONLY in the memory of the ONE
+`recording-e2e.sh` process running that attempt — the runner kills the process tree SECONDS after
+a cancel, while `cleanup()`'s own device-restore phase (which must run BEFORE the bkshading
+restore, per the ordering rule above) takes MINUTES. Live incident (2026-09-02, run 33640143227):
+attempt 2's `[0/8]` pause found the relay active on cam1+cam2 and stopped it, was cancelled with
+no `[cleanup]` line ever printed; attempt 3's OWN pause then found the unit already `inactive`
+(from attempt 2's stop) with no way to know that was OUR doing, read the fail-safe default
+was-active=0, and — correctly per its OWN inputs — left it stopped. Net: both boxes sat silently
+shading-dead for 76 minutes until a human noticed and ran `systemctl start` by hand.
+
+- **The fix: a persistent marker file ON THE BOX**, `/run/bkshading-e2e-paused` (tmpfs — writable
+  even on the cambox's read-only rootfs; vanishes on reboot, after which the `enabled` relay unit
+  starts on its own anyway). ONE source of truth: `bkshading_e2e_pause_marker_path` (default
+  `/run/bkshading-e2e-paused`, overridable via `BKSHADING_E2E_PAUSE_MARKER` for Tier-0 testing),
+  consumed by BOTH `bkshading_e2e_pause_stop_cmds` and `bkshading_e2e_pause_restore_cmds`.
+- **`bkshading_e2e_pause_stop_cmds` now treats EITHER `systemctl is-active` OR an already-existing
+  marker file as was-active=1** — a marker still on disk means a PRIOR run paused the relay and
+  never got to restore it, so THIS run must (and does) report was-active=1 and takes over the
+  restore obligation. When was-active becomes 1, the marker is written BEFORE `systemctl stop` —
+  so a run killed between the write and the stop still leaves the marker behind for the next run.
+- **`bkshading_e2e_pause_restore_cmds`'s "1" branch clears the marker ONLY in the SUCCESS path**,
+  after `systemctl is-active` has actually confirmed the relay came back up — the pre-existing
+  WARNING/failure branch (unit never comes back active) deliberately LEAVES the marker in place,
+  so a genuinely-failed restore is retried by a LATER run's pause step (or a future watchdog)
+  instead of the marker being lost and the relay staying silently dead forever. The "0" (no-op)
+  branch is untouched — an operator's deliberate manual stop, WITH NO UNRESOLVED E2E-CAUSED
+  MARKER ON THE BOX (unit already inactive, no marker), is still never woken back up by a run,
+  exactly the pre-existing #808 guarantee. **Precision caveat (review finding):** the marker
+  itself can't distinguish "we still owe a restore" from "the operator separately silenced it in
+  that same window" — if an earlier CANCELLED run's marker is still on disk when an operator
+  independently `systemctl stop`s the relay by hand, the NEXT run's restore will re-activate it
+  against that fresh manual intent (a narrow coincidence-window residual, not a regression: the
+  pre-1278 code had no better answer here either — it just silently left the relay broken).
+- **No `scripts/recording-e2e.sh` edit at all** — the whole fix lives in the sourced lib (the #675
+  pattern); both existing anchored call sites (the `[0/8]` pause + both cleanup/temp-trap restore
+  calls) stay byte-identical. Tests: `tests/harness_bkshading_e2e_pause_808.rs` — pure builder/
+  parser assertions for the marker existence-check + write-before-stop ordering + marker-clearing-
+  only-on-success, PLUS two full functional simulations (a fake `systemctl` + a fake unit-state
+  file, driven through the REAL stop_cmds/restore_cmds/parse_state) reproducing the exact live
+  incident sequence (pause→cancel→pause-again reads was-active=1 via the marker→restore succeeds→
+  marker cleared) and its negative companion (no marker + already-inactive unit stays was-active=0,
+  restore stays a no-op, no marker ever created).
+- **Not done here (optional per the ticket, not required for the fix): a dev1 watchdog that
+  notices a stale marker with no live E2E run holding the rig lease and restores it proactively.**
+  The marker alone already closes the 76-minute silent-dead window down to "the NEXT E2E run" —
+  a watchdog would shrink it further for the case where no E2E runs again soon, but is deliberately
+  out of scope for this fix (the ticket names it optional).
+
 
 ## Relay polling is BUS-FRIENDLY — a min-interval floor, never gphoto2-per-poll (issue 1229, P0)
 
