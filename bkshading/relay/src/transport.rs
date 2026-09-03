@@ -22,6 +22,19 @@ pub trait Gphoto2Runner: Send + Sync {
     fn auto_detect(&self) -> Result<String>;
     /// `gphoto2 --get-config <key>` stdout.
     fn get_config(&self, key: &str) -> Result<String>;
+    /// Reads MANY config keys in ONE gphoto2 invocation (issue 1229): the real transport spawns a
+    /// single `gphoto2 --get-config k1 --get-config k2 …` process — ONE USB open/enumerate/close
+    /// cycle for all keys, instead of one per key — and returns one stdout block per key, in the
+    /// order of `keys`. On success the returned `Vec` has EXACTLY `keys.len()` elements; a spawn
+    /// failure, a non-zero gphoto2 exit, or a block/key count mismatch is an `Err` (the read then
+    /// degrades to offline, the same as a failed single `get_config`).
+    ///
+    /// The default impl loops `get_config` (one USB session PER key) — correct behaviour, wrong
+    /// bus footprint; it exists so test fakes get the read semantics for free. The real
+    /// [`Gphoto2Cli`] OVERRIDES it with the single-process batch that this issue is about.
+    fn get_config_many(&self, keys: &[&str]) -> Result<Vec<String>> {
+        keys.iter().map(|k| self.get_config(k)).collect()
+    }
     /// `gphoto2 --set-config <key>=<value>`.
     fn set_config(&self, key: &str, value: &str) -> Result<()>;
 }

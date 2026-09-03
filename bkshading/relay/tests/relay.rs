@@ -459,6 +459,65 @@ fn read_is_fresh_pure_1229() {
     assert!(read_is_fresh(Some(100), 50, 10_000));
 }
 
+/// A [`Gphoto2Runner`] that counts every real gphoto2 PROCESS SPAWN on the read path — one per
+/// `auto_detect`, one per `get_config`, and ONE per `get_config_many` (a batched multi-key call is
+/// a SINGLE USB-PTP session, so it must count as one). This measures the shared-bus footprint of a
+/// single read cycle (issue 1229): the residual capture dips on cam1 come from the number of
+/// USB open/enumerate/close cycles a read fires on the xHCI bus it shares with the grabber.
+struct SessionCountingRunner {
+    inner: FakeRunner,
+    sessions: Arc<AtomicUsize>,
+}
+
+impl Gphoto2Runner for SessionCountingRunner {
+    fn auto_detect(&self) -> Result<String> {
+        self.sessions.fetch_add(1, Ordering::SeqCst);
+        self.inner.auto_detect()
+    }
+    fn get_config(&self, key: &str) -> Result<String> {
+        self.sessions.fetch_add(1, Ordering::SeqCst);
+        self.inner.get_config(key)
+    }
+    fn get_config_many(&self, keys: &[&str]) -> Result<Vec<String>> {
+        // A batched call is ONE USB session regardless of key count: count once, and read the
+        // per-key blocks from the inner fake DIRECTLY (not via self.get_config) so it stays one.
+        self.sessions.fetch_add(1, Ordering::SeqCst);
+        keys.iter().map(|k| self.inner.get_config(k)).collect()
+    }
+    fn set_config(&self, key: &str, value: &str) -> Result<()> {
+        self.inner.set_config(key, value)
+    }
+}
+
+#[test]
+fn read_cycle_uses_at_most_three_usb_sessions_1229() {
+    // #1229 residual (post-floor): even at one read per floor, a single read cycle shells gphoto2
+    // NINE times — `detect()` (1x --auto-detect) + `read_raw()` (8x --get-config: the 7 shading
+    // keys + the d003 focus distance) — each a separate USB open/enumerate/close on the xHCI bus
+    // the relay shares with the grabber, which is what still dips the grabber's isochronous capture.
+    // The fix coalesces the shading reads into ONE multi `--get-config` session, so a full read is
+    // at most THREE USB sessions: detect + one core batch + the best-effort d003 (kept separate so
+    // an unanswered d003 can never abort the core batch). On the pre-fix code this is NINE -> RED.
+    let sessions = Arc::new(AtomicUsize::new(0));
+    let session = CameraSession::new(
+        Box::new(SessionCountingRunner {
+            inner: FakeRunner::full_camera()
+                .with_config("d003", "Current: 32768\nBottom: 0\nTop: 65536\nEND"),
+            sessions: sessions.clone(),
+        }),
+        "1.7.0-dev.516",
+    );
+    let st = session.read_state();
+    assert!(st.online, "the read must still produce a full online state");
+    assert_eq!(st.params.focus_distance, Some(32768), "d003 still read");
+    assert_eq!(st.params.iso, Some(400), "core keys still read");
+    let n = sessions.load(Ordering::SeqCst);
+    assert!(
+        n <= 3,
+        "one read cycle must use at most 3 USB-PTP sessions (detect + core batch + d003), got {n}"
+    );
+}
+
 #[test]
 fn parse_min_read_interval_env_1229() {
     assert_eq!(
