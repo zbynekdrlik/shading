@@ -134,12 +134,25 @@ def test_unit_wires_the_lib_constants_no_drift():
     # EnvironmentFile is OPTIONAL (leading '-') so an unprovisioned box degrades to None, not a
     # wrong value.
     assert "EnvironmentFile=-%s" % ENV_PATH in u, u
-    assert "Restart=always" in u
     assert "WantedBy=multi-user.target" in u
     assert "SyslogIdentifier=bkshading-relay" in u
     # unit must NOT hard-code a capture fps (Environment=CAMERA_BOX_CAPTURE_FPS=...) — that is the
     # rejected Approach 3 (duplicate truth); it comes from the derived EnvironmentFile.
     assert not re.search(r"^Environment=CAMERA_BOX_CAPTURE_FPS=", u, re.M), u
+
+
+def test_unit_restart_policy_is_on_failure_issue_1228():
+    # issue 1228: the relay stayed dead a full day after a 2026-08-29 TERM because the unit had no
+    # Restart= at all in its ORIGINAL form; it was later provisioned with Restart=always (this test
+    # used to pin that), but the ticket asks for the more conservative on-failure + RestartSec=5 —
+    # restart on a genuine crash/uncaught-signal, but (like every Restart= policy, always included)
+    # never on a deliberate `systemctl stop`/deploy-flow restart, and never on a clean exit(0) either
+    # (the "always" difference this test now guards against regressing back to).
+    with open(UNIT, encoding="utf-8") as f:
+        u = f.read()
+    assert "Restart=on-failure" in u, u
+    assert "RestartSec=5" in u, u
+    assert not re.search(r"^Restart=always$", u, re.M), u
 
 
 def test_default_capture_fps_matches_appliance_requested_denominator():
