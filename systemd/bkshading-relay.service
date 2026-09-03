@@ -17,8 +17,13 @@ Type=simple
 # root (no User=) for raw USB device access, exactly like camera-box.service. On a headless cambox
 # there is no gvfs-gphoto2-volume-monitor to contend for the PTP device.
 ExecStart=/usr/local/bin/bkshading-relay --bind 0.0.0.0:8771
-Restart=always
-RestartSec=3
+# issue 1228: on-failure (not always) -- restarts on a genuine crash/uncaught-signal, but (like
+# every Restart= policy) never on a deliberate `systemctl stop`/deploy-flow restart, and -- the
+# deliberate difference from `always` -- never on a clean exit(0) either (this relay is a
+# long-running server that should never exit 0 on its own). RestartSec=5 is the ticket's own
+# specified delay.
+Restart=on-failure
+RestartSec=5
 
 # issue 809: CAMERA_BOX_CAPTURE_FPS is provisioned into this file by
 # scripts/bkshading-provision-relay.sh, DERIVED from the box's own appliance capture-fps config
