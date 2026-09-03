@@ -540,14 +540,19 @@ until the owner tried to use shading the next day.
 **The lesson generalizes past this one incident: a DELIBERATE `systemctl stop` is never
 auto-recovered by `Restart=on-failure`, by design** — systemd suppresses the restart when a stop was
 requested by the service manager itself (an administrative/clean stop), regardless of the
-`Restart=` policy. So even once issue 1228 lands `Restart=on-failure` on
-`systemd/bkshading-relay.service`, it will **only** protect against a genuine unexpected crash
-(panic, segfault, OOM-kill) — it will NOT bring back a relay that was deliberately silenced as an
+`Restart=` policy. Issue 1228's `Restart=` code lane has now LANDED
+(`systemd/bkshading-relay.service`: `Restart=always`/`RestartSec=3` → `Restart=on-failure`/
+`RestartSec=5`) — the precondition (issue 1229's USB2 topology question) was settled once the owner
+ruled the physical re-cabling step impossible (single xHCI controller), so today's topology already
+IS the target one. As predicted here, it **only** protects against a genuine unexpected crash
+(panic, segfault, OOM-kill) — it does NOT bring back a relay that was deliberately silenced as an
 interim mitigation (correct behavior: an operator's deliberate stop should stay off until they
-undo it). **Any interim "stop this on box X while we investigate" mitigation needs its OWN explicit
-tracking** (a ticket comment naming which boxes were stopped + a reminder to restore them) — the
-harness-managed pause (`bkshading-e2e-pause.sh`, above) only covers stops the E2E harness ITSELF
-performs; it has no visibility into an ad-hoc manual stop done directly on the rig.
+undo it), and it does NOT change the deploy stop→start flow either (both `always` and `on-failure`
+already skip a manager-requested stop by systemd design). **Any interim "stop this on box X while we
+investigate" mitigation still needs its OWN explicit tracking** (a ticket comment naming which boxes
+were stopped + a reminder to restore them) — the harness-managed pause (`bkshading-e2e-pause.sh`,
+above) only covers stops the E2E harness ITSELF performs; it has no visibility into an ad-hoc manual
+stop done directly on the rig.
 
 ## E2E `[0/8]` camera pre-run auto-check reads `/api/state` — shutter+iso+aperture, NOT focus/exposure-MODE (issue 808 shutter half + issue 1237 exposure half)
 
