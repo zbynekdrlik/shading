@@ -561,6 +561,23 @@ reminder to restore them) — the harness-managed pause (`bkshading-e2e-pause.sh
 stops the E2E harness ITSELF performs; it has no visibility into an ad-hoc manual stop done directly
 on the rig.
 
+**Why this "SIGTERM is always clean" fact applies cleanly to `bkshading-relay` specifically —
+verified against its own source, not just systemd theory (issue 1228 review-fix follow-up):**
+`bkshading/relay/src/main.rs` only installs `tokio::signal::ctrl_c()` (SIGINT / Ctrl-C) for graceful
+shutdown — it registers **no SIGTERM handler at all**. So a SIGTERM (from `systemctl stop`, the
+deploy flow, or a stray external `kill -TERM`) is never intercepted; it kills the process via the
+raw OS default, which is exactly the `code=killed, signal=TERM` shape the 29.8 incident's journal
+showed, and exactly systemd's "clean exit" case (confirmed from this box's own local
+`man systemd.service` "Table 1. Exit causes and the effect of the Restart= settings" — `on-failure`
+has NO entry for the "Clean exit code or signal" row). **This does NOT contradict
+`imag-obs-supervision.md`'s opposite-sounding claim** ("an external `pkill -TERM` … STILL triggers
+`Restart=on-failure`") — that is about a DIFFERENT process (OBS) that DOES install its own signal
+handling and exits via a controlled-but-non-zero path (or crashes) in response, which lands in the
+table's "Unclean exit code" / "Unclean signal" rows instead. The generalizable rule: whether a raw
+SIGTERM is "clean" (no restart) or "unclean" (restart) under `on-failure` depends on **whether the
+specific binary catches the signal and how it exits in response** — never assume either way without
+checking that binary's own signal handling, the way this was checked here.
+
 ## E2E `[0/8]` camera pre-run auto-check reads `/api/state` — shutter+iso+aperture, NOT focus/exposure-MODE (issue 808 shutter half + issue 1237 exposure half)
 
 `scripts/lib/bkshading-preflight.sh` (wired at `recording-e2e.sh:650`, `bkshading_preflight_report
