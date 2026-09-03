@@ -88,6 +88,10 @@ impl Gphoto2Runner for Gphoto2Cli {
         // shared xHCI bus (vs one session PER key with the default `get_config` loop), which is the
         // per-read footprint reduction this issue is about. `--get-config` repeats in the same
         // invocation, so gphoto2 opens the camera once and reads all keys in that one PTP session.
+        if keys.is_empty() {
+            // An argument-less `gphoto2` would print usage + exit non-zero; keep the pub fn honest.
+            return Ok(Vec::new());
+        }
         let args = build_get_config_many_args(keys);
         let out = std::process::Command::new(&self.binary)
             .args(&args)
@@ -254,7 +258,7 @@ pub fn parse_min_read_interval_env(raw: Option<String>) -> Option<u64> {
 }
 
 /// The seven CORE shading config keys read together in ONE gphoto2 invocation (issue 1229). Their
-/// ORDER is the wire contract for [`split_config_blocks`]'s positional mapping in [`read_raw`], and
+/// ORDER is the wire contract for [`split_config_blocks`]'s positional mapping in `read_raw`, and
 /// matches the field order they are assigned to in [`RawConfigs`]. The best-effort `d003` focus
 /// distance (issue 1238) is deliberately NOT here — it is read as a separate call so a camera that
 /// does not answer it can never abort the core batch (which would wrongly degrade the read to
@@ -383,23 +387,28 @@ impl CameraSession {
         // in `CORE_CONFIG_KEYS` order, or an `Err` (spawn/exit/count mismatch) that propagates via
         // `?` -> offline, the same failure semantics the previous per-key `?` had.
         let core = self.runner.get_config_many(&CORE_CONFIG_KEYS)?;
-        // Defensive: `get_config_many`'s contract is exactly `keys.len()` blocks on `Ok`; a buggy
-        // runner returning fewer must NOT index-panic (read_state must never panic) — bail instead.
-        if core.len() != CORE_CONFIG_KEYS.len() {
-            bail!(
-                "get_config_many returned {} blocks, expected {}",
-                core.len(),
-                CORE_CONFIG_KEYS.len()
-            );
-        }
+        // Defensive typed destructure: `get_config_many`'s contract is EXACTLY `keys.len()` blocks
+        // on `Ok`, but a buggy runner returning a different count must NOT index-panic (read_state
+        // must never panic). `Vec<String>: TryInto<[String; 7]>` makes the count check, the
+        // panic-freedom, and the field arity ONE construct that also moves each block into its field
+        // with no per-block clone; a wrong length hands the Vec back and degrades to a failed read
+        // (-> offline), the same fail-safe as before.
+        let [iso, fnumber, shutter_angle, kelvin, tint, sensor_fps, project_fps]: [String; 7] =
+            core.try_into().map_err(|v: Vec<String>| {
+                anyhow::anyhow!(
+                    "get_config_many returned {} blocks, expected {}",
+                    v.len(),
+                    CORE_CONFIG_KEYS.len()
+                )
+            })?;
         Ok(RawConfigs {
-            iso: core[0].clone(),
-            fnumber: core[1].clone(),
-            shutter_angle: core[2].clone(),
-            kelvin: core[3].clone(),
-            tint: core[4].clone(),
-            sensor_fps: core[5].clone(),
-            project_fps: core[6].clone(),
+            iso,
+            fnumber,
+            shutter_angle,
+            kelvin,
+            tint,
+            sensor_fps,
+            project_fps,
             // issue 1238: the manual focus distance (d003) is read BEST-EFFORT as a SEPARATE call —
             // NOT folded into the core batch — so a camera/firmware/lens that does not answer d003
             // can never abort the batched core read (which would wrongly degrade the whole shading
@@ -445,8 +454,9 @@ impl CameraSession {
         state
     }
 
-    /// The real (un-throttled) read cycle: one `gphoto2 --auto-detect` + eight `--get-config`
-    /// (the seven shading keys + the issue-1238 best-effort `d003` focus distance).
+    /// The real (un-throttled) read cycle (issue 1229): `detect()` (one `gphoto2 --auto-detect`) +
+    /// `read_raw()` (ONE batched multi `--get-config` for the seven shading keys + one best-effort
+    /// `--get-config d003`) = THREE USB-PTP sessions, coalesced down from the pre-fix nine.
     /// A detect miss or a gphoto2 read error degrades to an offline [`RelayState`], the
     /// server-is-truth model. Reached only through [`read_state`](Self::read_state)'s floor.
     fn read_state_uncached(&self) -> RelayState {
@@ -483,21 +493,33 @@ impl CameraSession {
     /// performed. Aperture is planned against the camera's live f-number choices and the
     /// live fps (for the shutter angle), so a write always matches the current camera.
     pub fn apply(&self, req: &SetRequest) -> Result<usize> {
+        // issue 1229: HOLD the `read_cache` lock across the ENTIRE apply (the `read_raw` + the
+        // `set_config` writes), not just at the final invalidate. `http.rs` dispatches `read_state`
+        // and `apply` on independent `spawn_blocking` threads, so a panel write landing while the
+        // service pump's read is in flight would otherwise run TWO gphoto2 processes against the one
+        // USB camera at once — the second fails to claim the interface (a 502 write, or a cached
+        // "offline" read for a whole floor). Serializing camera access is the SAME invariant
+        // `read_state` relies on (it also holds this lock across its read). No re-entrancy: `apply`
+        // never calls `read_state`, and `read_raw` never locks the cache — so this cannot deadlock.
+        let mut cache = self
+            .read_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Read the live config ONCE, and PROPAGATE a read failure: falling back to a default
         // fps here would plan a wrong d002 shutter angle and write a wrong exposure to a live
-        // camera on a partial read (the handler maps this error to 502).
+        // camera on a partial read (the handler maps this error to 502). This top `read_raw()?`
+        // early-return drops the lock guard WITHOUT invalidating — correct: nothing was written.
         let raw = self.read_raw()?;
         let fnumber_choices = parse_choices(&raw.fnumber);
         let (params, _) = params_and_caps(&raw);
         let fps100 = params.fps100.unwrap_or(DEFAULT_FPS100);
         let writes = plan_writes(req, &fnumber_choices, fps100);
         let n = writes.len();
-        // issue 1229: run the writes, but INVALIDATE the cache whether they ALL succeed OR one
-        // fails partway. A mid-apply gphoto2 error (camera busy / unplugged — the handler maps it
-        // to 502) still leaves the camera DIRTY: the earlier writes already landed, so the cached
-        // pre-write snapshot is stale either way and must not be served for up to a floor. (The
-        // top `read_raw()?` stays non-invalidating: nothing was written there.) Writes are
-        // user-initiated + rare, so this cannot reintroduce sustained bus contention.
+        // Run the writes, then INVALIDATE the cache whether they ALL succeed OR one fails partway.
+        // A mid-apply gphoto2 error (camera busy / unplugged — the handler maps it to 502) still
+        // leaves the camera DIRTY: the earlier writes already landed, so the cached pre-write
+        // snapshot is stale either way and must not be served for up to a floor. Writes are
+        // user-initiated + rare, so holding the lock this long cannot reintroduce bus contention.
         let mut write_err: Option<anyhow::Error> = None;
         for (key, value) in writes {
             if let Err(e) = self.runner.set_config(&key, &value) {
@@ -505,10 +527,7 @@ impl CameraSession {
                 break;
             }
         }
-        *self
-            .read_cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        *cache = None;
         match write_err {
             Some(e) => Err(e),
             None => Ok(n),

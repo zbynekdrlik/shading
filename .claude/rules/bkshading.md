@@ -469,12 +469,13 @@ can never disable it — 0/negative/junk falls back to the default; features-def
   on cam1 (17-30 min, 0× capture-rate self-heal, 0× USB reset), but issue 1229's OWN live-verify comment
   found a documented residual — occasional capture dips (54.5-58.5 fps, well below the 60.0 baseline
   but NOT enough to re-trip self-heal) still correlate with individual gphoto2 PTP transactions
-  colliding with the grabber's isochronous stream on the shared xHCI bus. The owner explicitly kept
-  1229 OPEN (`needs-owner-action`) pending a PHYSICAL step — moving the BMPCC's USB cable on cam1 to
-  a USB2 port (PTP only needs 480 Mb/s, isolating it from the grabber's SuperSpeed bandwidth domain)
-  — plus one more clean watch after that. **1228 unblocks only once 1229 actually closes** (or the
-  owner explicitly says otherwise) — do NOT add `Restart=on-failure` just because the floor merged;
-  re-check `gh issue view 1229` state/labels before touching the unit.
+  colliding with the grabber's isochronous stream on the shared xHCI bus. **SUPERSEDED 2026-09-03
+  (owner ruling, webterm):** the PHYSICAL USB2 step is IMPOSSIBLE — the cam1 mini PC has a SINGLE
+  xHCI controller (see the "Coalesce the read into ONE multi `--get-config` USB session" subsection
+  below), so #1229 became a CODE lane and the residual is now attacked by coalescing the per-read
+  gphoto2 sessions (9 → 3), not by re-cabling. **1228 unblocks only once 1229 actually closes** (or
+  the owner explicitly says otherwise) — do NOT add `Restart=on-failure` just because a floor/coalesce
+  merged; re-check `gh issue view 1229` state/labels before touching the unit.
 - **Complementary idle lever (owner's "poll len on-demand keď je panel otvorený" half, NOT done
   here):** the service could poll relays only while a WS/panel client is connected, for TRUE-zero
   idle. It lives in a different crate (service, ships to Windows/strih) with WS-lifecycle
