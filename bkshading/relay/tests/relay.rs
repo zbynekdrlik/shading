@@ -9,8 +9,9 @@ use std::sync::{Arc, Mutex};
 use anyhow::{anyhow, bail, Result};
 use bkshading_proto::wire::SetRequest;
 use bkshading_relay::transport::{
-    parse_capture_fps_env, parse_first_model, parse_min_read_interval_env, read_is_fresh,
-    CameraSession, Gphoto2Runner, MonoClock,
+    build_get_config_many_args, parse_capture_fps_env, parse_first_model,
+    parse_min_read_interval_env, read_is_fresh, split_config_blocks, CameraSession, Gphoto2Runner,
+    MonoClock, CORE_CONFIG_KEYS,
 };
 
 const AUTO_DETECT: &str = "\
@@ -516,6 +517,105 @@ fn read_cycle_uses_at_most_three_usb_sessions_1229() {
         n <= 3,
         "one read cycle must use at most 3 USB-PTP sessions (detect + core batch + d003), got {n}"
     );
+}
+
+/// A [`Gphoto2Runner`] that mirrors the REAL [`Gphoto2Cli`] batched read (issue 1229): its
+/// `get_config_many` JOINS the per-key gphoto2 stdout blocks into one combined string (as a single
+/// multi-`--get-config` process would print) and then re-splits it with `split_config_blocks`. This
+/// proves the combine→split round-trip recovers the correct per-key blocks in order, so a coalesced
+/// read yields the SAME shading state as the per-key path — without a camera or the gphoto2 binary.
+struct CoalescingFakeRunner {
+    inner: FakeRunner,
+}
+
+impl Gphoto2Runner for CoalescingFakeRunner {
+    fn auto_detect(&self) -> Result<String> {
+        self.inner.auto_detect()
+    }
+    fn get_config(&self, key: &str) -> Result<String> {
+        self.inner.get_config(key)
+    }
+    fn get_config_many(&self, keys: &[&str]) -> Result<Vec<String>> {
+        let combined = keys
+            .iter()
+            .map(|k| self.inner.get_config(k))
+            .collect::<Result<Vec<_>>>()?
+            .join("\n");
+        split_config_blocks(&combined, keys.len())
+            .ok_or_else(|| anyhow!("split_config_blocks: block/key count mismatch"))
+    }
+    fn set_config(&self, key: &str, value: &str) -> Result<()> {
+        self.inner.set_config(key, value)
+    }
+}
+
+#[test]
+fn coalesced_read_yields_same_state_1229() {
+    // The batched (combine→split) read must produce byte-identical shading state to the per-key
+    // read — the coalesce is a bus-footprint change ONLY, never a semantic one.
+    let d003 = "Current: 32768\nBottom: 0\nTop: 65536\nEND";
+    let plain = CameraSession::new(
+        Box::new(FakeRunner::full_camera().with_config("d003", d003)),
+        "1.7.0-dev.516",
+    );
+    let coalesced = CameraSession::new(
+        Box::new(CoalescingFakeRunner {
+            inner: FakeRunner::full_camera().with_config("d003", d003),
+        }),
+        "1.7.0-dev.516",
+    );
+    let a = plain.read_state();
+    let b = coalesced.read_state();
+    assert!(b.online);
+    assert_eq!(a.camera, b.camera);
+    assert_eq!(a.params.iso, b.params.iso);
+    assert_eq!(a.params.aperture_av, b.params.aperture_av);
+    assert_eq!(a.params.kelvin, b.params.kelvin);
+    assert_eq!(a.params.tint, b.params.tint);
+    assert_eq!(a.params.shutter, b.params.shutter);
+    assert_eq!(a.params.fps100, b.params.fps100);
+    assert_eq!(a.params.focus_distance, b.params.focus_distance);
+    assert_eq!(b.params.focus_distance, Some(32768));
+    assert_eq!(
+        a.caps.as_ref().map(|c| c.iso_choices.clone()),
+        b.caps.as_ref().map(|c| c.iso_choices.clone())
+    );
+    assert_eq!(a.fps_supported, b.fps_supported);
+}
+
+#[test]
+fn split_config_blocks_1229() {
+    let combined = "Label: ISO\nCurrent: 400\nEND\nLabel: F\nCurrent: f/5.2\nEND";
+    let got = split_config_blocks(combined, 2).expect("two blocks");
+    assert_eq!(got.len(), 2);
+    assert!(got[0].contains("Current: 400"));
+    assert!(got[1].contains("Current: f/5.2"));
+    // A trailing newline after the last END is tolerated (no spurious empty block).
+    assert!(split_config_blocks("A\nEND\nB\nEND\n", 2).is_some());
+    // Count mismatch (excess or shortfall) -> None -> fail-safe (read degrades to offline, never a
+    // block mis-assigned to the wrong key).
+    assert!(split_config_blocks(combined, 3).is_none());
+    assert!(split_config_blocks(combined, 1).is_none());
+    // A missing terminating END -> the final block is incomplete -> shortfall -> None.
+    assert!(split_config_blocks("A\nEND\nB", 2).is_none());
+    // Zero keys / empty input.
+    assert_eq!(split_config_blocks("", 0), Some(vec![]));
+}
+
+#[test]
+fn build_get_config_many_args_1229() {
+    // One `--get-config` token per key -> a SINGLE gphoto2 process reads every key in ONE USB
+    // session (the coalesce), not one process per key.
+    let args = build_get_config_many_args(&CORE_CONFIG_KEYS);
+    assert_eq!(args.len(), CORE_CONFIG_KEYS.len() * 2);
+    assert_eq!(
+        args.iter().filter(|a| a.as_str() == "--get-config").count(),
+        CORE_CONFIG_KEYS.len()
+    );
+    assert_eq!(&args[0], "--get-config");
+    assert_eq!(&args[1], "iso");
+    assert_eq!(&args[12], "--get-config");
+    assert_eq!(&args[13], "d007");
 }
 
 #[test]
