@@ -483,6 +483,45 @@ can never disable it — 0/negative/junk falls back to the default; features-def
   during live shading), so it is deferred, not dropped; file it with evidence if live-verify shows
   the residual idle burst still disturbs capture.
 
+### Coalesce the read into ONE multi `--get-config` USB session — the residual per-read footprint fix (issue 1229 CODE lane, 2026-09-03)
+
+**Owner ruling 2026-09-03 (webterm): the PHYSICAL USB2 step is IMPOSSIBLE and the ticket is a CODE
+lane.** The cam1 mini PC has a SINGLE xHCI controller (confirmed live `lsusb -t`: Bus 002, one
+4-port SuperSpeed root hub, carrying the grabber's isochronous UVC stream AND the BMPCC PTP camera
+AND a `uas` mass-storage SSD together), so moving the BMPCC cable to "another port" isolates
+nothing — every USB device on the box shares the one controller. Disabling shading on cam1 is also
+rejected (owner wants shading working WHILE grabbing). So the residual (documented above: freezes
+GONE with the floor — 0× self-heal live — but ~5 % of 5 s windows still dip <58.5 fps, min ~51.8,
+each dip correlating with a gphoto2 read) is closed by a CODE reduction of the per-read footprint,
+NOT a physical or lifecycle change.
+
+- **The fix: a batched `Gphoto2Runner::get_config_many(&[&str])` on top of the floor.** A real read
+  used to fire NINE separate `gphoto2` processes (1 `--auto-detect` + 8 `--get-config`), each a
+  full USB open/enumerate/close cycle — and re-enumeration (interface claim + PTP OpenSession) is
+  the part that most disturbs the grabber's isochronous stream. `Gphoto2Cli::get_config_many` now
+  reads the SEVEN core shading keys (`CORE_CONFIG_KEYS`) in ONE `gphoto2 --get-config k1
+  --get-config k2 …` process (ONE USB session for all seven), splitting the combined stdout back
+  into per-key blocks by `END`-line boundaries (`split_config_blocks`, positional map, fail-safe
+  `None` on a block/key count mismatch → the read degrades to offline, never a mis-assigned block).
+  `read_raw()` is now detect (1) + core batch (1) + best-effort `d003` kept SEPARATE (1) = **3 USB
+  sessions per read, down from 9.** DEFAULT-ON (no toggle — features-default-on); the floor still
+  caps the read RATE, this cuts the per-read enumeration COUNT.
+- **`d003` stays its own call, NEVER folded into the batch** — a camera that does not answer `d003`
+  would abort a batched core read (gphoto2 errors the whole invocation), wrongly degrading the
+  essential shading state to offline. Best-effort `d003` alone can fail harmlessly (→ `None`).
+- **Tier-0:** the batch/session count is proven by a `SessionCountingRunner` (one read ≤ 3 sessions;
+  RED at 9 on the pre-fix path), `split_config_blocks`/`build_get_config_many_args` are pure and
+  unit-tested + rustc-replicated, and a `CoalescingFakeRunner` (join stdout → split, mirroring the
+  real `Gphoto2Cli`) proves a coalesced read yields byte-identical state to the per-key path.
+- **What is NOT reduced (deferred, not dropped):** the `--auto-detect` presence probe stays a
+  separate session (folding it needs caching the port + deriving presence from the batch — a bigger
+  change, not this lane); and the residual "one 3-session read/floor can still occasionally clip the
+  isochronous stream" is bounded far lower but not provably zero on a single shared controller — the
+  final clean-watch A/B (relay-on steady vs off) is a supervisor live-verify step (blocked in this
+  lane by an in-progress E2E, which itself pauses the relay). If that watch still shows dips, the
+  next levers are the service-side on-demand poll (idle lever above) and inter-call pacing — both
+  strictly after coalesce, which removes the most sessions for the least risk.
+
 
 ## A manual interim `systemctl stop bkshading-relay` is NEVER auto-restored — not even by `Restart=on-failure` (issue 1228 TERM-origin finding)
 
