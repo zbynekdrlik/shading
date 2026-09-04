@@ -469,12 +469,13 @@ can never disable it — 0/negative/junk falls back to the default; features-def
   on cam1 (17-30 min, 0× capture-rate self-heal, 0× USB reset), but issue 1229's OWN live-verify comment
   found a documented residual — occasional capture dips (54.5-58.5 fps, well below the 60.0 baseline
   but NOT enough to re-trip self-heal) still correlate with individual gphoto2 PTP transactions
-  colliding with the grabber's isochronous stream on the shared xHCI bus. The owner explicitly kept
-  1229 OPEN (`needs-owner-action`) pending a PHYSICAL step — moving the BMPCC's USB cable on cam1 to
-  a USB2 port (PTP only needs 480 Mb/s, isolating it from the grabber's SuperSpeed bandwidth domain)
-  — plus one more clean watch after that. **1228 unblocks only once 1229 actually closes** (or the
-  owner explicitly says otherwise) — do NOT add `Restart=on-failure` just because the floor merged;
-  re-check `gh issue view 1229` state/labels before touching the unit.
+  colliding with the grabber's isochronous stream on the shared xHCI bus. **SUPERSEDED 2026-09-03
+  (owner ruling, webterm):** the PHYSICAL USB2 step is IMPOSSIBLE — the cam1 mini PC has a SINGLE
+  xHCI controller (see the "Coalesce the read into ONE multi `--get-config` USB session" subsection
+  below), so #1229 became a CODE lane and the residual is now attacked by coalescing the per-read
+  gphoto2 sessions (9 → 3), not by re-cabling. **1228 unblocks only once 1229 actually closes** (or
+  the owner explicitly says otherwise) — do NOT add `Restart=on-failure` just because a floor/coalesce
+  merged; re-check `gh issue view 1229` state/labels before touching the unit.
 - **Complementary idle lever (owner's "poll len on-demand keď je panel otvorený" half, NOT done
   here):** the service could poll relays only while a WS/panel client is connected, for TRUE-zero
   idle. It lives in a different crate (service, ships to Windows/strih) with WS-lifecycle
@@ -482,6 +483,45 @@ can never disable it — 0/negative/junk falls back to the default; features-def
   floor already bounds the worst case (1 read/floor even with a panel open — the case that matters
   during live shading), so it is deferred, not dropped; file it with evidence if live-verify shows
   the residual idle burst still disturbs capture.
+
+### Coalesce the read into ONE multi `--get-config` USB session — the residual per-read footprint fix (issue 1229 CODE lane, 2026-09-03)
+
+**Owner ruling 2026-09-03 (webterm): the PHYSICAL USB2 step is IMPOSSIBLE and the ticket is a CODE
+lane.** The cam1 mini PC has a SINGLE xHCI controller (confirmed live `lsusb -t`: Bus 002, one
+4-port SuperSpeed root hub, carrying the grabber's isochronous UVC stream AND the BMPCC PTP camera
+AND a `uas` mass-storage SSD together), so moving the BMPCC cable to "another port" isolates
+nothing — every USB device on the box shares the one controller. Disabling shading on cam1 is also
+rejected (owner wants shading working WHILE grabbing). So the residual (documented above: freezes
+GONE with the floor — 0× self-heal live — but ~5 % of 5 s windows still dip <58.5 fps, min ~51.8,
+each dip correlating with a gphoto2 read) is closed by a CODE reduction of the per-read footprint,
+NOT a physical or lifecycle change.
+
+- **The fix: a batched `Gphoto2Runner::get_config_many(&[&str])` on top of the floor.** A real read
+  used to fire NINE separate `gphoto2` processes (1 `--auto-detect` + 8 `--get-config`), each a
+  full USB open/enumerate/close cycle — and re-enumeration (interface claim + PTP OpenSession) is
+  the part that most disturbs the grabber's isochronous stream. `Gphoto2Cli::get_config_many` now
+  reads the SEVEN core shading keys (`CORE_CONFIG_KEYS`) in ONE `gphoto2 --get-config k1
+  --get-config k2 …` process (ONE USB session for all seven), splitting the combined stdout back
+  into per-key blocks by `END`-line boundaries (`split_config_blocks`, positional map, fail-safe
+  `None` on a block/key count mismatch → the read degrades to offline, never a mis-assigned block).
+  `read_raw()` is now detect (1) + core batch (1) + best-effort `d003` kept SEPARATE (1) = **3 USB
+  sessions per read, down from 9.** DEFAULT-ON (no toggle — features-default-on); the floor still
+  caps the read RATE, this cuts the per-read enumeration COUNT.
+- **`d003` stays its own call, NEVER folded into the batch** — a camera that does not answer `d003`
+  would abort a batched core read (gphoto2 errors the whole invocation), wrongly degrading the
+  essential shading state to offline. Best-effort `d003` alone can fail harmlessly (→ `None`).
+- **Tier-0:** the batch/session count is proven by a `SessionCountingRunner` (one read ≤ 3 sessions;
+  RED at 9 on the pre-fix path), `split_config_blocks`/`build_get_config_many_args` are pure and
+  unit-tested + rustc-replicated, and a `CoalescingFakeRunner` (join stdout → split, mirroring the
+  real `Gphoto2Cli`) proves a coalesced read yields byte-identical state to the per-key path.
+- **What is NOT reduced (deferred, not dropped):** the `--auto-detect` presence probe stays a
+  separate session (folding it needs caching the port + deriving presence from the batch — a bigger
+  change, not this lane); and the residual "one 3-session read/floor can still occasionally clip the
+  isochronous stream" is bounded far lower but not provably zero on a single shared controller — the
+  final clean-watch A/B (relay-on steady vs off) is a supervisor live-verify step (blocked in this
+  lane by an in-progress E2E, which itself pauses the relay). If that watch still shows dips, the
+  next levers are the service-side on-demand poll (idle lever above) and inter-call pacing — both
+  strictly after coalesce, which removes the most sessions for the least risk.
 
 
 ## A manual interim `systemctl stop bkshading-relay` is NEVER auto-restored — not even by `Restart=on-failure` (issue 1228 TERM-origin finding)
@@ -498,16 +538,45 @@ left `enabled` (comes back only on a REBOOT) and nobody manually restarted it, s
 until the owner tried to use shading the next day.
 
 **The lesson generalizes past this one incident: a DELIBERATE `systemctl stop` is never
-auto-recovered by `Restart=on-failure`, by design** — systemd suppresses the restart when a stop was
-requested by the service manager itself (an administrative/clean stop), regardless of the
-`Restart=` policy. So even once issue 1228 lands `Restart=on-failure` on
-`systemd/bkshading-relay.service`, it will **only** protect against a genuine unexpected crash
-(panic, segfault, OOM-kill) — it will NOT bring back a relay that was deliberately silenced as an
-interim mitigation (correct behavior: an operator's deliberate stop should stay off until they
-undo it). **Any interim "stop this on box X while we investigate" mitigation needs its OWN explicit
-tracking** (a ticket comment naming which boxes were stopped + a reminder to restore them) — the
-harness-managed pause (`bkshading-e2e-pause.sh`, above) only covers stops the E2E harness ITSELF
-performs; it has no visibility into an ad-hoc manual stop done directly on the rig.
+auto-recovered by `Restart=on-failure`, by design — and neither is ANY OTHER SIGTERM, regardless of
+who sent it.** Two independent systemd mechanisms both point the same way here: (1) systemd
+suppresses `Restart=` entirely when a stop was requested by the service manager itself
+(`systemctl stop`/`systemctl restart`, e.g. the deploy flow), and (2) separately, systemd treats
+SIGHUP/SIGINT/**SIGTERM**/SIGPIPE as a CLEAN exit by default (same as exit code 0) for the purpose
+of `Restart=on-failure`'s own "was this a failure?" check — so even a SIGTERM from a source OTHER
+than the manager (a stray `kill -TERM`, some other tool) still would not trigger a restart under
+`on-failure`. Issue 1228's `Restart=` code lane has now LANDED (`systemd/bkshading-relay.service`:
+`Restart=always`/`RestartSec=3` → `Restart=on-failure`/`RestartSec=5`) — the precondition (issue
+1229's USB2 topology question) was settled once the owner ruled the physical re-cabling step
+impossible (single xHCI controller), so today's topology already IS the target one. As predicted
+here, it **only** protects against a genuine unexpected crash — a non-zero exit, an operation
+timeout, a watchdog failure, or termination by a signal OTHER than the four "clean" ones above
+(SIGSEGV, SIGABRT, SIGKILL/OOM-kill) — it does NOT bring back a relay that was deliberately
+silenced as an interim mitigation (correct behavior: an operator's deliberate stop should stay off
+until they undo it), and it does NOT change the deploy stop→start flow either (both `always` and
+`on-failure` already skip a manager-requested stop, and `on-failure` additionally treats SIGTERM as
+clean regardless of origin). **Any interim "stop this on box X while we investigate" mitigation
+still needs its OWN explicit tracking** (a ticket comment naming which boxes were stopped + a
+reminder to restore them) — the harness-managed pause (`bkshading-e2e-pause.sh`, above) only covers
+stops the E2E harness ITSELF performs; it has no visibility into an ad-hoc manual stop done directly
+on the rig.
+
+**Why this "SIGTERM is always clean" fact applies cleanly to `bkshading-relay` specifically —
+verified against its own source, not just systemd theory (issue 1228 review-fix follow-up):**
+`bkshading/relay/src/main.rs` only installs `tokio::signal::ctrl_c()` (SIGINT / Ctrl-C) for graceful
+shutdown — it registers **no SIGTERM handler at all**. So a SIGTERM (from `systemctl stop`, the
+deploy flow, or a stray external `kill -TERM`) is never intercepted; it kills the process via the
+raw OS default, which is exactly the `code=killed, signal=TERM` shape the 29.8 incident's journal
+showed, and exactly systemd's "clean exit" case (confirmed from this box's own local
+`man systemd.service` "Table 1. Exit causes and the effect of the Restart= settings" — `on-failure`
+has NO entry for the "Clean exit code or signal" row). **This does NOT contradict
+`imag-obs-supervision.md`'s opposite-sounding claim** ("an external `pkill -TERM` … STILL triggers
+`Restart=on-failure`") — that is about a DIFFERENT process (OBS) that DOES install its own signal
+handling and exits via a controlled-but-non-zero path (or crashes) in response, which lands in the
+table's "Unclean exit code" / "Unclean signal" rows instead. The generalizable rule: whether a raw
+SIGTERM is "clean" (no restart) or "unclean" (restart) under `on-failure` depends on **whether the
+specific binary catches the signal and how it exits in response** — never assume either way without
+checking that binary's own signal handling, the way this was checked here.
 
 ## E2E `[0/8]` camera pre-run auto-check reads `/api/state` — shutter+iso+aperture, NOT focus/exposure-MODE (issue 808 shutter half + issue 1237 exposure half)
 

@@ -9,8 +9,9 @@ use std::sync::{Arc, Mutex};
 use anyhow::{anyhow, bail, Result};
 use bkshading_proto::wire::SetRequest;
 use bkshading_relay::transport::{
-    parse_capture_fps_env, parse_first_model, parse_min_read_interval_env, read_is_fresh,
-    CameraSession, Gphoto2Runner, MonoClock,
+    build_get_config_many_args, parse_capture_fps_env, parse_first_model,
+    parse_min_read_interval_env, read_is_fresh, split_config_blocks, CameraSession, Gphoto2Cli,
+    Gphoto2Runner, MonoClock, CORE_CONFIG_KEYS,
 };
 
 const AUTO_DETECT: &str = "\
@@ -103,7 +104,9 @@ fn read_state_reports_online_camera() {
         Some("Blackmagic Design Pocket Cinema Camera 4K")
     );
     assert_eq!(st.params.iso, Some(400));
-    assert_eq!(st.params.kelvin, Some(5600));
+    assert_eq!(st.params.kelvin, Some(5600)); // d004
+    assert_eq!(st.params.tint, Some(0)); // d005 -- distinct from d006 to catch a positional swap
+    assert_eq!(st.params.sensor_fps100, Some(2500)); // d006 -- ditto; issue 1229 batch order
     assert_eq!(st.params.shutter, Some(50)); // d002 18000 @ 25fps -> 1/50
     assert!(st.fps_supported);
     // issue 1238: full_camera() deliberately omits d003, so the best-effort focus-distance read
@@ -243,10 +246,13 @@ fn apply_writes_expected_gphoto2_config() {
     assert!(!writes.iter().any(|(k, _)| k.contains("wb")));
 }
 
-/// A [`Gphoto2Runner`] that COUNTS its gphoto2 invocations (via a shared atomic), so a test can
-/// assert how many real USB-PTP reads a sequence of `/api/state` calls actually triggered. The
-/// `auto_detect` count is the proxy for "one full read cycle" (`read_state` calls it exactly once
-/// before the eight `get_config` reads — the seven shading keys + the issue-1238 `d003`).
+/// A [`Gphoto2Runner`] that COUNTS its `auto_detect` invocations (via a shared atomic), so a test
+/// can assert how many real USB-PTP READ CYCLES a sequence of `/api/state` calls actually
+/// triggered. `read_state` calls `auto_detect` exactly once per uncached read cycle (before the
+/// coalesced core `get_config_many` batch + the best-effort `d003`), so its count is the read-cycle
+/// proxy — used by the min-interval-floor tests (issue 1229). It deliberately does NOT override
+/// `get_config_many`, so a floor test measures read CYCLES, not USB sessions per read (that is the
+/// separate `SessionCountingRunner`).
 struct CountingRunner {
     inner: FakeRunner,
     detect_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
@@ -457,6 +463,199 @@ fn read_is_fresh_pure_1229() {
                                                       // A (monotonic-impossible) backwards step saturates to 0 -> treated fresh: serve cache
                                                       // rather than hammer the bus.
     assert!(read_is_fresh(Some(100), 50, 10_000));
+}
+
+/// A [`Gphoto2Runner`] that counts every real gphoto2 PROCESS SPAWN on the read path — one per
+/// `auto_detect`, one per `get_config`, and ONE per `get_config_many` (a batched multi-key call is
+/// a SINGLE USB-PTP session, so it must count as one). This measures the shared-bus footprint of a
+/// single read cycle (issue 1229): the residual capture dips on cam1 come from the number of
+/// USB open/enumerate/close cycles a read fires on the xHCI bus it shares with the grabber.
+struct SessionCountingRunner {
+    inner: FakeRunner,
+    sessions: Arc<AtomicUsize>,
+}
+
+impl Gphoto2Runner for SessionCountingRunner {
+    fn auto_detect(&self) -> Result<String> {
+        self.sessions.fetch_add(1, Ordering::SeqCst);
+        self.inner.auto_detect()
+    }
+    fn get_config(&self, key: &str) -> Result<String> {
+        self.sessions.fetch_add(1, Ordering::SeqCst);
+        self.inner.get_config(key)
+    }
+    fn get_config_many(&self, keys: &[&str]) -> Result<Vec<String>> {
+        // A batched call is ONE USB session regardless of key count: count once, and read the
+        // per-key blocks from the inner fake DIRECTLY (not via self.get_config) so it stays one.
+        self.sessions.fetch_add(1, Ordering::SeqCst);
+        keys.iter().map(|k| self.inner.get_config(k)).collect()
+    }
+    fn set_config(&self, key: &str, value: &str) -> Result<()> {
+        self.inner.set_config(key, value)
+    }
+}
+
+#[test]
+fn read_cycle_uses_at_most_three_usb_sessions_1229() {
+    // #1229 residual (post-floor): even at one read per floor, a single read cycle shells gphoto2
+    // NINE times — `detect()` (1x --auto-detect) + `read_raw()` (8x --get-config: the 7 shading
+    // keys + the d003 focus distance) — each a separate USB open/enumerate/close on the xHCI bus
+    // the relay shares with the grabber, which is what still dips the grabber's isochronous capture.
+    // The fix coalesces the shading reads into ONE multi `--get-config` session, so a full read is
+    // at most THREE USB sessions: detect + one core batch + the best-effort d003 (kept separate so
+    // an unanswered d003 can never abort the core batch). On the pre-fix code this is NINE -> RED.
+    let sessions = Arc::new(AtomicUsize::new(0));
+    let session = CameraSession::new(
+        Box::new(SessionCountingRunner {
+            inner: FakeRunner::full_camera()
+                .with_config("d003", "Current: 32768\nBottom: 0\nTop: 65536\nEND"),
+            sessions: sessions.clone(),
+        }),
+        "1.7.0-dev.516",
+    );
+    let st = session.read_state();
+    assert!(st.online, "the read must still produce a full online state");
+    assert_eq!(st.params.focus_distance, Some(32768), "d003 still read");
+    assert_eq!(st.params.iso, Some(400), "core keys still read");
+    let n = sessions.load(Ordering::SeqCst);
+    assert!(
+        n <= 3,
+        "one read cycle must use at most 3 USB-PTP sessions (detect + core batch + d003), got {n}"
+    );
+}
+
+/// A [`Gphoto2Runner`] that mirrors the REAL [`Gphoto2Cli`] batched read (issue 1229): its
+/// `get_config_many` JOINS the per-key gphoto2 stdout blocks into one combined string (as a single
+/// multi-`--get-config` process would print) and then re-splits it with `split_config_blocks`. This
+/// proves the combine→split round-trip recovers the correct per-key blocks in order, so a coalesced
+/// read yields the SAME shading state as the per-key path — without a camera or the gphoto2 binary.
+struct CoalescingFakeRunner {
+    inner: FakeRunner,
+}
+
+impl Gphoto2Runner for CoalescingFakeRunner {
+    fn auto_detect(&self) -> Result<String> {
+        self.inner.auto_detect()
+    }
+    fn get_config(&self, key: &str) -> Result<String> {
+        self.inner.get_config(key)
+    }
+    fn get_config_many(&self, keys: &[&str]) -> Result<Vec<String>> {
+        let combined = keys
+            .iter()
+            .map(|k| self.inner.get_config(k))
+            .collect::<Result<Vec<_>>>()?
+            .join("\n");
+        split_config_blocks(&combined, keys.len())
+            .ok_or_else(|| anyhow!("split_config_blocks: block/key count mismatch"))
+    }
+    fn set_config(&self, key: &str, value: &str) -> Result<()> {
+        self.inner.set_config(key, value)
+    }
+}
+
+#[test]
+fn coalesced_read_yields_same_state_1229() {
+    // The batched (combine→split) read must produce byte-identical shading state to the per-key
+    // read — the coalesce is a bus-footprint change ONLY, never a semantic one.
+    let d003 = "Current: 32768\nBottom: 0\nTop: 65536\nEND";
+    let plain = CameraSession::new(
+        Box::new(FakeRunner::full_camera().with_config("d003", d003)),
+        "1.7.0-dev.516",
+    );
+    let coalesced = CameraSession::new(
+        Box::new(CoalescingFakeRunner {
+            inner: FakeRunner::full_camera().with_config("d003", d003),
+        }),
+        "1.7.0-dev.516",
+    );
+    let a = plain.read_state();
+    let b = coalesced.read_state();
+    // Whole-state equality: RelayState derives PartialEq, so this pins EVERY field (camera, all
+    // params incl. aperture/tint/sensor_fps, caps, fps_supported, version) at once — a positional
+    // mis-map or a dropped field in the coalesced path fails here, not just a hand-picked subset.
+    assert_eq!(a, b, "coalesced read must equal the per-key read exactly");
+    assert!(b.online);
+    assert_eq!(b.params.focus_distance, Some(32768));
+}
+
+#[test]
+fn split_config_blocks_1229() {
+    let combined = "Label: ISO\nCurrent: 400\nEND\nLabel: F\nCurrent: f/5.2\nEND";
+    let got = split_config_blocks(combined, 2).expect("two blocks");
+    assert_eq!(got.len(), 2);
+    assert!(got[0].contains("Current: 400"));
+    assert!(got[1].contains("Current: f/5.2"));
+    // A trailing newline after the last END is tolerated (no spurious empty block).
+    assert!(split_config_blocks("A\nEND\nB\nEND\n", 2).is_some());
+    // Count mismatch (excess or shortfall) -> None -> fail-safe (read degrades to offline, never a
+    // block mis-assigned to the wrong key).
+    assert!(split_config_blocks(combined, 3).is_none());
+    assert!(split_config_blocks(combined, 1).is_none());
+    // A missing terminating END -> the final block is incomplete -> shortfall -> None.
+    assert!(split_config_blocks("A\nEND\nB", 2).is_none());
+    // Zero keys / empty input.
+    assert_eq!(split_config_blocks("", 0), Some(vec![]));
+}
+
+#[cfg(unix)]
+#[test]
+fn gphoto2_cli_get_config_many_batches_and_fails_safe_1229() {
+    // Exercise the REAL `Gphoto2Cli::get_config_many` glue (argv build -> one process -> split ->
+    // fail-safe) with a stand-in `gphoto2` shell script, no camera. The `bkshading` CI job runs on
+    // Linux (/bin/sh present); `#[cfg(unix)]` keeps it off the `bkshading-windows` compile.
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("bksh-1229-cli-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // A fake gphoto2 that prints TWO END-delimited blocks (mirrors a real multi `--get-config`).
+    let ok = dir.join("gphoto2-ok.sh");
+    std::fs::write(
+        &ok,
+        "#!/bin/sh\nprintf 'Label: ISO\\nCurrent: 400\\nEND\\nLabel: F\\nCurrent: f/5.2\\nEND\\n'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&ok, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let cli = Gphoto2Cli {
+        binary: ok.to_string_lossy().into_owned(),
+    };
+    let blocks = cli
+        .get_config_many(&["iso", "f-number"])
+        .expect("two blocks");
+    assert_eq!(blocks.len(), 2);
+    assert!(blocks[0].contains("Current: 400"));
+    assert!(blocks[1].contains("Current: f/5.2"));
+    // Count mismatch (2 printed blocks, 3 keys) -> Err (fail-safe -> offline), never a mis-parse.
+    assert!(cli.get_config_many(&["iso", "f-number", "d002"]).is_err());
+    // Empty keys -> Ok(empty), never a bare `gphoto2` usage-error spawn.
+    assert!(cli.get_config_many(&[]).unwrap().is_empty());
+
+    // A non-zero gphoto2 exit -> Err (a failed read degrades to offline).
+    let bad = dir.join("gphoto2-bad.sh");
+    std::fs::write(&bad, "#!/bin/sh\necho boom >&2\nexit 1\n").unwrap();
+    std::fs::set_permissions(&bad, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let cli_bad = Gphoto2Cli {
+        binary: bad.to_string_lossy().into_owned(),
+    };
+    assert!(cli_bad.get_config_many(&["iso"]).is_err());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn build_get_config_many_args_1229() {
+    // One `--get-config` token per key -> a SINGLE gphoto2 process reads every key in ONE USB
+    // session (the coalesce), not one process per key.
+    let args = build_get_config_many_args(&CORE_CONFIG_KEYS);
+    assert_eq!(args.len(), CORE_CONFIG_KEYS.len() * 2);
+    assert_eq!(
+        args.iter().filter(|a| a.as_str() == "--get-config").count(),
+        CORE_CONFIG_KEYS.len()
+    );
+    assert_eq!(&args[0], "--get-config");
+    assert_eq!(&args[1], "iso");
+    assert_eq!(&args[12], "--get-config");
+    assert_eq!(&args[13], "d007");
 }
 
 #[test]

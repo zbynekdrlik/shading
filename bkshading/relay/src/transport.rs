@@ -22,6 +22,19 @@ pub trait Gphoto2Runner: Send + Sync {
     fn auto_detect(&self) -> Result<String>;
     /// `gphoto2 --get-config <key>` stdout.
     fn get_config(&self, key: &str) -> Result<String>;
+    /// Reads MANY config keys in ONE gphoto2 invocation (issue 1229): the real transport spawns a
+    /// single `gphoto2 --get-config k1 --get-config k2 …` process — ONE USB open/enumerate/close
+    /// cycle for all keys, instead of one per key — and returns one stdout block per key, in the
+    /// order of `keys`. On success the returned `Vec` has EXACTLY `keys.len()` elements; a spawn
+    /// failure, a non-zero gphoto2 exit, or a block/key count mismatch is an `Err` (the read then
+    /// degrades to offline, the same as a failed single `get_config`).
+    ///
+    /// The default impl loops `get_config` (one USB session PER key) — correct behaviour, wrong
+    /// bus footprint; it exists so test fakes get the read semantics for free. The real
+    /// [`Gphoto2Cli`] OVERRIDES it with the single-process batch that this issue is about.
+    fn get_config_many(&self, keys: &[&str]) -> Result<Vec<String>> {
+        keys.iter().map(|k| self.get_config(k)).collect()
+    }
     /// `gphoto2 --set-config <key>=<value>`.
     fn set_config(&self, key: &str, value: &str) -> Result<()>;
 }
@@ -68,6 +81,39 @@ impl Gphoto2Runner for Gphoto2Cli {
             );
         }
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
+    fn get_config_many(&self, keys: &[&str]) -> Result<Vec<String>> {
+        // issue 1229: read every key in ONE gphoto2 process = ONE USB open/enumerate/close on the
+        // shared xHCI bus (vs one session PER key with the default `get_config` loop), which is the
+        // per-read footprint reduction this issue is about. `--get-config` repeats in the same
+        // invocation, so gphoto2 opens the camera once and reads all keys in that one PTP session.
+        if keys.is_empty() {
+            // An argument-less `gphoto2` would print usage + exit non-zero; keep the pub fn honest.
+            return Ok(Vec::new());
+        }
+        let args = build_get_config_many_args(keys);
+        let out = std::process::Command::new(&self.binary)
+            .args(&args)
+            .output()
+            .with_context(|| format!("spawn {} --get-config (x{})", self.binary, keys.len()))?;
+        if !out.status.success() {
+            bail!(
+                "gphoto2 --get-config (x{}) failed: {}",
+                keys.len(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        // Fail-safe: a block/key count mismatch (a key errored mid-batch, a truncated block) must
+        // NOT mis-assign a block to the wrong key — it degrades to a failed read (-> offline), the
+        // same as a failed single `get_config`.
+        split_config_blocks(&stdout, keys.len()).ok_or_else(|| {
+            anyhow::anyhow!(
+                "gphoto2 multi --get-config returned an unexpected END-block count (expected {})",
+                keys.len()
+            )
+        })
     }
 
     fn set_config(&self, key: &str, value: &str) -> Result<()> {
@@ -211,6 +257,55 @@ pub fn parse_min_read_interval_env(raw: Option<String>) -> Option<u64> {
     }
 }
 
+/// The seven CORE shading config keys read together in ONE gphoto2 invocation (issue 1229). Their
+/// ORDER is the wire contract for [`split_config_blocks`]'s positional mapping in `read_raw`, and
+/// matches the field order they are assigned to in [`RawConfigs`]. The best-effort `d003` focus
+/// distance (issue 1238) is deliberately NOT here — it is read as a separate call so a camera that
+/// does not answer it can never abort the core batch (which would wrongly degrade the read to
+/// offline). `d001`-style undiscovered keys are not read.
+pub const CORE_CONFIG_KEYS: [&str; 7] = ["iso", "f-number", "d002", "d004", "d005", "d006", "d007"];
+
+/// Builds the gphoto2 argv for reading many config keys in ONE process (issue 1229):
+/// `["--get-config", k1, "--get-config", k2, …]`. A single `gphoto2` invocation with this argv
+/// opens the camera ONCE (one USB open/enumerate/close) and reads every key in that one PTP
+/// session — the whole point of the coalesce. Pure; unit-tested (proves it is one command, not N).
+pub fn build_get_config_many_args(keys: &[&str]) -> Vec<String> {
+    let mut args = Vec::with_capacity(keys.len() * 2);
+    for &k in keys {
+        args.push("--get-config".to_string());
+        args.push(k.to_string());
+    }
+    args
+}
+
+/// Splits the combined stdout of one multi-`--get-config` gphoto2 invocation into per-key blocks
+/// (issue 1229). gphoto2 prints one block per `--get-config`, in flag order, each terminated by a
+/// line that is exactly `END`; a block's own `Label:`/`Readonly:`/`Type:` header lines are kept in
+/// the block (the [`crate`]'s per-block parsers read only `Current:`/`Choice:`/`Bottom:`/`Top:` and
+/// ignore the rest). Returns `Some(blocks)` ONLY when the number of `END`-terminated blocks equals
+/// `n` (the key count); any shortfall/excess (a key that errored mid-batch, a missing terminating
+/// `END`, an unexpected extra block) yields `None`, so the caller degrades to a failed read →
+/// offline rather than mis-assigning a block to the wrong key. Pure; unit-tested + rustc-replicated.
+pub fn split_config_blocks(combined: &str, n: usize) -> Option<Vec<String>> {
+    let mut blocks: Vec<String> = Vec::new();
+    let mut cur: Vec<&str> = Vec::new();
+    for raw in combined.lines() {
+        if raw.trim() == "END" {
+            blocks.push(cur.join("\n"));
+            cur.clear();
+        } else {
+            cur.push(raw);
+        }
+    }
+    // Any lines after the last `END` are an incomplete (un-terminated) block: they are NOT counted,
+    // so a truncated final block shows up as a block-count shortfall below and fails safe.
+    if blocks.len() == n {
+        Some(blocks)
+    } else {
+        None
+    }
+}
+
 /// One cached read cycle (issue 1229): the last `RelayState` and the monotonic ms it was read at.
 struct CachedRead {
     state: RelayState,
@@ -287,25 +382,42 @@ impl CameraSession {
     }
 
     fn read_raw(&self) -> Result<RawConfigs> {
+        // issue 1229: read the seven CORE shading keys in ONE gphoto2 invocation (ONE USB-PTP
+        // session), not one session per key. `get_config_many` returns exactly one block per key,
+        // in `CORE_CONFIG_KEYS` order, or an `Err` (spawn/exit/count mismatch) that propagates via
+        // `?` -> offline, the same failure semantics the previous per-key `?` had.
+        let core = self.runner.get_config_many(&CORE_CONFIG_KEYS)?;
+        // Defensive typed destructure: `get_config_many`'s contract is EXACTLY `keys.len()` blocks
+        // on `Ok`, but a buggy runner returning a different count must NOT index-panic (read_state
+        // must never panic). `Vec<String>: TryInto<[String; 7]>` makes the count check, the
+        // panic-freedom, and the field arity ONE construct that also moves each block into its field
+        // with no per-block clone; a wrong length hands the Vec back and degrades to a failed read
+        // (-> offline), the same fail-safe as before.
+        let [iso, fnumber, shutter_angle, kelvin, tint, sensor_fps, project_fps]: [String; 7] =
+            core.try_into().map_err(|v: Vec<String>| {
+                anyhow::anyhow!(
+                    "get_config_many returned {} blocks, expected {}",
+                    v.len(),
+                    CORE_CONFIG_KEYS.len()
+                )
+            })?;
         Ok(RawConfigs {
-            iso: self.runner.get_config("iso")?,
-            fnumber: self.runner.get_config("f-number")?,
-            shutter_angle: self.runner.get_config("d002")?,
-            kelvin: self.runner.get_config("d004")?,
-            tint: self.runner.get_config("d005")?,
-            sensor_fps: self.runner.get_config("d006")?,
-            project_fps: self.runner.get_config("d007")?,
-            // issue 1238: the manual focus distance (d003) rides the SAME coalesced read cycle as
-            // the seven keys above (one more `--get-config` per throttled read, NEVER a per-request
-            // read and NEVER a second cadence — the issue-1229 bus-friendly floor is preserved). It
-            // is read BEST-EFFORT: unlike the core exposure trio (iso/f-number/d002) whose failure
-            // means the read is fundamentally broken and correctly degrades to offline via `?`,
-            // focus_distance is a supplementary pre-run-check signal — a camera/firmware/lens that
-            // does not answer d003 must NOT suppress the essential shading state, so its error maps
-            // to an empty block (-> a `None` focus_distance), not a whole-read failure. NB: `apply`
-            // also calls `read_raw`, so a write pays this one extra `--get-config` that `plan_writes`
-            // never uses — negligible (writes are rare + user-initiated), and not worth splitting the
-            // read paths for.
+            iso,
+            fnumber,
+            shutter_angle,
+            kelvin,
+            tint,
+            sensor_fps,
+            project_fps,
+            // issue 1238: the manual focus distance (d003) is read BEST-EFFORT as a SEPARATE call —
+            // NOT folded into the core batch — so a camera/firmware/lens that does not answer d003
+            // can never abort the batched core read (which would wrongly degrade the whole shading
+            // state to offline). Unlike the core keys whose failure means the read is fundamentally
+            // broken and correctly degrades via `?`, an unanswered d003 maps to an empty block
+            // (-> a `None` focus_distance). This is the ONE extra USB session beyond the batch: a
+            // full read is now detect + one core batch + d003 = 3 sessions (was 9). NB: `apply` also
+            // calls `read_raw`, so a write pays this same shape — negligible (writes are rare +
+            // user-initiated).
             focus_distance: self
                 .runner
                 .get_config(FOCUS_DISTANCE_KEY)
@@ -342,8 +454,9 @@ impl CameraSession {
         state
     }
 
-    /// The real (un-throttled) read cycle: one `gphoto2 --auto-detect` + eight `--get-config`
-    /// (the seven shading keys + the issue-1238 best-effort `d003` focus distance).
+    /// The real (un-throttled) read cycle (issue 1229): `detect()` (one `gphoto2 --auto-detect`) +
+    /// `read_raw()` (ONE batched multi `--get-config` for the seven shading keys + one best-effort
+    /// `--get-config d003`) = THREE USB-PTP sessions, coalesced down from the pre-fix nine.
     /// A detect miss or a gphoto2 read error degrades to an offline [`RelayState`], the
     /// server-is-truth model. Reached only through [`read_state`](Self::read_state)'s floor.
     fn read_state_uncached(&self) -> RelayState {
@@ -380,21 +493,33 @@ impl CameraSession {
     /// performed. Aperture is planned against the camera's live f-number choices and the
     /// live fps (for the shutter angle), so a write always matches the current camera.
     pub fn apply(&self, req: &SetRequest) -> Result<usize> {
+        // issue 1229: HOLD the `read_cache` lock across the ENTIRE apply (the `read_raw` + the
+        // `set_config` writes), not just at the final invalidate. `http.rs` dispatches `read_state`
+        // and `apply` on independent `spawn_blocking` threads, so a panel write landing while the
+        // service pump's read is in flight would otherwise run TWO gphoto2 processes against the one
+        // USB camera at once — the second fails to claim the interface (a 502 write, or a cached
+        // "offline" read for a whole floor). Serializing camera access is the SAME invariant
+        // `read_state` relies on (it also holds this lock across its read). No re-entrancy: `apply`
+        // never calls `read_state`, and `read_raw` never locks the cache — so this cannot deadlock.
+        let mut cache = self
+            .read_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Read the live config ONCE, and PROPAGATE a read failure: falling back to a default
         // fps here would plan a wrong d002 shutter angle and write a wrong exposure to a live
-        // camera on a partial read (the handler maps this error to 502).
+        // camera on a partial read (the handler maps this error to 502). This top `read_raw()?`
+        // early-return drops the lock guard WITHOUT invalidating — correct: nothing was written.
         let raw = self.read_raw()?;
         let fnumber_choices = parse_choices(&raw.fnumber);
         let (params, _) = params_and_caps(&raw);
         let fps100 = params.fps100.unwrap_or(DEFAULT_FPS100);
         let writes = plan_writes(req, &fnumber_choices, fps100);
         let n = writes.len();
-        // issue 1229: run the writes, but INVALIDATE the cache whether they ALL succeed OR one
-        // fails partway. A mid-apply gphoto2 error (camera busy / unplugged — the handler maps it
-        // to 502) still leaves the camera DIRTY: the earlier writes already landed, so the cached
-        // pre-write snapshot is stale either way and must not be served for up to a floor. (The
-        // top `read_raw()?` stays non-invalidating: nothing was written there.) Writes are
-        // user-initiated + rare, so this cannot reintroduce sustained bus contention.
+        // Run the writes, then INVALIDATE the cache whether they ALL succeed OR one fails partway.
+        // A mid-apply gphoto2 error (camera busy / unplugged — the handler maps it to 502) still
+        // leaves the camera DIRTY: the earlier writes already landed, so the cached pre-write
+        // snapshot is stale either way and must not be served for up to a floor. Writes are
+        // user-initiated + rare, so holding the lock this long cannot reintroduce bus contention.
         let mut write_err: Option<anyhow::Error> = None;
         for (key, value) in writes {
             if let Err(e) = self.runner.set_config(&key, &value) {
@@ -402,10 +527,7 @@ impl CameraSession {
                 break;
             }
         }
-        *self
-            .read_cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        *cache = None;
         match write_err {
             Some(e) => Err(e),
             None => Ok(n),
