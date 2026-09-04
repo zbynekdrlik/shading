@@ -282,6 +282,14 @@ mirroring the relay/cloudflared provisioning canon but with two deliberate delta
   and a handheld has no grab comparison, so the unit's `EnvironmentFile=-` degrades gracefully
   (relay → `capture_fps=None` → service static config). Do NOT reuse `bkshading-provision-relay.sh`
   (its whole job is deriving that env from `camera-box.service.d` drop-ins, which an SBC lacks).
+- **A `systemd/bkshading-relay.service` UNIT-FILE change never rides any binary deploy** (neither
+  `bkshading-deploy-relay.sh` nor the fleet post-merge deploy touch `/etc/systemd/system/`) — it
+  needs its own manual re-provision per box: `mount -o remount,rw /` → write the unit →
+  `systemctl daemon-reload && systemctl restart bkshading-relay` → read back
+  `systemctl show -p Restart,RestartUSec,ActiveState` → `mount -o remount,ro /`. Done live
+  2026-09-04 on cam1+cam2 for the issue-1228 `Restart=on-failure`/`RestartSec=5` unit (cam2 had
+  drifted on an older `Restart=always`/3 provisioning). Symptom of forgetting this: repo unit and
+  `systemctl cat` disagree after a green release.
 - **Deploy uses `bkshading-deploy-relay.sh --arch arm64 --no-remount`.** `--arch arm64` fetches the
   `bkshading-relay-linux-arm64` artifact; `--no-remount` skips the read-only-root swap (a cambox
   appliance has a ro root; a **stock Raspberry Pi OS root is read-WRITE** — remounting it ro is
