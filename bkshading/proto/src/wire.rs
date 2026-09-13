@@ -82,7 +82,9 @@ pub struct CameraCaps {
     /// f-number (issue 1304). `#[serde(default)]` so an older relay that does not send it still
     /// deserializes (empty `Vec`) — the panel then DISABLES the aperture +/- buttons rather
     /// than fabricating a step.
-    #[serde(default)]
+    // `rename_all = "camelCase"` would emit `fnumberChoices` (one word); the panel (app.js) and
+    // the E2E stub relay speak `fNumberChoices`, so pin the wire key explicitly.
+    #[serde(default, rename = "fNumberChoices")]
     pub fnumber_choices: Vec<f64>,
     pub shutter_choices: Vec<i64>,
     pub fps_min: i64,
