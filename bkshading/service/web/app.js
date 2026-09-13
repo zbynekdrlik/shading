@@ -391,3 +391,12 @@ setInterval(() => {
   if (!wsConnected) poll();
 }, 2000);
 setInterval(refreshPreviews, Math.round(1000 / PREVIEW_FPS));
+
+// issue 1305: register the service worker so the panel is installable as a PWA (own icon,
+// standalone window in the Windows dock). The SW is a pure network passthrough (no cache —
+// server-truth). Guarded on the API being present: on an insecure-origin LAN page (plain http
+// on a bare hostname) `navigator.serviceWorker` is undefined, so this is a no-op and the console
+// stays clean; the `.catch` swallows any registration error so nothing is logged either way.
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("/sw.js").catch(() => {});
+}

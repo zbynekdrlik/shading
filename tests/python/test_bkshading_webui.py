@@ -199,6 +199,52 @@ def test_app_js_aperture_step_disabled_without_choices_1304():
     assert "disabled = true" in rd, "step buttons disabled when no choices / at a bound"
 
 
+def test_index_links_pwa_manifest_and_icons_1305():
+    html = _read("index.html")
+    assert '<link rel="manifest"' in html, "index links a web app manifest"
+    assert "manifest.webmanifest" in html
+    assert '<meta name="theme-color"' in html
+    assert '<link rel="icon"' in html
+    assert "apple-touch-icon" in html
+
+
+def test_manifest_is_valid_standalone_pwa_1305():
+    import json
+
+    with open(os.path.join(WEB, "manifest.webmanifest"), encoding="utf-8") as fh:
+        m = json.load(fh)
+    assert m["display"] == "standalone"
+    assert m["start_url"] == "/"
+    assert m["scope"] == "/"
+    srcs = [i.get("src") for i in m["icons"]]
+    assert "/icon-192.png" in srcs
+    assert "/icon-512.png" in srcs
+    assert any("maskable" in (i.get("purpose") or "") for i in m["icons"]), "a maskable icon entry"
+
+
+def test_service_worker_is_passthrough_no_cache_1305():
+    with open(os.path.join(WEB, "sw.js"), encoding="utf-8") as fh:
+        sw = fh.read()
+    # server-truth: no cache anywhere (no stale UI/state).
+    assert "caches" not in sw, "sw.js must not use the Cache Storage API"
+    assert "fetch(event.request)" in sw, "sw.js is a pure network passthrough"
+
+
+def test_app_js_registers_service_worker_guarded_1305():
+    js = _read("app.js")
+    assert '"serviceWorker" in navigator' in js, "SW registration is guarded"
+    assert 'navigator.serviceWorker.register("/sw.js")' in js
+    assert ".catch(" in js, "registration errors are swallowed (clean console on insecure origin)"
+
+
+def test_pwa_icons_are_png_1305():
+    for name in ("icon-192.png", "icon-512.png"):
+        with open(os.path.join(WEB, name), "rb") as fh:
+            assert fh.read(8) == b"\x89PNG\r\n\x1a\n", f"{name} is not a PNG"
+    with open(os.path.join(WEB, "favicon.svg"), encoding="utf-8") as fh:
+        assert "<svg" in fh.read(), "favicon.svg is an SVG"
+
+
 def _run():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

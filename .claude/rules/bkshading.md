@@ -620,3 +620,73 @@ from the relay's issue-1229 read-floor cache (never a direct gphoto2 call). It i
   byte-identical, so the #675 anchor sweep is trivially clean. Keep the classifier's decision the
   single source of truth for a WARN's named parameter (pass the STATUS into the message, don't
   re-derive the missing set from the values in two places).
+
+
+## Panel +/- step buttons — aperture is a CHOICE step, K/tint are linear (issue 1304)
+
+The operator panel's three sliders (clona/biely bod/tint) each gained a `-`/`+` step button pair
+(`data-role="<role>-dec"/"-inc"`, `.step-btn` in a `.slider-row`), for precise stepping where a
+drag is imprecise. The three step semantics DIFFER and are not interchangeable:
+- **Aperture = ONE f-number CHOICE, not a fixed norm delta.** The panel needs the choice COUNT to
+  compute the step, which the M1 `CameraCaps` did not carry. Added an ADDITIVE
+  `CameraCaps.fnumber_choices: Vec<f64>` (camelCase `fNumberChoices`, `#[serde(default)]`), filled
+  by `read.rs::params_and_caps` from the SAME `parse_choices(&raw.fnumber)` RADIO list via
+  `parse_fnumber` — so the panel's `idx = round(norm*(n-1))`, `idx' = clamp(idx±1, 0, n-1)`,
+  `apertureNorm = idx'/(n-1)` round-trips EXACTLY through the relay's `norm_to_choice_index`
+  (round-half-up) over the identical list. **`Eq` was dropped from `CameraCaps`** — `Vec<f64>` has
+  no total order; only `PartialEq` was ever used (the `RelayState` whole-state `assert_eq!` tests
+  need only `PartialEq`), and nothing bounds `CameraCaps: Eq`. When the relay sends no choices
+  (older relay → empty `Vec` via serde default), the panel DISABLES the aperture ± with a title —
+  never a fabricated step.
+- **Biely bod = ±100 K, tint = ±1**, clamped to the slider's own min/max; the button `disabled`s
+  at a bound. `refreshStepDisabled(el)` (called each poll AND after each step) drives the disabled
+  state; the choices are stored on the block dataset (`el.dataset.fnumberChoices`), the SAME
+  pattern as issue 809's `grabFps`.
+- **One tap = one PUT, NO auto-repeat on hold** — the issue 1229 USB-PTP shared-bus doctrine (one
+  write = one gphoto2 session). The step handlers (`stepAperture`/`stepLinear`) are plain CLICK
+  handlers with NO `setInterval`/`setTimeout` — pinned by `test_app_js_step_handlers_have_no_repeat_timer_1304`.
+- **Server-truth preserved:** each tap reads the slider's CURRENT (last server) value, steps it,
+  sets the slider locally so a quick second tap builds on it, and sends the ABSOLUTE value; labels
+  re-sync from the next WS push. The existing `interacting` pointerdown/up guard + `guard()`
+  wrapper are respected exactly like the slider `change` handlers.
+- **Playwright E2E** (`bkshading/service/tests/e2e/`, wired into the `bkshading` CI job): the
+  JUST-BUILT service runs against a stdlib stub relay (`bkshading/service/tests/stub_relay.py`,
+  serving `/api/state` with `fNumberChoices` + recording PUT `/api/params` bodies). Playwright's
+  `webServer` array manages BOTH the stub and the service; the spec clicks +/- on clona/K/tint and
+  asserts the forwarded absolute PUT bodies + a clean console. Chromium only, one spec (small CI
+  budget). `npm install` (no committed lockfile — Tier-0 has no network), then `npx playwright
+  install --with-deps chromium`.
+
+
+## Installable web app (PWA) — manifest + no-cache SW + embedded icons (issue 1305)
+
+The panel is installable as a windowed web app (own icon in the Windows dock, no browser chrome):
+- **Static assets in `bkshading/service/web/`:** `manifest.webmanifest` (name/short_name, `lang
+  "sk"`, `start_url`/`scope` `/`, `display "standalone"`, dark `#14171c` bg/theme, icons 192+512
+  with BOTH `purpose "any"` and `"maskable"` entries), `sw.js`, `icon-192.png`/`icon-512.png`,
+  `favicon.svg`. `index.html` links `rel="manifest"`, `meta theme-color`, `rel="icon"` (svg+png),
+  `apple-touch-icon`; `app.js` registers the SW guarded on `"serviceWorker" in navigator`
+  (insecure-origin LAN page → API undefined → no-op, clean console; `.catch(()=>{})` swallows any
+  error).
+- **The SW does NO caching — server-truth.** `sw.js` is install/activate + a pure `fetch(event.
+  request)` passthrough; it exists ONLY to meet the browser's PWA-install requirement. NEVER add
+  the Cache Storage API (a cache would risk a stale UI/state) — pinned by the python + Rust tests
+  asserting `caches` is absent.
+- **Icons are generated deterministically by a committed stdlib script** `web/gen-icons.py`
+  (zlib/struct PNG writer + the SVG, NO Pillow, no new dependency) — an aperture/lens glyph inside
+  the central ~60% so the icons are maskable-safe. Re-run it after a palette/glyph change; output
+  is byte-deterministic. The PNGs are committed (small: ~2 KB / ~5.5 KB) and EMBEDDED via
+  `include_bytes!`/`include_str!` in `http.rs` (self-contained binary, same model as the HTML/JS).
+- **Routes in `http.rs`:** `/manifest.webmanifest` (`application/manifest+json`), `/sw.js`
+  (`text/javascript; charset=utf-8` + a `Service-Worker-Allowed: /` header so the SW controls the
+  whole origin), `/icon-192.png` + `/icon-512.png` (`image/png`), `/favicon.svg` (`image/svg+xml`).
+  Each is served via a pure `*_asset()` helper + a `*_CONTENT_TYPE` const (mirrors `rendered_index`),
+  so the service route tests pin the payload + content-type WITHOUT standing up an HTTP server
+  (Tier-0 — the codebase has no tower dev-dep).
+- **Secure-context fact (for the owner):** Chrome/Edge offer a PWA install ONLY on HTTPS or
+  `localhost`. So: (a) on the strih PC itself, `http://localhost:8770` gives the FULL install; (b)
+  on another PC over plain-HTTP LAN (`http://strih.lan:8770`) the browser gives no install prompt —
+  use Edge "Apps → Install this site as an app" / Chrome "Cast, save and share → Install page as
+  app" to create a windowed shortcut (icon + name come from this change); (c) a full PWA from
+  anywhere = the cloudflared HTTPS hostname (`scripts/bkshading-provision-cloudflared.sh`). Do NOT
+  add self-signed HTTPS to the service (an untrusted cert is still an insecure context).
