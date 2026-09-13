@@ -160,6 +160,18 @@ pub fn parse_choices(output: &str) -> Vec<String> {
     pairs.into_iter().map(|(_, label)| label).collect()
 }
 
+/// The f-number RADIO choices that parse as real f-numbers (any non-`f/N.N` entry — a stray
+/// `Auto`/`Unknown`/`—` — is dropped), preserving order. This is the ONE canonical basis for the
+/// aperture choice index (issue 1304): the readback `aperture_norm`, the caps `fnumber_choices`,
+/// AND the relay's write `plan_writes` all derive their count from THIS same filtered list, so the
+/// panel's +/- step count can never diverge from the write count and step to the wrong f-stop.
+pub fn parse_fnumber_labels(output: &str) -> Vec<String> {
+    parse_choices(output)
+        .into_iter()
+        .filter(|c| parse_fnumber(c).is_some())
+        .collect()
+}
+
 /// Parses an f-number choice string like `"f/5.2"` into `5.2`, or `None` if unparseable
 /// — matches `mapping.py`'s `re.fullmatch(r"f/(\d+(?:\.\d+)?)")`.
 pub fn parse_fnumber(s: &str) -> Option<f64> {

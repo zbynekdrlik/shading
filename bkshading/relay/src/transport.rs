@@ -11,7 +11,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
-use bkshading_proto::mapping::{parse_choices, DEFAULT_FPS100};
+use bkshading_proto::mapping::{parse_fnumber_labels, DEFAULT_FPS100};
 use bkshading_proto::read::{fps_supported, params_and_caps, plan_writes, RawConfigs};
 use bkshading_proto::wire::{RelayState, SetRequest};
 
@@ -510,7 +510,10 @@ impl CameraSession {
         // camera on a partial read (the handler maps this error to 502). This top `read_raw()?`
         // early-return drops the lock guard WITHOUT invalidating — correct: nothing was written.
         let raw = self.read_raw()?;
-        let fnumber_choices = parse_choices(&raw.fnumber);
+        // issue 1304: the write index basis is the PARSEABLE-only f-number list — the SAME basis
+        // `params_and_caps` uses for the readback `aperture_norm` and the caps `fnumber_choices`
+        // the panel steps over. Using the unfiltered `parse_choices` here would desync the count.
+        let fnumber_choices = parse_fnumber_labels(&raw.fnumber);
         let (params, _) = params_and_caps(&raw);
         let fps100 = params.fps100.unwrap_or(DEFAULT_FPS100);
         let writes = plan_writes(req, &fnumber_choices, fps100);

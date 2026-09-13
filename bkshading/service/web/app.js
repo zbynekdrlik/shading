@@ -85,9 +85,10 @@ function refreshStepDisabled(el) {
 
 // issue 1304: step the aperture by ONE f-number choice. Server-truth: read the slider's current
 // (last server) value, map to the nearest choice index, step by one, clamp to [0, n-1], set the
-// slider locally (so a quick second tap builds on it — same as a drag) and PUT the ABSOLUTE
+// slider locally (so a quick second tap that lands BEFORE the next server push builds on it, like
+// a drag; once a push arrives the slider re-syncs to the server value) and PUT the ABSOLUTE
 // apertureNorm = idx'/(n-1). That is the inverse of the relay's norm_to_choice_index over the
-// SAME choice list, so it lands exactly on the neighbouring f-number. One tap = one PUT.
+// SAME parseable choice list, so it lands exactly on the neighbouring f-number. One tap = one PUT.
 function stepAperture(el, id, dir) {
   const choices = readFnumChoices(el);
   if (choices.length < 2) return; // no choices -> no fabricated step (the button is disabled)

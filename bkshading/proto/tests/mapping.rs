@@ -191,6 +191,37 @@ fn params_and_caps_from_full_camera() {
 }
 
 #[test]
+fn fnumber_choices_parity_drops_unparseable_1304() {
+    // A pathological RADIO list with a non-f/N.N entry ("Auto"): the caps count, the readback
+    // aperture_norm basis, AND the relay's plan_writes basis must ALL use the SAME parseable
+    // subset — otherwise the panel's +/- step maps to the wrong f-stop (review finding, #1304).
+    let block =
+        "Current: f/4.0\nChoice: 0 Auto\nChoice: 1 f/2.8\nChoice: 2 f/4.0\nChoice: 3 f/8.0\nEND";
+    let raw = RawConfigs {
+        fnumber: block.to_string(),
+        ..Default::default()
+    };
+    let (params, caps) = params_and_caps(&raw);
+    // "Auto" is dropped -> three parseable choices.
+    assert_eq!(caps.fnumber_choices.len(), 3);
+    // The write-path basis (what transport.rs feeds plan_writes) has the SAME count.
+    let labels = parse_fnumber_labels(block);
+    assert_eq!(labels.len(), caps.fnumber_choices.len(), "count parity");
+    // f/4.0 is index 1 of the 3-entry parseable list -> norm 0.5, and plan_writes round-trips it
+    // back to f/4.0 over the same basis (the panel's +/- step round-trip).
+    assert!((params.aperture_norm.unwrap() - 0.5).abs() < 1e-9);
+    let writes = plan_writes(
+        &SetRequest {
+            aperture_norm: Some(0.5),
+            ..Default::default()
+        },
+        &labels,
+        2500,
+    );
+    assert!(writes.contains(&("f-number".to_string(), "f/4.0".to_string())));
+}
+
+#[test]
 fn empty_fnumber_block_yields_no_choices_1304() {
     // A relay that does not report f-number choices (empty block) -> empty `fnumber_choices`,
     // never a fabricated entry. The panel then disables the aperture +/- step.

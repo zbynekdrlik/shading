@@ -51,15 +51,18 @@ pub fn params_and_caps(raw: &RawConfigs) -> (ShadingParams, CameraCaps) {
         .unwrap_or(DEFAULT_FPS100);
 
     // Aperture: current f-number choice -> AV + normalised position within the choices.
-    let fnumber_choices = parse_choices(&raw.fnumber);
+    // Use the PARSEABLE-ONLY choice list as the single canonical basis (issue 1304): the readback
+    // `aperture_norm`, the caps `fnumber_choices` below, and the relay's `plan_writes` all count
+    // from THIS same list, so the panel's +/- step index can never diverge from the write index.
+    let fnumber_labels = parse_fnumber_labels(&raw.fnumber);
     let current_fnumber = parse_current(&raw.fnumber);
     let (aperture_av, aperture_norm) = match &current_fnumber {
         Some(cur) => {
             let av = parse_fnumber(cur).and_then(fnumber_to_av);
-            let norm = fnumber_choices
+            let norm = fnumber_labels
                 .iter()
                 .position(|c| c == cur)
-                .map(|i| choices_to_norm(i as i64, fnumber_choices.len() as i64));
+                .map(|i| choices_to_norm(i as i64, fnumber_labels.len() as i64));
             (av, norm)
         }
         None => (None, None),
@@ -92,12 +95,12 @@ pub fn params_and_caps(raw: &RawConfigs) -> (ShadingParams, CameraCaps) {
         parse_range(&raw.kelvin).unwrap_or((KELVIN_MIN_FALLBACK, KELVIN_MAX_FALLBACK));
     let caps = CameraCaps {
         iso_choices: parse_iso_choices(&raw.iso),
-        // issue 1304: expose the f-number choices as plain numbers, in the SAME order as the
-        // RADIO choice list `fnumber_choices` above (which drives `aperture_norm` and the relay's
-        // `plan_writes` round-trip), so the panel's +/- step indexes the identical list. Parsed
-        // via `parse_fnumber`; a malformed choice (never seen on a real BMPCC `f/N.N` list) is
-        // dropped, same as it would not map to an AV.
-        fnumber_choices: fnumber_choices
+        // issue 1304: expose the f-number choices as plain numbers, from the SAME parseable-only
+        // `fnumber_labels` basis used for `aperture_norm` above and for the relay's `plan_writes`
+        // (transport.rs also derives its write list via `parse_fnumber_labels`). Every label here
+        // parses by construction, so this count EQUALS the write-path count — the panel's +/- step
+        // index can never diverge and step to the wrong f-stop.
+        fnumber_choices: fnumber_labels
             .iter()
             .filter_map(|c| parse_fnumber(c))
             .collect(),
