@@ -314,6 +314,170 @@ def test_no_bluetooth_anywhere():
         assert not re.search(r"\bble\b", text), "%s must not mention BLE (owner hard rule)" % f
 
 
+# ---------------------------------------------------------------------------------------------
+# 2026-09-13 escalation (#1229): rig-busy PREFLIGHT + ETXTBSY staged atomic-mv.
+#
+# A bkshading relay deploy/restart DURING a live production recording fork-wedged cam1 (gphoto2 PTP
+# on the single shared xHCI controller). So the deploy MUST refuse while strih/stream are
+# broadcasting (reusing the SAME shared obs_phase2.py rig-busy-check guard recording-e2e.sh uses),
+# unless an explicit --force-live supervisor override is passed; and it MUST scp to a temp path +
+# atomic `mv` (scp onto a RUNNING relay binary fails ETXTBSY), never directly onto the running exe.
+# ---------------------------------------------------------------------------------------------
+def _write_fake_obs_phase2(dirpath, mode):
+    """Write a fake obs_phase2.py answering rig-busy-check + stream-detail.
+
+    mode: 'idle'       -> rig-busy-check {busy: False} (deploy proceeds);
+          'busy'       -> {busy: True, diagnostics:[strih streaming+recording]} (deploy refuses);
+          'unreadable' -> exit 1 with NO output (guard fail-opens: WARN + proceed).
+    Built with sentinel replacement so the fake's own literals never collide with %-formatting.
+    """
+    p = os.path.join(dirpath, "obs_phase2.py")
+    body = (
+        "#!/usr/bin/env python3\n"
+        "import sys, json\n"
+        "MODE = '__MODE__'\n"
+        "sub = sys.argv[1] if len(sys.argv) > 1 else ''\n"
+        "if MODE == 'unreadable':\n"
+        "    sys.exit(1)\n"
+        "if sub == 'rig-busy-check':\n"
+        "    if MODE == 'busy':\n"
+        "        print(json.dumps({'busy': True, 'diagnostics': [{'host': 'strih', 'streaming': True, 'recording': True}], 'hint': 'a broadcast is live'}))\n"
+        "    else:\n"
+        "        print(json.dumps({'busy': False, 'diagnostics': [{'host': 'strih', 'streaming': False, 'recording': False}, {'host': 'stream', 'streaming': False, 'recording': False}]}))\n"
+        "elif sub == 'stream-detail':\n"
+        "    print('server=srt://ingest.example strih outputDuration=00:12:34')\n"
+        "sys.exit(0)\n"
+    ).replace("__MODE__", mode)
+    with open(p, "w") as f:
+        f.write(body)
+    os.chmod(p, os.stat(p).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    return p
+
+
+def _rig_env(tmp, remote_sha, obs_mode="idle", scp_fail=False):
+    """Fake ssh/scp/obs_phase2 for the escalation tests. Returns (env, logfile).
+
+    Reuses _fake_deploy_env for the ssh/scp fakes (ssh echoes remote_sha for sha256sum, 'yes' for
+    the exec-bit probe), then adds a fake obs_phase2.py (via BKSHADING_DEPLOY_OBS_PHASE2_DIR) so the
+    shared rig-busy guard is driven deterministically WITHOUT a rig. scp_fail=True makes the fake
+    scp exit non-zero (to exercise the ro-restore + stage-cleanup failure path).
+    """
+    env, log = _fake_deploy_env(tmp, remote_sha)
+    _write_fake_obs_phase2(tmp, obs_mode)
+    env["BKSHADING_DEPLOY_OBS_PHASE2_DIR"] = tmp
+    if scp_fail:
+        fake_scp = os.path.join(tmp, "fake-scp")
+        scp_body = (
+            "#!/usr/bin/env bash\n"
+            'printf "SCP %s\\n" "$*" >> "__LOG__"\n'
+            "exit 7\n"
+        ).replace("__LOG__", log)
+        _write_fake(fake_scp, scp_body)
+        env["BKSHADING_DEPLOY_SCP"] = fake_scp
+    return env, log
+
+
+def _local_sha(binary):
+    return subprocess.run(
+        ["sha256sum", binary], capture_output=True, text=True, check=True
+    ).stdout.split()[0]
+
+
+def test_deploy_refuses_when_rig_busy():
+    # The rig-busy PREFLIGHT must run BEFORE the first cambox ssh/scp: when strih/stream are
+    # broadcasting the deploy REFUSES (non-zero) and never mutates the box (no remount, no scp).
+    with tempfile.TemporaryDirectory() as tmp:
+        fake_bin = os.path.join(tmp, "bkshading-relay")
+        with open(fake_bin, "wb") as f:
+            f.write(b"RELAYBINARYCONTENT")
+        env, log = _rig_env(tmp, _local_sha(fake_bin), obs_mode="busy")
+        r = _run_script(["--host", "10.77.9.201", "--binary", fake_bin], env=env)
+        assert r.returncode != 0, "a BUSY rig must make the deploy REFUSE: %s%s" % (r.stdout, r.stderr)
+        out = r.stdout + r.stderr
+        assert re.search(r"(recording|streaming|broadcast)", out, re.I), \
+            "the refusal must name that a broadcast is live: %s" % out
+        calls = open(log).read() if os.path.exists(log) else ""
+        assert "remount,rw /" not in calls, "must NOT remount the box when refusing on a busy rig"
+        assert "SCP" not in calls, "must NOT scp to the box when refusing on a busy rig"
+
+
+def test_force_live_bypasses_rig_busy_guard():
+    # --force-live (supervisor-only, logged loudly) proceeds even on a busy rig.
+    with tempfile.TemporaryDirectory() as tmp:
+        fake_bin = os.path.join(tmp, "bkshading-relay")
+        with open(fake_bin, "wb") as f:
+            f.write(b"RELAYBINARYCONTENT")
+        env, log = _rig_env(tmp, _local_sha(fake_bin), obs_mode="busy")
+        r = _run_script(["--host", "10.77.9.201", "--binary", fake_bin, "--force-live"], env=env)
+        assert r.returncode == 0, "--force-live must proceed on a busy rig: %s%s" % (r.stdout, r.stderr)
+        out = r.stdout + r.stderr
+        assert re.search(r"force-live", out, re.I), "the override must be logged loudly: %s" % out
+        calls = open(log).read()
+        assert "SCP" in calls, "--force-live must actually deploy (scp) despite the busy rig"
+
+
+def test_deploy_proceeds_when_rig_unreadable_fail_open():
+    # No readable box -> the guard fail-OPENs (WARN + proceed), never blocks on a transient read
+    # error. (RED pre-fix: no guard exists, so no fail-open WARNING is ever emitted.)
+    with tempfile.TemporaryDirectory() as tmp:
+        fake_bin = os.path.join(tmp, "bkshading-relay")
+        with open(fake_bin, "wb") as f:
+            f.write(b"RELAYBINARYCONTENT")
+        env, log = _rig_env(tmp, _local_sha(fake_bin), obs_mode="unreadable")
+        r = _run_script(["--host", "10.77.9.201", "--binary", fake_bin], env=env)
+        assert r.returncode == 0, "an unreadable rig must fail-OPEN (proceed): %s%s" % (r.stdout, r.stderr)
+        out = r.stdout + r.stderr
+        assert re.search(r"could not read rig-busy", out, re.I), \
+            "fail-open must WARN that it could not read rig-busy state: %s" % out
+        calls = open(log).read()
+        assert "SCP" in calls, "fail-open must proceed with the deploy"
+
+
+def test_deploy_stages_via_temp_then_atomic_mv():
+    # ETXTBSY fix: scp to a temp path in the SAME dir, then atomic `mv -f` over the running binary —
+    # never scp directly onto the running executable.
+    with tempfile.TemporaryDirectory() as tmp:
+        fake_bin = os.path.join(tmp, "bkshading-relay")
+        with open(fake_bin, "wb") as f:
+            f.write(b"RELAYBINARYCONTENT")
+        env, log = _rig_env(tmp, _local_sha(fake_bin), obs_mode="idle")
+        r = _run_script(["--host", "10.77.9.201", "--binary", fake_bin], env=env)
+        assert r.returncode == 0, "an idle rig deploy should succeed: %s%s" % (r.stdout, r.stderr)
+        calls = open(log).read()
+        stage_prefix = RELAY_BIN_PATH + ".deploy."
+        # scp must target a STAGING path (dest + .deploy.<pid>), never the running binary directly.
+        scp_lines = [ln for ln in calls.splitlines() if ln.startswith("SCP ")]
+        assert scp_lines, "expected an scp call"
+        assert any(stage_prefix in ln for ln in scp_lines), \
+            "scp must target a staged temp path (%s...), got: %s" % (stage_prefix, scp_lines)
+        # then an atomic mv of the stage over the real dest.
+        assert "mv -f " in calls, "must atomic-mv the staged binary over the running one"
+        assert stage_prefix in calls and RELAY_BIN_PATH + " " in (calls + " "), \
+            "the mv must move the stage onto the real relay path"
+        # ordering: scp(stage) < mv < byte-verify(sha read) < remount,ro.
+        i_scp = calls.index(stage_prefix)
+        i_mv = calls.index("mv -f ")
+        i_ro = calls.index("remount,ro /")
+        assert i_scp < i_mv < i_ro, "order must be scp(stage) -> mv -> remount,ro"
+
+
+def test_ro_root_restored_and_stage_cleaned_on_scp_failure():
+    # An scp failure must still ALWAYS restore the read-only root AND clean up the staged temp file
+    # (never leave a half-written .deploy.<pid> behind on the appliance).
+    with tempfile.TemporaryDirectory() as tmp:
+        fake_bin = os.path.join(tmp, "bkshading-relay")
+        with open(fake_bin, "wb") as f:
+            f.write(b"RELAYBINARYCONTENT")
+        env, log = _rig_env(tmp, _local_sha(fake_bin), obs_mode="idle", scp_fail=True)
+        r = _run_script(["--host", "10.77.9.201", "--binary", fake_bin], env=env)
+        assert r.returncode != 0, "a failing scp must fail the deploy"
+        calls = open(log).read()
+        assert "remount,rw /" in calls, "must have remounted rw before the failed scp"
+        assert "remount,ro /" in calls, "must ALWAYS restore ro root even on scp failure"
+        assert re.search(r"rm -f .*\.deploy\.", calls), \
+            "must clean up the staged temp file on scp failure"
+
+
 if __name__ == "__main__":
     import sys
 
