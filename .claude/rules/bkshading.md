@@ -690,3 +690,35 @@ The panel is installable as a windowed web app (own icon in the Windows dock, no
   app" to create a windowed shortcut (icon + name come from this change); (c) a full PWA from
   anywhere = the cloudflared HTTPS hostname (`scripts/bkshading-provision-cloudflared.sh`). Do NOT
   add self-signed HTTPS to the service (an untrusted cert is still an insecure context).
+
+
+## Clona `f/—`: off-grid aperture from `gphoto2 --summary` (issue 1306)
+
+The panel showed `f/—` for clona (dead slider) on BOTH online cameras. Root cause: libgphoto2's
+`_get_FNumber` sets the `f-number` RADIO `Current:` ONLY when the raw value exactly matches an
+enumerated choice; both lenses sit open BELOW the camera's first enumerated stop (cam1 f/4.0 vs enum
+from f/4.5, cam2 f/2.0 vs enum from f/2.6), so `gphoto2 --get-config f-number` prints
+`Current: (null)` → `parse_fnumber` fails → `aperture_av`/`aperture_norm` = `None`. The ONLY honest
+current-aperture signal is the `gphoto2 --summary` line `F-Number(0x5007) … value: f/4 (400)`
+(raw = PTP F-Number x100).
+
+- **`--summary` folds into the EXISTING best-effort `d003` session — never a new USB session.**
+  `Gphoto2Runner::get_focus_and_summary` runs `gphoto2 --get-config d003 --summary` (ONE process),
+  and `split_focus_and_summary` splits the stdout at the FIRST `END` line (block = d003, remainder =
+  summary). Per-read session count stays 3 (detect + core batch + this) — the issue 1229 doctrine.
+  The default trait impl (test fakes) reads d003 alone with an empty summary; the real `Gphoto2Cli`
+  overrides it. `RawConfigs` gained a `summary` field (empty → the pre-1306 RADIO-`Current:` path).
+- **`params_and_caps`:** when `Current:` is missing/`(null)`, `aperture_av = fnumber_to_av(raw/100)`
+  and `aperture_norm` = the NEAREST enumerated choice (`nearest_choice_norm`); an exact `Current:`
+  still maps to its exact position. Pure parser `parse_summary_fnumber_raw` (fail-safe → `None`).
+- **Junk-choice filter is in the ONE canonical list.** `parse_fnumber_labels` now also drops any
+  choice below `MIN_VALID_FNUMBER` (0.5) — the gphoto2 placeholders `f/0`/`f/0.2` — so the grid used
+  for read-norm, write (`plan_writes`), AND `CameraCaps.fNumberChoices` is consistent and a near-0
+  step can never write `f/0`. Threshold 0.5 keeps a genuine `f/0.95` lens.
+- **Consequence for the #1304 +/- step (off-grid state):** the recovered `aperture_norm` is 0, so
+  `refreshStepDisabled` disables "−" (idx 0) while "+" moves to the first/next enumerated choice —
+  the camera exposes no smaller f-number than its first enumerated stop over PTP. No panel change
+  was needed; the existing bound-disable logic produces this by construction.
+- **Tier-0:** the pure aperture selection + parsers were RED→GREEN-proven via a `rustc --test`
+  replica (cam1 → `av=2·log2(4)`, norm 0, `[4.5,4.8,5.6]`; cam2 → `av=2·log2(2)`, norm 0,
+  `[2.6,2.8,3.2]`; the clean-list `f/5.2` case still norm 2/3). CI runs the real proto+relay tests.
