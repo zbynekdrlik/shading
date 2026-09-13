@@ -157,6 +157,7 @@ fn full_raw() -> RawConfigs {
         sensor_fps: D006_BLOCK.to_string(),
         project_fps: D007_BLOCK.to_string(),
         focus_distance: D003_BLOCK.to_string(),
+        summary: String::new(),
     }
 }
 
@@ -219,6 +220,54 @@ fn fnumber_choices_parity_drops_unparseable_1304() {
         2500,
     );
     assert!(writes.contains(&("f-number".to_string(), "f/4.0".to_string())));
+}
+
+fn assert_f64_vec(got: &[f64], want: &[f64]) {
+    assert_eq!(got.len(), want.len(), "len {got:?} != {want:?}");
+    for (g, w) in got.iter().zip(want) {
+        assert!((g - w).abs() < 1e-9, "{got:?} != {want:?}");
+    }
+}
+
+#[test]
+fn aperture_from_summary_when_current_null_cam1_1306() {
+    // cam1 live repro: the lens is open at f/4.0, BELOW the camera's first enumerated stop (f/4.5),
+    // so gphoto2 prints `Current: (null)` for the f-number RADIO. The current aperture must then
+    // come from the --summary raw (0x5007 value/100 = 4.0), the slider snaps to the NEAREST choice,
+    // and the junk choices f/0.2/f/0 are filtered out of the grid. Bug #1306 — RED until GREEN.
+    let raw = RawConfigs {
+        fnumber: "Current: (null)\nChoice: 0 f/0.2\nChoice: 1 f/0\nChoice: 2 f/4.5\nChoice: 3 f/4.8\nChoice: 4 f/5.6\nEND".to_string(),
+        summary: "F-Number(0x5007):(readwrite) (type=0x4) Enumeration [20,0,450,480,560] value: f/4 (400)".to_string(),
+        ..Default::default()
+    };
+    let (params, caps) = params_and_caps(&raw);
+    // aperture_av from the summary raw 400 -> f/4.0 -> 2*log2(4.0)
+    assert!(
+        (params.aperture_av.unwrap() - 2.0 * 4.0_f64.log2()).abs() < 1e-9,
+        "aperture_av {:?}",
+        params.aperture_av
+    );
+    // the grid drops f/0.2 (0.2) and f/0 (0.0); nearest to 4.0 is f/4.5 = index 0 -> norm 0.0
+    assert_f64_vec(&caps.fnumber_choices, &[4.5, 4.8, 5.6]);
+    assert!(
+        params.aperture_norm.unwrap().abs() < 1e-9,
+        "aperture_norm {:?}",
+        params.aperture_norm
+    );
+}
+
+#[test]
+fn aperture_from_summary_when_current_null_cam2_1306() {
+    // cam2 live repro: lens at f/2.0, below the first enumerated stop f/2.6 -> Current: (null).
+    let raw = RawConfigs {
+        fnumber: "Current: (null)\nChoice: 0 f/0.2\nChoice: 1 f/0\nChoice: 2 f/2.6\nChoice: 3 f/2.8\nChoice: 4 f/3.2\nEND".to_string(),
+        summary: "F-Number(0x5007):(readwrite) (type=0x4) Enumeration [20,0,260,280,320] value: f/2 (200)".to_string(),
+        ..Default::default()
+    };
+    let (params, caps) = params_and_caps(&raw);
+    assert!((params.aperture_av.unwrap() - 2.0 * 2.0_f64.log2()).abs() < 1e-9);
+    assert_f64_vec(&caps.fnumber_choices, &[2.6, 2.8, 3.2]);
+    assert!(params.aperture_norm.unwrap().abs() < 1e-9);
 }
 
 #[test]

@@ -422,6 +422,9 @@ impl CameraSession {
                 .runner
                 .get_config(FOCUS_DISTANCE_KEY)
                 .unwrap_or_default(),
+            // issue 1306: filled in the GREEN commit (folded into the d003 session); empty here
+            // keeps the read compiling + falls back to the RADIO Current: aperture path.
+            summary: String::new(),
         })
     }
 

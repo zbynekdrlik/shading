@@ -30,6 +30,12 @@ pub struct RawConfigs {
     /// best-effort by the relay, so an empty block (a camera that does not answer it)
     /// degrades to a `None` `focus_distance`, never a crash.
     pub focus_distance: String,
+    /// `gphoto2 --summary` text, read best-effort in the SAME session as `d003` (issue 1306).
+    /// Its `F-Number(0x5007) … value: f/4 (400)` line carries the raw current aperture (x100)
+    /// that libgphoto2 OMITS from the `f-number` RADIO `Current:` when the lens is open below the
+    /// camera's first enumerated stop (`Current: (null)`). Empty when unavailable — the aperture
+    /// then simply falls back to the RADIO `Current:` (i.e. the pre-1306 behaviour), never a crash.
+    pub summary: String,
 }
 
 fn current_i64(block: &str) -> Option<i64> {
