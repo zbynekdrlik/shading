@@ -92,6 +92,15 @@ pub fn params_and_caps(raw: &RawConfigs) -> (ShadingParams, CameraCaps) {
         parse_range(&raw.kelvin).unwrap_or((KELVIN_MIN_FALLBACK, KELVIN_MAX_FALLBACK));
     let caps = CameraCaps {
         iso_choices: parse_iso_choices(&raw.iso),
+        // issue 1304: expose the f-number choices as plain numbers, in the SAME order as the
+        // RADIO choice list `fnumber_choices` above (which drives `aperture_norm` and the relay's
+        // `plan_writes` round-trip), so the panel's +/- step indexes the identical list. Parsed
+        // via `parse_fnumber`; a malformed choice (never seen on a real BMPCC `f/N.N` list) is
+        // dropped, same as it would not map to an AV.
+        fnumber_choices: fnumber_choices
+            .iter()
+            .filter_map(|c| parse_fnumber(c))
+            .collect(),
         shutter_choices: shutter_choices_for_fps(fps100),
         fps_min,
         fps_max,

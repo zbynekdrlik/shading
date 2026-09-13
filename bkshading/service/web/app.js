@@ -34,6 +34,87 @@ async function setParam(id, patch) {
   }
 }
 
+// issue 1304: +/- step amounts. Aperture steps by ONE camera f-number choice (computed from
+// caps.fNumberChoices); the white balance and tint step by a fixed operator-sized amount.
+const KELVIN_STEP = 100; // K per tap
+const TINT_STEP = 1; // tint units per tap
+
+// issue 1304: a block's f-number choices, stored on its dataset by updateBlock (from
+// caps.fNumberChoices). Empty/absent -> the aperture +/- step is disabled (never fabricated).
+function readFnumChoices(el) {
+  try {
+    const a = JSON.parse(el.dataset.fnumberChoices || "[]");
+    return Array.isArray(a) ? a : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+// issue 1304: enable/disable the six +/- step buttons. Aperture is disabled entirely when the
+// relay sends no f-number choices (a title explains why — never a fabricated step) and at the
+// choice-index bounds; kelvin/tint are disabled at the slider's own min/max. Called by
+// updateBlock (each poll) and after each step so a tap that reaches a bound disables promptly.
+function refreshStepDisabled(el) {
+  const q = (role) => el.querySelector(`[data-role="${role}"]`);
+  const choices = readFnumChoices(el);
+  const apDec = q("aperture-dec");
+  const apInc = q("aperture-inc");
+  if (choices.length < 2) {
+    for (const b of [apDec, apInc]) {
+      b.disabled = true;
+      b.title = "Kroky clony nie sú dostupné (relay neposiela voľby clony)";
+    }
+  } else {
+    const n = choices.length;
+    const idx = Math.round(Number(q("aperture").value) * (n - 1));
+    apDec.disabled = idx <= 0;
+    apInc.disabled = idx >= n - 1;
+    apDec.title = "";
+    apInc.title = "";
+  }
+  for (const [role, dec, inc] of [
+    ["kelvin", "kelvin-dec", "kelvin-inc"],
+    ["tint", "tint-dec", "tint-inc"],
+  ]) {
+    const s = q(role);
+    const cur = Number(s.value);
+    q(dec).disabled = cur <= Number(s.min);
+    q(inc).disabled = cur >= Number(s.max);
+  }
+}
+
+// issue 1304: step the aperture by ONE f-number choice. Server-truth: read the slider's current
+// (last server) value, map to the nearest choice index, step by one, clamp to [0, n-1], set the
+// slider locally (so a quick second tap builds on it — same as a drag) and PUT the ABSOLUTE
+// apertureNorm = idx'/(n-1). That is the inverse of the relay's norm_to_choice_index over the
+// SAME choice list, so it lands exactly on the neighbouring f-number. One tap = one PUT.
+function stepAperture(el, id, dir) {
+  const choices = readFnumChoices(el);
+  if (choices.length < 2) return; // no choices -> no fabricated step (the button is disabled)
+  const n = choices.length;
+  const s = el.querySelector('[data-role="aperture"]');
+  let idx = Math.round(Number(s.value) * (n - 1));
+  idx = Math.min(n - 1, Math.max(0, idx + dir));
+  const norm = idx / (n - 1);
+  s.value = norm;
+  setParam(id, { apertureNorm: norm });
+  refreshStepDisabled(el);
+}
+
+// issue 1304: step a linear slider (kelvin by KELVIN_STEP K, tint by TINT_STEP) by `amount`,
+// clamped to the slider's own min/max, sending the ABSOLUTE new value. One tap = one PUT, no
+// auto-repeat on hold (the issue-1229 USB-PTP bus doctrine: one write = one gphoto2 session).
+function stepLinear(el, id, role, key, amount, dir) {
+  const s = el.querySelector(`[data-role="${role}"]`);
+  const min = Number(s.min);
+  const max = Number(s.max);
+  let next = Math.round(Number(s.value)) + dir * amount;
+  next = Math.min(max, Math.max(min, next));
+  s.value = next;
+  setParam(id, { [key]: next });
+  refreshStepDisabled(el);
+}
+
 // Wire a freshly cloned block's controls to their PUT handlers (attached once per block).
 function wire(el, id) {
   const q = (role) => el.querySelector(`[data-role="${role}"]`);
@@ -55,6 +136,16 @@ function wire(el, id) {
   q("kelvin").addEventListener("change", guard((e) => setParam(id, { kelvin: Math.round(Number(e.target.value)) })));
   q("tint").addEventListener("change", guard((e) => setParam(id, { tint: Math.round(Number(e.target.value)) })));
   q("auto-wb").addEventListener("click", () => setParam(id, { autoWb: true }));
+
+  // issue 1304: +/- step buttons. Each is a plain CLICK handler (one tap = one PUT) — NEVER a
+  // pointerdown-hold with a repeat timer, per the issue-1229 USB-PTP bus doctrine. `guard`
+  // clears `interacting` like the slider's change handler so the next render isn't eaten.
+  q("aperture-dec").addEventListener("click", guard(() => stepAperture(el, id, -1)));
+  q("aperture-inc").addEventListener("click", guard(() => stepAperture(el, id, 1)));
+  q("kelvin-dec").addEventListener("click", guard(() => stepLinear(el, id, "kelvin", "kelvin", KELVIN_STEP, -1)));
+  q("kelvin-inc").addEventListener("click", guard(() => stepLinear(el, id, "kelvin", "kelvin", KELVIN_STEP, 1)));
+  q("tint-dec").addEventListener("click", guard(() => stepLinear(el, id, "tint", "tint", TINT_STEP, -1)));
+  q("tint-inc").addEventListener("click", guard(() => stepLinear(el, id, "tint", "tint", TINT_STEP, 1)));
 
   // issue 809: explicit "align camera fps to the box's grab mode" button. Never an auto-write
   // (a camera-side format change can interrupt recording) — the operator must click. The grab
@@ -147,6 +238,13 @@ function updateBlock(el, cam) {
   q("tint-val").textContent = p.tint == null ? "—" : String(p.tint);
   const tEl = q("tint");
   if (document.activeElement !== tEl && p.tint != null) tEl.value = p.tint;
+
+  // issue 1304: expose the camera's f-number choices for the aperture +/- step (stored on the
+  // dataset, read by the step handler — the same pattern as grabFps), and refresh the
+  // enable/disable state of all six step buttons (disabled without choices and at the bounds).
+  const fnumChoices = caps && Array.isArray(caps.fNumberChoices) ? caps.fNumberChoices : [];
+  el.dataset.fnumberChoices = JSON.stringify(fnumChoices);
+  refreshStepDisabled(el);
 
   // Shutter.
   q("shutter-val").textContent = p.shutter == null ? "—" : "1/" + p.shutter;

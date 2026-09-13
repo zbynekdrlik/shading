@@ -115,6 +115,12 @@ fn read_state_reports_online_camera() {
     assert_eq!(st.params.focus_distance, None);
     let caps = st.caps.unwrap();
     assert_eq!(caps.iso_choices, vec![100, 200, 400, 800]);
+    // issue 1304: the relay reports the f-number choices as plain numbers (from the RADIO
+    // choice list via parse_fnumber), so the panel can compute the aperture +/- step.
+    assert_eq!(caps.fnumber_choices.len(), 4);
+    for (got, want) in caps.fnumber_choices.iter().zip([2.8, 4.0, 5.2, 8.0]) {
+        assert!((got - want).abs() < 1e-9, "fnumber choice {got} != {want}");
+    }
     assert_eq!(st.version, "1.7.0-dev.516");
 }
 

@@ -36,7 +36,14 @@
 
         <div class="control iris-control">
           <div class="control-head"><span>Clona</span><span class="value" data-role="fnum">f/—</span></div>
-          <input type="range" min="0" max="1" step="0.001" value="0.5" class="slider" data-role="aperture" aria-label="Clona" />
+          <!-- issue 1304: +/- step buttons. One tap = one camera f-number choice (computed by
+               app.js from caps.fNumberChoices); disabled (with a title) when the relay sends no
+               choices or at a bound. No auto-repeat on hold (issue 1229 USB-PTP bus doctrine). -->
+          <div class="slider-row">
+            <button type="button" class="btn step-btn" data-role="aperture-dec" aria-label="Clona o krok nižšie">−</button>
+            <input type="range" min="0" max="1" step="0.001" value="0.5" class="slider" data-role="aperture" aria-label="Clona" />
+            <button type="button" class="btn step-btn" data-role="aperture-inc" aria-label="Clona o krok vyššie">+</button>
+          </div>
         </div>
 
         <div class="control iso-control">
@@ -46,9 +53,19 @@
 
         <div class="control wb-control">
           <div class="control-head"><span>Biely bod</span><span class="value" data-role="kelvin-val">—</span></div>
-          <input type="range" min="2500" max="10000" step="50" value="5600" class="slider" data-role="kelvin" aria-label="Biely bod (Kelvin)" />
+          <!-- issue 1304: biely bod krok ±100 K, clamp na rozsah slidera; disabled na hranici. -->
+          <div class="slider-row">
+            <button type="button" class="btn step-btn" data-role="kelvin-dec" aria-label="Biely bod o 100 K nižšie">−</button>
+            <input type="range" min="2500" max="10000" step="50" value="5600" class="slider" data-role="kelvin" aria-label="Biely bod (Kelvin)" />
+            <button type="button" class="btn step-btn" data-role="kelvin-inc" aria-label="Biely bod o 100 K vyššie">+</button>
+          </div>
           <div class="control-head"><span>Tint</span><span class="value" data-role="tint-val">—</span></div>
-          <input type="range" min="-50" max="50" step="1" value="0" class="slider" data-role="tint" aria-label="Tint" />
+          <!-- issue 1304: tint krok ±1, clamp na rozsah slidera; disabled na hranici. -->
+          <div class="slider-row">
+            <button type="button" class="btn step-btn" data-role="tint-dec" aria-label="Tint o 1 nižšie">−</button>
+            <input type="range" min="-50" max="50" step="1" value="0" class="slider" data-role="tint" aria-label="Tint" />
+            <button type="button" class="btn step-btn" data-role="tint-inc" aria-label="Tint o 1 vyššie">+</button>
+          </div>
           <button type="button" class="btn wb-auto" data-role="auto-wb">Auto WB</button>
         </div>
 

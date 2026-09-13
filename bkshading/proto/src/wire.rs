@@ -66,10 +66,24 @@ pub struct ShadingParams {
 
 /// The camera's own fine-grained value lists/ranges — the web UI rebuilds its ISO and
 /// shutter button groups from these when present.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Note: no `Eq` derive — [`CameraCaps::fnumber_choices`] is `Vec<f64>` and `f64` has no
+/// total order, so `Eq` is impossible. `PartialEq` is enough (and is all the whole-state
+/// `assert_eq!` round-trip tests need — `Eq` is never required as a bound anywhere).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CameraCaps {
     pub iso_choices: Vec<i64>,
+    /// The camera's f-number choices as plain numbers (e.g. `[2.8, 4.0, 5.2, 8.0]`), ordered
+    /// like the RADIO `f-number` choices the relay reads. The panel uses the COUNT for the
+    /// aperture +/- step (`idx = round(norm*(n-1))`, step to `clamp(idx±1)`, send the absolute
+    /// `apertureNorm = idx'/(n-1)` — the inverse of [`crate::mapping::norm_to_choice_index`],
+    /// which the relay applies to the SAME choice list) and the VALUES to label the target
+    /// f-number (issue 1304). `#[serde(default)]` so an older relay that does not send it still
+    /// deserializes (empty `Vec`) — the panel then DISABLES the aperture +/- buttons rather
+    /// than fabricating a step.
+    #[serde(default)]
+    pub fnumber_choices: Vec<f64>,
     pub shutter_choices: Vec<i64>,
     pub fps_min: i64,
     pub fps_max: i64,

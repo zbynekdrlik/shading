@@ -182,6 +182,45 @@ fn params_and_caps_from_full_camera() {
     assert_eq!(caps.kelvin_min, 2500);
     assert_eq!(caps.kelvin_max, 10000);
     assert!(!caps.shutter_choices.is_empty());
+    // issue 1304: the f-number choices lift through as plain numbers, same order/count as the
+    // RADIO choice list, so the panel's aperture +/- step indexes the identical list.
+    assert_eq!(caps.fnumber_choices.len(), 4);
+    for (got, want) in caps.fnumber_choices.iter().zip([2.8, 4.0, 5.2, 8.0]) {
+        assert!((got - want).abs() < 1e-9, "fnumber choice {got} != {want}");
+    }
+}
+
+#[test]
+fn empty_fnumber_block_yields_no_choices_1304() {
+    // A relay that does not report f-number choices (empty block) -> empty `fnumber_choices`,
+    // never a fabricated entry. The panel then disables the aperture +/- step.
+    let (_params, caps) = params_and_caps(&RawConfigs::default());
+    assert!(caps.fnumber_choices.is_empty());
+}
+
+#[test]
+fn camera_caps_fnumber_choices_wire_is_camel_case_1304() {
+    let caps = bkshading_proto::wire::CameraCaps {
+        iso_choices: vec![100, 200],
+        fnumber_choices: vec![2.8, 4.0, 5.2, 8.0],
+        shutter_choices: vec![50, 60],
+        fps_min: 5,
+        fps_max: 60,
+        kelvin_min: 2500,
+        kelvin_max: 10000,
+    };
+    let json = serde_json::to_string(&caps).unwrap();
+    assert!(json.contains("\"fNumberChoices\""), "camelCase wire key");
+    // Round-trips, and an OLDER relay that omits the key deserializes to an empty Vec
+    // (`#[serde(default)]`), never a deserialize error.
+    let back: bkshading_proto::wire::CameraCaps = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, caps);
+    let legacy = "{\"isoChoices\":[100],\"shutterChoices\":[50],\"fpsMin\":5,\"fpsMax\":60,\"kelvinMin\":2500,\"kelvinMax\":10000}";
+    let old: bkshading_proto::wire::CameraCaps = serde_json::from_str(legacy).unwrap();
+    assert!(
+        old.fnumber_choices.is_empty(),
+        "missing key -> empty via serde default"
+    );
 }
 
 #[test]
