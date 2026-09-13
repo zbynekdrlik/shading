@@ -621,6 +621,40 @@ from the relay's issue-1229 read-floor cache (never a direct gphoto2 call). It i
   single source of truth for a WARN's named parameter (pass the STATUS into the message, don't
   re-derive the missing set from the values in two places).
 
+## NEVER deploy OR restart a cambox relay during production — the deploy tool is now rig-busy gated (2026-09-13 escalation, issue 1229)
+
+**The 2026-09-13 escalation, past the capture-dip class this ticket started on:** deploying the
+relay to cam1 (`scripts/bkshading-deploy-relay.sh`-style scp/mv-over-running + `systemctl restart
+bkshading-relay`) DURING a live production recording did not merely dip the capture rate — it
+fork-WEDGED the whole box. ssh, the `linux-cam1` MCP agent, and `gphoto2 --auto-detect` all
+reset/timed out while the box still pinged and the already-running relay still answered HTTP;
+recovery needed an owner power-cycle (no remote reboot path to a cambox). The gphoto2 PTP polling
+sharing the single xHCI controller with the grabber is dangerous UNDER PRODUCTION LOAD beyond the
+capture drop — it cascades into stuck D-state gphoto2 processes and fork-exhaustion of the box.
+
+**The doctrine (both halves now enforced in the deploy tool):**
+
+- **Every bkshading relay deploy/restart is gated on rig-not-busy.** `bkshading-deploy-relay.sh`
+  runs a rig-busy PREFLIGHT before its first cambox ssh/scp, reusing the ONE shared guard
+  `recording-e2e.sh` uses — `stray_session_check_assert HERE STRIH STREAM WHAT` (→ `obs_phase2.py
+  rig-busy-check`; NEVER a duplicated per-box WS loop, see `rig-mutation-broadcast-guard.md`). It
+  REFUSES (non-zero, naming what is streaming) when strih/stream are broadcasting, and fail-OPENs
+  (WARN + proceed) ONLY when NO box is readable — never blocks on a transient read error.
+  `--force-live` (logged loudly) is the SUPERVISOR-ONLY override for a genuine idle-rig-but-guard-
+  unavailable case; a normal deploy never passes it. Env `STRIH_HOST`/`STREAM_HOST` (default
+  10.77.9.202/.204) + `OBS_PASSWORD` mirror `rig-busy-gate.sh`; `BKSHADING_DEPLOY_OBS_PHASE2_DIR`
+  is a Tier-0 test seam pointing the guard at a fake `obs_phase2.py`.
+- **The RESTART that adopts a freshly-deployed binary is a SEPARATE, rig-idle-ONLY supervisor
+  step — never part of the deploy.** The deploy stays ENABLE-ONLY (it never starts/restarts the
+  unit; provisioning-scripts.md), and now uses an ETXTBSY-safe swap: scp lands on a staging path
+  in the SAME directory (`<dest>.deploy.<pid>`) then atomic `mv -f` over the (possibly running)
+  binary — scp directly onto a running executable fails `ETXTBSY` ("dest open: Failure"), and
+  `rename(2)` swaps the inode while the running process keeps the old one. So the new bytes are on
+  disk but NOT live until a deliberate restart, and that restart (adopting the new binary, or the
+  interim manual pause/resume) is itself subject to the same rig-idle discipline — do it only when
+  the rig is idle, never during a broadcast. (The relay `Restart=on-failure` lifecycle is issue
+  1228, unchanged here — this deploy touches no systemd unit.)
+
 
 ## Panel +/- step buttons — aperture is a CHOICE step, K/tint are linear (issue 1304)
 
