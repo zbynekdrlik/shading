@@ -158,7 +158,7 @@ maybe_remount_rw() { [ "$RO_ROOT" = 1 ] || return 0; ssh_box "$1" "mount -o remo
 maybe_remount_ro() { [ "$RO_ROOT" = 1 ] || return 0; ssh_box "$1" "mount -o remount,ro / 2>/dev/null; true" || true; }
 
 ssh_box() { "${SSHPASS_PREFIX[@]}" "$SSH_BIN" -o StrictHostKeyChecking=no -o ConnectTimeout=10 "root@$1" "$2"; }
-scp_box() { "${SSHPASS_PREFIX[@]}" "$SCP_BIN" -o StrictHostKeyChecking=no "$2" "root@$1:$3"; }
+scp_box() { "${SSHPASS_PREFIX[@]}" "$SCP_BIN" -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$2" "root@$1:$3"; }
 
 # --- resolve the relay binary (a pre-downloaded --binary, or the CI artifact) ---
 if [ -z "$BINARY" ]; then

@@ -643,7 +643,10 @@ capture drop — it cascades into stuck D-state gphoto2 processes and fork-exhau
   `--force-live` (logged loudly) is the SUPERVISOR-ONLY override for a genuine idle-rig-but-guard-
   unavailable case; a normal deploy never passes it. Env `STRIH_HOST`/`STREAM_HOST` (default
   10.77.9.202/.204) + `OBS_PASSWORD` mirror `rig-busy-gate.sh`; `BKSHADING_DEPLOY_OBS_PHASE2_DIR`
-  is a Tier-0 test seam pointing the guard at a fake `obs_phase2.py`.
+  is a Tier-0 test seam pointing the guard at a fake `obs_phase2.py`. The gate applies to EVERY
+  deploy including a handheld SBC (`--arch arm64`), which shares no xHCI bus with the rig — this is
+  a deliberate conservative default (a handheld camera may itself be in use during a broadcast);
+  pass `--force-live` for a genuinely off-rig handheld deploy.
 - **The RESTART that adopts a freshly-deployed binary is a SEPARATE, rig-idle-ONLY supervisor
   step — never part of the deploy.** The deploy stays ENABLE-ONLY (it never starts/restarts the
   unit; provisioning-scripts.md), and now uses an ETXTBSY-safe swap: scp lands on a staging path
