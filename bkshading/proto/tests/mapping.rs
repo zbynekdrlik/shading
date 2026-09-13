@@ -271,6 +271,21 @@ fn aperture_from_summary_when_current_null_cam2_1306() {
 }
 
 #[test]
+fn aperture_norm_falls_back_to_nearest_when_current_string_off_list_1306() {
+    // Review hardening: Current is a valid f-number ("f/4") whose STRING is not among the choices
+    // ("f/4.0"); aperture_norm must fall back to the nearest choice (never a dead slider) while
+    // aperture_av is known.
+    let raw = RawConfigs {
+        fnumber: "Current: f/4\nChoice: 0 f/2.8\nChoice: 1 f/4.0\nChoice: 2 f/5.6\nEND".to_string(),
+        ..Default::default()
+    };
+    let (params, _caps) = params_and_caps(&raw);
+    assert!((params.aperture_av.unwrap() - 2.0 * 4.0_f64.log2()).abs() < 1e-9);
+    // nearest to 4.0 is f/4.0 (index 1 of 3) -> norm 0.5, not None.
+    assert!((params.aperture_norm.unwrap() - 0.5).abs() < 1e-9);
+}
+
+#[test]
 fn empty_fnumber_block_yields_no_choices_1304() {
     // A relay that does not report f-number choices (empty block) -> empty `fnumber_choices`,
     // never a fabricated entry. The panel then disables the aperture +/- step.

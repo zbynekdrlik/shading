@@ -74,11 +74,17 @@ pub fn params_and_caps(raw: &RawConfigs) -> (ShadingParams, CameraCaps) {
         .or(summary_fnumber);
     let aperture_av = current_fnumber_value.and_then(fnumber_to_av);
     let aperture_norm = match &current_label {
-        // An exact enumerated choice -> its exact position in the (filtered) choice list.
+        // An exact enumerated choice -> its exact position in the (filtered) choice list. If the
+        // reported `Current:` string is NOT among the filtered choices (e.g. a `f/4` vs `f/4.0`
+        // spelling drift, or a value that got junk-filtered), fall back to the NEAREST choice by
+        // f-number so the slider is never dead while `aperture_av` is known (review finding #1306).
         Some(cur) => fnumber_labels
             .iter()
             .position(|c| c == cur)
-            .map(|i| choices_to_norm(i as i64, fnumber_labels.len() as i64)),
+            .map(|i| choices_to_norm(i as i64, fnumber_labels.len() as i64))
+            .or_else(|| {
+                current_fnumber_value.and_then(|v| nearest_choice_norm(v, &fnumber_labels))
+            }),
         // No exact choice (the summary-derived off-grid case) -> the NEAREST choice by f-number,
         // so the slider still shows a sensible position rather than staying dead (issue 1306).
         None => current_fnumber_value.and_then(|v| nearest_choice_norm(v, &fnumber_labels)),
