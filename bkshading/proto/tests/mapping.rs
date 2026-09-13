@@ -279,6 +279,45 @@ fn empty_fnumber_block_yields_no_choices_1304() {
 }
 
 #[test]
+fn parse_summary_fnumber_raw_1306() {
+    assert_eq!(
+        parse_summary_fnumber_raw(
+            "F-Number(0x5007):(readwrite) (type=0x4) Enumeration [20,0,450] value: f/4 (400)"
+        ),
+        Some(400)
+    );
+    assert_eq!(
+        parse_summary_fnumber_raw("F-Number(0x5007): ... value: f/2 (200)"),
+        Some(200)
+    );
+    assert_eq!(parse_summary_fnumber_raw("no 0x5007 line here"), None);
+    // present line but no parseable trailing integer -> None (fail-safe).
+    assert_eq!(
+        parse_summary_fnumber_raw("F-Number(0x5007): value: f/4 ()"),
+        None
+    );
+}
+
+#[test]
+fn parse_fnumber_labels_drops_sub_half_junk_1306() {
+    // f/0 and f/0.2 are gphoto2 placeholders (< MIN_VALID_FNUMBER 0.5); a real f/0.95 lens stays.
+    let block = "Choice: 0 f/0.2\nChoice: 1 f/0\nChoice: 2 f/4.5\nChoice: 3 f/0.95\nEND";
+    assert_eq!(parse_fnumber_labels(block), vec!["f/4.5", "f/0.95"]);
+}
+
+#[test]
+fn nearest_choice_norm_1306() {
+    let labels = vec![
+        "f/4.5".to_string(),
+        "f/4.8".to_string(),
+        "f/5.6".to_string(),
+    ];
+    assert_eq!(nearest_choice_norm(4.0, &labels), Some(0.0)); // nearest = f/4.5 (idx 0)
+    assert_eq!(nearest_choice_norm(5.0, &labels), Some(0.5)); // nearest = f/4.8 (idx 1)
+    assert!(nearest_choice_norm(4.0, &[]).is_none());
+}
+
+#[test]
 fn camera_caps_fnumber_choices_wire_is_camel_case_1304() {
     let caps = bkshading_proto::wire::CameraCaps {
         iso_choices: vec![100, 200],

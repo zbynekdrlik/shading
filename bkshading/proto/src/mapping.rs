@@ -160,16 +160,65 @@ pub fn parse_choices(output: &str) -> Vec<String> {
     pairs.into_iter().map(|(_, label)| label).collect()
 }
 
-/// The f-number RADIO choices that parse as real f-numbers (any non-`f/N.N` entry — a stray
-/// `Auto`/`Unknown`/`—` — is dropped), preserving order. This is the ONE canonical basis for the
-/// aperture choice index (issue 1304): the readback `aperture_norm`, the caps `fnumber_choices`,
-/// AND the relay's write `plan_writes` all derive their count from THIS same filtered list, so the
-/// panel's +/- step count can never diverge from the write count and step to the wrong f-stop.
+/// Sub-`f/0.5` f-number choices are gphoto2/PTP junk placeholders (`f/0`, `f/0.2`) that no real
+/// lens exposes; the threshold keeps genuine fast lenses (an `f/0.95`). Used to drop them from the
+/// canonical choice grid (issue 1306).
+pub const MIN_VALID_FNUMBER: f64 = 0.5;
+
+/// The f-number RADIO choices that parse as REAL f-numbers, preserving order — any non-`f/N.N`
+/// entry (a stray `Auto`/`Unknown`/`—`) AND any junk placeholder below [`MIN_VALID_FNUMBER`]
+/// (`f/0`, `f/0.2`, issue 1306) is dropped. This is the ONE canonical basis for the aperture
+/// choice index (issue 1304): the readback `aperture_norm`, the caps `fnumber_choices`, AND the
+/// relay's write `plan_writes` all derive their count from THIS same filtered list, so the panel's
+/// +/- step count can never diverge from the write count (and a step near 0 can never write `f/0`).
 pub fn parse_fnumber_labels(output: &str) -> Vec<String> {
     parse_choices(output)
         .into_iter()
-        .filter(|c| parse_fnumber(c).is_some())
+        .filter(|c| parse_fnumber(c).is_some_and(|f| f >= MIN_VALID_FNUMBER))
         .collect()
+}
+
+/// Extracts the raw F-Number value from a gphoto2 `--summary` `F-Number(0x5007)` line, e.g.
+/// `F-Number(0x5007):(readwrite) (type=0x4) Enumeration [...] value: f/4 (400)` -> `400`. The raw
+/// is the PTP F-Number x100 (`400` = f/4.0). Returns `None` if the line or its trailing
+/// parenthesised integer is absent (fail-safe). This is the ONLY honest current-aperture signal
+/// when libgphoto2 prints `Current: (null)` for the `f-number` RADIO because the lens sits open
+/// below the camera's first enumerated stop (issue 1306).
+pub fn parse_summary_fnumber_raw(summary: &str) -> Option<i64> {
+    for line in summary.lines() {
+        if line.contains("0x5007") {
+            // The value is the LAST parenthesised integer on the line: `... value: f/4 (400)`.
+            let open = line.rfind('(')?;
+            let inner = &line[open + 1..];
+            let close = inner.find(')')?;
+            return inner[..close].trim().parse::<i64>().ok();
+        }
+    }
+    None
+}
+
+/// The normalised slider position of the choice whose f-number is NEAREST to `value` — used when
+/// the camera's current aperture (read from `--summary`) is NOT one of its enumerated choices
+/// (the lens is open below the first enumerated stop, issue 1306), so the slider still shows a
+/// sensible position. `labels` must be the parsed f-number choice labels (e.g. from
+/// [`parse_fnumber_labels`]); `None` when there are no parseable choices.
+pub fn nearest_choice_norm(value: f64, labels: &[String]) -> Option<f64> {
+    let n = labels.len();
+    if n == 0 {
+        return None;
+    }
+    let mut best_i = 0usize;
+    let mut best_d = f64::INFINITY;
+    for (i, c) in labels.iter().enumerate() {
+        if let Some(f) = parse_fnumber(c) {
+            let d = (f - value).abs();
+            if d < best_d {
+                best_d = d;
+                best_i = i;
+            }
+        }
+    }
+    Some(choices_to_norm(best_i as i64, n as i64))
 }
 
 /// Parses an f-number choice string like `"f/5.2"` into `5.2`, or `None` if unparseable

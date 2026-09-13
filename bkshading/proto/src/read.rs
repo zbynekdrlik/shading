@@ -56,22 +56,32 @@ pub fn params_and_caps(raw: &RawConfigs) -> (ShadingParams, CameraCaps) {
         .or(sensor_fps100)
         .unwrap_or(DEFAULT_FPS100);
 
-    // Aperture: current f-number choice -> AV + normalised position within the choices.
+    // Aperture: current f-number -> AV + normalised position within the choices.
     // Use the PARSEABLE-ONLY choice list as the single canonical basis (issue 1304): the readback
     // `aperture_norm`, the caps `fnumber_choices` below, and the relay's `plan_writes` all count
     // from THIS same list, so the panel's +/- step index can never diverge from the write index.
     let fnumber_labels = parse_fnumber_labels(&raw.fnumber);
-    let current_fnumber = parse_current(&raw.fnumber);
-    let (aperture_av, aperture_norm) = match &current_fnumber {
-        Some(cur) => {
-            let av = parse_fnumber(cur).and_then(fnumber_to_av);
-            let norm = fnumber_labels
-                .iter()
-                .position(|c| c == cur)
-                .map(|i| choices_to_norm(i as i64, fnumber_labels.len() as i64));
-            (av, norm)
-        }
-        None => (None, None),
+    // The RADIO `Current:` only when it names a real f-number; libgphoto2 prints `Current: (null)`
+    // (-> parse_fnumber None) when the lens is open below the camera's first enumerated stop.
+    let current_label = parse_current(&raw.fnumber).filter(|c| parse_fnumber(c).is_some());
+    // Fall back to the `--summary` raw (0x5007 value / 100) when the RADIO current is absent —
+    // the only honest current-aperture signal in the off-grid case (issue 1306).
+    let summary_fnumber =
+        parse_summary_fnumber_raw(&raw.summary).map(|raw_x100| raw_x100 as f64 / 100.0);
+    let current_fnumber_value = current_label
+        .as_deref()
+        .and_then(parse_fnumber)
+        .or(summary_fnumber);
+    let aperture_av = current_fnumber_value.and_then(fnumber_to_av);
+    let aperture_norm = match &current_label {
+        // An exact enumerated choice -> its exact position in the (filtered) choice list.
+        Some(cur) => fnumber_labels
+            .iter()
+            .position(|c| c == cur)
+            .map(|i| choices_to_norm(i as i64, fnumber_labels.len() as i64)),
+        // No exact choice (the summary-derived off-grid case) -> the NEAREST choice by f-number,
+        // so the slider still shows a sensible position rather than staying dead (issue 1306).
+        None => current_fnumber_value.and_then(|v| nearest_choice_norm(v, &fnumber_labels)),
     };
 
     let iso = current_i64(&raw.iso);
