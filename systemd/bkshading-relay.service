@@ -28,6 +28,22 @@ ExecStart=/usr/local/bin/bkshading-relay --bind 0.0.0.0:8771
 Restart=on-failure
 RestartSec=5
 
+# issue 1309 -- bound the relay's fork/thread BLAST RADIUS. On 2026-09-13 a cambox went half-dead
+# after a relay (re)start (cam1 during a live production, cam2 after an E2E cleanup): dantesync +
+# the relay HTTP kept answering while anything that needs a fork -- an sshd session, the remoteos
+# MCP, a gphoto2 spawn -- failed, i.e. the box's pid space was exhausted and the box became
+# unreachable/unrepairable remotely. The healthy-box baseline measured the relay at pids.current=5
+# with the cgroup default TasksMax=18761 (the whole box's pid_max headroom), so an unbounded relay
+# runaway CAN consume the box-wide pid space and starve sshd. TasksMax=512 caps THIS unit's total
+# tasks (threads count too) far above the measured 5 / normal peak (<10, gphoto2 reads are
+# serialised + min-interval-throttled per issue 1229) but far below pid_max, so a relay leak can
+# never starve the rest of the box -- sshd (a different cgroup) keeps its forks. This CONTAINS a
+# leak; it does not prevent one (the on-box mgmt self-heal + persistent journal, same ticket, cover
+# detection + recovery). `.output()` in transport.rs already waits+reaps every gphoto2 child (no
+# zombie path), so no per-invocation timeout is added here (issue 1229 is the separate polling-vs-
+# grabber ticket); the baseline shows no leak, so this is a defensive ceiling, not a measured fix.
+TasksMax=512
+
 # issue 809: CAMERA_BOX_CAPTURE_FPS is provisioned into this file by
 # scripts/bkshading-provision-relay.sh, DERIVED from the box's own appliance capture-fps config
 # (the SAME value src/capture.rs requested_capture_denominator uses -- ONE source of truth). The

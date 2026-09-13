@@ -155,6 +155,38 @@ def test_unit_restart_policy_is_on_failure_issue_1228():
     assert not re.search(r"^Restart=always$", u, re.M), u
 
 
+def test_unit_tasksmax_bounds_the_fork_blast_radius_issue_1309():
+    # issue 1309: a cambox went half-dead after a relay (re)start -- dantesync + relay HTTP kept
+    # answering while anything needing a fork (sshd session, remoteos MCP, gphoto2) failed. The unit
+    # inherited the cgroup DEFAULT TasksMax (~18761, the box-wide pid_max headroom), so an unbounded
+    # relay runaway CAN starve sshd's forks. A real, explicit ceiling far above the measured 5 (and
+    # normal peak <10) but far below pid_max contains a leak to this cgroup; sshd (a different
+    # cgroup) keeps its forks. This CONTAINS a leak, it does not prevent one.
+    with open(UNIT, encoding="utf-8") as f:
+        u = f.read()
+    m = re.search(r"^TasksMax=(\d+)$", u, re.M)
+    assert m, "bkshading-relay.service must set an explicit TasksMax ceiling (issue 1309): %s" % u
+    val = int(m.group(1))
+    assert 5 < val < 18761, (
+        "TasksMax must be a REAL ceiling -- above the measured 5 but below the box-wide pid_max "
+        "headroom the cgroup default already grants (issue 1309), got %d" % val
+    )
+    # It is a [Service] directive (a UNIT-section TasksMax silently no-ops, like StartLimit* which
+    # this unit deliberately keeps in [Unit]). Prove the DIRECTIVE line sits inside the [Service]
+    # section: after the ^[Service]$ header, with no other ^[Section]$ header between them. Anchor on
+    # line-start (re.M) so the "[Service]"/"TasksMax=" strings that appear inside comments never
+    # match (the [Unit] comment literally mentions "[Service]", and the rationale comment mentions
+    # "TasksMax=18761").
+    svc = re.search(r"^\[Service\]$", u, re.M)
+    assert svc, u
+    tm_line = re.search(r"^TasksMax=\d+$", u, re.M)
+    assert tm_line and tm_line.start() > svc.start(), "TasksMax must be inside [Service] (issue 1309)"
+    between = u[svc.end():tm_line.start()]
+    assert not re.search(r"^\[[A-Za-z]", between, re.M), (
+        "TasksMax must be in [Service], not a later section (issue 1309)"
+    )
+
+
 def test_default_capture_fps_matches_appliance_requested_denominator():
     # One source of truth: the env default must equal the appliance's own default so a box with no
     # capture-fps drop-in reports the SAME rate it actually grabs at.
