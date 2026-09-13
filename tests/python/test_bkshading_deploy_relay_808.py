@@ -244,6 +244,11 @@ def _fake_deploy_env(tmp, remote_sha):
         "BKSHADING_DEPLOY_SCP": fake_scp,
         "BKSHADING_DEPLOY_SSHPASS_PREFIX": "",  # bypass sshpass -> fakes run bare
     }
+    # Rig-busy guard hermeticity (2026-09-13 escalation): the deploy now runs a rig-busy PREFLIGHT
+    # before the first ssh/scp. Point it at a fake IDLE obs_phase2.py so a fake-deploy test never
+    # touches the real rig OBS hosts (a busy/unreadable-mode test overwrites this fake afterward).
+    _write_fake_obs_phase2(tmp, "idle")
+    env["BKSHADING_DEPLOY_OBS_PHASE2_DIR"] = tmp
     return env, log
 
 

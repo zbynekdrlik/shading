@@ -26,7 +26,7 @@ set -euo pipefail
 # "is it off-air"; the operator who runs it guards live timing. It does NOT reboot the host.
 #
 # Usage:  scripts/bkshading-deploy-relay.sh --host <ip> [--arch amd64|arm64] [--no-remount]
-#                                           [--run <id> | --binary <path>] [--dry-run]
+#                                           [--run <id> | --binary <path>] [--dry-run] [--force-live]
 #   --host <ip>       (required) the cambox/SBC to deploy the relay to (e.g. 10.77.9.201).
 #   --arch <a>        target arch of the CI artifact: `amd64` (default; cambox — the relay+service
 #                     bkshading-linux-amd64 artifact) or `arm64` (SBC/handheld Pi Zero 2 W — the
@@ -37,13 +37,18 @@ set -euo pipefail
 #   --run <id>        pin a specific GitHub Actions ci.yml run id to download the artifact from.
 #   --binary <path>   deploy an already-downloaded CI relay binary (skips gh download).
 #   --dry-run         print the plan and touch nothing (no gh/ssh/scp).
+#   --force-live      BYPASS the rig-busy guard and deploy even while a broadcast is live. Supervisor
+#                     override ONLY, logged loudly — a relay deploy/restart during live production can
+#                     fork-wedge the cambox (gphoto2 PTP on the shared xHCI bus, 2026-09-13 #1229).
 #   -h | --help       show this header.
 # With neither --run nor --binary, the latest successful ci.yml run on $BRANCH is used.
 # SBC/handheld example: scripts/bkshading-deploy-relay.sh --host <pi> --arch arm64 --no-remount
 #
 # Env: SSH_PASS (default newlevel), REPO (default zbynekdrlik/camera-box), BRANCH (default main),
-#      ARTIFACT (default from the lib). Overridable for Tier-0 tests (inject fakes):
-#      BKSHADING_DEPLOY_GH, BKSHADING_DEPLOY_SSH, BKSHADING_DEPLOY_SCP, BKSHADING_DEPLOY_SSHPASS_PREFIX.
+#      ARTIFACT (default from the lib), STRIH_HOST/STREAM_HOST (rig-busy OBS-WS hosts, default
+#      10.77.9.202/.204), OBS_PASSWORD (default ""). Overridable for Tier-0 tests (inject fakes):
+#      BKSHADING_DEPLOY_GH, BKSHADING_DEPLOY_SSH, BKSHADING_DEPLOY_SCP, BKSHADING_DEPLOY_SSHPASS_PREFIX,
+#      BKSHADING_DEPLOY_OBS_PHASE2_DIR (dir holding obs_phase2.py for the rig-busy guard).
 #
 # Exit codes: 0 = relay deployed + byte-verified; 1 = a step failed / sha256 mismatch; 2 = bad args.
 # After a successful deploy: run scripts/bkshading-provision-relay.sh --install (if not yet) on the
@@ -55,8 +60,21 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/bkshading-deploy-runtime.sh"
 # shellcheck source=scripts/lib/bkshading-relay-runtime.sh
 . "$HERE/lib/bkshading-relay-runtime.sh" # bkshading_relay_bin_path() — the ONE relay install path
+# shellcheck source=scripts/lib/stray-session-check.sh
+. "$HERE/lib/stray-session-check.sh" # stray_session_check_assert() — the ONE shared rig-busy guard
 
 RELAY_DEST="$(bkshading_relay_bin_path)"     # /usr/local/bin/bkshading-relay (one source of truth)
+# Staging path for the ETXTBSY-safe swap: scp lands here (SAME dir → atomic rename), then `mv -f`
+# replaces the (possibly RUNNING) relay inode. scp'ing directly onto a running exe fails ETXTBSY
+# ("dest open: Failure", 2026-09-13 escalation). $$ is the local PID = a unique per-run stage name.
+RELAY_STAGE="${RELAY_DEST}.deploy.$$"
+# Rig-busy guard inputs (mirror scripts/rig-busy-gate.sh's own defaults). The guard reuses the
+# shared obs_phase2.py rig-busy-check; RIG_BUSY_HERE names the dir holding obs_phase2.py (this
+# script's own scripts/ dir), overridable so a Tier-0 test can point it at a fake.
+STRIH_HOST="${STRIH_HOST:-10.77.9.202}"
+STREAM_HOST="${STREAM_HOST:-10.77.9.204}"
+OBS_PASSWORD="${OBS_PASSWORD:-}"
+RIG_BUSY_HERE="${BKSHADING_DEPLOY_OBS_PHASE2_DIR:-$HERE}"
 SSH_PASS="${SSH_PASS:-newlevel}"
 REPO="${REPO:-zbynekdrlik/camera-box}"
 BRANCH="${BRANCH:-main}"
@@ -84,6 +102,7 @@ HOST=""
 RUN_ID=""
 BINARY=""
 DRY_RUN=0
+FORCE_LIVE=0   # --force-live: bypass the rig-busy guard (supervisor-only, logged loudly)
 
 # require_val: a flag needs a following value; without one, fail with the bad-args exit 2 + a
 # message (NOT a bare `shift 2` that aborts under set -e with exit 1 and no diagnostic).
@@ -97,6 +116,7 @@ while [ "$#" -gt 0 ]; do
     --run) require_val "$#" --run; RUN_ID="$2"; shift 2 ;;
     --binary) require_val "$#" --binary; BINARY="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
+    --force-live) FORCE_LIVE=1; shift ;;
     -h | --help)
       grep -E '^# ' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0
@@ -163,10 +183,10 @@ LOCAL_SHA="$(sha256sum "$BINARY" | awk '{print $1}')"
 # --- dry-run: print the plan, touch nothing ---
 if [ "$DRY_RUN" -eq 1 ]; then
   if [ "$RO_ROOT" = 1 ]; then
-    STEPS="mount -o remount,rw /  ->  scp  ->  chmod +x  ->  sha256 byte-verify  ->  mount -o remount,ro /"
+    STEPS="rig-busy guard  ->  mount -o remount,rw /  ->  scp (staged $RELAY_STAGE)  ->  chmod +x + atomic mv over running binary  ->  sha256 byte-verify  ->  mount -o remount,ro /"
     NEXT="on the box run scripts/bkshading-provision-relay.sh --install (if not yet) + reboot"
   else
-    STEPS="scp  ->  chmod +x  ->  sha256 byte-verify   (no remount -- stock rw-root SBC, --no-remount)"
+    STEPS="rig-busy guard  ->  scp (staged $RELAY_STAGE)  ->  chmod +x + atomic mv over running binary  ->  sha256 byte-verify   (no remount -- stock rw-root SBC, --no-remount)"
     NEXT="on the SBC run scripts/bkshading-provision-sbc.sh --install (if not yet) + reboot"
   fi
   cat <<PLAN
@@ -182,21 +202,45 @@ PLAN
   exit 0
 fi
 
+# --- rig-busy PREFLIGHT (2026-09-13 escalation): NEVER deploy a cambox relay while a broadcast may
+# be LIVE. A relay deploy DURING live production fork-wedged cam1 (gphoto2 PTP contention with the
+# grabber on the single shared xHCI controller cascades into D-state gphoto2 + fork-exhaustion).
+# Reuse the SAME shared rig-busy guard recording-e2e.sh uses (obs_phase2.py rig-busy-check via
+# stray_session_check_assert) — refuse on a busy rig unless --force-live (supervisor-only, logged
+# loudly); the guard fail-OPENs (WARN + proceed) only when NO box is readable, never on a transient.
+if [ "$FORCE_LIVE" = 1 ]; then
+  echo "WARNING: --force-live — BYPASSING the rig-busy guard for the bkshading relay deploy to $HOST." >&2
+  echo "         A relay deploy/restart during a LIVE broadcast can fork-wedge the cambox (2026-09-13 escalation); supervisor override only." >&2
+else
+  stray_session_check_assert "$RIG_BUSY_HERE" "$STRIH_HOST" "$STREAM_HOST" "the bkshading relay deploy to $HOST"
+fi
+
 # --- real deploy: read-only-root swap cycle (mirrors deploy-fleet.sh) ---
 if [ "${SSHPASS_PREFIX[0]:-}" = "sshpass" ]; then
   command -v sshpass >/dev/null 2>&1 || { echo "ERROR: sshpass required (apt-get install sshpass)" >&2; exit 1; }
 fi
 
-echo "[bkshading-deploy-relay] deploying $BINARY ($ARCH) -> root@$HOST:$RELAY_DEST"
+echo "[bkshading-deploy-relay] deploying $BINARY ($ARCH) -> root@$HOST:$RELAY_DEST (staged via $RELAY_STAGE, atomic mv)"
 if ! maybe_remount_rw "$HOST"; then
   echo "ERROR: remount rw / failed on $HOST" >&2; exit 1
 fi
-if ! scp_box "$HOST" "$BINARY" "$RELAY_DEST"; then
+# Stage to a temp path in the SAME directory, then atomic `mv -f` over the (possibly RUNNING) relay
+# binary. scp'ing directly onto a running executable fails ETXTBSY ("dest open: Failure", 2026-09-13);
+# rename(2) swaps the inode while the running process keeps the old one — so ADOPTING the new binary
+# stays a SEPARATE, rig-idle-only restart step (the enable-only invariant below: this never starts
+# the unit). On any failure, clean up the stage file AND always restore the ro root.
+if ! scp_box "$HOST" "$BINARY" "$RELAY_STAGE"; then
   echo "ERROR: scp of relay binary to $HOST failed" >&2
+  ssh_box "$HOST" "rm -f $RELAY_STAGE 2>/dev/null || true" || true
   maybe_remount_ro "$HOST"
   exit 1
 fi
-ssh_box "$HOST" "chmod +x $RELAY_DEST 2>/dev/null || true" || true
+if ! ssh_box "$HOST" "chmod +x $RELAY_STAGE && mv -f $RELAY_STAGE $RELAY_DEST"; then
+  echo "ERROR: staging chmod + atomic mv of the relay binary failed on $HOST" >&2
+  ssh_box "$HOST" "rm -f $RELAY_STAGE 2>/dev/null || true" || true
+  maybe_remount_ro "$HOST"
+  exit 1
+fi
 
 # Byte-verify (deploy-from-clean-tree.md Layer 3): a partial scp / stale same-name binary would
 # otherwise pass unnoticed. Read the remote sha AND the exec bit BEFORE restoring ro (fresh file):
