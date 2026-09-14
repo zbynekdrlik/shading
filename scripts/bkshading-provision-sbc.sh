@@ -167,7 +167,7 @@ do_check() {
   # (5) WiFi link -- the handheld SBC is wireless and the whole topology depends on it. A WIRED box
   #     (the cambox class, which runs the SAME reused relay unit) has no wl* interface and this check
   #     is SKIPPED, never FAILed. Band-agnostic: a 2.4 GHz-only board is fine, we only require a link.
-  local net_root wifi ssid _if
+  local net_root wifi ssid _if wlif
   net_root="${BKSHADING_SBC_NET_SYSFS:-/sys/class/net}"
   wifi="$(bkshading_sbc_wifi_link_state "$net_root" 'wl*')"
   case "$wifi" in
@@ -191,8 +191,9 @@ do_check() {
       fi
       ;;
     *)
-      echo "FAIL: WiFi link is down (no wl* interface with operstate=up) -- join the rig WiFi, e.g.:" >&2
-      echo "        nmcli device wifi connect '<RIG_SSID>' password '<PSK>' ifname wlan0" >&2
+      wlif="$(bkshading_sbc_first_wifi_iface "$net_root" 'wl*')"
+      echo "FAIL: WiFi link is down (a wl* interface is present but has no up link / carrier) -- join the rig WiFi, e.g.:" >&2
+      echo "        nmcli device wifi connect '<RIG_SSID>' password '<PSK>' ifname ${wlif:-wlan0}" >&2
       echo "        (a 2.4 GHz-only board needs a 2.4 GHz SSID on site; band is not asserted here)" >&2
       rc=1
       ;;

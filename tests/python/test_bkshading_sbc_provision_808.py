@@ -3,7 +3,8 @@
 
 The owner architecture (comment 5356048130 path 2, "cieľový stav"; Design v3 comment 5664682477 +
 ROZHODNUTÉ 5664746806, 14.9.2026) puts a handheld camera on a separately powered zero-class arm64
-SBC with WiFi — the board is device-agnostic (Raspberry Pi Zero 2 W, or Radxa ZERO 3W), powered from
+SBC with WiFi — the board is device-agnostic (Raspberry Pi Zero 2 W, Radxa ZERO 3W, or Orange Pi Zero 2W — the
+ordered prototype), powered from
 the camera cage's V-mount 5 V USB splitter (never a power bank / PiSugar / raw 15 V D-tap). The
 camera plugs USB into the SBC's host port (PTP), which runs the SAME `bkshading-relay` component the
 camboxes run — a "mini-cambox without video". The strih aggregation
@@ -191,6 +192,34 @@ def test_wifi_link_state_up_down_none():
         # two wireless ifaces, one up -> up
         two = _make_net_sysfs(os.path.join(tmp, "t"), {"wlan0": "down", "wlan1": "up"})
         assert _wifi_state(two) == (0, "up")
+        # an associated interface whose driver leaves operstate "unknown" but carrier=1 (the
+        # out-of-tree uwe5622 on the Orange Pi Zero 2W) counts as UP, never a false FAIL.
+        unk = _make_net_sysfs(os.path.join(tmp, "u2"),
+                              {"wlan0": {"operstate": "unknown", "carrier": "1"}})
+        assert _wifi_state(unk) == (0, "up")
+        # a genuinely-down link: operstate down AND carrier 0 -> down
+        dn = _make_net_sysfs(os.path.join(tmp, "d2"),
+                             {"wlan0": {"operstate": "down", "carrier": "0"}})
+        assert _wifi_state(dn) == (0, "down")
+
+
+def _first_wifi_iface(root, glob="wl*"):
+    src = '. "%s"\nbkshading_sbc_first_wifi_iface "$A1" "$A2"' % LIB
+    env = dict(os.environ, A1=root, A2=glob)
+    r = subprocess.run(["bash", "-c", src], capture_output=True, text=True, env=env)
+    return r.returncode, r.stdout.strip()
+
+
+def test_first_wifi_iface_names_the_real_interface():
+    with tempfile.TemporaryDirectory() as tmp:
+        # a non-standard name (wlp2s0) is what the remediation should print, not a hard-coded wlan0
+        r = _make_net_sysfs(os.path.join(tmp, "a"), {"eth0": "up", "wlp2s0": "down"})
+        assert _first_wifi_iface(r) == (0, "wlp2s0")
+        # no wireless iface -> empty, never an error
+        r2 = _make_net_sysfs(os.path.join(tmp, "b"), {"eth0": "up"})
+        assert _first_wifi_iface(r2) == (0, "")
+        # missing tree -> empty, never an error
+        assert _first_wifi_iface(os.path.join(tmp, "nope")) == (0, "")
 
 
 def test_wifi_ssid_from_iw_parser():
@@ -241,16 +270,25 @@ def _fake_systemctl(record_path):
 
 
 def _make_net_sysfs(base, ifaces):
-    """Build a fake /sys/class/net tree. `ifaces` maps iface name -> operstate string. Returns the
-    root path (injected via BKSHADING_SBC_NET_SYSFS) so the WiFi-link check reads a controlled tree
-    instead of the CI runner's real interfaces."""
+    """Build a fake /sys/class/net tree. `ifaces` maps iface name -> either an operstate string, or a
+    dict {"operstate": <str>, "carrier": <str>} to also write a `carrier` file. Returns the root path
+    (injected via BKSHADING_SBC_NET_SYSFS) so the WiFi-link check reads a controlled tree instead of
+    the CI runner's real interfaces."""
     root = os.path.join(base, "net-sysfs")
     os.makedirs(root, exist_ok=True)
     for name, state in ifaces.items():
         d = os.path.join(root, name)
         os.makedirs(d, exist_ok=True)
+        if isinstance(state, dict):
+            operstate = state["operstate"]
+            carrier = state.get("carrier")
+        else:
+            operstate, carrier = state, None
         with open(os.path.join(d, "operstate"), "w") as f:
-            f.write(state + "\n")
+            f.write(operstate + "\n")
+        if carrier is not None:
+            with open(os.path.join(d, "carrier"), "w") as f:
+                f.write(carrier + "\n")
     return root
 
 

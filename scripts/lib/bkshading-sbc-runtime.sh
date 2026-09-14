@@ -120,7 +120,7 @@ bkshading_sbc_elf_arch_of_file() {
 # Reads only; a missing/empty tree -> none, never an error (safe under the caller's set -euo pipefail).
 bkshading_sbc_wifi_link_state() {
   local root="${1:-/sys/class/net}" glob="${2:-wl*}"
-  local iface found=0 up=0 st restore_nullglob
+  local iface found=0 up=0 st car restore_nullglob
   shopt -q nullglob && restore_nullglob=0 || restore_nullglob=1
   shopt -s nullglob
   # shellcheck disable=SC2231  # deliberate glob expansion of the iface pattern (no spaces in wl*).
@@ -128,7 +128,13 @@ bkshading_sbc_wifi_link_state() {
     [ -r "$iface/operstate" ] || continue
     found=1
     st="$(cat "$iface/operstate" 2>/dev/null || true)"
-    if [ "$st" = "up" ]; then up=1; fi
+    # operstate "up" is the primary signal, BUT some drivers (notably the out-of-tree uwe5622 on the
+    # Orange Pi Zero 2W) leave operstate at "unknown"/"dormant" while genuinely associated, so
+    # carrier==1 (an L1 link is present) also counts as up. A genuinely-down link has operstate
+    # "down" AND no carrier. Reading `carrier` on a down iface can error ("Invalid argument") — the
+    # 2>/dev/null + `|| true` degrades that to empty, never aborting the caller's set -euo pipefail.
+    car="$(cat "$iface/carrier" 2>/dev/null || true)"
+    if [ "$st" = "up" ] || [ "$car" = "1" ]; then up=1; fi
   done
   [ "$restore_nullglob" = 1 ] && shopt -u nullglob
   if [ "$found" -eq 0 ]; then
@@ -138,6 +144,26 @@ bkshading_sbc_wifi_link_state() {
   else
     printf '%s\n' down
   fi
+}
+
+# Print the name of the FIRST wireless interface under <sysfs-root> matching <iface-glob> (e.g.
+# `wlan0` / `wlp2s0`), or nothing if none. Used only to make the WiFi-down remediation name the real
+# interface instead of a hard-coded `wlan0` (a board may enumerate as `wlan1`/`wlp2s0`). Pure, reads
+# only; safe under set -euo pipefail (nullglob + a break, no head).
+bkshading_sbc_first_wifi_iface() {
+  local root="${1:-/sys/class/net}" glob="${2:-wl*}"
+  local iface restore_nullglob
+  shopt -q nullglob && restore_nullglob=0 || restore_nullglob=1
+  shopt -s nullglob
+  # shellcheck disable=SC2231  # deliberate glob expansion of the iface pattern (no spaces in wl*).
+  for iface in "$root"/$glob; do
+    if [ -e "$iface/operstate" ]; then
+      [ "$restore_nullglob" = 1 ] && shopt -u nullglob
+      basename "$iface"
+      return 0
+    fi
+  done
+  [ "$restore_nullglob" = 1 ] && shopt -u nullglob
 }
 
 # Parse the SSID from `iw dev <iface> link` output (the "SSID: <name>" line). Prints the SSID or
