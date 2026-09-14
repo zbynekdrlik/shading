@@ -29,11 +29,12 @@ set -euo pipefail
 #                                           [--run <id> | --binary <path>] [--dry-run] [--force-live]
 #   --host <ip>       (required) the cambox/SBC to deploy the relay to (e.g. 10.77.9.201).
 #   --arch <a>        target arch of the CI artifact: `amd64` (default; cambox — the relay+service
-#                     bkshading-linux-amd64 artifact) or `arm64` (SBC/handheld Pi Zero 2 W — the
+#                     bkshading-linux-amd64 artifact) or `arm64` (SBC/handheld zero-class arm64 SBC —
 #                     relay-only bkshading-relay-linux-arm64 artifact; issue 808 SBC milestone).
 #   --no-remount      skip the read-only-root remount,rw/remount,ro swap. A camera-box appliance has
-#                     a read-only root (default: remount); a stock Raspberry Pi OS SBC root is
-#                     read-WRITE, so an SBC deploy passes --no-remount (remounting it ro is wrong).
+#                     a read-only root (default: remount); a stock arm64 SBC image (Raspberry Pi OS
+#                     / Debian / Armbian) root is read-WRITE, so an SBC deploy passes --no-remount
+#                     (remounting it ro is wrong).
 #   --run <id>        pin a specific GitHub Actions ci.yml run id to download the artifact from.
 #   --binary <path>   deploy an already-downloaded CI relay binary (skips gh download).
 #   --dry-run         print the plan and touch nothing (no gh/ssh/scp).
@@ -42,7 +43,7 @@ set -euo pipefail
 #                     fork-wedge the cambox (gphoto2 PTP on the shared xHCI bus, 2026-09-13 #1229).
 #   -h | --help       show this header.
 # With neither --run nor --binary, the latest successful ci.yml run on $BRANCH is used.
-# SBC/handheld example: scripts/bkshading-deploy-relay.sh --host <pi> --arch arm64 --no-remount
+# SBC/handheld example: scripts/bkshading-deploy-relay.sh --host <sbc> --arch arm64 --no-remount
 #
 # Env: SSH_PASS (default newlevel), REPO (default zbynekdrlik/camera-box), BRANCH (default main),
 #      ARTIFACT (default from the lib), STRIH_HOST/STREAM_HOST (rig-busy OBS-WS hosts, default
@@ -141,17 +142,18 @@ case "$ARCH" in
 esac
 ARTIFACT="${ARTIFACT_ENV:-$(bkshading_deploy_artifact_name_for_arch "$ARCH")}"
 
-# arm64 targets an SBC, and a stock Raspberry Pi OS root is read-WRITE — a ro-root remount on it is
-# almost always wrong. --arch and --no-remount stay ORTHOGONAL (a deliberately read-only Pi image
-# legitimately wants arm64 WITH the remount), so WARN rather than force — the operator keeps the
-# choice. This removes the "forgot --no-remount" footgun without breaking the read-only-Pi case.
+# arm64 targets an SBC, and a stock arm64 SBC image (Raspberry Pi OS / Debian / Armbian) root is
+# read-WRITE — a ro-root remount on it is almost always wrong. --arch and --no-remount stay
+# ORTHOGONAL (a deliberately read-only SBC image legitimately wants arm64 WITH the remount), so WARN
+# rather than force — the operator keeps the choice. This removes the "forgot --no-remount" footgun
+# without breaking the read-only-image case.
 if [ "$ARCH" = "arm64" ] && [ "$RO_ROOT" = 1 ]; then
   echo "WARNING: --arch arm64 without --no-remount will remount the target root read-only after the" >&2
-  echo "         deploy; a stock Raspberry Pi OS SBC has a read-WRITE root, so pass --no-remount" >&2
-  echo "         unless this is a deliberately read-only Pi image." >&2
+  echo "         deploy; a stock arm64 SBC image has a read-WRITE root, so pass --no-remount" >&2
+  echo "         unless this is a deliberately read-only SBC image." >&2
 fi
 
-# Conditional read-only-root swap (a cambox has a read-only root; a stock Pi OS SBC root is rw). No
+# Conditional read-only-root swap (a cambox has a read-only root; a stock arm64 SBC root is rw). No
 # ssh remount call at all when --no-remount is set, so an SBC deploy never tries to remount its
 # root ro (which would be wrong / fail-busy).
 maybe_remount_rw() { [ "$RO_ROOT" = 1 ] || return 0; ssh_box "$1" "mount -o remount,rw /"; }

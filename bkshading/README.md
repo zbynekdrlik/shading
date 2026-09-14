@@ -138,21 +138,33 @@ scripts/bkshading-provision-cloudflared.sh --check
 ## SBC / handheld image (issue 808)
 
 A **handheld** camera (no cambox, video over wireless HDMI) is shaded by running the SAME
-`bkshading-relay` on a **mini SBC on the cage** — a Raspberry **Pi Zero 2 W**: camera USB → Pi,
-Pi on WiFi, the relay exposes the camera's shading to the service exactly like a cambox does (owner
+`bkshading-relay` on **a separately powered zero-class arm64 SBC with WiFi on the cage** — the
+board is device-agnostic (Design v3, owner 14.9.2026): a Raspberry **Pi Zero 2 W**, a **Radxa
+ZERO 3W**, or an **Orange Pi Zero 2W** (the ordered prototype). The camera plugs into the SBC's
+**USB host port** (PTP over `gphoto2`) and the box is powered from the camera cage's V-mount **5 V
+USB splitter** (5 V USB-C/USB-A out, or a D-tap→USB-C **5 V** cable) — **never a power bank, never
+PiSugar, never raw 15 V D-tap; all candidate boards are 5 V-only**. Because PTP makes the camera
+the USB *device* (the power sink), the box can never be powered BY the camera — hence its own 5 V
+feed. The relay exposes the camera's shading to the service exactly like a cambox does (owner
 architecture, issue 808 comment 5356048130 path 2). The service already treats it as just another
-camera (`transport = "sbc-relay"`, the `handheld-1` record in `bkshading.example.toml`, a
+camera (`transport = "sbc-relay"`, the `handheld-1..3` records in `bkshading.example.toml`, a
 params-only block — a handheld has no NDI feed). This milestone provisions the box side.
 
+- **Per-board port/power topology (all one USB cable to the camera + a 5 V feed from the splitter):**
+  - **Pi Zero 2 W** — micro-USB OTG host → camera; a separate micro-USB 5 V power-in from the
+    splitter. 2.4 GHz WiFi only, so the rig needs a 2.4 GHz SSID on site.
+  - **Radxa ZERO 3W** — USB 3.0 Type-C host → camera; OTG-C 5 V-in from the splitter. Dual-band WiFi.
+  - **Orange Pi Zero 2W** — two USB-C ports (host vs power is revision-dependent — probe both);
+    5 V-in from the splitter on the power port. Dual-band WiFi.
 - **CI cross-builds the ARM binary.** The `bkshading` job cross-compiles the relay for
   **`aarch64-unknown-linux-gnu`** (rustup target + the `gcc-aarch64-linux-gnu` linker; the relay is
   pure Rust — axum/tokio/serde/clap, no C link deps — so the cross-link is trivial) and uploads it
   as the relay-only **`bkshading-relay-linux-arm64`** artifact. **Target choice — aarch64, not
-  armhf:** the Pi Zero 2 W is a Cortex-A53 (ARMv8-A, 64-bit) and Raspberry Pi OS (Bookworm) 64-bit
-  is its current default image; the relay's footprint is a few MB (well under the 512 MB budget on
-  64-bit), and aarch64-gnu is the best-supported Rust cross target with glibc matching Pi OS. A
-  32-bit `armv7-unknown-linux-gnueabihf` build is one extra CI matrix entry to add IF a legacy
-  32-bit handheld ever needs it — not the default.
+  armhf:** every candidate board is a Cortex-A53 (ARMv8-A, 64-bit) with a 64-bit stock arm64 image
+  (Raspberry Pi OS / Debian / Armbian); the relay's footprint is a few MB (well under the 512 MB /
+  2 GB budget on 64-bit), and aarch64-gnu is the best-supported Rust cross target with glibc
+  matching every candidate image. A 32-bit `armv7-unknown-linux-gnueabihf` build is one extra CI
+  matrix entry to add IF a legacy 32-bit handheld ever needs it — not the default.
 - **`scripts/bkshading-provision-sbc.sh --check|--install`** (+ pure lib
   `scripts/lib/bkshading-sbc-runtime.sh`) — idempotent, fail-loud, ENABLE-ONLY (`daemon-reload` +
   `enable`, never `start`/`restart` — defer to reboot, per `.claude/rules/provisioning-scripts.md`).
@@ -163,23 +175,27 @@ params-only block — a handheld has no NDI feed). This milestone provisions the
   `capture_fps=None` → the service uses its static config, never a wrong value). `--check` verifies
   `gphoto2` + the unit installed (byte-match) + enabled + the relay binary present **and actually
   aarch64** (an ELF `e_machine` read — a mis-deployed amd64 binary is caught here, not at reboot
-  with an opaque `Exec format error`).
-- **Deploy the ARM relay:** `scripts/bkshading-deploy-relay.sh --host <pi> --arch arm64
+  with an opaque `Exec format error`) + **the WiFi link is up** (reads `/sys/class/net/wl*/operstate`
+  — band-agnostic; a wired box with no `wl*` interface, e.g. a cambox, SKIPs this check, never
+  FAILs; a down link FAILs with a `nmcli device wifi connect …` join remediation).
+- **Deploy the ARM relay:** `scripts/bkshading-deploy-relay.sh --host <sbc> --arch arm64
   --no-remount` — `--arch arm64` fetches the `bkshading-relay-linux-arm64` artifact; `--no-remount`
-  skips the read-only-root swap (a cambox appliance has a read-only root; a stock Pi OS root is
-  read-write). The scp + sha256 byte-verify + ENABLE-ONLY discipline is otherwise identical to the
-  cambox path.
+  skips the read-only-root swap (a cambox appliance has a read-only root; a stock arm64 SBC image —
+  Raspberry Pi OS / Debian / Armbian — root is read-write). The scp + sha256 byte-verify +
+  ENABLE-ONLY discipline is otherwise identical to the cambox path.
 - **The physical box bring-up is the owner's / supervisor's step** (no rig access in this lane):
-  flash Raspberry Pi OS Lite (64-bit) with `rpi-imager` (headless WiFi + ssh), then deploy +
-  `--install` + reboot, then add the `handheld-1` (or another id) `[[camera]]` record to the
-  service config. **Transports stay USB-relay / USB-Ethernet REST only — never Bluetooth** (owner
-  hard rule): the SBC drives the camera over USB-PTP (`gphoto2`/libusb), so it never enumerates as a
-  network link (the netplan `enx*` CDC-NCM trap that bites camboxes does not touch the handheld).
+  flash the board's 64-bit arm64 image (Raspberry Pi OS Lite / Debian / Armbian) with headless WiFi
+  + ssh, join the rig WiFi SSID (a 2.4 GHz-only board needs a 2.4 GHz SSID on site), give the box a
+  stable `handheld-N` hostname via a static DHCP lease on router_snv, then deploy + `--install` +
+  reboot, then add the `handheld-N` `[[camera]]` record to the service config. **Transports stay
+  USB-relay / USB-Ethernet REST only — never Bluetooth** (owner hard rule): the SBC drives the
+  camera over USB-PTP (`gphoto2`/libusb), so it never enumerates as a network link (the netplan
+  `enx*` CDC-NCM trap that bites camboxes does not touch the handheld).
 
 ```
-# on the SBC (after flashing Pi OS + deploying the aarch64 relay):
+# on the SBC (after flashing the arm64 image + deploying the aarch64 relay):
 scripts/bkshading-provision-sbc.sh --install   # gphoto2 + reused relay unit; enable (defer to reboot)
-scripts/bkshading-provision-sbc.sh --check     # verify gphoto2 + unit enabled + aarch64 binary
+scripts/bkshading-provision-sbc.sh --check     # verify gphoto2 + unit enabled + aarch64 binary + WiFi link
 ```
 
 ## Running (once built on CI)

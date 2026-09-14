@@ -3,7 +3,8 @@
 //! Design decision (issue 808 design comment, Prístup 1): the relay drives the camera
 //! by spawning the system `gphoto2` binary — NOT a build-time `libgphoto2` FFI binding.
 //! This keeps the crate free of any C build-time dependency, so it cross-compiles cleanly
-//! for ARM (Pi Zero 2 W, the handheld SBC relay), and it reuses the exact gphoto2
+//! for ARM (a zero-class arm64 SBC handheld relay — Pi Zero 2 W / Radxa ZERO 3W / Orange
+//! Pi Zero 2W), and it reuses the exact gphoto2
 //! semantics the dev2 MVP verified. The `Gphoto2Runner` trait is the seam: `Gphoto2Cli`
 //! is the real impl, and tests inject a fake so every path is exercised without a camera.
 

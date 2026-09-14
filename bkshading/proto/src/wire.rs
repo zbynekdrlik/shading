@@ -16,8 +16,9 @@ use serde::{Deserialize, Serialize};
 pub enum Transport {
     /// Camera USB -> cambox PC, controlled by a `bkshading-relay` on that cambox.
     CamboxRelay,
-    /// Camera USB -> mini SBC on the cage (Pi Zero 2 W), running the SAME relay — a
-    /// "mini-cambox without video". Handheld path.
+    /// Camera USB -> a separately powered zero-class arm64 SBC with WiFi on the cage
+    /// (device-agnostic: Pi Zero 2 W / Radxa ZERO 3W / Orange Pi Zero 2W), running the
+    /// SAME relay — a "mini-cambox without video". Handheld path.
     SbcRelay,
     /// Camera in REST mode via a USB-C->Ethernet adapter (Camera OS >= 8.6). Future
     /// alternative transport; the service treats it as another relay-shaped endpoint.

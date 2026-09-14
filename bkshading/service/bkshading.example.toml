@@ -27,10 +27,30 @@ grab_fps = 60                 # box grabs this cam at 60 fps (issue 809) — the
                               # "align to grab" button (never an automatic write). Omit for a
                               # camera whose grab rate you don't want compared.
 
-# A handheld on a mini SBC (Pi Zero 2 W) — same relay component, no video feed.
+# Handheld cameras (×3) on a separately powered zero-class arm64 SBC with WiFi (device-agnostic:
+# Raspberry Pi Zero 2 W / Radxa ZERO 3W / Orange Pi Zero 2W), running the SAME relay component the
+# camboxes run — no video feed, so a params-only block (no ndi_preview, no grab_fps: a handheld has
+# no box grab-rate to compare against). The box is powered from the camera cage's V-mount 5 V USB
+# splitter and joins the rig WiFi SSID; give each box a stable hostname `handheld-N` via a static
+# DHCP lease on router_snv (an ops step) so `handheld-N.lan` resolves. A 2.4 GHz-only board (e.g. a
+# Pi Zero 2 W) needs a 2.4 GHz SSID on site.
 [[camera]]
 id = "handheld-1"
 label = "Handheld 1"
 transport = "sbc-relay"
-address = "10.77.9.60:8771"
+address = "handheld-1.lan:8771"
+# no ndi_preview -> params-only block
+
+[[camera]]
+id = "handheld-2"
+label = "Handheld 2"
+transport = "sbc-relay"
+address = "handheld-2.lan:8771"
+# no ndi_preview -> params-only block
+
+[[camera]]
+id = "handheld-3"
+label = "Handheld 3"
+transport = "sbc-relay"
+address = "handheld-3.lan:8771"
 # no ndi_preview -> params-only block

@@ -19,7 +19,7 @@
 bkshading_deploy_artifact_name() { printf '%s\n' bkshading-linux-amd64; }
 
 # The aarch64 relay-only artifact the `bkshading` job cross-builds + uploads for the SBC/handheld
-# (issue 808 SBC milestone; a Pi Zero 2 W is ARM and cannot run the amd64 binary). ONE source of
+# (issue 808 SBC milestone; a zero-class arm64 SBC is ARM and cannot run the amd64 binary). ONE source of
 # truth for the arm64 artifact name — the CI upload, the deploy `--arch arm64` path, and the python
 # cross-check all read this. Relay-ONLY (the service runs on the strih PC, never on a handheld SBC),
 # hence the distinct `bkshading-relay-linux-arm64` name vs the amd64 `bkshading-linux-amd64` (relay
