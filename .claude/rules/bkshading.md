@@ -437,6 +437,39 @@ shading-dead for 76 minutes until a human noticed and ran `systemctl start` by h
   out of scope for this fix (the ticket names it optional).
 
 
+## The relay lifecycle is EVENT-ONLY on the rig — `rig-mode.sh test` stops+disables it, `event` starts it (issue 1311)
+
+**Two boot sticks died in 24h (cam1 13.9., cam2 14.9.) on exactly the two boxes with a shading
+camera on the SAME USB3 root hub as the boot stick** (issue 1309/1311 Finding 1/2): a consumer
+896 mA SanDisk + a 512 mA Cam Link grabber + a 144 mA+ BMPCC PTP camera share one mini-PC 5 V rail,
+and every relay start/stop is a PTP-session power change on that hub. Owner ruling
+(14.9.2026): „nie nemas nic co by moholo odpalit disk skusat" — pursue it PASSIVELY, and remove
+the software provocations. During DEVELOPMENT the shading panel is not needed, so the relay has no
+business running (and polling the shared bus) while measurements run.
+
+- **`rig-mode.sh test` STOPS + DISABLES `bkshading-relay`; `rig-mode.sh event` ENABLES + STARTS it**
+  — via `scripts/lib/bkshading-relay-mode.sh` (`bkshading_relay_mode_apply <test|event> <cam_pw>
+  <label=ip>…`), an additive sourced-helper call in `do_test`/`do_event` (no anchored `rig-mode.sh`
+  line edited, the additive pattern). The roster is DERIVED, not a literal list: the same two boxes
+  the issue-808 E2E pause + `EVENT_ASSERT_TARGETS` use — the resolved source box
+  (`${RIG_SOURCE_BOX}=$RIG_SOURCE_IP`) + `cam2=$PAINTER_IP`. The unit name is the ONE source of
+  truth `bkshading_relay_unit_name` (from `bkshading-relay-runtime.sh`). Every systemctl line is
+  `|| true`-tolerant and the ssh loop is best-effort per box (a bad/unreachable box never aborts
+  the switch).
+- **This makes the issue-808 E2E pause/restore a TRUE no-op in TEST mode:** with the relay already
+  stopped+disabled, `bkshading_e2e_pause_stop_cmds` reads `systemctl is-active`=false AND (in steady
+  state) no `/run/bkshading-e2e-paused` marker → `was-active=0` → `bkshading_e2e_pause_restore_cmds`
+  takes its `true # leave it stopped` branch → toggles nothing. No change to
+  `bkshading-e2e-pause.sh` was needed; verify that path STAYS a no-op if either lib changes.
+- **It also removes the issue-1229 gphoto2 polling noise from every measurement** — the bus-friendly
+  min-interval floor below still applies while the relay IS running (EVENT mode), but development
+  runs no longer pay any relay bus traffic at all.
+- **Distinct from the deploy/ops gate below** ("NEVER deploy OR restart a cambox relay during
+  production"): that is a rig-busy gate on the DEPLOY TOOL; this is the relay's steady-state
+  lifecycle on the TEST/EVENT switch. Both point the same way — the relay is a broadcast-time
+  service, not a development-time one.
+
+
 ## Relay polling is BUS-FRIENDLY — a min-interval floor, never gphoto2-per-poll (issue 1229, P0)
 
 **The relay MUST NOT shell out to `gphoto2` on every `GET /api/state`.** Root cause of the #1229
