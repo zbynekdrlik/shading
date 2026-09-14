@@ -43,9 +43,27 @@ _BKSH_MODE_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 bkshading_relay_mode_stop_cmds() {
   local unit
   unit="$(bkshading_relay_unit_name)"
+  # The persistent enable-state lives under /etc on the cambox's READ-ONLY root (issue 1311, live
+  # on the source box 14.9.2026: the change failed 'Read-only file system' behind 2>/dev/null and
+  # the unit stayed armed for the next boot). Mirror the painter's ro-persist helper: remount rw,
+  # change, restore ro, READ BACK, and exit non-zero when the state did not land. A box without
+  # the unit (the painter box today) has nothing to persist -> RELAY_ENABLED=not-found, exit 0.
   cat <<STOP
 systemctl stop $unit 2>/dev/null || true
-systemctl disable $unit 2>/dev/null || true
+if ! systemctl cat $unit >/dev/null 2>&1; then echo "RELAY_ENABLED=not-found"; exit 0; fi
+_rm_rc=0
+if mount -o remount,rw / 2>/dev/null; then
+  systemctl disable $unit 2>/dev/null || _rm_rc=\$?
+  for _i in 1 2 3; do mount -o remount,ro / 2>/dev/null && break; sleep 2; done
+else
+  _rm_rc=98
+fi
+_rm_state="\$(systemctl is-enabled $unit 2>/dev/null || true)"
+echo "RELAY_ENABLED=\${_rm_state:-unknown}"
+if [ "\$_rm_state" = "enabled" ] || [ "\$_rm_rc" -ne 0 ]; then
+  echo "FAIL: [issue 1311] $unit persist did not land (rc=\$_rm_rc is-enabled=\${_rm_state:-unknown}) -- a reboot would re-arm the relay" >&2
+  exit 1
+fi
 STOP
 }
 
@@ -55,8 +73,21 @@ bkshading_relay_mode_start_cmds() {
   local unit
   unit="$(bkshading_relay_unit_name)"
   cat <<START
-systemctl enable $unit 2>/dev/null || true
+if ! systemctl cat $unit >/dev/null 2>&1; then echo "RELAY_ENABLED=not-found"; exit 0; fi
+_rm_rc=0
+if mount -o remount,rw / 2>/dev/null; then
+  systemctl enable $unit 2>/dev/null || _rm_rc=\$?
+  for _i in 1 2 3; do mount -o remount,ro / 2>/dev/null && break; sleep 2; done
+else
+  _rm_rc=98
+fi
 systemctl start $unit 2>/dev/null || true
+_rm_state="\$(systemctl is-enabled $unit 2>/dev/null || true)"
+echo "RELAY_ENABLED=\${_rm_state:-unknown}"
+if [ "\$_rm_state" != "enabled" ] || [ "\$_rm_rc" -ne 0 ]; then
+  echo "FAIL: [issue 1311] $unit persist did not land (rc=\$_rm_rc is-enabled=\${_rm_state:-unknown}) -- the relay would not survive a reboot" >&2
+  exit 1
+fi
 START
 }
 
@@ -68,6 +99,7 @@ START
 # stubs `sshpass` as a shell function must be able to intercept it -- `timeout sshpass ...` would
 # exec the real binary and bypass the stub).
 bkshading_relay_mode_apply() {
+  local _failed=0 _out _rc _state
   local action="$1" cam_pw="$2"
   shift 2 || return 0
   local cmds verb
@@ -92,9 +124,16 @@ bkshading_relay_mode_apply() {
     if [ -z "$label" ] || [ -z "$ip" ] || [ "$label" = "$ip" ]; then
       continue
     fi
-    sshpass -p "$cam_pw" timeout 12 ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
-      root@"$ip" "$cmds" 2>/dev/null || true
-    echo "    [issue 1311] bkshading-relay $verb on $label ($ip)"
+    _out=""; _rc=0
+    _out="$(sshpass -p "$cam_pw" timeout 12 ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
+      root@"$ip" "$cmds" 2>&1)" || _rc=$?
+    _state="$(printf '%s\n' "$_out" | grep -oE '^RELAY_ENABLED=.*' | tail -n 1)"
+    if [ "$_rc" -ne 0 ]; then
+      echo "    [issue 1311] bkshading-relay $verb on $label ($ip): FAIL (rc=$_rc ${_state:-read-back missing}) -- $(printf '%s\n' "$_out" | grep -E '^FAIL' | tail -n 1)" >&2
+      _failed=1
+    else
+      echo "    [issue 1311] bkshading-relay $verb on $label ($ip) [${_state:-read-back n/a}]"
+    fi
   done
-  return 0
+  [ "${_failed:-0}" -eq 0 ]
 }
