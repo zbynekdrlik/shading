@@ -323,7 +323,11 @@ the relay/cloudflared provisioning canon but with two deliberate deltas + one go
   not at reboot with an opaque `Exec format error`.
 - **`--check` also verifies the WiFi link is up** — a pure `bkshading_sbc_wifi_link_state
   <sysfs-root> <iface-glob>` reads `/sys/class/net/wl*/operstate` and returns `up`/`down`/`none`
-  (`BKSHADING_SBC_NET_SYSFS` injects a fake tree for Tier-0). **Band-agnostic on purpose** (a
+  (`BKSHADING_SBC_NET_SYSFS` injects a fake tree for Tier-0). **`operstate` is the primary signal
+  but NOT the only one — `carrier==1` also counts as up.** Some drivers (notably the **Orange Pi
+  Zero 2W's out-of-tree `uwe5622`**) leave `operstate` at `"unknown"`/`"dormant"` while genuinely
+  associated, so operstate-alone would false-FAIL the very prototype board; a genuinely-down link is
+  `operstate down` AND no carrier. **Band-agnostic on purpose** (a
   2.4 GHz-only Pi Zero 2 W is as valid as a dual-band board — the check only proves a link, never a
   band/SSID); an optional best-effort `iw`-parsed SSID enriches the OK line (`bkshading_sbc_wifi_ssid_from_iw`,
   never gating). A **wired box with no `wl*` interface (the cambox class, which runs the SAME reused
