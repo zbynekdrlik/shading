@@ -48,17 +48,21 @@ bkshading_relay_mode_stop_cmds() {
   # the unit stayed armed for the next boot). Mirror the painter's ro-persist helper: remount rw,
   # change, restore ro, READ BACK, and exit non-zero when the state did not land. A box without
   # the unit (the painter box today) has nothing to persist -> RELAY_ENABLED=not-found, exit 0.
+  # Every `systemctl` line still ENDS with `|| true` (the harness guard): a failed change is captured
+  # into _rm_rc / _rm_missing on that same line and judged by the `if` that follows -- the loud exit 1
+  # never comes from a systemctl line itself.
   cat <<STOP
 systemctl stop $unit 2>/dev/null || true
-if ! systemctl cat $unit >/dev/null 2>&1; then echo "RELAY_ENABLED=not-found"; exit 0; fi
+_rm_missing=0; systemctl cat $unit >/dev/null 2>&1 || _rm_missing=1 || true
+if [ "\$_rm_missing" -eq 1 ]; then echo "RELAY_ENABLED=not-found"; exit 0; fi
 _rm_rc=0
 if mount -o remount,rw / 2>/dev/null; then
-  systemctl disable $unit 2>/dev/null || _rm_rc=\$?
+  systemctl disable $unit 2>/dev/null || _rm_rc=\$? || true
   for _i in 1 2 3; do mount -o remount,ro / 2>/dev/null && break; sleep 2; done
 else
   _rm_rc=98
 fi
-_rm_state="\$(systemctl is-enabled $unit 2>/dev/null || true)"
+_rm_state="\$(systemctl is-enabled $unit 2>/dev/null)" || true
 echo "RELAY_ENABLED=\${_rm_state:-unknown}"
 if [ "\$_rm_state" = "enabled" ] || [ "\$_rm_rc" -ne 0 ]; then
   echo "FAIL: [issue 1311] $unit persist did not land (rc=\$_rm_rc is-enabled=\${_rm_state:-unknown}) -- a reboot would re-arm the relay" >&2
@@ -73,16 +77,17 @@ bkshading_relay_mode_start_cmds() {
   local unit
   unit="$(bkshading_relay_unit_name)"
   cat <<START
-if ! systemctl cat $unit >/dev/null 2>&1; then echo "RELAY_ENABLED=not-found"; exit 0; fi
+_rm_missing=0; systemctl cat $unit >/dev/null 2>&1 || _rm_missing=1 || true
+if [ "\$_rm_missing" -eq 1 ]; then echo "RELAY_ENABLED=not-found"; exit 0; fi
 _rm_rc=0
 if mount -o remount,rw / 2>/dev/null; then
-  systemctl enable $unit 2>/dev/null || _rm_rc=\$?
+  systemctl enable $unit 2>/dev/null || _rm_rc=\$? || true
   for _i in 1 2 3; do mount -o remount,ro / 2>/dev/null && break; sleep 2; done
 else
   _rm_rc=98
 fi
 systemctl start $unit 2>/dev/null || true
-_rm_state="\$(systemctl is-enabled $unit 2>/dev/null || true)"
+_rm_state="\$(systemctl is-enabled $unit 2>/dev/null)" || true
 echo "RELAY_ENABLED=\${_rm_state:-unknown}"
 if [ "\$_rm_state" != "enabled" ] || [ "\$_rm_rc" -ne 0 ]; then
   echo "FAIL: [issue 1311] $unit persist did not land (rc=\$_rm_rc is-enabled=\${_rm_state:-unknown}) -- the relay would not survive a reboot" >&2
