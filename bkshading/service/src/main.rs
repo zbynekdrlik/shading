@@ -126,7 +126,7 @@ async fn main() -> Result<()> {
                 {
                     tracing::info!("{line}");
                 }
-                if cycle % REACH_HEARTBEAT_CYCLES == 0 {
+                if cycle.is_multiple_of(REACH_HEARTBEAT_CYCLES) {
                     tracing::info!(
                         "{}",
                         bkshading::monitor::reach_heartbeat_line(&snapshot.cameras)
