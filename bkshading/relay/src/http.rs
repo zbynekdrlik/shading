@@ -15,7 +15,7 @@ use axum::{
 };
 use bkshading_proto::wire::{RelayState, SetRequest};
 
-use crate::transport::CameraSession;
+use crate::transport::{ApplyOutcome, CameraSession};
 
 type Shared = Arc<CameraSession>;
 
@@ -55,8 +55,14 @@ async fn set_params(
     Json(req): Json<SetRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let s = session.clone();
-    match tokio::task::spawn_blocking(move || s.apply(&req)).await {
-        Ok(Ok(applied)) => Ok(Json(serde_json::json!({ "applied": applied }))),
+    // issue 1309: funnel through the single-flight coalescing gate so two rapid SETs never fork
+    // two concurrent gphoto2 processes. A coalesced SET is accepted (queued) — the in-flight write
+    // will apply the latest-wins merge — so it returns `{"coalesced": true}`.
+    match tokio::task::spawn_blocking(move || s.submit(&req)).await {
+        Ok(Ok(ApplyOutcome::Applied(applied))) => {
+            Ok(Json(serde_json::json!({ "applied": applied })))
+        }
+        Ok(Ok(ApplyOutcome::Coalesced)) => Ok(Json(serde_json::json!({ "coalesced": true }))),
         // A gphoto2 error (camera unplugged / busy) is an upstream failure, not our bug.
         Ok(Err(e)) => Err((StatusCode::BAD_GATEWAY, e.to_string())),
         Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),

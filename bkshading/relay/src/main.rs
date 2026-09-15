@@ -80,6 +80,15 @@ async fn main() -> Result<()> {
         min_read_interval_ms,
         "bkshading-relay starting"
     );
+    // issue 1309: log the startup camera-detect result so the journal records, at boot, whether a
+    // camera is cabled — the relay logs every command + online/offline transition from here on.
+    {
+        let s = session.clone();
+        let detected = tokio::task::spawn_blocking(move || s.detect())
+            .await
+            .unwrap_or(None);
+        tracing::info!(camera = ?detected, "startup camera detect");
+    }
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, http::router(session))
         .with_graceful_shutdown(shutdown_signal())

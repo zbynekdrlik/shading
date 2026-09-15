@@ -52,3 +52,58 @@ pub fn fps_alert_transitions(
     prev.retain(|id, _| seen.contains(id));
     lines
 }
+
+/// Per-camera reachability, tracked across pump cycles (issue 1309): `true` == the last snapshot
+/// reached this camera's relay.
+type ReachState = std::collections::HashMap<String, bool>;
+
+/// Reachability TRANSITION tracker (issue 1309) — the reachability sibling of
+/// [`fps_alert_transitions`], and the reason `poll_state`'s per-poll `relay unreachable` WARN was
+/// downgraded to `debug`. Given the previous per-camera reachable flag and the current views,
+/// returns ONE log line per camera whose reachability just FLIPPED (reachable -> unreachable and
+/// back), plus a one-time line for a camera first seen already down — so the strih log records a
+/// relay going away / coming back ONCE per transition instead of every ~2 s (the 365 KB/run spam).
+/// Updates `prev` in place and prunes cameras that dropped out of the config.
+pub fn reach_transitions(prev: &mut ReachState, views: &[CameraView]) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for v in views {
+        seen.insert(v.id.clone());
+        match prev.get(&v.id).copied() {
+            Some(was) if was != v.reachable => {
+                lines.push(if v.reachable {
+                    format!("relay {} reachable again", v.id)
+                } else {
+                    format!("relay {} unreachable", v.id)
+                });
+            }
+            // First sighting already down: record it once (a relay that starts the service down).
+            None if !v.reachable => lines.push(format!("relay {} unreachable", v.id)),
+            _ => {}
+        }
+        prev.insert(v.id.clone(), v.reachable);
+    }
+    prev.retain(|id, _| seen.contains(id));
+    lines
+}
+
+/// A periodic reachability HEARTBEAT summary (issue 1309): `N/M relays reachable` (plus the
+/// down ids), emitted every ~5 min by the pump so a chronically-down set stays visible without the
+/// per-poll spam the transition tracker replaced.
+pub fn reach_heartbeat_line(views: &[CameraView]) -> String {
+    let total = views.len();
+    let up = views.iter().filter(|v| v.reachable).count();
+    let down: Vec<&str> = views
+        .iter()
+        .filter(|v| !v.reachable)
+        .map(|v| v.id.as_str())
+        .collect();
+    if down.is_empty() {
+        format!("relay reachability heartbeat: {up}/{total} reachable")
+    } else {
+        format!(
+            "relay reachability heartbeat: {up}/{total} reachable (down: {})",
+            down.join(", ")
+        )
+    }
+}

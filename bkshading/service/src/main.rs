@@ -27,6 +27,12 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// about colour/exposure, not motion, so a couple of seconds is plenty.
 const LIVE_PUSH_INTERVAL_MS: u64 = 2000;
 
+/// How many pump cycles between reachability HEARTBEAT lines (issue 1309): 5 min / 2 s = 150. The
+/// per-cycle `relay unreachable` WARN is gone (downgraded to `debug`); the pump instead logs ONE
+/// line per reachability TRANSITION plus this periodic count, so a chronically-down relay stays
+/// visible without the 365 KB/run spam.
+const REACH_HEARTBEAT_CYCLES: u64 = 150;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "bkshading",
@@ -95,9 +101,15 @@ async fn main() -> Result<()> {
             // logged ONCE on transition (not every ~2 s pump cycle).
             let mut fps_alert_state: std::collections::HashMap<String, (FpsSync, bool)> =
                 std::collections::HashMap::new();
+            // issue 1309: per-camera reachability state, so the pump logs ONE line per reachability
+            // transition + a periodic heartbeat (replacing the per-poll `relay unreachable` spam).
+            let mut reach_state: std::collections::HashMap<String, bool> =
+                std::collections::HashMap::new();
+            let mut cycle: u64 = 0;
             ticker.tick().await; // consume the immediate first tick (channel is already seeded)
             loop {
                 ticker.tick().await;
+                cycle = cycle.wrapping_add(1);
                 let snapshot = Arc::new(agg.snapshot(&config).await);
                 // issue 809: telemetry — surface a camera fps mismatch or a config-vs-capture
                 // grab desync in the log (with the cross-reference to capture_rate_health), on
@@ -107,6 +119,18 @@ async fn main() -> Result<()> {
                     &snapshot.cameras,
                 ) {
                     tracing::warn!("{line}");
+                }
+                // issue 1309: relay reachability — one info line per transition, plus a heartbeat.
+                for line in
+                    bkshading::monitor::reach_transitions(&mut reach_state, &snapshot.cameras)
+                {
+                    tracing::info!("{line}");
+                }
+                if cycle % REACH_HEARTBEAT_CYCLES == 0 {
+                    tracing::info!(
+                        "{}",
+                        bkshading::monitor::reach_heartbeat_line(&snapshot.cameras)
+                    );
                 }
                 // The AppState keeps a receiver alive, so `send` never fails for "no receivers".
                 let _ = live_tx.send(snapshot);
