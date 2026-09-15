@@ -403,3 +403,34 @@ fn index_links_the_pwa_assets_1305() {
         "index has apple-touch-icon"
     );
 }
+
+#[test]
+fn reach_transitions_log_once_per_flip_and_heartbeat_counts() {
+    use bkshading::monitor::{reach_heartbeat_line, reach_transitions};
+    use std::collections::HashMap;
+
+    let cfg = ServiceConfig::from_toml_str(CAM1_GRAB60).unwrap();
+    let cam = &cfg.cameras[0];
+    // camera_view(cam, Some(state)) -> reachable=true; camera_view(cam, None) -> reachable=false.
+    let up = vec![camera_view(cam, Some(online_state_with_fps100(Some(6000))))];
+    let down = vec![camera_view(cam, None)];
+
+    let mut state: HashMap<String, bool> = HashMap::new();
+    // First sighting already down -> logged once.
+    let l = reach_transitions(&mut state, &down);
+    assert_eq!(l.len(), 1);
+    assert!(l[0].contains("cam1") && l[0].contains("unreachable"));
+    // Still down -> no re-log (no per-poll spam).
+    assert!(reach_transitions(&mut state, &down).is_empty());
+    // Comes back -> one "reachable again" line.
+    let l = reach_transitions(&mut state, &up);
+    assert_eq!(l.len(), 1);
+    assert!(l[0].contains("reachable again"));
+    // Steady up -> silent.
+    assert!(reach_transitions(&mut state, &up).is_empty());
+
+    // Heartbeat counts up/down without a transition.
+    assert!(reach_heartbeat_line(&up).contains("1/1 reachable"));
+    let hb_down = reach_heartbeat_line(&down);
+    assert!(hb_down.contains("0/1 reachable") && hb_down.contains("cam1"));
+}
