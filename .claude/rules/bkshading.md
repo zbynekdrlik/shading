@@ -835,3 +835,44 @@ current-aperture signal is the `gphoto2 --summary` line `F-Number(0x5007) … va
 - **Tier-0:** the pure aperture selection + parsers were RED→GREEN-proven via a `rustc --test`
   replica (cam1 → `av=2·log2(4)`, norm 0, `[4.5,4.8,5.6]`; cam2 → `av=2·log2(2)`, norm 0,
   `[2.6,2.8,3.2]`; the clean-list `f/5.2` case still norm 2/3). CI runs the real proto+relay tests.
+
+
+## Relay + service LOGGING is on by default, and gphoto2 shell-outs are BOUNDED (issue 1309, 15.9.2026)
+
+The 2026-09-13/15 half-dead-cambox class lands right after bkshading-relay activity, and each time
+it was undiagnosable: the relay emitted ZERO journal lines on a RUNNING unit (`journalctl -u
+bkshading-relay -b` = 0 — its subscriber defaulted to info but nothing logged per command), and the
+strih service logged NOTHING for a `PUT /api/params` while spamming `WARN relay unreachable` every
+2 s (365 KB/run). The 15.9. escalation was "shading crashol po dvoch zdvihnutiach clony" — two
+aperture SETs = two gphoto2 shell-outs. The fix makes the whole chain reconstructible + bounded:
+
+- **The relay logs EVERY gphoto2 command at info through ONE centralised seam** `Gphoto2Cli::run`
+  (`bkshading/relay/src/transport.rs`): kind (detect/read/set), param + value, the exact argv, rc,
+  duration_ms, and on failure the stderr tail — one structured line per command. Startup logs the
+  camera-detect result; `note_online_transition` logs one line per camera online/offline FLIP. The
+  `Gphoto2Runner` TRAIT is deliberately untouched (the logging + timeout live only in the real
+  `Gphoto2Cli`), so every fake-runner unit test stays green in shape. Reads stay cached (issue 1229),
+  so info volume is ~3 lines per real read cycle (once per 10 s floor), never per-poll.
+- **gphoto2 shell-outs are BOUNDED.** `run_with_timeout` gives every command a hard 8 s timeout
+  (`GPHOTO2_TIMEOUT`) that KILLS + reaps the child (stdout/stderr drained on threads so a large
+  output can't deadlock the wait) — a gphoto2 hung on a busy USB-PTP device can no longer hold the
+  serialized camera lock forever. SET and READ already serialise through the one `read_cache` mutex
+  (no parallel fork); on top of that a pure single-flight `SetQueue` (`bkshading-proto`) coalesces a
+  burst of SETs latest-wins: the first runs, concurrent SETs fold into `pending`, the in-flight
+  worker drains the coalesced latest — so "raising the aperture twice" NEVER forks a second gphoto2.
+  `apply()` is unchanged (existing `apply(&req)==count` tests stay green); the HTTP handler calls the
+  new `submit()`, which returns `Applied(n)` or `Coalesced` (`202 {"coalesced":true}`).
+- **The service logs every `PUT /api/params`** (`forward_set`: id/params/status/latency_ms, error
+  body on failure), and the per-poll `relay unreachable` WARN is DOWNGRADED to `debug`; reachability
+  is now logged ONCE per transition (`monitor::reach_transitions`, mirroring `fps_alert_transitions`)
+  + a 5-min heartbeat count in the pump — so a chronic-down relay is visible without the spam.
+- **verify-device `(am)`** HARD-FAILs a box that RUNS the relay if the LIVE unit's `TasksMax` > 512
+  (the #1309 blast-radius ceiling, already in the unit) OR an ACTIVE relay emits zero info journal
+  lines this boot (an old binary predating info-by-default logging). Relay absent = `na`;
+  disabled/inactive (the TEST-mode default per the lifecycle section above) skips the log assertion.
+  Pure `relay_blast_radius_verdict`/`relay_tasksmax_within_ceiling`, inserted BEFORE `(q)`.
+- **rig-dev-handover-check** gains a `shading` item (`rig_dev_handover_decision.py` + a read-only
+  per-cambox ssh+curl probe in the orchestrator): SHADING-ON (enabled+active+online) = OK,
+  SHADING-DEAD (enabled but crashed) = FORGOT (the crash class), SHADING-OFF (disabled = the dev
+  default) / SHADING-NO-CAMERA / SHADING-UNREACHABLE = neutral → UNKNOWN. So "shading is off on
+  cam1" is reported, never discovered, and an all-disabled dev fleet never false-forgots.
