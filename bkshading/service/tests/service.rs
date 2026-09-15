@@ -323,3 +323,83 @@ fn fps_alert_transitions_logs_grab_config_desync_once() {
         "chronic desync silent"
     );
 }
+
+// --- issue 1305: installable web app (PWA) assets + routes -------------------
+
+#[test]
+fn pwa_manifest_is_valid_standalone_1305() {
+    let m = bkshading::http::manifest_asset();
+    let v: serde_json::Value = serde_json::from_str(m).expect("manifest is valid JSON");
+    assert_eq!(v["display"], "standalone");
+    assert_eq!(v["start_url"], "/");
+    assert_eq!(v["scope"], "/");
+    let icons = v["icons"].as_array().expect("icons array");
+    let srcs: Vec<&str> = icons.iter().filter_map(|i| i["src"].as_str()).collect();
+    assert!(srcs.contains(&"/icon-192.png"), "192 icon listed");
+    assert!(srcs.contains(&"/icon-512.png"), "512 icon listed");
+    // a maskable entry is present (install-quality icon on Android/Chrome).
+    assert!(
+        icons.iter().any(|i| i["purpose"]
+            .as_str()
+            .is_some_and(|p| p.contains("maskable"))),
+        "a maskable icon entry is present"
+    );
+    assert_eq!(
+        bkshading::http::MANIFEST_CONTENT_TYPE,
+        "application/manifest+json"
+    );
+}
+
+#[test]
+fn pwa_service_worker_has_no_cache_1305() {
+    // server-truth: the SW must be a pure passthrough, never a caching SW (no stale UI/state).
+    let sw = bkshading::http::sw_js_asset();
+    assert!(
+        !sw.contains("caches"),
+        "sw.js must not use the Cache Storage API"
+    );
+    assert!(
+        sw.contains("fetch(event.request)"),
+        "sw.js is a passthrough"
+    );
+    assert_eq!(
+        bkshading::http::SW_JS_CONTENT_TYPE,
+        "text/javascript; charset=utf-8"
+    );
+}
+
+#[test]
+fn pwa_icons_are_png_and_favicon_is_svg_1305() {
+    assert!(
+        bkshading::http::icon_192_asset().starts_with(b"\x89PNG\r\n\x1a\n"),
+        "icon-192 is a PNG"
+    );
+    assert!(
+        bkshading::http::icon_512_asset().starts_with(b"\x89PNG\r\n\x1a\n"),
+        "icon-512 is a PNG"
+    );
+    assert!(
+        bkshading::http::favicon_svg_asset().contains("<svg"),
+        "favicon is an SVG"
+    );
+    assert_eq!(bkshading::http::PNG_CONTENT_TYPE, "image/png");
+    assert_eq!(bkshading::http::SVG_CONTENT_TYPE, "image/svg+xml");
+}
+
+#[test]
+fn index_links_the_pwa_assets_1305() {
+    let html = bkshading::http::rendered_index();
+    assert!(
+        html.contains("rel=\"manifest\""),
+        "index links the manifest"
+    );
+    assert!(html.contains("/manifest.webmanifest"));
+    assert!(
+        html.contains("name=\"theme-color\""),
+        "index has theme-color"
+    );
+    assert!(
+        html.contains("apple-touch-icon"),
+        "index has apple-touch-icon"
+    );
+}

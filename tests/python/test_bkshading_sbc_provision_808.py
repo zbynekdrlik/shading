@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """bkshading SBC / handheld provisioning — the LAST milestone (issue 808).
 
-The owner architecture (comment 5356048130 path 2, "cieľový stav") puts a handheld camera on a mini
-SBC (a Pi Zero 2 W on the cage, on WiFi): the camera plugs USB into the Pi, which runs the SAME
-`bkshading-relay` component the camboxes run — a "mini-cambox without video". The strih aggregation
+The owner architecture (comment 5356048130 path 2, "cieľový stav"; Design v3 comment 5664682477 +
+ROZHODNUTÉ 5664746806, 14.9.2026) puts a handheld camera on a separately powered zero-class arm64
+SBC with WiFi — the board is device-agnostic (Raspberry Pi Zero 2 W, Radxa ZERO 3W, or Orange Pi Zero 2W — the
+ordered prototype), powered from
+the camera cage's V-mount 5 V USB splitter (never a power bank / PiSugar / raw 15 V D-tap). The
+camera plugs USB into the SBC's host port (PTP), which runs the SAME `bkshading-relay` component the
+camboxes run — a "mini-cambox without video". The strih aggregation
 service ALREADY understands this (`Transport::SbcRelay`, the `handheld-1` record in
 bkshading.example.toml, a params-only block with no NDI preview), but nothing provisioned the relay
 on a bare SBC, CI produced NO ARM binary (a Pi cannot run the amd64 one), and the amd64 deploy
@@ -161,6 +165,76 @@ def test_elf_arch_of_real_files():
 
 
 # ---------------------------------------------------------------------------------------------
+# WiFi-link state classifier (pure; --check reads it) — the handheld is wireless, a cambox is wired
+# ---------------------------------------------------------------------------------------------
+def _wifi_state(root, glob="wl*"):
+    src = '. "%s"\nbkshading_sbc_wifi_link_state "$A1" "$A2"' % LIB
+    env = dict(os.environ, A1=root, A2=glob)
+    r = subprocess.run(["bash", "-c", src], capture_output=True, text=True, env=env)
+    return r.returncode, r.stdout.strip()
+
+
+def test_wifi_link_state_up_down_none():
+    with tempfile.TemporaryDirectory() as tmp:
+        # a joined wireless box -> up
+        up = _make_net_sysfs(os.path.join(tmp, "u"), {"wlan0": "up", "eth0": "up"})
+        assert _wifi_state(up) == (0, "up")
+        # a wireless box present but not associated -> down (any non-"up" operstate)
+        down = _make_net_sysfs(os.path.join(tmp, "d"), {"wlan0": "down"})
+        assert _wifi_state(down) == (0, "down")
+        dorm = _make_net_sysfs(os.path.join(tmp, "dm"), {"wlp2s0": "dormant"})
+        assert _wifi_state(dorm) == (0, "down")
+        # NO wireless interface at all (a wired cambox) -> none (the --check SKIP signal), never error
+        none = _make_net_sysfs(os.path.join(tmp, "n"), {"eth0": "up", "lo": "unknown"})
+        assert _wifi_state(none) == (0, "none")
+        # a missing sysfs root -> none, never an error
+        assert _wifi_state(os.path.join(tmp, "nope")) == (0, "none")
+        # two wireless ifaces, one up -> up
+        two = _make_net_sysfs(os.path.join(tmp, "t"), {"wlan0": "down", "wlan1": "up"})
+        assert _wifi_state(two) == (0, "up")
+        # an associated interface whose driver leaves operstate "unknown" but carrier=1 (the
+        # out-of-tree uwe5622 on the Orange Pi Zero 2W) counts as UP, never a false FAIL.
+        unk = _make_net_sysfs(os.path.join(tmp, "u2"),
+                              {"wlan0": {"operstate": "unknown", "carrier": "1"}})
+        assert _wifi_state(unk) == (0, "up")
+        # a genuinely-down link: operstate down AND carrier 0 -> down
+        dn = _make_net_sysfs(os.path.join(tmp, "d2"),
+                             {"wlan0": {"operstate": "down", "carrier": "0"}})
+        assert _wifi_state(dn) == (0, "down")
+
+
+def _first_wifi_iface(root, glob="wl*"):
+    src = '. "%s"\nbkshading_sbc_first_wifi_iface "$A1" "$A2"' % LIB
+    env = dict(os.environ, A1=root, A2=glob)
+    r = subprocess.run(["bash", "-c", src], capture_output=True, text=True, env=env)
+    return r.returncode, r.stdout.strip()
+
+
+def test_first_wifi_iface_names_the_real_interface():
+    with tempfile.TemporaryDirectory() as tmp:
+        # a non-standard name (wlp2s0) is what the remediation should print, not a hard-coded wlan0
+        r = _make_net_sysfs(os.path.join(tmp, "a"), {"eth0": "up", "wlp2s0": "down"})
+        assert _first_wifi_iface(r) == (0, "wlp2s0")
+        # no wireless iface -> empty, never an error
+        r2 = _make_net_sysfs(os.path.join(tmp, "b"), {"eth0": "up"})
+        assert _first_wifi_iface(r2) == (0, "")
+        # missing tree -> empty, never an error
+        assert _first_wifi_iface(os.path.join(tmp, "nope")) == (0, "")
+
+
+def test_wifi_ssid_from_iw_parser():
+    iw = (
+        "Connected to aa:bb:cc:dd:ee:ff (on wlan0)\n"
+        "\tSSID: rig-5g\n"
+        "\tfreq: 5180\n"
+    )
+    assert _bash_arg(LIB, "bkshading_sbc_wifi_ssid_from_iw", iw)[1] == "rig-5g"
+    # no SSID line -> empty, never an error
+    assert _bash_arg(LIB, "bkshading_sbc_wifi_ssid_from_iw", "not connected")[1] == ""
+    assert _bash_arg(LIB, "bkshading_sbc_wifi_ssid_from_iw", "")[1] == ""
+
+
+# ---------------------------------------------------------------------------------------------
 # provision script: sources both libs, reuses the relay unit, enable-only, no env
 # ---------------------------------------------------------------------------------------------
 def test_provision_sources_both_libs_and_reuses_relay_unit():
@@ -195,7 +269,30 @@ def _fake_systemctl(record_path):
     return p
 
 
-def _run_provision(mode, root, bin_machine=AARCH64, make_bin=True):
+def _make_net_sysfs(base, ifaces):
+    """Build a fake /sys/class/net tree. `ifaces` maps iface name -> either an operstate string, or a
+    dict {"operstate": <str>, "carrier": <str>} to also write a `carrier` file. Returns the root path
+    (injected via BKSHADING_SBC_NET_SYSFS) so the WiFi-link check reads a controlled tree instead of
+    the CI runner's real interfaces."""
+    root = os.path.join(base, "net-sysfs")
+    os.makedirs(root, exist_ok=True)
+    for name, state in ifaces.items():
+        d = os.path.join(root, name)
+        os.makedirs(d, exist_ok=True)
+        if isinstance(state, dict):
+            operstate = state["operstate"]
+            carrier = state.get("carrier")
+        else:
+            operstate, carrier = state, None
+        with open(os.path.join(d, "operstate"), "w") as f:
+            f.write(operstate + "\n")
+        if carrier is not None:
+            with open(os.path.join(d, "carrier"), "w") as f:
+                f.write(carrier + "\n")
+    return root
+
+
+def _run_provision(mode, root, bin_machine=AARCH64, make_bin=True, net_ifaces=None):
     sysd = os.path.join(root, "systemd-system")
     binp = os.path.join(root, "bin", "bkshading-relay")
     calls = os.path.join(root, "systemctl-calls.log")
@@ -203,12 +300,18 @@ def _run_provision(mode, root, bin_machine=AARCH64, make_bin=True):
     if make_bin:
         os.makedirs(os.path.dirname(binp), exist_ok=True)
         _fake_elf(binp, bin_machine)
+    if net_ifaces is None:
+        # default: a joined wireless handheld (wl* operstate=up) so --check is deterministic and
+        # green regardless of the CI runner's real interfaces.
+        net_ifaces = {"wlan0": "up", "eth0": "up"}
+    net_root = _make_net_sysfs(root, net_ifaces)
     env = dict(
         os.environ,
         BKSHADING_SBC_UNIT_DEST=os.path.join(sysd, UNIT_NAME),
         BKSHADING_SBC_BIN=binp,
         BKSHADING_SBC_GPHOTO2="true",  # exists -> command -v succeeds, apt skipped
         BKSHADING_SBC_SYSTEMCTL=sc,
+        BKSHADING_SBC_NET_SYSFS=net_root,
     )
     r = subprocess.run(["bash", SCRIPT, mode], capture_output=True, text=True, env=env)
     return r, calls, binp
@@ -261,6 +364,38 @@ def test_check_fails_on_wrong_arch_binary():
         assert r2.returncode != 0, "an amd64 binary on the SBC must fail --check"
         assert re.search(r"aarch64|arch|arm64|x86", r2.stdout + r2.stderr, re.I), \
             "the failure must name the arch mismatch"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_check_skips_wifi_on_wired_box():
+    # A wired box (a cambox — the reused relay unit runs there too) has no wl* interface; --check
+    # must SKIP the WiFi item, never FAIL it. Provision fully with a wired-only sysfs tree.
+    root = tempfile.mkdtemp()
+    try:
+        r, _c, _b = _run_provision("--install", root, net_ifaces={"eth0": "up"})
+        assert r.returncode == 0, (r.stdout, r.stderr)
+        r2, _c2, _b2 = _run_provision("--check", root, net_ifaces={"eth0": "up"})
+        assert r2.returncode == 0, (r2.stdout, r2.stderr)
+        assert re.search(r"skip", r2.stdout + r2.stderr, re.I), \
+            "a wired box (no wl*) must report the WiFi check SKIPPED, not FAILED"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_check_fails_when_wifi_down():
+    # A wireless handheld whose WiFi is not up must FAIL --check with a join remediation — the whole
+    # topology depends on the link. Everything else provisioned OK, only the link is down.
+    root = tempfile.mkdtemp()
+    try:
+        r, _c, _b = _run_provision("--install", root, net_ifaces={"wlan0": "down"})
+        assert r.returncode == 0, (r.stdout, r.stderr)  # install does not gate on the live link
+        r2, _c2, _b2 = _run_provision("--check", root, net_ifaces={"wlan0": "down"})
+        assert r2.returncode != 0, "a down WiFi link must fail --check"
+        out = r2.stdout + r2.stderr
+        assert re.search(r"wifi|wl|link", out, re.I), "the failure must name the WiFi link"
+        assert re.search(r"nmcli|ssid|join", out, re.I), \
+            "the failure must carry a join remediation"
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -436,7 +571,9 @@ def test_readme_documents_sbc_handheld_image():
     txt = open(README, encoding="utf-8").read()
     assert "bkshading-provision-sbc.sh" in txt, "README must document the SBC provision script"
     assert "aarch64" in txt.lower() or "arm64" in txt.lower(), "README must name the ARM target"
-    assert "Pi Zero 2 W" in txt, "README must name the SBC device"
+    # Device-AGNOSTIC (the board is not finally decided, owner 14.9.2026): the README names the ROLE,
+    # not one vendor. Pinned so a future re-hardcode to a single device name is a RED test.
+    assert "zero-class arm64 SBC" in txt, "README must name the device-agnostic SBC class"
     # the milestone is done -> it must NOT still be listed as deferred.
     assert not re.search(r"[Dd]eferred[^\n]*SBC handheld image", txt), \
         "README must not still list the SBC image as deferred"

@@ -16,8 +16,9 @@ use serde::{Deserialize, Serialize};
 pub enum Transport {
     /// Camera USB -> cambox PC, controlled by a `bkshading-relay` on that cambox.
     CamboxRelay,
-    /// Camera USB -> mini SBC on the cage (Pi Zero 2 W), running the SAME relay — a
-    /// "mini-cambox without video". Handheld path.
+    /// Camera USB -> a separately powered zero-class arm64 SBC with WiFi on the cage
+    /// (device-agnostic: Pi Zero 2 W / Radxa ZERO 3W / Orange Pi Zero 2W), running the
+    /// SAME relay — a "mini-cambox without video". Handheld path.
     SbcRelay,
     /// Camera in REST mode via a USB-C->Ethernet adapter (Camera OS >= 8.6). Future
     /// alternative transport; the service treats it as another relay-shaped endpoint.
@@ -66,10 +67,26 @@ pub struct ShadingParams {
 
 /// The camera's own fine-grained value lists/ranges — the web UI rebuilds its ISO and
 /// shutter button groups from these when present.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Note: no `Eq` derive — [`CameraCaps::fnumber_choices`] is `Vec<f64>` and `f64` has no
+/// total order, so `Eq` is impossible. `PartialEq` is enough (and is all the whole-state
+/// `assert_eq!` round-trip tests need — `Eq` is never required as a bound anywhere).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CameraCaps {
     pub iso_choices: Vec<i64>,
+    /// The camera's f-number choices as plain numbers (e.g. `[2.8, 4.0, 5.2, 8.0]`), ordered
+    /// like the RADIO `f-number` choices the relay reads. The panel uses the COUNT for the
+    /// aperture +/- step (`idx = round(norm*(n-1))`, step to `clamp(idx±1)`, send the absolute
+    /// `apertureNorm = idx'/(n-1)` — the inverse of [`crate::mapping::norm_to_choice_index`],
+    /// which the relay applies to the SAME choice list) and the VALUES to label the target
+    /// f-number (issue 1304). `#[serde(default)]` so an older relay that does not send it still
+    /// deserializes (empty `Vec`) — the panel then DISABLES the aperture +/- buttons rather
+    /// than fabricating a step.
+    // `rename_all = "camelCase"` would emit `fnumberChoices` (one word); the panel (app.js) and
+    // the E2E stub relay speak `fNumberChoices`, so pin the wire key explicitly.
+    #[serde(default, rename = "fNumberChoices")]
+    pub fnumber_choices: Vec<f64>,
     pub shutter_choices: Vec<i64>,
     pub fps_min: i64,
     pub fps_max: i64,

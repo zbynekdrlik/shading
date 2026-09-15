@@ -23,7 +23,7 @@ dev2 MVP `pybridge/mapping.py`). Owner architecture: issue 808 comments 53558360
   params-only block** (no preview). M2 delivers the LIVE preview (JPEG over HTTP; see M2 section).
 - Relay transport = shell out to the `gphoto2` CLI behind the `CameraTransport`-style trait (NOT a
   `libgphoto2` FFI binding — the trait keeps FFI as a future 2nd impl). Rationale: no build-time C
-  dep → clean ARM cross-build for the Pi Zero 2 W handheld relay.
+  dep → clean ARM cross-build for the zero-class arm64 SBC handheld relay.
 
 ## How the crates sit in the workspace WITHOUT disturbing the appliance
 The repo root `Cargo.toml` is a **single package** (the camera-box appliance). The bkshading crates
@@ -271,38 +271,89 @@ ignores the new key), so relay/service/panel interoperate across versions with n
   ring is a supervisor rig step (needs the camera cabled to a relay box), not a code-lane task.
 
 
-## SBC / handheld provisioning (issue 808 — the last milestone)
-A handheld camera runs the SAME `bkshading-relay` on a mini SBC (a Pi Zero 2 W): camera USB → Pi,
-Pi on WiFi. The service already understands it (`Transport::SbcRelay`, `handheld-1` /
-`transport="sbc-relay"` in `bkshading.example.toml`, a params-only block — no NDI preview). The box
-side is `scripts/bkshading-provision-sbc.sh` (+ pure lib `scripts/lib/bkshading-sbc-runtime.sh`),
-mirroring the relay/cloudflared provisioning canon but with two deliberate deltas + one gotcha:
+## SBC / handheld provisioning (issue 808 — the last milestone; Design v3, owner 14.9.2026)
+A handheld camera runs the SAME `bkshading-relay` on **a separately powered zero-class arm64 SBC
+with WiFi**: camera USB → SBC host port (PTP/gphoto2), SBC on the rig WiFi. **The board is
+DEVICE-AGNOSTIC** (owner has not finally chosen — Design v3, comment 5664682477 + ROZHODNUTÉ
+5664746806): a Raspberry **Pi Zero 2 W**, a **Radxa ZERO 3W**, or an **Orange Pi Zero 2W** (the
+ordered prototype). **Power is the camera cage's V-mount 5 V USB splitter** (5 V USB-C/USB-A out, or
+a D-tap→USB-C **5 V** cable) — **never a power bank, never PiSugar, never raw 15 V D-tap; all
+candidate boards are 5 V-only.** The box can never be powered BY the camera: PTP makes the camera
+the USB *device* (the power sink), so the box needs its own 5 V. The service already understands the
+handheld (`Transport::SbcRelay`, `handheld-1..3` / `transport="sbc-relay"` in
+`bkshading.example.toml`, a params-only block — no NDI preview). The box side is
+`scripts/bkshading-provision-sbc.sh` (+ pure lib `scripts/lib/bkshading-sbc-runtime.sh`), mirroring
+the relay/cloudflared provisioning canon but with two deliberate deltas + one gotcha:
+- **Do NOT hard-code one board's port topology.** Per-board (all one USB cable to the camera + a 5 V
+  feed from the splitter): **Pi Zero 2 W** = micro-USB OTG host + a separate micro-USB 5 V power-in
+  (2.4 GHz WiFi only → needs a 2.4 GHz SSID on site); **Radxa ZERO 3W** = USB3-C host + OTG-C 5 V-in
+  (dual-band); **Orange Pi Zero 2W** = two USB-C (host-vs-power is revision-dependent — probe both;
+  dual-band).
 - **The SBC REUSES `systemd/bkshading-relay.service` UNCHANGED** (owner: "the SAME relay component")
   and writes **NO `CAMERA_BOX_CAPTURE_FPS` env** — an SBC has no camera-box appliance to derive from
   and a handheld has no grab comparison, so the unit's `EnvironmentFile=-` degrades gracefully
   (relay → `capture_fps=None` → service static config). Do NOT reuse `bkshading-provision-relay.sh`
   (its whole job is deriving that env from `camera-box.service.d` drop-ins, which an SBC lacks).
+- **A `systemd/bkshading-relay.service` UNIT-FILE change never rides any binary deploy** (neither
+  `bkshading-deploy-relay.sh` nor the fleet post-merge deploy touch `/etc/systemd/system/`) — it
+  needs its own manual re-provision per box: `mount -o remount,rw /` → write the unit →
+  `systemctl daemon-reload && systemctl restart bkshading-relay` → read back
+  `systemctl show -p Restart,RestartUSec,ActiveState` → `mount -o remount,ro /`. Done live
+  2026-09-04 on cam1+cam2 for the issue-1228 `Restart=on-failure`/`RestartSec=5` unit (cam2 had
+  drifted on an older `Restart=always`/3 provisioning). Symptom of forgetting this: repo unit and
+  `systemctl cat` disagree after a green release.
 - **Deploy uses `bkshading-deploy-relay.sh --arch arm64 --no-remount`.** `--arch arm64` fetches the
   `bkshading-relay-linux-arm64` artifact; `--no-remount` skips the read-only-root swap (a cambox
-  appliance has a ro root; a **stock Raspberry Pi OS root is read-WRITE** — remounting it ro is
-  wrong). The default (no flags) is still amd64 + ro-root remount (cambox), byte-unchanged.
+  appliance has a ro root; a **stock arm64 SBC image — Raspberry Pi OS / Debian / Armbian — root is
+  read-WRITE** — remounting it ro is wrong). The default (no flags) is still amd64 + ro-root remount
+  (cambox), byte-unchanged.
 - **CROSS-BUILD GOTCHA — only the RELAY cross-builds to aarch64 trivially; the SERVICE does NOT.**
   The relay is pure Rust (axum/tokio/serde/clap; **no reqwest/rustls/ring, no libndi** on the relay
   side), so the CI `bkshading` job cross-compiles it for `aarch64-unknown-linux-gnu` with just
   `rustup target add` + the `gcc-aarch64-linux-gnu` linker + `CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER`.
-  Target = aarch64 (NOT armhf): the Pi Zero 2 W is ARMv8 and Pi OS 64-bit is its default; a 32-bit
-  `armv7-unknown-linux-gnueabihf` build is one extra matrix entry only if a legacy handheld needs it.
-  **Do NOT naively add a service ARM cross-build** — the service pulls `ring`/`rustls` (reqwest) +
-  the libndi FFI, which do NOT cross-link with a bare gcc linker; the service is Windows/amd64 only
-  (it runs on the strih PC), so there is deliberately no service ARM artifact.
+  Target = aarch64 (NOT armhf): every candidate board is ARMv8 (Cortex-A53) with a 64-bit stock
+  image; a 32-bit `armv7-unknown-linux-gnueabihf` build is one extra matrix entry only if a legacy
+  handheld needs it. **Do NOT naively add a service ARM cross-build** — the service pulls
+  `ring`/`rustls` (reqwest) + the libndi FFI, which do NOT cross-link with a bare gcc linker; the
+  service is Windows/amd64 only (it runs on the strih PC), so there is deliberately no service ARM
+  artifact.
 - **`--check` verifies the deployed relay binary is actually AArch64** (an ELF `e_machine` read via
   `od` — offset 18, 2 bytes LE, AArch64=183 / x86-64=62; pure helpers in `bkshading-sbc-runtime.sh`,
   Tier-0 testable with a 20-byte fake-ELF fixture) so a mis-deployed amd64 binary is caught here,
   not at reboot with an opaque `Exec format error`.
-- The physical bring-up (flash Pi OS with `rpi-imager`, headless WiFi, then deploy + `--install` +
-  reboot) is the owner's/supervisor's rig step. Transports stay USB-PTP (gphoto2/libusb) / USB-Eth
-  REST — NEVER Bluetooth; a gphoto2 camera is a USB device, not a network link, so the netplan
-  `enx*` CDC-NCM trap (#1155) does not touch the handheld.
+- **`--check` also verifies the WiFi link is up** — a pure `bkshading_sbc_wifi_link_state
+  <sysfs-root> <iface-glob>` reads `/sys/class/net/wl*/operstate` and returns `up`/`down`/`none`
+  (`BKSHADING_SBC_NET_SYSFS` injects a fake tree for Tier-0). **`operstate` is the primary signal
+  but NOT the only one — `carrier==1` also counts as up.** Some drivers (notably the **Orange Pi
+  Zero 2W's out-of-tree `uwe5622`**) leave `operstate` at `"unknown"`/`"dormant"` while genuinely
+  associated, so operstate-alone would false-FAIL the very prototype board; a genuinely-down link is
+  `operstate down` AND no carrier. **Band-agnostic on purpose** (a
+  2.4 GHz-only Pi Zero 2 W is as valid as a dual-band board — the check only proves a link, never a
+  band/SSID); an optional best-effort `iw`-parsed SSID enriches the OK line (`bkshading_sbc_wifi_ssid_from_iw`,
+  never gating). A **wired box with no `wl*` interface (the cambox class, which runs the SAME reused
+  unit) SKIPs the WiFi check — never FAILs**; a down wireless link FAILs with a `nmcli device wifi
+  connect …` join remediation (noting a 2.4 GHz-only board needs a 2.4 GHz SSID on site).
+- The physical bring-up (flash the arm64 image, headless WiFi, then deploy + `--install` + reboot)
+  is the owner's/supervisor's rig step. Transports stay USB-PTP (gphoto2/libusb) / USB-Eth REST —
+  NEVER Bluetooth; a gphoto2 camera is a USB device, not a network link, so the netplan `enx*`
+  CDC-NCM trap (#1155) does not touch the handheld.
+
+### Supervisor bench checklist (run when the prototype board arrives — the HARDWARE half, UNVERIFIED in code lanes)
+The code lane ships the provisioning + `--check`; these live-hardware steps are the supervisor's:
+1. **PD / power-role listener on the camera's USB-C port** (M1) — confirm the camera never
+   advertises Source / never answers a `PR_Swap`, i.e. it cannot power the box (closes the
+   "one-cable, camera-powered" question by measurement; e.g. FNIRSI FNB58 in-line). Feed the box
+   from the cage V-mount **5 V** splitter only — never 15 V/D-tap directly.
+2. **`gphoto2 --auto-detect` on the real board** — the camera enumerates on the SBC's USB host port
+   and PTP control works (the relay's transport).
+3. **WiFi join** — the board is on the rig WiFi SSID; on a **2.4 GHz-only** board bring up a 2.4 GHz
+   SSID on site first. Then `scripts/bkshading-provision-sbc.sh --check` reports the link `up`.
+4. **Per-board port/power probe** — **Orange Pi Zero 2W:** which USB-C is host vs power is
+   **revision-dependent — probe both**; its WiFi driver is **out-of-tree (`uwe5622`)**, so verify
+   `wl*` comes up on the vendor/Armbian image **before** `--install`. **Radxa ZERO 3W:** USB3-C =
+   host, OTG-C = 5 V-in. **Pi Zero 2 W:** micro-USB OTG = host, separate micro-USB = 5 V-in.
+5. **End-to-end** — deploy the aarch64 relay, `--install`, reboot, add the `handheld-N` record, and
+   confirm the strih `bkshading` service sees the handheld live (params-only block).
 
 
 ## Service DEPLOY path onto strih (Windows) — issue 808 (repeatable, mirrors the relay canon)
@@ -427,6 +478,39 @@ shading-dead for 76 minutes until a human noticed and ran `systemctl start` by h
   The marker alone already closes the 76-minute silent-dead window down to "the NEXT E2E run" —
   a watchdog would shrink it further for the case where no E2E runs again soon, but is deliberately
   out of scope for this fix (the ticket names it optional).
+
+
+## The relay lifecycle is EVENT-ONLY on the rig — `rig-mode.sh test` stops+disables it, `event` starts it (issue 1311)
+
+**Two boot sticks died in 24h (cam1 13.9., cam2 14.9.) on exactly the two boxes with a shading
+camera on the SAME USB3 root hub as the boot stick** (issue 1309/1311 Finding 1/2): a consumer
+896 mA SanDisk + a 512 mA Cam Link grabber + a 144 mA+ BMPCC PTP camera share one mini-PC 5 V rail,
+and every relay start/stop is a PTP-session power change on that hub. Owner ruling
+(14.9.2026): „nie nemas nic co by moholo odpalit disk skusat" — pursue it PASSIVELY, and remove
+the software provocations. During DEVELOPMENT the shading panel is not needed, so the relay has no
+business running (and polling the shared bus) while measurements run.
+
+- **`rig-mode.sh test` STOPS + DISABLES `bkshading-relay`; `rig-mode.sh event` ENABLES + STARTS it**
+  — via `scripts/lib/bkshading-relay-mode.sh` (`bkshading_relay_mode_apply <test|event> <cam_pw>
+  <label=ip>…`), an additive sourced-helper call in `do_test`/`do_event` (no anchored `rig-mode.sh`
+  line edited, the additive pattern). The roster is DERIVED, not a literal list: the same two boxes
+  the issue-808 E2E pause + `EVENT_ASSERT_TARGETS` use — the resolved source box
+  (`${RIG_SOURCE_BOX}=$RIG_SOURCE_IP`) + `cam2=$PAINTER_IP`. The unit name is the ONE source of
+  truth `bkshading_relay_unit_name` (from `bkshading-relay-runtime.sh`). Every systemctl line is
+  `|| true`-tolerant and the ssh loop is best-effort per box (a bad/unreachable box never aborts
+  the switch).
+- **This makes the issue-808 E2E pause/restore a TRUE no-op in TEST mode:** with the relay already
+  stopped+disabled, `bkshading_e2e_pause_stop_cmds` reads `systemctl is-active`=false AND (in steady
+  state) no `/run/bkshading-e2e-paused` marker → `was-active=0` → `bkshading_e2e_pause_restore_cmds`
+  takes its `true # leave it stopped` branch → toggles nothing. No change to
+  `bkshading-e2e-pause.sh` was needed; verify that path STAYS a no-op if either lib changes.
+- **It also removes the issue-1229 gphoto2 polling noise from every measurement** — the bus-friendly
+  min-interval floor below still applies while the relay IS running (EVENT mode), but development
+  runs no longer pay any relay bus traffic at all.
+- **Distinct from the deploy/ops gate below** ("NEVER deploy OR restart a cambox relay during
+  production"): that is a rig-busy gate on the DEPLOY TOOL; this is the relay's steady-state
+  lifecycle on the TEST/EVENT switch. Both point the same way — the relay is a broadcast-time
+  service, not a development-time one.
 
 
 ## Relay polling is BUS-FRIENDLY — a min-interval floor, never gphoto2-per-poll (issue 1229, P0)
@@ -612,3 +696,142 @@ from the relay's issue-1229 read-floor cache (never a direct gphoto2 call). It i
   byte-identical, so the #675 anchor sweep is trivially clean. Keep the classifier's decision the
   single source of truth for a WARN's named parameter (pass the STATUS into the message, don't
   re-derive the missing set from the values in two places).
+
+## NEVER deploy OR restart a cambox relay during production — the deploy tool is now rig-busy gated (2026-09-13 escalation, issue 1229)
+
+**The 2026-09-13 escalation, past the capture-dip class this ticket started on:** deploying the
+relay to cam1 (`scripts/bkshading-deploy-relay.sh`-style scp/mv-over-running + `systemctl restart
+bkshading-relay`) DURING a live production recording did not merely dip the capture rate — it
+fork-WEDGED the whole box. ssh, the `linux-cam1` MCP agent, and `gphoto2 --auto-detect` all
+reset/timed out while the box still pinged and the already-running relay still answered HTTP;
+recovery needed an owner power-cycle (no remote reboot path to a cambox). The gphoto2 PTP polling
+sharing the single xHCI controller with the grabber is dangerous UNDER PRODUCTION LOAD beyond the
+capture drop — it cascades into stuck D-state gphoto2 processes and fork-exhaustion of the box.
+
+**The doctrine (both halves now enforced in the deploy tool):**
+
+- **Every bkshading relay deploy/restart is gated on rig-not-busy.** `bkshading-deploy-relay.sh`
+  runs a rig-busy PREFLIGHT before its first cambox ssh/scp, reusing the ONE shared guard
+  `recording-e2e.sh` uses — `stray_session_check_assert HERE STRIH STREAM WHAT` (→ `obs_phase2.py
+  rig-busy-check`; NEVER a duplicated per-box WS loop, see `rig-mutation-broadcast-guard.md`). It
+  REFUSES (non-zero, naming what is streaming) when strih/stream are broadcasting, and fail-OPENs
+  (WARN + proceed) ONLY when NO box is readable — never blocks on a transient read error.
+  `--force-live` (logged loudly) is the SUPERVISOR-ONLY override for a genuine idle-rig-but-guard-
+  unavailable case; a normal deploy never passes it. Env `STRIH_HOST`/`STREAM_HOST` (default
+  10.77.9.202/.204) + `OBS_PASSWORD` mirror `rig-busy-gate.sh`; `BKSHADING_DEPLOY_OBS_PHASE2_DIR`
+  is a Tier-0 test seam pointing the guard at a fake `obs_phase2.py`. The gate applies to EVERY
+  deploy including a handheld SBC (`--arch arm64`), which shares no xHCI bus with the rig — this is
+  a deliberate conservative default (a handheld camera may itself be in use during a broadcast);
+  pass `--force-live` for a genuinely off-rig handheld deploy.
+- **The RESTART that adopts a freshly-deployed binary is a SEPARATE, rig-idle-ONLY supervisor
+  step — never part of the deploy.** The deploy stays ENABLE-ONLY (it never starts/restarts the
+  unit; provisioning-scripts.md), and now uses an ETXTBSY-safe swap: scp lands on a staging path
+  in the SAME directory (`<dest>.deploy.<pid>`) then atomic `mv -f` over the (possibly running)
+  binary — scp directly onto a running executable fails `ETXTBSY` ("dest open: Failure"), and
+  `rename(2)` swaps the inode while the running process keeps the old one. So the new bytes are on
+  disk but NOT live until a deliberate restart, and that restart (adopting the new binary, or the
+  interim manual pause/resume) is itself subject to the same rig-idle discipline — do it only when
+  the rig is idle, never during a broadcast. (The relay `Restart=on-failure` lifecycle is issue
+  1228, unchanged here — this deploy touches no systemd unit.)
+
+
+## Panel +/- step buttons — aperture is a CHOICE step, K/tint are linear (issue 1304)
+
+The operator panel's three sliders (clona/biely bod/tint) each gained a `-`/`+` step button pair
+(`data-role="<role>-dec"/"-inc"`, `.step-btn` in a `.slider-row`), for precise stepping where a
+drag is imprecise. The three step semantics DIFFER and are not interchangeable:
+- **Aperture = ONE f-number CHOICE, not a fixed norm delta.** The panel needs the choice COUNT to
+  compute the step, which the M1 `CameraCaps` did not carry. Added an ADDITIVE
+  `CameraCaps.fnumber_choices: Vec<f64>` (camelCase `fNumberChoices`, `#[serde(default)]`), filled
+  by `read.rs::params_and_caps` from the SAME `parse_choices(&raw.fnumber)` RADIO list via
+  `parse_fnumber` — so the panel's `idx = round(norm*(n-1))`, `idx' = clamp(idx±1, 0, n-1)`,
+  `apertureNorm = idx'/(n-1)` round-trips EXACTLY through the relay's `norm_to_choice_index`
+  (round-half-up) over the identical list. **`Eq` was dropped from `CameraCaps`** — `Vec<f64>` has
+  no total order; only `PartialEq` was ever used (the `RelayState` whole-state `assert_eq!` tests
+  need only `PartialEq`), and nothing bounds `CameraCaps: Eq`. When the relay sends no choices
+  (older relay → empty `Vec` via serde default), the panel DISABLES the aperture ± with a title —
+  never a fabricated step.
+- **Biely bod = ±100 K, tint = ±1**, clamped to the slider's own min/max; the button `disabled`s
+  at a bound. `refreshStepDisabled(el)` (called each poll AND after each step) drives the disabled
+  state; the choices are stored on the block dataset (`el.dataset.fnumberChoices`), the SAME
+  pattern as issue 809's `grabFps`.
+- **One tap = one PUT, NO auto-repeat on hold** — the issue 1229 USB-PTP shared-bus doctrine (one
+  write = one gphoto2 session). The step handlers (`stepAperture`/`stepLinear`) are plain CLICK
+  handlers with NO `setInterval`/`setTimeout` — pinned by `test_app_js_step_handlers_have_no_repeat_timer_1304`.
+- **Server-truth preserved:** each tap reads the slider's CURRENT (last server) value, steps it,
+  sets the slider locally so a quick second tap builds on it, and sends the ABSOLUTE value; labels
+  re-sync from the next WS push. The existing `interacting` pointerdown/up guard + `guard()`
+  wrapper are respected exactly like the slider `change` handlers.
+- **Playwright E2E** (`bkshading/service/tests/e2e/`, wired into the `bkshading` CI job): the
+  JUST-BUILT service runs against a stdlib stub relay (`bkshading/service/tests/stub_relay.py`,
+  serving `/api/state` with `fNumberChoices` + recording PUT `/api/params` bodies). Playwright's
+  `webServer` array manages BOTH the stub and the service; the spec clicks +/- on clona/K/tint and
+  asserts the forwarded absolute PUT bodies + a clean console. Chromium only, one spec (small CI
+  budget). `npm install` (no committed lockfile — Tier-0 has no network), then `npx playwright
+  install --with-deps chromium`.
+
+
+## Installable web app (PWA) — manifest + no-cache SW + embedded icons (issue 1305)
+
+The panel is installable as a windowed web app (own icon in the Windows dock, no browser chrome):
+- **Static assets in `bkshading/service/web/`:** `manifest.webmanifest` (name/short_name, `lang
+  "sk"`, `start_url`/`scope` `/`, `display "standalone"`, dark `#14171c` bg/theme, icons 192+512
+  with BOTH `purpose "any"` and `"maskable"` entries), `sw.js`, `icon-192.png`/`icon-512.png`,
+  `favicon.svg`. `index.html` links `rel="manifest"`, `meta theme-color`, `rel="icon"` (svg+png),
+  `apple-touch-icon`; `app.js` registers the SW guarded on `"serviceWorker" in navigator`
+  (insecure-origin LAN page → API undefined → no-op, clean console; `.catch(()=>{})` swallows any
+  error).
+- **The SW does NO caching — server-truth.** `sw.js` is install/activate + a pure `fetch(event.
+  request)` passthrough; it exists ONLY to meet the browser's PWA-install requirement. NEVER add
+  the Cache Storage API (a cache would risk a stale UI/state) — pinned by the python + Rust tests
+  asserting `caches` is absent.
+- **Icons are generated deterministically by a committed stdlib script** `web/gen-icons.py`
+  (zlib/struct PNG writer + the SVG, NO Pillow, no new dependency) — an aperture/lens glyph inside
+  the central ~60% so the icons are maskable-safe. Re-run it after a palette/glyph change; output
+  is byte-deterministic. The PNGs are committed (small: ~2 KB / ~5.5 KB) and EMBEDDED via
+  `include_bytes!`/`include_str!` in `http.rs` (self-contained binary, same model as the HTML/JS).
+- **Routes in `http.rs`:** `/manifest.webmanifest` (`application/manifest+json`), `/sw.js`
+  (`text/javascript; charset=utf-8` + a `Service-Worker-Allowed: /` header so the SW controls the
+  whole origin), `/icon-192.png` + `/icon-512.png` (`image/png`), `/favicon.svg` (`image/svg+xml`).
+  Each is served via a pure `*_asset()` helper + a `*_CONTENT_TYPE` const (mirrors `rendered_index`),
+  so the service route tests pin the payload + content-type WITHOUT standing up an HTTP server
+  (Tier-0 — the codebase has no tower dev-dep).
+- **Secure-context fact (for the owner):** Chrome/Edge offer a PWA install ONLY on HTTPS or
+  `localhost`. So: (a) on the strih PC itself, `http://localhost:8770` gives the FULL install; (b)
+  on another PC over plain-HTTP LAN (`http://strih.lan:8770`) the browser gives no install prompt —
+  use Edge "Apps → Install this site as an app" / Chrome "Cast, save and share → Install page as
+  app" to create a windowed shortcut (icon + name come from this change); (c) a full PWA from
+  anywhere = the cloudflared HTTPS hostname (`scripts/bkshading-provision-cloudflared.sh`). Do NOT
+  add self-signed HTTPS to the service (an untrusted cert is still an insecure context).
+
+
+## Clona `f/—`: off-grid aperture from `gphoto2 --summary` (issue 1306)
+
+The panel showed `f/—` for clona (dead slider) on BOTH online cameras. Root cause: libgphoto2's
+`_get_FNumber` sets the `f-number` RADIO `Current:` ONLY when the raw value exactly matches an
+enumerated choice; both lenses sit open BELOW the camera's first enumerated stop (cam1 f/4.0 vs enum
+from f/4.5, cam2 f/2.0 vs enum from f/2.6), so `gphoto2 --get-config f-number` prints
+`Current: (null)` → `parse_fnumber` fails → `aperture_av`/`aperture_norm` = `None`. The ONLY honest
+current-aperture signal is the `gphoto2 --summary` line `F-Number(0x5007) … value: f/4 (400)`
+(raw = PTP F-Number x100).
+
+- **`--summary` folds into the EXISTING best-effort `d003` session — never a new USB session.**
+  `Gphoto2Runner::get_focus_and_summary` runs `gphoto2 --get-config d003 --summary` (ONE process),
+  and `split_focus_and_summary` splits the stdout at the FIRST `END` line (block = d003, remainder =
+  summary). Per-read session count stays 3 (detect + core batch + this) — the issue 1229 doctrine.
+  The default trait impl (test fakes) reads d003 alone with an empty summary; the real `Gphoto2Cli`
+  overrides it. `RawConfigs` gained a `summary` field (empty → the pre-1306 RADIO-`Current:` path).
+- **`params_and_caps`:** when `Current:` is missing/`(null)`, `aperture_av = fnumber_to_av(raw/100)`
+  and `aperture_norm` = the NEAREST enumerated choice (`nearest_choice_norm`); an exact `Current:`
+  still maps to its exact position. Pure parser `parse_summary_fnumber_raw` (fail-safe → `None`).
+- **Junk-choice filter is in the ONE canonical list.** `parse_fnumber_labels` now also drops any
+  choice below `MIN_VALID_FNUMBER` (0.5) — the gphoto2 placeholders `f/0`/`f/0.2` — so the grid used
+  for read-norm, write (`plan_writes`), AND `CameraCaps.fNumberChoices` is consistent and a near-0
+  step can never write `f/0`. Threshold 0.5 keeps a genuine `f/0.95` lens.
+- **Consequence for the #1304 +/- step (off-grid state):** the recovered `aperture_norm` is 0, so
+  `refreshStepDisabled` disables "−" (idx 0) while "+" moves to the first/next enumerated choice —
+  the camera exposes no smaller f-number than its first enumerated stop over PTP. No panel change
+  was needed; the existing bound-disable logic produces this by construction.
+- **Tier-0:** the pure aperture selection + parsers were RED→GREEN-proven via a `rustc --test`
+  replica (cam1 → `av=2·log2(4)`, norm 0, `[4.5,4.8,5.6]`; cam2 → `av=2·log2(2)`, norm 0,
+  `[2.6,2.8,3.2]`; the clean-list `f/5.2` case still norm 2/3). CI runs the real proto+relay tests.

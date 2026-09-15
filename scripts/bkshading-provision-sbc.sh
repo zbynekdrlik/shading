@@ -5,8 +5,10 @@ set -euo pipefail
 
 # ---------------------------------------------------------------------------------------------
 # WHY: the LAST bkshading milestone (issue 808) — the handheld branch of the owner architecture
-# (comment 5356048130 path 2, "cieľový stav"): a camera plugs USB into a mini SBC (a Pi Zero 2 W on
-# the cage, on WiFi) which runs the SAME `bkshading-relay` component the camboxes run — a
+# (comment 5356048130 path 2, "cieľový stav"; Design v3 comment 5664682477, 14.9.2026): a camera
+# plugs USB into a separately powered zero-class arm64 SBC with WiFi (the board is device-agnostic —
+# a Raspberry Pi Zero 2 W, a Radxa ZERO 3W, or an Orange Pi Zero 2W — powered from the camera cage's
+# V-mount 5 V USB splitter) which runs the SAME `bkshading-relay` component the camboxes run — a
 # "mini-cambox without video". The strih aggregation service already understands this transport
 # (`Transport::SbcRelay`, the `handheld-1` record in bkshading.example.toml, a params-only block
 # with no NDI preview), but nothing PROVISIONS the relay on a bare SBC. This script does.
@@ -31,14 +33,17 @@ set -euo pipefail
 # caught here, not at reboot with an opaque `Exec format error`.
 #
 # Usage:  scripts/bkshading-provision-sbc.sh [--check|--install]
-#   --check    (default) verify gphoto2 + unit + enabled + binary present + binary is aarch64;
+#   --check    (default) verify gphoto2 + unit + enabled + binary present + binary is aarch64 +
+#              the WiFi link is up (SKIPPED on a wired box with no wl* interface, e.g. a cambox);
 #              0 if all OK, 1 + remediation.
 #   --install  install gphoto2 (if missing), install + enable the (reused) relay unit; enable-only.
 #
 # Exit codes: 0 = OK; 1 = not fully provisioned + remediation printed; 2 = bad argument.
 #
 # Overridable targets (for Tier-0 tests to a temp root — no root/apt/systemd needed):
-#   BKSHADING_SBC_UNIT_DEST, BKSHADING_SBC_BIN, BKSHADING_SBC_GPHOTO2, BKSHADING_SBC_SYSTEMCTL
+#   BKSHADING_SBC_UNIT_DEST, BKSHADING_SBC_BIN, BKSHADING_SBC_GPHOTO2, BKSHADING_SBC_SYSTEMCTL,
+#   BKSHADING_SBC_NET_SYSFS (the /sys/class/net root the WiFi-link --check reads; default
+#   /sys/class/net).
 # ---------------------------------------------------------------------------------------------
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -105,7 +110,7 @@ do_install() {
   if [ ! -x "$RELAY_BIN" ]; then
     echo "  WARNING: relay binary not present/executable at $RELAY_BIN -- deploy the aarch64" >&2
     echo "           bkshading-relay there (scripts/bkshading-deploy-relay.sh --arch arm64" >&2
-    echo "           --no-remount --host <pi>) before reboot." >&2
+    echo "           --no-remount --host <sbc>) before reboot." >&2
   elif [ "$(bkshading_sbc_arch_ok "$(bkshading_sbc_elf_arch_of_file "$RELAY_BIN")")" != "yes" ]; then
     echo "  WARNING: relay binary at $RELAY_BIN is not aarch64 (found: $(bkshading_sbc_elf_arch_of_file "$RELAY_BIN")) --" >&2
     echo "           deploy the arm64 build (bkshading-relay-linux-arm64), not the amd64 one." >&2
@@ -159,13 +164,47 @@ do_check() {
     echo "FAIL: unit not enabled (is-enabled=${en:-<none>})" >&2
     rc=1
   fi
+  # (5) WiFi link -- the handheld SBC is wireless and the whole topology depends on it. A WIRED box
+  #     (the cambox class, which runs the SAME reused relay unit) has no wl* interface and this check
+  #     is SKIPPED, never FAILed. Band-agnostic: a 2.4 GHz-only board is fine, we only require a link.
+  local net_root wifi ssid _if wlif
+  net_root="${BKSHADING_SBC_NET_SYSFS:-/sys/class/net}"
+  wifi="$(bkshading_sbc_wifi_link_state "$net_root" 'wl*')"
+  case "$wifi" in
+    none)
+      echo "OK: no wireless interface (wired box, e.g. a cambox) -- WiFi link check skipped"
+      ;;
+    up)
+      ssid=""
+      if command -v iw >/dev/null 2>&1; then
+        # best-effort SSID for the OK line; never gates. Try each wl* iface until one reports one.
+        for _if in "$net_root"/wl*; do
+          [ -e "$_if" ] || continue
+          ssid="$(bkshading_sbc_wifi_ssid_from_iw "$(iw dev "$(basename "$_if")" link 2>/dev/null || true)")"
+          [ -n "$ssid" ] && break
+        done
+      fi
+      if [ -n "$ssid" ]; then
+        echo "OK: WiFi link up (SSID: $ssid)"
+      else
+        echo "OK: WiFi link up"
+      fi
+      ;;
+    *)
+      wlif="$(bkshading_sbc_first_wifi_iface "$net_root" 'wl*')"
+      echo "FAIL: WiFi link is down (a wl* interface is present but has no up link / carrier) -- join the rig WiFi, e.g.:" >&2
+      echo "        nmcli device wifi connect '<RIG_SSID>' password '<PSK>' ifname ${wlif:-wlan0}" >&2
+      echo "        (a 2.4 GHz-only board needs a 2.4 GHz SSID on site; band is not asserted here)" >&2
+      rc=1
+      ;;
+  esac
 
   if [ "$rc" -ne 0 ]; then
     cat >&2 <<MSG
 bkshading relay NOT fully provisioned on this SBC. Fix:
   scripts/bkshading-provision-sbc.sh --install   # gphoto2 + reused relay unit; enable (defer to reboot)
 Then deploy the aarch64 bkshading-relay binary to $RELAY_BIN and reboot:
-  scripts/bkshading-deploy-relay.sh --arch arm64 --no-remount --host <pi-ip>
+  scripts/bkshading-deploy-relay.sh --arch arm64 --no-remount --host <sbc-ip>
 MSG
   else
     echo "OK: bkshading relay fully provisioned on this SBC (live after reboot / already running)."

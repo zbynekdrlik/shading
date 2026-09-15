@@ -1,0 +1,12 @@
+{
+  "name": "bkshading-panel-e2e",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Playwright E2E for the bkshading operator panel +/- step buttons (issue 1304)",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.49.1"
+  }
+}

@@ -157,6 +157,7 @@ fn full_raw() -> RawConfigs {
         sensor_fps: D006_BLOCK.to_string(),
         project_fps: D007_BLOCK.to_string(),
         focus_distance: D003_BLOCK.to_string(),
+        summary: String::new(),
     }
 }
 
@@ -182,6 +183,178 @@ fn params_and_caps_from_full_camera() {
     assert_eq!(caps.kelvin_min, 2500);
     assert_eq!(caps.kelvin_max, 10000);
     assert!(!caps.shutter_choices.is_empty());
+    // issue 1304: the f-number choices lift through as plain numbers, same order/count as the
+    // RADIO choice list, so the panel's aperture +/- step indexes the identical list.
+    assert_eq!(caps.fnumber_choices.len(), 4);
+    for (got, want) in caps.fnumber_choices.iter().zip([2.8, 4.0, 5.2, 8.0]) {
+        assert!((got - want).abs() < 1e-9, "fnumber choice {got} != {want}");
+    }
+}
+
+#[test]
+fn fnumber_choices_parity_drops_unparseable_1304() {
+    // A pathological RADIO list with a non-f/N.N entry ("Auto"): the caps count, the readback
+    // aperture_norm basis, AND the relay's plan_writes basis must ALL use the SAME parseable
+    // subset — otherwise the panel's +/- step maps to the wrong f-stop (review finding, #1304).
+    let block =
+        "Current: f/4.0\nChoice: 0 Auto\nChoice: 1 f/2.8\nChoice: 2 f/4.0\nChoice: 3 f/8.0\nEND";
+    let raw = RawConfigs {
+        fnumber: block.to_string(),
+        ..Default::default()
+    };
+    let (params, caps) = params_and_caps(&raw);
+    // "Auto" is dropped -> three parseable choices.
+    assert_eq!(caps.fnumber_choices.len(), 3);
+    // The write-path basis (what transport.rs feeds plan_writes) has the SAME count.
+    let labels = parse_fnumber_labels(block);
+    assert_eq!(labels.len(), caps.fnumber_choices.len(), "count parity");
+    // f/4.0 is index 1 of the 3-entry parseable list -> norm 0.5, and plan_writes round-trips it
+    // back to f/4.0 over the same basis (the panel's +/- step round-trip).
+    assert!((params.aperture_norm.unwrap() - 0.5).abs() < 1e-9);
+    let writes = plan_writes(
+        &SetRequest {
+            aperture_norm: Some(0.5),
+            ..Default::default()
+        },
+        &labels,
+        2500,
+    );
+    assert!(writes.contains(&("f-number".to_string(), "f/4.0".to_string())));
+}
+
+fn assert_f64_vec(got: &[f64], want: &[f64]) {
+    assert_eq!(got.len(), want.len(), "len {got:?} != {want:?}");
+    for (g, w) in got.iter().zip(want) {
+        assert!((g - w).abs() < 1e-9, "{got:?} != {want:?}");
+    }
+}
+
+#[test]
+fn aperture_from_summary_when_current_null_cam1_1306() {
+    // cam1 live repro: the lens is open at f/4.0, BELOW the camera's first enumerated stop (f/4.5),
+    // so gphoto2 prints `Current: (null)` for the f-number RADIO. The current aperture must then
+    // come from the --summary raw (0x5007 value/100 = 4.0), the slider snaps to the NEAREST choice,
+    // and the junk choices f/0.2/f/0 are filtered out of the grid. Bug #1306 — RED until GREEN.
+    let raw = RawConfigs {
+        fnumber: "Current: (null)\nChoice: 0 f/0.2\nChoice: 1 f/0\nChoice: 2 f/4.5\nChoice: 3 f/4.8\nChoice: 4 f/5.6\nEND".to_string(),
+        summary: "F-Number(0x5007):(readwrite) (type=0x4) Enumeration [20,0,450,480,560] value: f/4 (400)".to_string(),
+        ..Default::default()
+    };
+    let (params, caps) = params_and_caps(&raw);
+    // aperture_av from the summary raw 400 -> f/4.0 -> 2*log2(4.0)
+    assert!(
+        (params.aperture_av.unwrap() - 2.0 * 4.0_f64.log2()).abs() < 1e-9,
+        "aperture_av {:?}",
+        params.aperture_av
+    );
+    // the grid drops f/0.2 (0.2) and f/0 (0.0); nearest to 4.0 is f/4.5 = index 0 -> norm 0.0
+    assert_f64_vec(&caps.fnumber_choices, &[4.5, 4.8, 5.6]);
+    assert!(
+        params.aperture_norm.unwrap().abs() < 1e-9,
+        "aperture_norm {:?}",
+        params.aperture_norm
+    );
+}
+
+#[test]
+fn aperture_from_summary_when_current_null_cam2_1306() {
+    // cam2 live repro: lens at f/2.0, below the first enumerated stop f/2.6 -> Current: (null).
+    let raw = RawConfigs {
+        fnumber: "Current: (null)\nChoice: 0 f/0.2\nChoice: 1 f/0\nChoice: 2 f/2.6\nChoice: 3 f/2.8\nChoice: 4 f/3.2\nEND".to_string(),
+        summary: "F-Number(0x5007):(readwrite) (type=0x4) Enumeration [20,0,260,280,320] value: f/2 (200)".to_string(),
+        ..Default::default()
+    };
+    let (params, caps) = params_and_caps(&raw);
+    assert!((params.aperture_av.unwrap() - 2.0 * 2.0_f64.log2()).abs() < 1e-9);
+    assert_f64_vec(&caps.fnumber_choices, &[2.6, 2.8, 3.2]);
+    assert!(params.aperture_norm.unwrap().abs() < 1e-9);
+}
+
+#[test]
+fn aperture_norm_falls_back_to_nearest_when_current_string_off_list_1306() {
+    // Review hardening: Current is a valid f-number ("f/4") whose STRING is not among the choices
+    // ("f/4.0"); aperture_norm must fall back to the nearest choice (never a dead slider) while
+    // aperture_av is known.
+    let raw = RawConfigs {
+        fnumber: "Current: f/4\nChoice: 0 f/2.8\nChoice: 1 f/4.0\nChoice: 2 f/5.6\nEND".to_string(),
+        ..Default::default()
+    };
+    let (params, _caps) = params_and_caps(&raw);
+    assert!((params.aperture_av.unwrap() - 2.0 * 4.0_f64.log2()).abs() < 1e-9);
+    // nearest to 4.0 is f/4.0 (index 1 of 3) -> norm 0.5, not None.
+    assert!((params.aperture_norm.unwrap() - 0.5).abs() < 1e-9);
+}
+
+#[test]
+fn empty_fnumber_block_yields_no_choices_1304() {
+    // A relay that does not report f-number choices (empty block) -> empty `fnumber_choices`,
+    // never a fabricated entry. The panel then disables the aperture +/- step.
+    let (_params, caps) = params_and_caps(&RawConfigs::default());
+    assert!(caps.fnumber_choices.is_empty());
+}
+
+#[test]
+fn parse_summary_fnumber_raw_1306() {
+    assert_eq!(
+        parse_summary_fnumber_raw(
+            "F-Number(0x5007):(readwrite) (type=0x4) Enumeration [20,0,450] value: f/4 (400)"
+        ),
+        Some(400)
+    );
+    assert_eq!(
+        parse_summary_fnumber_raw("F-Number(0x5007): ... value: f/2 (200)"),
+        Some(200)
+    );
+    assert_eq!(parse_summary_fnumber_raw("no 0x5007 line here"), None);
+    // present line but no parseable trailing integer -> None (fail-safe).
+    assert_eq!(
+        parse_summary_fnumber_raw("F-Number(0x5007): value: f/4 ()"),
+        None
+    );
+}
+
+#[test]
+fn parse_fnumber_labels_drops_sub_half_junk_1306() {
+    // f/0 and f/0.2 are gphoto2 placeholders (< MIN_VALID_FNUMBER 0.5); a real f/0.95 lens stays.
+    let block = "Choice: 0 f/0.2\nChoice: 1 f/0\nChoice: 2 f/4.5\nChoice: 3 f/0.95\nEND";
+    assert_eq!(parse_fnumber_labels(block), vec!["f/4.5", "f/0.95"]);
+}
+
+#[test]
+fn nearest_choice_norm_1306() {
+    let labels = vec![
+        "f/4.5".to_string(),
+        "f/4.8".to_string(),
+        "f/5.6".to_string(),
+    ];
+    assert_eq!(nearest_choice_norm(4.0, &labels), Some(0.0)); // nearest = f/4.5 (idx 0)
+    assert_eq!(nearest_choice_norm(5.0, &labels), Some(0.5)); // nearest = f/4.8 (idx 1)
+    assert!(nearest_choice_norm(4.0, &[]).is_none());
+}
+
+#[test]
+fn camera_caps_fnumber_choices_wire_is_camel_case_1304() {
+    let caps = bkshading_proto::wire::CameraCaps {
+        iso_choices: vec![100, 200],
+        fnumber_choices: vec![2.8, 4.0, 5.2, 8.0],
+        shutter_choices: vec![50, 60],
+        fps_min: 5,
+        fps_max: 60,
+        kelvin_min: 2500,
+        kelvin_max: 10000,
+    };
+    let json = serde_json::to_string(&caps).unwrap();
+    assert!(json.contains("\"fNumberChoices\""), "camelCase wire key");
+    // Round-trips, and an OLDER relay that omits the key deserializes to an empty Vec
+    // (`#[serde(default)]`), never a deserialize error.
+    let back: bkshading_proto::wire::CameraCaps = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, caps);
+    let legacy = "{\"isoChoices\":[100],\"shutterChoices\":[50],\"fpsMin\":5,\"fpsMax\":60,\"kelvinMin\":2500,\"kelvinMax\":10000}";
+    let old: bkshading_proto::wire::CameraCaps = serde_json::from_str(legacy).unwrap();
+    assert!(
+        old.fnumber_choices.is_empty(),
+        "missing key -> empty via serde default"
+    );
 }
 
 #[test]

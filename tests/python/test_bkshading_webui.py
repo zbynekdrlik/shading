@@ -130,6 +130,121 @@ def test_index_and_js_surface_grab_config_desync():
     assert 'q("fps-desync")' in js, "the JS drives the desync element"
 
 
+def _js_fn_body(js, sig):
+    """The brace-balanced body of the JS function whose declaration starts with `sig`.
+    Naive brace counting is fine here: every `{`/`}` in these functions is balanced
+    (object literals, `${...}` template holes), so depth never goes wrong."""
+    start = js.index(sig)
+    open_brace = js.index("{", start)
+    depth = 0
+    for i in range(open_brace, len(js)):
+        c = js[i]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return js[open_brace : i + 1]
+    raise AssertionError("unbalanced braces for " + sig)
+
+
+def test_index_has_aperture_kelvin_tint_step_buttons_1304():
+    # issue 1304: each of clona / biely bod / tint gets a - and a + step button next to its slider.
+    html = _read("index.html")
+    for role in (
+        "aperture-dec",
+        "aperture-inc",
+        "kelvin-dec",
+        "kelvin-inc",
+        "tint-dec",
+        "tint-inc",
+    ):
+        assert f'data-role="{role}"' in html, f"missing step button: {role}"
+    # The layout is - [slider] + : a .slider-row wraps each slider + its two step buttons.
+    assert "slider-row" in html
+
+
+def test_app_js_step_handlers_send_absolute_values_1304():
+    # issue 1304: the aperture step sends apertureNorm; kelvin/tint steps send kelvin/tint.
+    js = _read("app.js")
+    ap = _js_fn_body(js, "function stepAperture(")
+    assert "{ apertureNorm: norm }" in ap, "aperture step sends an absolute apertureNorm"
+    lin = _js_fn_body(js, "function stepLinear(")
+    assert "{ [key]: next }" in lin, "linear step sends an absolute value for its key"
+    # the step buttons are wired to kelvin/tint via stepLinear.
+    assert '"kelvin", "kelvin"' in js and '"tint", "tint"' in js
+
+
+def test_app_js_step_handlers_have_no_repeat_timer_1304():
+    # pin bodu 3: one tap = one PUT, NO auto-repeat on hold. The step handlers must contain no
+    # setInterval/setTimeout, and the buttons must be wired as CLICK handlers (not a held repeat).
+    js = _read("app.js")
+    for sig in ("function stepAperture(", "function stepLinear("):
+        body = _js_fn_body(js, sig)
+        assert "setInterval" not in body, f"{sig} must not auto-repeat (no setInterval)"
+        assert "setTimeout" not in body, f"{sig} must not auto-repeat (no setTimeout)"
+    for role in ("aperture-dec", "aperture-inc", "kelvin-dec", "kelvin-inc", "tint-dec", "tint-inc"):
+        assert re.search(
+            r'q\("' + re.escape(role) + r'"\)\.addEventListener\("click"', js
+        ), f"{role} must be a click handler (no pointerdown-hold repeat)"
+
+
+def test_app_js_aperture_step_disabled_without_choices_1304():
+    # issue 1304 pin: without f-number choices the aperture +/- is DISABLED (never a fabricated
+    # step), and the choices are read from caps.fNumberChoices exposed on the block dataset.
+    js = _read("app.js")
+    assert "caps.fNumberChoices" in js, "panel reads the f-number choices from caps"
+    assert "refreshStepDisabled" in js, "panel enables/disables the step buttons"
+    rd = _js_fn_body(js, "function refreshStepDisabled(")
+    assert "disabled = true" in rd, "step buttons disabled when no choices / at a bound"
+
+
+def test_index_links_pwa_manifest_and_icons_1305():
+    html = _read("index.html")
+    assert '<link rel="manifest"' in html, "index links a web app manifest"
+    assert "manifest.webmanifest" in html
+    assert '<meta name="theme-color"' in html
+    assert '<link rel="icon"' in html
+    assert "apple-touch-icon" in html
+
+
+def test_manifest_is_valid_standalone_pwa_1305():
+    import json
+
+    with open(os.path.join(WEB, "manifest.webmanifest"), encoding="utf-8") as fh:
+        m = json.load(fh)
+    assert m["display"] == "standalone"
+    assert m["start_url"] == "/"
+    assert m["scope"] == "/"
+    srcs = [i.get("src") for i in m["icons"]]
+    assert "/icon-192.png" in srcs
+    assert "/icon-512.png" in srcs
+    assert any("maskable" in (i.get("purpose") or "") for i in m["icons"]), "a maskable icon entry"
+
+
+def test_service_worker_is_passthrough_no_cache_1305():
+    with open(os.path.join(WEB, "sw.js"), encoding="utf-8") as fh:
+        sw = fh.read()
+    # server-truth: no cache anywhere (no stale UI/state).
+    assert "caches" not in sw, "sw.js must not use the Cache Storage API"
+    assert "fetch(event.request)" in sw, "sw.js is a pure network passthrough"
+
+
+def test_app_js_registers_service_worker_guarded_1305():
+    js = _read("app.js")
+    assert '"serviceWorker" in navigator' in js, "SW registration is guarded"
+    assert 'navigator.serviceWorker.register("/sw.js")' in js
+    assert ".catch(" in js, "registration errors are swallowed (clean console on insecure origin)"
+
+
+def test_pwa_icons_are_png_1305():
+    for name in ("icon-192.png", "icon-512.png"):
+        with open(os.path.join(WEB, name), "rb") as fh:
+            assert fh.read(8) == b"\x89PNG\r\n\x1a\n", f"{name} is not a PNG"
+    with open(os.path.join(WEB, "favicon.svg"), encoding="utf-8") as fh:
+        assert "<svg" in fh.read(), "favicon.svg is an SVG"
+
+
 def _run():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

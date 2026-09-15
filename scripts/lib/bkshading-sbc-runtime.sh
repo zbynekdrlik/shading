@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 # scripts/lib/bkshading-sbc-runtime.sh — shared constants + pure helpers for provisioning the
-# bkshading RELAY on a mini SBC / handheld (a Pi Zero 2 W running ONLY the relay, no camera-box
-# appliance). This is the LAST bkshading milestone (issue 808) — the handheld branch of the owner
-# architecture (comment 5356048130 path 2, "cieľový stav"): camera USB -> Pi -> the SAME
-# bkshading-relay component the camboxes run -> the strih service sees it uniformly as a params-only
-# camera (no NDI preview). See .claude/rules/bkshading.md.
+# bkshading RELAY on a separately powered zero-class arm64 SBC with WiFi (running ONLY the relay, no
+# camera-box appliance). This is the LAST bkshading milestone (issue 808) — the handheld branch of
+# the owner architecture (comment 5356048130 path 2, "cieľový stav"; Design v3 comment 5664682477,
+# 14.9.2026): the camera plugs USB into the SBC's host port -> the SAME bkshading-relay component the
+# camboxes run -> the strih service sees it uniformly as a params-only camera (no NDI preview).
+# The board is DEVICE-AGNOSTIC (owner has not finally chosen): a Raspberry Pi Zero 2 W, a Radxa
+# ZERO 3W, or an Orange Pi Zero 2W (the ordered prototype) — all zero-class arm64 SBCs with WiFi,
+# powered from the camera cage's V-mount 5 V USB splitter (never a power bank / PiSugar / raw 15 V
+# D-tap). See .claude/rules/bkshading.md.
 #
 # This lib is the single source of truth for the SBC-SPECIFIC decisions: the cross-compile target,
 # the ELF-arch classifier used by the provision --check (so a mis-deployed amd64 binary is caught),
@@ -22,10 +26,11 @@
 # --- Cross-build target (issue 808 target justification; see .claude/rules/bkshading.md) ---
 
 # The Rust cross-compile target for the SBC relay binary. aarch64-unknown-linux-gnu, NOT armhf:
-# the Pi Zero 2 W is a Cortex-A53 (ARMv8-A, 64-bit) and Raspberry Pi OS (Bookworm) 64-bit is the
-# current default image for it; the relay is a tiny headless axum/tokio service (well under the
-# 512 MB budget on 64-bit), and aarch64-gnu is the best-supported Rust cross (pure-Rust relay -> a
-# trivial cross-link with the gcc-aarch64-linux-gnu linker; glibc matches Pi OS). A 32-bit
+# every candidate board (Raspberry Pi Zero 2 W, Radxa ZERO 3W, Orange Pi Zero 2W) is a Cortex-A53
+# (ARMv8-A, 64-bit) and ships a 64-bit stock arm64 image (Raspberry Pi OS / Debian / Armbian); the
+# relay is a tiny headless axum/tokio service (well under the 512 MB / 2 GB budget on 64-bit), and
+# aarch64-gnu is the best-supported Rust cross (pure-Rust relay -> a trivial cross-link with the
+# gcc-aarch64-linux-gnu linker; glibc matches every candidate image). A 32-bit
 # armv7-unknown-linux-gnueabihf build is one extra CI matrix entry to add IF a legacy 32-bit
 # handheld ever needs it — not the default.
 bkshading_sbc_cross_target() { printf '%s\n' aarch64-unknown-linux-gnu; }
@@ -100,4 +105,71 @@ bkshading_sbc_elf_arch_of_file() {
   m="$(bkshading_sbc_elf_machine_from_file "${1:-}")"
   [ -n "$m" ] || { printf '%s\n' unknown; return 0; }
   bkshading_sbc_arch_from_machine "$m"
+}
+
+# --- WiFi link classification (the handheld is wireless; provision --check verifies the link) ---
+
+# Classify the wireless link state by reading <sysfs-root>/<iface-glob>/operstate. Prints:
+#   up    - at least one matching interface has operstate "up" (carrier + associated)
+#   down  - a matching wireless interface exists but none is "up" (not joined / no carrier)
+#   none  - NO matching wireless interface at all -> a WIRED box (the cambox class): --check SKIPs it
+# <sysfs-root> is the first positional so a Tier-0 test injects a fake /sys/class/net tree via
+# BKSHADING_SBC_NET_SYSFS (the provision script passes ${BKSHADING_SBC_NET_SYSFS:-/sys/class/net}).
+# BAND-AGNOSTIC on purpose: a 2.4 GHz-only board (e.g. a Pi Zero 2 W) is as valid as a dual-band one
+# (Radxa / Orange Pi Zero 2W); the check proves only that a link is up, never which SSID or band.
+# Reads only; a missing/empty tree -> none, never an error (safe under the caller's set -euo pipefail).
+bkshading_sbc_wifi_link_state() {
+  local root="${1:-/sys/class/net}" glob="${2:-wl*}"
+  local iface found=0 up=0 st car restore_nullglob
+  shopt -q nullglob && restore_nullglob=0 || restore_nullglob=1
+  shopt -s nullglob
+  # shellcheck disable=SC2231  # deliberate glob expansion of the iface pattern (no spaces in wl*).
+  for iface in "$root"/$glob; do
+    [ -r "$iface/operstate" ] || continue
+    found=1
+    st="$(cat "$iface/operstate" 2>/dev/null || true)"
+    # operstate "up" is the primary signal, BUT some drivers (notably the out-of-tree uwe5622 on the
+    # Orange Pi Zero 2W) leave operstate at "unknown"/"dormant" while genuinely associated, so
+    # carrier==1 (an L1 link is present) also counts as up. A genuinely-down link has operstate
+    # "down" AND no carrier. Reading `carrier` on a down iface can error ("Invalid argument") — the
+    # 2>/dev/null + `|| true` degrades that to empty, never aborting the caller's set -euo pipefail.
+    car="$(cat "$iface/carrier" 2>/dev/null || true)"
+    if [ "$st" = "up" ] || [ "$car" = "1" ]; then up=1; fi
+  done
+  [ "$restore_nullglob" = 1 ] && shopt -u nullglob
+  if [ "$found" -eq 0 ]; then
+    printf '%s\n' none
+  elif [ "$up" -eq 1 ]; then
+    printf '%s\n' up
+  else
+    printf '%s\n' down
+  fi
+}
+
+# Print the name of the FIRST wireless interface under <sysfs-root> matching <iface-glob> (e.g.
+# `wlan0` / `wlp2s0`), or nothing if none. Used only to make the WiFi-down remediation name the real
+# interface instead of a hard-coded `wlan0` (a board may enumerate as `wlan1`/`wlp2s0`). Pure, reads
+# only; safe under set -euo pipefail (nullglob + a break, no head).
+bkshading_sbc_first_wifi_iface() {
+  local root="${1:-/sys/class/net}" glob="${2:-wl*}"
+  local iface restore_nullglob
+  shopt -q nullglob && restore_nullglob=0 || restore_nullglob=1
+  shopt -s nullglob
+  # shellcheck disable=SC2231  # deliberate glob expansion of the iface pattern (no spaces in wl*).
+  for iface in "$root"/$glob; do
+    if [ -e "$iface/operstate" ]; then
+      [ "$restore_nullglob" = 1 ] && shopt -u nullglob
+      basename "$iface"
+      return 0
+    fi
+  done
+  [ "$restore_nullglob" = 1 ] && shopt -u nullglob
+}
+
+# Parse the SSID from `iw dev <iface> link` output (the "SSID: <name>" line). Prints the SSID or
+# nothing. Pure text parser (the caller runs iw/nmcli best-effort and feeds its output here) so it
+# is Tier-0 testable without a real radio; informational only — never gates --check. No `head`
+# (the SIGPIPE-under-pipefail footgun): `iw dev link` emits exactly one SSID line.
+bkshading_sbc_wifi_ssid_from_iw() {
+  printf '%s\n' "${1:-}" | sed -n 's/^[[:space:]]*SSID:[[:space:]]*//p'
 }

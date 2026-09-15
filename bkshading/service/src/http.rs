@@ -12,7 +12,7 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Path, State,
     },
-    http::{header, StatusCode},
+    http::{header, HeaderName, StatusCode},
     response::{Html, IntoResponse, Json, Response},
     routing::{get, put},
     Router,
@@ -28,6 +28,43 @@ const INDEX_HTML: &str = include_str!("../web/index.html");
 const APP_JS: &str = include_str!("../web/app.js");
 const STYLE_CSS: &str = include_str!("../web/style.css");
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+// issue 1305: installable web app (PWA) assets, embedded so the binary stays self-contained on
+// the strih PC (same include_str!/include_bytes! model as the HTML/JS/CSS above). The generator
+// for the icons is bkshading/service/web/gen-icons.py (stdlib, no new dependency).
+const MANIFEST_JSON: &str = include_str!("../web/manifest.webmanifest");
+const SW_JS: &str = include_str!("../web/sw.js");
+const ICON_192_PNG: &[u8] = include_bytes!("../web/icon-192.png");
+const ICON_512_PNG: &[u8] = include_bytes!("../web/icon-512.png");
+const FAVICON_SVG: &str = include_str!("../web/favicon.svg");
+
+// The Content-Type each PWA asset route serves (issue 1305), exposed so the service tests can
+// pin the exact type without standing up an HTTP server (mirrors `rendered_index`).
+pub const MANIFEST_CONTENT_TYPE: &str = "application/manifest+json";
+pub const SW_JS_CONTENT_TYPE: &str = "text/javascript; charset=utf-8";
+pub const PNG_CONTENT_TYPE: &str = "image/png";
+pub const SVG_CONTENT_TYPE: &str = "image/svg+xml";
+
+/// The embedded PWA manifest JSON (issue 1305) — exposed for the service route tests.
+pub fn manifest_asset() -> &'static str {
+    MANIFEST_JSON
+}
+/// The embedded service worker JS (issue 1305).
+pub fn sw_js_asset() -> &'static str {
+    SW_JS
+}
+/// The embedded 192px PWA icon PNG bytes (issue 1305).
+pub fn icon_192_asset() -> &'static [u8] {
+    ICON_192_PNG
+}
+/// The embedded 512px PWA icon PNG bytes (issue 1305).
+pub fn icon_512_asset() -> &'static [u8] {
+    ICON_512_PNG
+}
+/// The embedded SVG favicon (issue 1305).
+pub fn favicon_svg_asset() -> &'static str {
+    FAVICON_SVG
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -46,6 +83,12 @@ pub fn router(state: AppState) -> Router {
         .route("/", get(index))
         .route("/app.js", get(app_js))
         .route("/style.css", get(style_css))
+        // issue 1305: PWA assets (installable web app).
+        .route("/manifest.webmanifest", get(manifest))
+        .route("/sw.js", get(service_worker))
+        .route("/icon-192.png", get(icon_192))
+        .route("/icon-512.png", get(icon_512))
+        .route("/favicon.svg", get(favicon_svg))
         .route("/api/version", get(version))
         .route("/api/cameras", get(cameras))
         .route("/api/cameras/:id/params", put(set_params))
@@ -110,6 +153,37 @@ async fn style_css() -> impl IntoResponse {
         [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
         STYLE_CSS,
     )
+}
+
+// issue 1305: PWA asset handlers. Each serves an embedded asset with its exact Content-Type.
+async fn manifest() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, MANIFEST_CONTENT_TYPE)],
+        MANIFEST_JSON,
+    )
+}
+
+async fn service_worker() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, SW_JS_CONTENT_TYPE),
+            // Allow the SW to control the whole origin even though it is served from /sw.js.
+            (HeaderName::from_static("service-worker-allowed"), "/"),
+        ],
+        SW_JS,
+    )
+}
+
+async fn icon_192() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, PNG_CONTENT_TYPE)], ICON_192_PNG)
+}
+
+async fn icon_512() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, PNG_CONTENT_TYPE)], ICON_512_PNG)
+}
+
+async fn favicon_svg() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, SVG_CONTENT_TYPE)], FAVICON_SVG)
 }
 
 async fn version() -> Json<serde_json::Value> {

@@ -30,6 +30,12 @@ pub struct RawConfigs {
     /// best-effort by the relay, so an empty block (a camera that does not answer it)
     /// degrades to a `None` `focus_distance`, never a crash.
     pub focus_distance: String,
+    /// `gphoto2 --summary` text, read best-effort in the SAME session as `d003` (issue 1306).
+    /// Its `F-Number(0x5007) … value: f/4 (400)` line carries the raw current aperture (x100)
+    /// that libgphoto2 OMITS from the `f-number` RADIO `Current:` when the lens is open below the
+    /// camera's first enumerated stop (`Current: (null)`). Empty when unavailable — the aperture
+    /// then simply falls back to the RADIO `Current:` (i.e. the pre-1306 behaviour), never a crash.
+    pub summary: String,
 }
 
 fn current_i64(block: &str) -> Option<i64> {
@@ -50,19 +56,38 @@ pub fn params_and_caps(raw: &RawConfigs) -> (ShadingParams, CameraCaps) {
         .or(sensor_fps100)
         .unwrap_or(DEFAULT_FPS100);
 
-    // Aperture: current f-number choice -> AV + normalised position within the choices.
-    let fnumber_choices = parse_choices(&raw.fnumber);
-    let current_fnumber = parse_current(&raw.fnumber);
-    let (aperture_av, aperture_norm) = match &current_fnumber {
-        Some(cur) => {
-            let av = parse_fnumber(cur).and_then(fnumber_to_av);
-            let norm = fnumber_choices
-                .iter()
-                .position(|c| c == cur)
-                .map(|i| choices_to_norm(i as i64, fnumber_choices.len() as i64));
-            (av, norm)
-        }
-        None => (None, None),
+    // Aperture: current f-number -> AV + normalised position within the choices.
+    // Use the PARSEABLE-ONLY choice list as the single canonical basis (issue 1304): the readback
+    // `aperture_norm`, the caps `fnumber_choices` below, and the relay's `plan_writes` all count
+    // from THIS same list, so the panel's +/- step index can never diverge from the write index.
+    let fnumber_labels = parse_fnumber_labels(&raw.fnumber);
+    // The RADIO `Current:` only when it names a real f-number; libgphoto2 prints `Current: (null)`
+    // (-> parse_fnumber None) when the lens is open below the camera's first enumerated stop.
+    let current_label = parse_current(&raw.fnumber).filter(|c| parse_fnumber(c).is_some());
+    // Fall back to the `--summary` raw (0x5007 value / 100) when the RADIO current is absent —
+    // the only honest current-aperture signal in the off-grid case (issue 1306).
+    let summary_fnumber =
+        parse_summary_fnumber_raw(&raw.summary).map(|raw_x100| raw_x100 as f64 / 100.0);
+    let current_fnumber_value = current_label
+        .as_deref()
+        .and_then(parse_fnumber)
+        .or(summary_fnumber);
+    let aperture_av = current_fnumber_value.and_then(fnumber_to_av);
+    let aperture_norm = match &current_label {
+        // An exact enumerated choice -> its exact position in the (filtered) choice list. If the
+        // reported `Current:` string is NOT among the filtered choices (e.g. a `f/4` vs `f/4.0`
+        // spelling drift, or a value that got junk-filtered), fall back to the NEAREST choice by
+        // f-number so the slider is never dead while `aperture_av` is known (review finding #1306).
+        Some(cur) => fnumber_labels
+            .iter()
+            .position(|c| c == cur)
+            .map(|i| choices_to_norm(i as i64, fnumber_labels.len() as i64))
+            .or_else(|| {
+                current_fnumber_value.and_then(|v| nearest_choice_norm(v, &fnumber_labels))
+            }),
+        // No exact choice (the summary-derived off-grid case) -> the NEAREST choice by f-number,
+        // so the slider still shows a sensible position rather than staying dead (issue 1306).
+        None => current_fnumber_value.and_then(|v| nearest_choice_norm(v, &fnumber_labels)),
     };
 
     let iso = current_i64(&raw.iso);
@@ -92,6 +117,15 @@ pub fn params_and_caps(raw: &RawConfigs) -> (ShadingParams, CameraCaps) {
         parse_range(&raw.kelvin).unwrap_or((KELVIN_MIN_FALLBACK, KELVIN_MAX_FALLBACK));
     let caps = CameraCaps {
         iso_choices: parse_iso_choices(&raw.iso),
+        // issue 1304: expose the f-number choices as plain numbers, from the SAME parseable-only
+        // `fnumber_labels` basis used for `aperture_norm` above and for the relay's `plan_writes`
+        // (transport.rs also derives its write list via `parse_fnumber_labels`). Every label here
+        // parses by construction, so this count EQUALS the write-path count — the panel's +/- step
+        // index can never diverge and step to the wrong f-stop.
+        fnumber_choices: fnumber_labels
+            .iter()
+            .filter_map(|c| parse_fnumber(c))
+            .collect(),
         shutter_choices: shutter_choices_for_fps(fps100),
         fps_min,
         fps_max,

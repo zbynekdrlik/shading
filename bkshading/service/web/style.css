@@ -109,6 +109,24 @@ body {
 .btn.active { background: var(--accent); border-color: var(--accent); color: #0b1016; font-weight: 600; }
 .wb-auto { margin-top: 0.4rem; }
 
+/* issue 1304: +/- step buttons flanking a slider ( − [slider] + ). The slider takes the
+   remaining width; the step buttons are big touch targets (>= 40px, i.e. >= 2.5rem) in the
+   existing .btn language. A disabled step button (no f-number choices, or at a value bound)
+   dims and shows a title. */
+.slider-row { display: flex; align-items: center; gap: 0.4rem; }
+.slider-row .slider { flex: 1 1 auto; min-width: 0; }
+.step-btn {
+  flex: 0 0 auto;
+  min-width: 2.6rem;
+  min-height: 2.6rem;
+  font-size: 1.15rem;
+  line-height: 1;
+  padding: 0.4rem 0.55rem;
+  font-variant-numeric: tabular-nums;
+}
+.step-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.step-btn:disabled:hover { border-color: var(--edge); }
+
 /* issue 809: fps-vs-grab sync row. The explicit [hidden] rules guard against an author
    display beating the UA rule (the same M1 lesson as .block-preview[hidden]). */
 .fps-sync { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; margin-top: 0.4rem; }

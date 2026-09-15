@@ -3,7 +3,8 @@
 //! Design decision (issue 808 design comment, Prístup 1): the relay drives the camera
 //! by spawning the system `gphoto2` binary — NOT a build-time `libgphoto2` FFI binding.
 //! This keeps the crate free of any C build-time dependency, so it cross-compiles cleanly
-//! for ARM (Pi Zero 2 W, the handheld SBC relay), and it reuses the exact gphoto2
+//! for ARM (a zero-class arm64 SBC handheld relay — Pi Zero 2 W / Radxa ZERO 3W / Orange
+//! Pi Zero 2W), and it reuses the exact gphoto2
 //! semantics the dev2 MVP verified. The `Gphoto2Runner` trait is the seam: `Gphoto2Cli`
 //! is the real impl, and tests inject a fake so every path is exercised without a camera.
 
@@ -11,7 +12,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
-use bkshading_proto::mapping::{parse_choices, DEFAULT_FPS100};
+use bkshading_proto::mapping::{parse_fnumber_labels, DEFAULT_FPS100};
 use bkshading_proto::read::{fps_supported, params_and_caps, plan_writes, RawConfigs};
 use bkshading_proto::wire::{RelayState, SetRequest};
 
@@ -37,6 +38,40 @@ pub trait Gphoto2Runner: Send + Sync {
     }
     /// `gphoto2 --set-config <key>=<value>`.
     fn set_config(&self, key: &str, value: &str) -> Result<()>;
+
+    /// Reads the best-effort focus distance (`d003`) AND the camera `--summary` in ONE gphoto2
+    /// invocation (issue 1306): `(d003_block, summary_text)`. Folding `--summary` into the existing
+    /// best-effort d003 call keeps the per-read USB-PTP session count at 3 (issue 1229 doctrine) —
+    /// no new session. The summary carries the raw current aperture (`F-Number(0x5007) … (400)`)
+    /// that libgphoto2 omits from the `f-number` RADIO `Current:` when the lens is open below the
+    /// camera's first enumerated stop. The default impl (test fakes) reads d003 alone with an empty
+    /// summary; the real [`Gphoto2Cli`] OVERRIDES it with the single `--get-config d003 --summary`
+    /// process, split at the first `END` line.
+    fn get_focus_and_summary(&self) -> Result<(String, String)> {
+        Ok((
+            self.get_config(FOCUS_DISTANCE_KEY).unwrap_or_default(),
+            String::new(),
+        ))
+    }
+}
+
+/// Splits the combined stdout of `gphoto2 --get-config d003 --summary` into `(d003_block,
+/// summary_text)` at the FIRST `END` line: everything up to and including that `END` is the d003
+/// config block, the remainder is the `--summary` text. Pure + fail-safe — if there is no `END`
+/// line (an unexpected shape), the whole output is treated as the d003 block and the summary is
+/// empty (aperture then just falls back to the RADIO `Current:` path). Tier-0 testable (issue 1306).
+pub fn split_focus_and_summary(combined: &str) -> (String, String) {
+    let mut block = String::new();
+    let mut lines = combined.lines();
+    for line in lines.by_ref() {
+        block.push_str(line);
+        block.push('\n');
+        if line.trim() == "END" {
+            let rest: Vec<&str> = lines.collect();
+            return (block, rest.join("\n"));
+        }
+    }
+    (block, String::new())
 }
 
 /// Real transport: spawns the `gphoto2` binary.
@@ -131,6 +166,26 @@ impl Gphoto2Runner for Gphoto2Cli {
             );
         }
         Ok(())
+    }
+
+    fn get_focus_and_summary(&self) -> Result<(String, String)> {
+        // issue 1306: read d003 AND --summary in ONE gphoto2 process = ONE USB open/enumerate/close
+        // on the shared xHCI bus, so the per-read session count stays 3 (issue 1229). Split the
+        // combined stdout at the first `END` line: d003 config block, then the summary text.
+        let out = std::process::Command::new(&self.binary)
+            .arg("--get-config")
+            .arg(FOCUS_DISTANCE_KEY)
+            .arg("--summary")
+            .output()
+            .with_context(|| format!("spawn {} --get-config d003 --summary", self.binary))?;
+        if !out.status.success() {
+            bail!(
+                "gphoto2 --get-config d003 --summary failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        Ok(split_focus_and_summary(&stdout))
     }
 }
 
@@ -401,6 +456,15 @@ impl CameraSession {
                     CORE_CONFIG_KEYS.len()
                 )
             })?;
+        // issue 1238 + 1306: the best-effort d003 focus distance AND the gphoto2 `--summary` text
+        // are read TOGETHER in ONE gphoto2 session (`get_focus_and_summary`), NOT folded into the
+        // core batch — so a camera/firmware/lens that does not answer them can never abort the
+        // batched core read (which would wrongly degrade the whole shading state to offline), and a
+        // full read stays detect + core batch + this = 3 USB sessions (issue 1229, was 9). A failure
+        // degrades BOTH to empty: a `None` focus_distance, and the aperture falls back to the RADIO
+        // `Current:` (the pre-1306 behaviour). `apply` also calls `read_raw`, so a write pays this
+        // same shape — negligible (writes are rare + user-initiated).
+        let (focus_distance, summary) = self.runner.get_focus_and_summary().unwrap_or_default();
         Ok(RawConfigs {
             iso,
             fnumber,
@@ -409,19 +473,8 @@ impl CameraSession {
             tint,
             sensor_fps,
             project_fps,
-            // issue 1238: the manual focus distance (d003) is read BEST-EFFORT as a SEPARATE call —
-            // NOT folded into the core batch — so a camera/firmware/lens that does not answer d003
-            // can never abort the batched core read (which would wrongly degrade the whole shading
-            // state to offline). Unlike the core keys whose failure means the read is fundamentally
-            // broken and correctly degrades via `?`, an unanswered d003 maps to an empty block
-            // (-> a `None` focus_distance). This is the ONE extra USB session beyond the batch: a
-            // full read is now detect + one core batch + d003 = 3 sessions (was 9). NB: `apply` also
-            // calls `read_raw`, so a write pays this same shape — negligible (writes are rare +
-            // user-initiated).
-            focus_distance: self
-                .runner
-                .get_config(FOCUS_DISTANCE_KEY)
-                .unwrap_or_default(),
+            focus_distance,
+            summary,
         })
     }
 
@@ -510,7 +563,10 @@ impl CameraSession {
         // camera on a partial read (the handler maps this error to 502). This top `read_raw()?`
         // early-return drops the lock guard WITHOUT invalidating — correct: nothing was written.
         let raw = self.read_raw()?;
-        let fnumber_choices = parse_choices(&raw.fnumber);
+        // issue 1304: the write index basis is the PARSEABLE-only f-number list — the SAME basis
+        // `params_and_caps` uses for the readback `aperture_norm` and the caps `fnumber_choices`
+        // the panel steps over. Using the unfiltered `parse_choices` here would desync the count.
+        let fnumber_choices = parse_fnumber_labels(&raw.fnumber);
         let (params, _) = params_and_caps(&raw);
         let fps100 = params.fps100.unwrap_or(DEFAULT_FPS100);
         let writes = plan_writes(req, &fnumber_choices, fps100);

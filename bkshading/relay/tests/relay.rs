@@ -10,8 +10,8 @@ use anyhow::{anyhow, bail, Result};
 use bkshading_proto::wire::SetRequest;
 use bkshading_relay::transport::{
     build_get_config_many_args, parse_capture_fps_env, parse_first_model,
-    parse_min_read_interval_env, read_is_fresh, split_config_blocks, CameraSession, Gphoto2Cli,
-    Gphoto2Runner, MonoClock, CORE_CONFIG_KEYS,
+    parse_min_read_interval_env, read_is_fresh, split_config_blocks, split_focus_and_summary,
+    CameraSession, Gphoto2Cli, Gphoto2Runner, MonoClock, CORE_CONFIG_KEYS,
 };
 
 const AUTO_DETECT: &str = "\
@@ -23,6 +23,8 @@ struct FakeRunner {
     detect: String,
     configs: HashMap<String, String>,
     camera_present: bool,
+    /// gphoto2 `--summary` text returned by `get_focus_and_summary` (issue 1306). Empty by default.
+    summary: String,
 }
 
 impl FakeRunner {
@@ -51,6 +53,7 @@ impl FakeRunner {
             detect: AUTO_DETECT.into(),
             configs,
             camera_present: true,
+            summary: String::new(),
         }
     }
 
@@ -59,6 +62,12 @@ impl FakeRunner {
     /// is also exercised).
     fn with_config(mut self, key: &str, block: &str) -> Self {
         self.configs.insert(key.into(), block.into());
+        self
+    }
+
+    /// Sets the gphoto2 `--summary` text the relay reads via `get_focus_and_summary` (issue 1306).
+    fn with_summary(mut self, summary: &str) -> Self {
+        self.summary = summary.into();
         self
     }
 }
@@ -78,6 +87,13 @@ impl Gphoto2Runner for FakeRunner {
     }
     fn set_config(&self, _key: &str, _value: &str) -> Result<()> {
         Ok(()) // reads don't write; the apply test uses RecordingRunner below
+    }
+    fn get_focus_and_summary(&self) -> Result<(String, String)> {
+        // issue 1306: d003 block (empty if absent — best-effort) + the configured summary text.
+        Ok((
+            self.configs.get("d003").cloned().unwrap_or_default(),
+            self.summary.clone(),
+        ))
     }
 }
 
@@ -115,6 +131,12 @@ fn read_state_reports_online_camera() {
     assert_eq!(st.params.focus_distance, None);
     let caps = st.caps.unwrap();
     assert_eq!(caps.iso_choices, vec![100, 200, 400, 800]);
+    // issue 1304: the relay reports the f-number choices as plain numbers (from the RADIO
+    // choice list via parse_fnumber), so the panel can compute the aperture +/- step.
+    assert_eq!(caps.fnumber_choices.len(), 4);
+    for (got, want) in caps.fnumber_choices.iter().zip([2.8, 4.0, 5.2, 8.0]) {
+        assert!((got - want).abs() < 1e-9, "fnumber choice {got} != {want}");
+    }
     assert_eq!(st.version, "1.7.0-dev.516");
 }
 
@@ -133,6 +155,51 @@ fn read_state_reports_d003_focus_distance_1238() {
     assert!(st.online);
     assert_eq!(st.params.focus_distance, Some(32768));
     assert_eq!(st.params.iso, Some(400));
+}
+
+#[test]
+fn read_state_recovers_offgrid_aperture_from_summary_1306() {
+    // The lens is open below the camera's first enumerated stop, so f-number RADIO prints
+    // `Current: (null)`. The relay must recover the real aperture from the --summary raw
+    // (0x5007 400 = f/4.0), folded into the d003 session, and drop the junk f/0.2/f/0 choices.
+    let fake = FakeRunner::full_camera()
+        .with_config(
+            "f-number",
+            "Current: (null)\nChoice: 0 f/0.2\nChoice: 1 f/0\nChoice: 2 f/4.5\nChoice: 3 f/4.8\nEND",
+        )
+        .with_summary(
+            "F-Number(0x5007):(readwrite) (type=0x4) Enumeration [20,0,450,480] value: f/4 (400)",
+        );
+    let session = CameraSession::new(Box::new(fake), "1.7.0-dev.516");
+    let st = session.read_state();
+    assert!(st.online);
+    let av = st
+        .params
+        .aperture_av
+        .expect("aperture recovered from summary");
+    assert!((av - 2.0 * 4.0_f64.log2()).abs() < 1e-9, "aperture_av {av}");
+    let caps = st.caps.unwrap();
+    // f/0.2 and f/0 dropped; nearest choice to 4.0 is f/4.5 (index 0) -> norm 0.0.
+    assert_eq!(caps.fnumber_choices.len(), 2);
+    assert!(st.params.aperture_norm.unwrap().abs() < 1e-9);
+}
+
+#[test]
+fn split_focus_and_summary_1306() {
+    let combined =
+        "Label: PTP Property 0xd003\nCurrent: 32768\nEND\nF-Number(0x5007): value: f/4 (400)\nModel: X";
+    let (block, summary) = split_focus_and_summary(combined);
+    assert!(block.contains("Current: 32768"));
+    assert!(block.trim_end().ends_with("END"));
+    assert!(summary.contains("0x5007"));
+    assert!(
+        !summary.contains("Current: 32768"),
+        "summary excludes the d003 block"
+    );
+    // No END line -> whole thing is the block, empty summary (fail-safe).
+    let (b2, s2) = split_focus_and_summary("no end line here");
+    assert!(b2.contains("no end line"));
+    assert!(s2.is_empty());
 }
 
 #[test]

@@ -1,0 +1,9 @@
+# bkshading service config for the issue-1304 panel E2E. ONE camera whose "relay" is the
+# stdlib stub_relay.py. No ndi_preview -> params-only block, no libndi needed on CI.
+bind = "127.0.0.1:8780"
+
+[[camera]]
+id = "cam1"
+label = "Cam 1"
+transport = "cambox-relay"
+address = "127.0.0.1:8781"
