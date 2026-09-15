@@ -14,7 +14,9 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use bkshading_proto::mapping::{parse_fnumber_labels, DEFAULT_FPS100};
 use bkshading_proto::read::{fps_supported, params_and_caps, plan_writes, RawConfigs};
-use bkshading_proto::wire::{RelayState, SetQueue, SetRequest, SubmitAction};
+use bkshading_proto::wire::{
+    summarize_set_request, RelayState, SetQueue, SetRequest, SubmitAction,
+};
 
 /// Hard per-gphoto2-command timeout (issue 1309). A gphoto2 that hangs on a busy / unresponsive
 /// USB-PTP device would otherwise hold the serialized camera lock (and its child) forever, wedging
@@ -29,6 +31,54 @@ pub const GPHOTO2_TIMEOUT: Duration = Duration::from_secs(8);
 pub enum ApplyOutcome {
     Applied(usize),
     Coalesced,
+}
+
+/// RAII guard around the single-flight write drain (issue 1309, review YELLOW): while `armed`, its
+/// `Drop` resets the [`SetQueue`] gate (clearing `in_flight` + any pending follow-up) so a PANIC
+/// inside `apply` can never leave shading permanently wedged (`in_flight` stuck true → every later
+/// SET coalesces forever). The normal completion paths disarm it; the error path calls
+/// `disarm_and_abort` (which also logs the dropped, already-acked coalesced follow-up).
+struct FlightGuard<'a> {
+    queue: &'a std::sync::Mutex<SetQueue>,
+    armed: bool,
+}
+
+impl FlightGuard<'_> {
+    /// Explicitly abort the flight (drop in-flight + pending) and disarm the guard, logging any
+    /// dropped coalesced follow-up at warn so its loss is reconstructible from the journal.
+    fn disarm_and_abort(&mut self) {
+        self.armed = false;
+        let dropped = self
+            .queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .abort();
+        if let Some(req) = dropped {
+            tracing::warn!(
+                dropped = %summarize_set_request(&req),
+                "shading SET dropped: the in-flight write failed and a coalesced follow-up (already acknowledged) was not applied"
+            );
+        }
+    }
+}
+
+impl Drop for FlightGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            // Reached only on an UNWIND (a panic in `apply`) — reset the gate so the next SET runs.
+            let dropped = self
+                .queue
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .abort();
+            if let Some(req) = dropped {
+                tracing::warn!(
+                    dropped = %summarize_set_request(&req),
+                    "shading SET dropped: the in-flight write panicked; single-flight gate reset"
+                );
+            }
+        }
+    }
 }
 
 /// Last ~200 chars of a gphoto2 stderr (issue 1309), trimmed, for the error log line. Pure.
@@ -739,15 +789,23 @@ impl CameraSession {
                 SubmitAction::RunNow(r) => r,
             }
         };
+        // Unwind guard (issue 1309, review YELLOW): if `apply` PANICS, the panic unwinds past the
+        // explicit Err handling below and would leave `in_flight` stuck `true` forever — every
+        // later SET would then coalesce and no shading write would ever run again until a relay
+        // restart, the exact half-dead availability class this ticket fights. The guard's Drop
+        // resets the gate (and logs any dropped coalesced follow-up) on ANY early exit it is not
+        // disarmed for; on the normal return paths below it is explicitly disarmed first.
+        let mut guard = FlightGuard {
+            queue: &self.set_queue,
+            armed: true,
+        };
         loop {
             match self.apply(&current) {
                 Err(e) => {
                     // Drop the in-flight state AND any queued follow-up: a write planned against a
-                    // now-uncertain camera must not run blind. The handler maps this to a 502.
-                    self.set_queue
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .abort();
+                    // now-uncertain camera must not run blind. The handler maps this to a 502. A
+                    // coalesced follow-up was already acked to the client, so log its loss.
+                    guard.disarm_and_abort();
                     return Err(e);
                 }
                 Ok(applied) => {
@@ -761,7 +819,10 @@ impl CameraSession {
                             tracing::info!("draining coalesced shading SET (applying the latest)");
                             current = r;
                         }
-                        None => return Ok(ApplyOutcome::Applied(applied)),
+                        None => {
+                            guard.armed = false; // clean completion — finish() already idled the gate
+                            return Ok(ApplyOutcome::Applied(applied));
+                        }
                     }
                 }
             }

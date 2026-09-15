@@ -53,16 +53,20 @@ async fn state(State(session): State<Shared>) -> Json<RelayState> {
 async fn set_params(
     State(session): State<Shared>,
     Json(req): Json<SetRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
     let s = session.clone();
     // issue 1309: funnel through the single-flight coalescing gate so two rapid SETs never fork
-    // two concurrent gphoto2 processes. A coalesced SET is accepted (queued) — the in-flight write
-    // will apply the latest-wins merge — so it returns `{"coalesced": true}`.
+    // two concurrent gphoto2 processes. A coalesced SET is ACCEPTED (queued) — the in-flight write
+    // will apply the latest-wins merge — so it returns 202 `{"coalesced": true}`.
     match tokio::task::spawn_blocking(move || s.submit(&req)).await {
-        Ok(Ok(ApplyOutcome::Applied(applied))) => {
-            Ok(Json(serde_json::json!({ "applied": applied })))
-        }
-        Ok(Ok(ApplyOutcome::Coalesced)) => Ok(Json(serde_json::json!({ "coalesced": true }))),
+        Ok(Ok(ApplyOutcome::Applied(applied))) => Ok((
+            StatusCode::OK,
+            Json(serde_json::json!({ "applied": applied })),
+        )),
+        Ok(Ok(ApplyOutcome::Coalesced)) => Ok((
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({ "coalesced": true })),
+        )),
         // A gphoto2 error (camera unplugged / busy) is an upstream failure, not our bug.
         Ok(Err(e)) => Err((StatusCode::BAD_GATEWAY, e.to_string())),
         Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),

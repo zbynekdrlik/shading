@@ -435,11 +435,14 @@ impl SetQueue {
         }
     }
 
-    /// Called on a write error: drop the in-flight state AND any pending follow-up (a queued write
-    /// planned against a now-uncertain camera must not be run blind). The next SET starts fresh.
-    pub fn abort(&mut self) {
+    /// Called on a write error (or an unwind guard): drop the in-flight state AND any pending
+    /// follow-up (a queued write planned against a now-uncertain camera must not be run blind), and
+    /// RETURN that dropped follow-up so the caller can log it — the coalesced SET was already
+    /// acknowledged to the client, so its loss must at least be reconstructible. The next SET starts
+    /// fresh. Idempotent: a second `abort()` returns `None`.
+    pub fn abort(&mut self) -> Option<SetRequest> {
         self.in_flight = false;
-        self.pending = None;
+        self.pending.take()
     }
 
     /// Total number of SETs coalesced over this queue's lifetime (for diagnostics).

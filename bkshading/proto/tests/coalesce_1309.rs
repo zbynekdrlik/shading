@@ -62,7 +62,9 @@ fn set_queue_abort_clears_in_flight_and_pending() {
     let mut q = SetQueue::default();
     assert!(matches!(q.submit(req_iso(1)), SubmitAction::RunNow(_)));
     assert_eq!(q.submit(req_iso(2)), SubmitAction::Coalesced { total: 1 });
-    q.abort(); // a write error drops both in-flight AND the queued follow-up
+    let dropped = q.abort(); // a write error drops both in-flight AND the queued follow-up
+    assert_eq!(dropped.and_then(|r| r.iso), Some(2)); // abort RETURNS the dropped follow-up (to log)
+    assert!(q.abort().is_none()); // idempotent — a second abort has nothing to drop
     assert!(q.finish().is_none()); // nothing pending
     assert!(matches!(q.submit(req_iso(3)), SubmitAction::RunNow(_))); // fresh start
 }
