@@ -528,10 +528,24 @@ def _fake_deploy_env(tmp, remote_sha):
     with open(fake_scp, "w") as f:
         f.write(scp_body)
     os.chmod(fake_scp, 0o755)
+    # issue 1271 rig-busy guard: the deploy script runs `obs_phase2.py rig-busy-check` against the
+    # LIVE strih/stream OBS before touching a cambox. A "fake" deploy must never read the real rig
+    # (16.9.2026: this test went red on dev1 purely because a PR E2E was recording on both boxes),
+    # so point the guard's script dir at a stub that answers "not busy" -- the existing
+    # BKSHADING_DEPLOY_OBS_PHASE2_DIR seam, no deploy-script change.
+    fake_phase2 = os.path.join(tmp, "obs_phase2.py")
+    with open(fake_phase2, "w") as f:
+        f.write(
+            "#!/usr/bin/env python3\n"
+            "import json, sys\n"
+            'print(json.dumps({"busy": False, "diagnostics": []}))\n'
+        )
+    os.chmod(fake_phase2, 0o755)
     env = {
         "BKSHADING_DEPLOY_SSH": fake_ssh,
         "BKSHADING_DEPLOY_SCP": fake_scp,
         "BKSHADING_DEPLOY_SSHPASS_PREFIX": "",
+        "BKSHADING_DEPLOY_OBS_PHASE2_DIR": tmp,
     }
     return env, log
 
