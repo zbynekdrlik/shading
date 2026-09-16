@@ -9,12 +9,143 @@
 //! is the real impl, and tests inject a fake so every path is exercised without a camera.
 
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use bkshading_proto::mapping::{parse_fnumber_labels, DEFAULT_FPS100};
 use bkshading_proto::read::{fps_supported, params_and_caps, plan_writes, RawConfigs};
-use bkshading_proto::wire::{RelayState, SetRequest};
+use bkshading_proto::wire::{
+    summarize_set_request, RelayState, SetQueue, SetRequest, SubmitAction,
+};
+
+/// Hard per-gphoto2-command timeout (issue 1309). A gphoto2 that hangs on a busy / unresponsive
+/// USB-PTP device would otherwise hold the serialized camera lock (and its child) forever, wedging
+/// the relay — the 2026-09-13/15 half-dead-cambox class. After this bound the child is KILLED and
+/// reaped, and the command reports an error (a read then degrades to offline, a write returns 502).
+pub const GPHOTO2_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// The outcome of a [`CameraSession::submit`] (issue 1309): the write actually ran (`Applied(n)`
+/// gphoto2 writes), or it was COALESCED into an in-flight write's queue (latest-wins) and will be
+/// applied by that worker when it finishes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApplyOutcome {
+    Applied(usize),
+    Coalesced,
+}
+
+/// RAII guard around the single-flight write drain (issue 1309, review YELLOW): while `armed`, its
+/// `Drop` resets the [`SetQueue`] gate (clearing `in_flight` + any pending follow-up) so a PANIC
+/// inside `apply` can never leave shading permanently wedged (`in_flight` stuck true → every later
+/// SET coalesces forever). The normal completion paths disarm it; the error path calls
+/// `disarm_and_abort` (which also logs the dropped, already-acked coalesced follow-up).
+struct FlightGuard<'a> {
+    queue: &'a std::sync::Mutex<SetQueue>,
+    armed: bool,
+}
+
+impl FlightGuard<'_> {
+    /// Explicitly abort the flight (drop in-flight + pending) and disarm the guard, logging any
+    /// dropped coalesced follow-up at warn so its loss is reconstructible from the journal.
+    fn disarm_and_abort(&mut self) {
+        self.armed = false;
+        let dropped = self
+            .queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .abort();
+        if let Some(req) = dropped {
+            tracing::warn!(
+                dropped = %summarize_set_request(&req),
+                "shading SET dropped: the in-flight write failed and a coalesced follow-up (already acknowledged) was not applied"
+            );
+        }
+    }
+}
+
+impl Drop for FlightGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            // Reached only on an UNWIND (a panic in `apply`) — reset the gate so the next SET runs.
+            let dropped = self
+                .queue
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .abort();
+            if let Some(req) = dropped {
+                tracing::warn!(
+                    dropped = %summarize_set_request(&req),
+                    "shading SET dropped: the in-flight write panicked; single-flight gate reset"
+                );
+            }
+        }
+    }
+}
+
+/// Last ~200 chars of a gphoto2 stderr (issue 1309), trimmed, for the error log line. Pure.
+pub fn gphoto2_stderr_tail(stderr: &str) -> String {
+    let trimmed = stderr.trim();
+    let n = trimmed.chars().count();
+    if n <= 200 {
+        trimmed.to_string()
+    } else {
+        let tail: String = trimmed.chars().skip(n - 200).collect();
+        format!("…{tail}")
+    }
+}
+
+/// Runs a prepared command with a hard `timeout`, KILLING + reaping the child on overrun (issue
+/// 1309). Returns `(output, elapsed, timed_out)`. stdout/stderr are drained on their own threads
+/// so a large output can never deadlock the wait; on the deadline the child is `kill()`ed and
+/// `wait()`ed (reaped — no zombie/orphan), and the reader threads finish as the pipes close.
+fn run_with_timeout(
+    mut cmd: std::process::Command,
+    timeout: Duration,
+) -> std::io::Result<(std::process::Output, Duration, bool)> {
+    use std::io::Read;
+    use std::process::Stdio;
+    let start = Instant::now();
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn()?;
+    let mut so = child.stdout.take();
+    let mut se = child.stderr.take();
+    let th_o = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        if let Some(s) = so.as_mut() {
+            let _ = s.read_to_end(&mut b);
+        }
+        b
+    });
+    let th_e = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        if let Some(s) = se.as_mut() {
+            let _ = s.read_to_end(&mut b);
+        }
+        b
+    });
+    let mut timed_out = false;
+    let status = loop {
+        if let Some(s) = child.try_wait()? {
+            break s;
+        }
+        if start.elapsed() >= timeout {
+            let _ = child.kill();
+            timed_out = true;
+            break child.wait()?;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let stdout = th_o.join().unwrap_or_default();
+    let stderr = th_e.join().unwrap_or_default();
+    Ok((
+        std::process::Output {
+            status,
+            stdout,
+            stderr,
+        },
+        start.elapsed(),
+        timed_out,
+    ))
+}
 
 /// The seam over the `gphoto2` CLI. Blocking (std process); handlers call it via
 /// `spawn_blocking`. `Send + Sync` so it can live behind an `Arc` shared across tasks.
@@ -87,35 +218,68 @@ impl Default for Gphoto2Cli {
     }
 }
 
+impl Gphoto2Cli {
+    /// Runs ONE gphoto2 command through the single centralised seam (issue 1309): a hard
+    /// timeout+kill ([`run_with_timeout`]) plus ONE structured log line per command — at info on
+    /// success (kind/param/value/argv/rc/duration_ms), at error on failure (adds the stderr tail +
+    /// whether it timed out). `kind` is `detect`/`read`/`set`; `param` names the key(s); `value`
+    /// is the write value (set only). Returns the child's stdout bytes on success, an `Err` on a
+    /// non-zero exit or a timeout (the caller degrades a read to offline / returns 502 for a write).
+    /// Centralising here is why the fork/kill/log lives in ONE place, not 5 copies, and why the
+    /// `Gphoto2Runner` trait (and every fake-runner test) is untouched.
+    fn run(&self, kind: &str, param: &str, value: Option<&str>, args: &[&str]) -> Result<Vec<u8>> {
+        let mut cmd = std::process::Command::new(&self.binary);
+        cmd.args(args);
+        let argv = std::iter::once(self.binary.as_str())
+            .chain(args.iter().copied())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let (out, elapsed, timed_out) =
+            run_with_timeout(cmd, GPHOTO2_TIMEOUT).with_context(|| format!("spawn {argv}"))?;
+        let duration_ms = elapsed.as_millis() as u64;
+        let rc = out.status.code();
+        if out.status.success() && !timed_out {
+            tracing::info!(
+                kind,
+                param,
+                value,
+                argv = %argv,
+                rc = ?rc,
+                duration_ms,
+                "gphoto2 command"
+            );
+            Ok(out.stdout)
+        } else {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let tail = gphoto2_stderr_tail(&stderr);
+            tracing::error!(
+                kind,
+                param,
+                value,
+                argv = %argv,
+                rc = ?rc,
+                timed_out,
+                duration_ms,
+                stderr = %tail,
+                "gphoto2 command failed"
+            );
+            if timed_out {
+                bail!("gphoto2 command timed out after {duration_ms} ms and was killed: {argv}");
+            }
+            bail!("gphoto2 command failed ({argv}): {tail}");
+        }
+    }
+}
+
 impl Gphoto2Runner for Gphoto2Cli {
     fn auto_detect(&self) -> Result<String> {
-        let out = std::process::Command::new(&self.binary)
-            .arg("--auto-detect")
-            .output()
-            .with_context(|| format!("spawn {} --auto-detect", self.binary))?;
-        if !out.status.success() {
-            bail!(
-                "gphoto2 --auto-detect failed: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-        }
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        let out = self.run("detect", "auto-detect", None, &["--auto-detect"])?;
+        Ok(String::from_utf8_lossy(&out).into_owned())
     }
 
     fn get_config(&self, key: &str) -> Result<String> {
-        let out = std::process::Command::new(&self.binary)
-            .arg("--get-config")
-            .arg(key)
-            .output()
-            .with_context(|| format!("spawn {} --get-config {}", self.binary, key))?;
-        if !out.status.success() {
-            bail!(
-                "gphoto2 --get-config {} failed: {}",
-                key,
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-        }
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        let out = self.run("read", key, None, &["--get-config", key])?;
+        Ok(String::from_utf8_lossy(&out).into_owned())
     }
 
     fn get_config_many(&self, keys: &[&str]) -> Result<Vec<String>> {
@@ -128,18 +292,9 @@ impl Gphoto2Runner for Gphoto2Cli {
             return Ok(Vec::new());
         }
         let args = build_get_config_many_args(keys);
-        let out = std::process::Command::new(&self.binary)
-            .args(&args)
-            .output()
-            .with_context(|| format!("spawn {} --get-config (x{})", self.binary, keys.len()))?;
-        if !out.status.success() {
-            bail!(
-                "gphoto2 --get-config (x{}) failed: {}",
-                keys.len(),
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-        }
-        let stdout = String::from_utf8_lossy(&out.stdout);
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = self.run("read", &keys.join(","), None, &arg_refs)?;
+        let stdout = String::from_utf8_lossy(&out);
         // Fail-safe: a block/key count mismatch (a key errored mid-batch, a truncated block) must
         // NOT mis-assign a block to the wrong key — it degrades to a failed read (-> offline), the
         // same as a failed single `get_config`.
@@ -152,19 +307,8 @@ impl Gphoto2Runner for Gphoto2Cli {
     }
 
     fn set_config(&self, key: &str, value: &str) -> Result<()> {
-        let out = std::process::Command::new(&self.binary)
-            .arg("--set-config")
-            .arg(format!("{key}={value}"))
-            .output()
-            .with_context(|| format!("spawn {} --set-config {}={}", self.binary, key, value))?;
-        if !out.status.success() {
-            bail!(
-                "gphoto2 --set-config {}={} failed: {}",
-                key,
-                value,
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-        }
+        let kv = format!("{key}={value}");
+        self.run("set", key, Some(value), &["--set-config", &kv])?;
         Ok(())
     }
 
@@ -172,19 +316,13 @@ impl Gphoto2Runner for Gphoto2Cli {
         // issue 1306: read d003 AND --summary in ONE gphoto2 process = ONE USB open/enumerate/close
         // on the shared xHCI bus, so the per-read session count stays 3 (issue 1229). Split the
         // combined stdout at the first `END` line: d003 config block, then the summary text.
-        let out = std::process::Command::new(&self.binary)
-            .arg("--get-config")
-            .arg(FOCUS_DISTANCE_KEY)
-            .arg("--summary")
-            .output()
-            .with_context(|| format!("spawn {} --get-config d003 --summary", self.binary))?;
-        if !out.status.success() {
-            bail!(
-                "gphoto2 --get-config d003 --summary failed: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-        }
-        let stdout = String::from_utf8_lossy(&out.stdout);
+        let out = self.run(
+            "read",
+            "d003+summary",
+            None,
+            &["--get-config", FOCUS_DISTANCE_KEY, "--summary"],
+        )?;
+        let stdout = String::from_utf8_lossy(&out);
         Ok(split_focus_and_summary(&stdout))
     }
 }
@@ -386,6 +524,14 @@ pub struct CameraSession {
     /// gphoto2 read (serializing gphoto2 access to the single USB camera is correct — concurrent
     /// gphoto2 processes would contend on the very bus this fix protects).
     read_cache: Mutex<Option<CachedRead>>,
+    /// Last observed camera online/offline state (issue 1309): `read_state_uncached` logs ONE info
+    /// line per transition (online -> offline and back), so the journal records a camera
+    /// coming/going without per-read-cycle noise.
+    last_online: Mutex<Option<bool>>,
+    /// Single-flight coalescing gate for shading writes (issue 1309). `submit` funnels every
+    /// `PUT /api/params` through it so a burst of SETs (the owner "raised the aperture twice")
+    /// never forks a second gphoto2; the in-flight write drains the coalesced (latest-wins) queue.
+    set_queue: Mutex<SetQueue>,
 }
 
 impl CameraSession {
@@ -397,6 +543,8 @@ impl CameraSession {
             min_read_interval_ms: DEFAULT_MIN_READ_INTERVAL_MS,
             clock: Box::new(InstantClock::new()),
             read_cache: Mutex::new(None),
+            last_online: Mutex::new(None),
+            set_queue: Mutex::new(SetQueue::default()),
         }
     }
 
@@ -513,6 +661,14 @@ impl CameraSession {
     /// A detect miss or a gphoto2 read error degrades to an offline [`RelayState`], the
     /// server-is-truth model. Reached only through [`read_state`](Self::read_state)'s floor.
     fn read_state_uncached(&self) -> RelayState {
+        let state = self.compute_state();
+        self.note_online_transition(&state);
+        state
+    }
+
+    /// Builds the current [`RelayState`] from one real read cycle (the old `read_state_uncached`
+    /// body), WITHOUT the transition-log side effect (issue 1309 kept the two concerns separate).
+    fn compute_state(&self) -> RelayState {
         let camera = self.detect();
         if camera.is_none() {
             // The box capture rate is known even with no camera — report it (issue 809).
@@ -539,6 +695,24 @@ impl CameraSession {
                 capture_fps: self.capture_fps,
                 ..RelayState::offline(self.version.clone())
             },
+        }
+    }
+
+    /// Logs ONE info line whenever the camera online/offline state FLIPS since the last read cycle
+    /// (issue 1309) — a camera coming online (with its model) or going offline. No line on a
+    /// steady state, so this never adds per-cycle noise. Poison-immune (recover the inner value).
+    fn note_online_transition(&self, state: &RelayState) {
+        let mut last = self
+            .last_online
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *last != Some(state.online) {
+            if state.online {
+                tracing::info!(camera = ?state.camera, "camera online");
+            } else {
+                tracing::info!("camera offline");
+            }
+            *last = Some(state.online);
         }
     }
 
@@ -587,6 +761,71 @@ impl CameraSession {
         match write_err {
             Some(e) => Err(e),
             None => Ok(n),
+        }
+    }
+
+    /// Submits a shading write through the single-flight coalescing gate (issue 1309) — the entry
+    /// point the HTTP `PUT /api/params` handler uses. If NO write is in flight, this call runs
+    /// [`apply`](Self::apply) now and, when it finishes, drains any SET that was coalesced while it
+    /// ran (latest-wins), applying the newest until the queue is idle. If a write IS already in
+    /// flight, this SET is folded into the pending slot and returns [`ApplyOutcome::Coalesced`] —
+    /// so the owner "raising the aperture twice" NEVER forks a second concurrent gphoto2 process
+    /// (the 2026-09-15 "shading crashol po dvoch zdvihnutiach clony" class). `apply` itself is
+    /// unchanged, so a lone SET behaves exactly as before.
+    pub fn submit(&self, req: &SetRequest) -> Result<ApplyOutcome> {
+        let mut current = {
+            let mut q = self
+                .set_queue
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match q.submit(req.clone()) {
+                SubmitAction::Coalesced { total } => {
+                    tracing::info!(
+                        coalesced_total = total,
+                        "shading SET coalesced (a gphoto2 write is already in flight; latest-wins per param)"
+                    );
+                    return Ok(ApplyOutcome::Coalesced);
+                }
+                SubmitAction::RunNow(r) => r,
+            }
+        };
+        // Unwind guard (issue 1309, review YELLOW): if `apply` PANICS, the panic unwinds past the
+        // explicit Err handling below and would leave `in_flight` stuck `true` forever — every
+        // later SET would then coalesce and no shading write would ever run again until a relay
+        // restart, the exact half-dead availability class this ticket fights. The guard's Drop
+        // resets the gate (and logs any dropped coalesced follow-up) on ANY early exit it is not
+        // disarmed for; on the normal return paths below it is explicitly disarmed first.
+        let mut guard = FlightGuard {
+            queue: &self.set_queue,
+            armed: true,
+        };
+        loop {
+            match self.apply(&current) {
+                Err(e) => {
+                    // Drop the in-flight state AND any queued follow-up: a write planned against a
+                    // now-uncertain camera must not run blind. The handler maps this to a 502. A
+                    // coalesced follow-up was already acked to the client, so log its loss.
+                    guard.disarm_and_abort();
+                    return Err(e);
+                }
+                Ok(applied) => {
+                    let next = self
+                        .set_queue
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .finish();
+                    match next {
+                        Some(r) => {
+                            tracing::info!("draining coalesced shading SET (applying the latest)");
+                            current = r;
+                        }
+                        None => {
+                            guard.armed = false; // clean completion — finish() already idled the gate
+                            return Ok(ApplyOutcome::Applied(applied));
+                        }
+                    }
+                }
+            }
         }
     }
 }

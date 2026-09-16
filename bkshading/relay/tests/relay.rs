@@ -9,9 +9,9 @@ use std::sync::{Arc, Mutex};
 use anyhow::{anyhow, bail, Result};
 use bkshading_proto::wire::SetRequest;
 use bkshading_relay::transport::{
-    build_get_config_many_args, parse_capture_fps_env, parse_first_model,
+    build_get_config_many_args, gphoto2_stderr_tail, parse_capture_fps_env, parse_first_model,
     parse_min_read_interval_env, read_is_fresh, split_config_blocks, split_focus_and_summary,
-    CameraSession, Gphoto2Cli, Gphoto2Runner, MonoClock, CORE_CONFIG_KEYS,
+    ApplyOutcome, CameraSession, Gphoto2Cli, Gphoto2Runner, MonoClock, CORE_CONFIG_KEYS,
 };
 
 const AUTO_DETECT: &str = "\
@@ -751,4 +751,39 @@ fn parse_min_read_interval_env_1229() {
         parse_min_read_interval_env(Some("99999999999".into())),
         None
     ); // absurd -> default
+}
+
+/// issue 1309: a lone SET goes through `submit` (the single-flight coalescing gate) exactly like
+/// the old `apply` — the queue is idle, so it runs immediately and reports `Applied(n)`. A second
+/// SET after the first completes also runs (idle again). Concurrency-driven coalescing is proven
+/// by the pure `SetQueue` unit tests (`bkshading-proto` `coalesce_1309.rs`); this pins the relay
+/// wiring: `submit` runs `apply` and surfaces its write count.
+#[test]
+fn submit_runs_a_lone_set_and_reports_applied() {
+    let session = CameraSession::new(Box::new(FakeRunner::full_camera()), "1.7.0-dev.516");
+    let req = SetRequest {
+        iso: Some(800),
+        fps: Some(30),
+        ..Default::default()
+    };
+    match session.submit(&req).expect("submit ok") {
+        ApplyOutcome::Applied(n) => assert!(n >= 2, "applied at least iso+fps writes, got {n}"),
+        ApplyOutcome::Coalesced => panic!("an idle queue must RUN the SET, not coalesce it"),
+    }
+    // Queue is idle again -> the next SET also runs.
+    assert!(matches!(
+        session.submit(&req).expect("submit ok"),
+        ApplyOutcome::Applied(_)
+    ));
+}
+
+/// issue 1309: the stderr-tail helper keeps a short error whole and elides a long one to its last
+/// 200 chars (behind an ellipsis), so a gphoto2 failure log line never dumps a huge stderr.
+#[test]
+fn stderr_tail_trims_long_and_keeps_short() {
+    assert_eq!(gphoto2_stderr_tail("  boom  "), "boom");
+    let long = "x".repeat(500);
+    let tail = gphoto2_stderr_tail(&long);
+    assert!(tail.starts_with('…'));
+    assert_eq!(tail.chars().count(), 201); // ellipsis + 200 chars
 }

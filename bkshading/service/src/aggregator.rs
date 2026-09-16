@@ -5,9 +5,11 @@
 //! does not answer within the timeout is reported `reachable: false` (never a panic — the
 //! panel greys that block out).
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use bkshading_proto::wire::{resolve_grab, Aggregate, CameraView, FpsSync, RelayState, SetRequest};
+use bkshading_proto::wire::{
+    resolve_grab, summarize_set_request, Aggregate, CameraView, FpsSync, RelayState, SetRequest,
+};
 
 use crate::config::{CameraConfig, ServiceConfig};
 
@@ -84,23 +86,49 @@ impl Aggregator {
         match self.client.get(&url).send().await {
             Ok(resp) if resp.status().is_success() => resp.json::<RelayState>().await.ok(),
             Ok(resp) => {
-                tracing::warn!(id = %cam.id, status = %resp.status(), "relay state non-200");
+                // issue 1309: DEBUG, not WARN — the per-poll (~2 s) reachability state is logged
+                // ONCE per transition by `monitor::reach_transitions` in the pump; a per-poll WARN
+                // here is the 365 KB/run "relay unreachable" spam the ticket measured.
+                tracing::debug!(id = %cam.id, status = %resp.status(), "relay state non-200");
                 None
             }
             Err(e) => {
-                tracing::warn!(id = %cam.id, error = %e, "relay unreachable");
+                tracing::debug!(id = %cam.id, error = %e, "relay unreachable");
                 None
             }
         }
     }
 
-    /// Forwards a shading write to the camera's relay (`PUT /api/params`).
+    /// Forwards a shading write to the camera's relay (`PUT /api/params`). issue 1309: logs EVERY
+    /// forward — camera id, the params requested, the relay HTTP status + latency, and the relay's
+    /// error body on failure — so a "crash after two SETs" is reconstructible from the strih log
+    /// alone (before this, a `PUT /api/params` left no trace on the service side).
     pub async fn forward_set(&self, cam: &CameraConfig, req: &SetRequest) -> anyhow::Result<()> {
         let url = format!("http://{}/api/params", cam.address);
-        let resp = self.client.put(&url).json(req).send().await?;
-        if !resp.status().is_success() {
-            anyhow::bail!("relay {} returned {}", cam.id, resp.status());
+        let params = summarize_set_request(req);
+        let start = Instant::now();
+        let result = self.client.put(&url).json(req).send().await;
+        let latency_ms = start.elapsed().as_millis() as u64;
+        match result {
+            Ok(resp) if resp.status().is_success() => {
+                let status = resp.status();
+                tracing::info!(id = %cam.id, params = %params, status = %status, latency_ms,
+                    "PUT /api/params -> relay ok");
+                Ok(())
+            }
+            Ok(resp) => {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                let body_tail: String = body.chars().take(500).collect();
+                tracing::error!(id = %cam.id, params = %params, status = %status, latency_ms,
+                    body = %body_tail, "PUT /api/params -> relay non-2xx");
+                anyhow::bail!("relay {} returned {}", cam.id, status);
+            }
+            Err(e) => {
+                tracing::error!(id = %cam.id, params = %params, latency_ms, error = %e,
+                    "PUT /api/params -> relay unreachable");
+                Err(e.into())
+            }
         }
-        Ok(())
     }
 }
