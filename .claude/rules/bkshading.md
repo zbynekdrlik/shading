@@ -876,3 +876,7 @@ aperture SETs = two gphoto2 shell-outs. The fix makes the whole chain reconstruc
   SHADING-DEAD (enabled but crashed) = FORGOT (the crash class), SHADING-OFF (disabled = the dev
   default) / SHADING-NO-CAMERA / SHADING-UNREACHABLE = neutral → UNKNOWN. So "shading is off on
   cam1" is reported, never discovered, and an all-disabled dev fleet never false-forgots.
+
+## Service redeploy on strih: the installer's start dies with the ssh session — relaunch via the keep-alive task (16.9.2026)
+
+`scripts/bkshading-deploy-service.sh --execute` copies the exe, registers the `bkshading-service` keep-alive task and starts the service from the ssh session; Windows OpenSSH tears that process down at disconnect (the same job-object physics as OBS-over-ssh, issue 859), so 60 s later there is no process and no `:8770` listener while the script printed `OK … Listening`. Recovery = `schtasks /run /tn bkshading-service` over ssh (session-agnostic; the task launches the exe detached) → `keep-alive: bkshading service was not running - relaunched`; verify from dev1 with `curl :8770/api/version`. The relay on a cambox is unaffected (systemd unit). Followup for the script: start via the task, verify from a SECOND connection.
