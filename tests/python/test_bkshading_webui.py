@@ -289,18 +289,70 @@ def test_app_js_optimistic_pending_echo_1337():
 
 
 def test_app_js_render_no_longer_drops_whole_push_while_interacting_1337():
-    # issue 1337: render must NOT `return` on `interacting` (that dropped every confirmation during a
-    # click sequence -> the owner's 2-3 s number lag). Instead updateBlock guards ONLY the button
-    # REBUILD (which could eat a mid-tap) with `!interacting`; value labels always reconcile.
+    # issue 1337: render must NOT `return` on interaction (that dropped every confirmation during a
+    # click sequence -> the owner's 2-3 s number lag); every value LABEL reconciles live from each
+    # push, and a dragged slider is protected only by its own `activeElement` check.
     js = _read("app.js")
     rb = _js_fn_body(js, "function render(")
     assert "if (interacting) return" not in rb, "render must not drop the whole push while interacting"
+    # addendum #1337: ISO/shutter are now the SAME -/slider/+ stepper as the aperture, so there is no
+    # per-value choice-button REBUILD left to eat a mid-tap -- the renderButtonGroup path is removed.
+    assert "renderButtonGroup" not in js, "the ISO/shutter choice-button renderer is gone"
+    # a dragged slider stays protected by the native activeElement guard (not a whole-push drop).
     ub = _js_fn_body(js, "function updateBlock(")
-    assert "if (!interacting)" in ub, "only the button rebuild is guarded, not the whole render"
+    assert "document.activeElement" in ub, "sliders are guarded by activeElement, not a whole-push drop"
     # one tap is still one PUT with no auto-repeat (the issue-1229 bus doctrine is unchanged).
-    for sig in ("function stepAperture(", "function stepLinear("):
+    for sig in ("function stepAperture(", "function stepLinear(", "function stepEnum("):
         body = _js_fn_body(js, sig)
         assert "setInterval" not in body and "setTimeout" not in body, f"{sig} must not auto-repeat"
+
+def test_index_iso_shutter_are_slider_steppers_not_choice_buttons_1337():
+    # addendum #1337: ISO and uzavierka become the SAME -/slider/+ stepper block as the aperture
+    # (owner: "selektory na iso ako samostatne tlacitka je blbost, daj to ako ostatne" + "uzavierka
+    # tiez"). The rows of per-value choice buttons are removed; each is a slider-row with a - and a +
+    # step button and an index <input type=range> over caps.isoChoices / caps.shutterChoices.
+    html = _read("index.html")
+    for role in ("iso-dec", "iso-inc", "shutter-dec", "shutter-inc"):
+        assert f'data-role="{role}"' in html, f"missing ISO/shutter step button: {role}"
+    # the per-value choice-button groups are gone (no second way to set ISO/shutter).
+    assert "btn-group" not in html, "no choice-button group left in the template"
+    # each stepper's value selector is now a RANGE slider carrying the role the step handler reads.
+    assert re.search(r'<input[^>]*type="range"[^>]*data-role="iso"', html), "ISO index slider present"
+    assert re.search(
+        r'<input[^>]*type="range"[^>]*data-role="shutter"', html
+    ), "shutter index slider present"
+    # Slovak a11y labels mirroring the aperture ones (design: "ISO/Uzavierka o krok nizsie/vyssie").
+    for label in (
+        "ISO o krok nižšie",
+        "ISO o krok vyššie",
+        "Uzávierka o krok nižšie",
+        "Uzávierka o krok vyššie",
+    ):
+        assert label in html, f"missing a11y label: {label}"
+    # the layout reuses the aperture .slider-row (- [slider] +).
+    assert "slider-row" in html
+
+
+def test_app_js_iso_shutter_step_via_stepchoice_absolute_put_1337():
+    # addendum #1337: ISO/shutter step through the SAME stepChoice mirror as the aperture, from the
+    # camera's REAL current value, and PUT the ABSOLUTE enumerated value (choices[idx]) -- NOT a norm.
+    # The choices come from caps.isoChoices / caps.shutterChoices, exposed on the block dataset like
+    # fNumberChoices; the old renderButtonGroup path is removed (verified above).
+    js = _read("app.js")
+    assert "caps.isoChoices" in js, "panel reads the ISO choices from caps"
+    assert "caps.shutterChoices" in js, "panel reads the shutter choices from caps"
+    step = _js_fn_body(js, "function stepEnum(")
+    assert "stepChoice(" in step, "the ISO/shutter step uses the shared stepChoice mirror"
+    # the enumerated ABSOLUTE value is PUT (choices[idx]), keyed by the stepper's key (iso/shutter).
+    assert "{ [cfg.key]: value }" in step, "stepEnum PUTs an absolute value for its key, not a norm"
+    # optimistic pending echo (reconciled by the next push), same as the aperture/kelvin/tint steps.
+    assert 'classList.add("pending")' in step, "the ISO/shutter step shows an optimistic pending value"
+    # one tap = one PUT: each - / + is a plain CLICK handler (no pointerdown-hold repeat).
+    for role in ("iso-dec", "iso-inc", "shutter-dec", "shutter-inc"):
+        assert re.search(
+            r'q\("' + re.escape(role) + r'"\)\.addEventListener\("click"', js
+        ), f"{role} must be a click handler (one tap = one PUT, no repeat)"
+
 
 if __name__ == "__main__":
     _run()
