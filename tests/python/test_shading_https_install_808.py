@@ -1,0 +1,493 @@
+#!/usr/bin/env python3
+"""LAN-only HTTPS front for the bkshading PWA panel (camera-box issue 808, owner ruling 17.9.2026:
+HTTPS over the LAN, never the internet).
+
+The bkshading web panel (bkshading/service) binds 0.0.0.0:8770 and is reachable only over plain
+HTTP on strih.lan:8770. Chrome/Edge offer a full PWA install ONLY in a SECURE CONTEXT (HTTPS with a
+trusted cert, or localhost), so from any other LAN PC there is no "Install app". The owner rejected
+the cloudflared/internet path and chose a dev1 nginx TLS reverse proxy on a PUBLIC DNS NAME that
+resolves to dev1's PRIVATE LAN IP (shading.newlevel.media -> 10.77.9.200), with a Let's Encrypt cert
+via DNS-01 (certbot --dns-cloudflare). Traffic stays on the LAN; the internet is used only for the
+DNS lookup + cert renewal.
+
+These stdlib-only structural + behavioural tests run in the `python-tests` CI job (no Rust
+toolchain, no root, no apt, no real nginx/certbot/cloudflared, no Cloudflare API — every impure op
+is overridden to a temp root / fake binary / fake airuleset module):
+ - the installer + lib parse (`bash -n`);
+ - the lib constants are correct and the committed nginx site file EQUALS the lib's default render
+   (drift guard — one source of truth);
+ - the site renderer parametrizes hostname + upstream and carries every required directive
+   (80->301, `listen 443 ssl http2` with NO `http2 on;`, WS Upgrade/Connection passthrough,
+   proxy_read_timeout 3600s, proxy_buffering off);
+ - the proxy upstream PORT agrees with the appliance `default_bind` (config.rs) — one source of
+   truth for where the panel listens;
+ - the certbot argv / deploy hook / cloudflare.ini renderers are correct;
+ - the --check verdict classifier is right;
+ - NO secret (Cloudflare token) is committed anywhere — the token is read from a file at runtime;
+ - `--install` end-to-end writes the site (== committed conf), enables the symlink + removes the
+   default, writes the cloudflare.ini 0600 from the token file WITHOUT ever echoing the token,
+   creates the A record via the real `cli_cloudflare_dns` snippet (against a fake module), calls
+   certbot with the right argv, writes the deploy hook 755, and reloads nginx;
+ - `--check` fails when unprovisioned and passes when the temp-root fixtures are present;
+ - Bluetooth appears NOWHERE (owner hard rule).
+Runnable directly (`python3 tests/python/test_shading_https_install_808.py`) or under pytest.
+"""
+import os
+import re
+import shutil
+import stat
+import subprocess
+import tempfile
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.normpath(os.path.join(HERE, "..", ".."))
+SCRIPT = os.path.join(REPO, "scripts", "dev1-shading-https-install.sh")
+LIB = os.path.join(REPO, "scripts", "lib", "shading-https.sh")
+CONF = os.path.join(REPO, "scripts", "nginx", "shading.newlevel.media.conf")
+CONFIG_RS = os.path.join(REPO, "bkshading", "service", "src", "config.rs")
+
+HOSTNAME = "shading.newlevel.media"
+ZONE = "newlevel.media"
+LAN_IP = "10.77.9.200"
+UPSTREAM = "http://strih.lan:8770"
+SERVICE_PORT = "8770"
+EMAIL = "claude-02@newlevel.media"
+CF_INI = "/etc/letsencrypt/cloudflare.ini"
+DEPLOY_HOOK = "/etc/letsencrypt/renewal-hooks/deploy/nginx-reload.sh"
+FAKE_CRED = "cf-fake-placeholder-value"
+
+
+def _bash(snippet, env=None):
+    """Source the helper, run `snippet`, return stdout (raises on nonzero)."""
+    src = '. "%s"\n%s' % (LIB, snippet)
+    out = subprocess.run(
+        ["bash", "-c", src], capture_output=True, text=True, check=True,
+        env=dict(os.environ, **(env or {})),
+    )
+    return out.stdout
+
+
+def test_files_exist_and_parse():
+    for p in (SCRIPT, LIB, CONF):
+        assert os.path.isfile(p), p
+    for p in (SCRIPT, LIB):
+        r = subprocess.run(["bash", "-n", p], capture_output=True, text=True)
+        assert r.returncode == 0, "bash -n %s: %s" % (p, r.stderr)
+
+
+def test_lib_constants():
+    assert _bash("shading_https_hostname").strip() == HOSTNAME
+    assert _bash("shading_https_zone").strip() == ZONE
+    assert _bash("shading_https_lan_ip").strip() == LAN_IP
+    assert _bash("shading_https_upstream").strip() == UPSTREAM
+    assert _bash("shading_https_service_port").strip() == SERVICE_PORT
+    assert _bash("shading_https_email").strip() == EMAIL
+    assert _bash("shading_https_apt_packages").strip() == (
+        "nginx certbot python3-certbot-dns-cloudflare"
+    )
+    assert _bash("shading_https_site_name").strip() == "shading"
+    assert _bash("shading_https_cf_ini_path").strip() == CF_INI
+    assert _bash("shading_https_deploy_hook_path").strip() == DEPLOY_HOOK
+    assert _bash("shading_https_propagation_seconds").strip() == "30"
+    assert _bash("shading_https_cert_dir").strip() == "/etc/letsencrypt/live/%s" % HOSTNAME
+    assert _bash('shading_https_cert_dir other.example.org').strip() == (
+        "/etc/letsencrypt/live/other.example.org"
+    )
+
+
+def test_service_port_matches_appliance_default_bind():
+    # ONE source of truth: the proxy upstream port must equal the service's own default_bind port.
+    with open(CONFIG_RS, encoding="utf-8") as f:
+        cfg = f.read()
+    assert '"0.0.0.0:%s"' % SERVICE_PORT in cfg, (
+        "bkshading service default_bind changed — update the proxy upstream port too"
+    )
+    assert (":%s" % SERVICE_PORT) in UPSTREAM
+
+
+def test_committed_conf_equals_default_render():
+    # DRIFT GUARD: the committed nginx site file must be byte-identical to the lib's default render,
+    # so the two never diverge (the lib is the single source of truth).
+    rendered = _bash(
+        'shading_https_site_content "$(shading_https_hostname)" "$(shading_https_upstream)"'
+    )
+    with open(CONF, encoding="utf-8") as f:
+        committed = f.read()
+    assert committed == rendered, "scripts/nginx/shading.newlevel.media.conf drifted from the lib render"
+
+
+def test_site_content_parametrizes_hostname_and_upstream():
+    body = _bash(
+        'shading_https_site_content "shading.example.org" "http://box.lan:9999"'
+    )
+    assert "server_name shading.example.org;" in body, body
+    assert "ssl_certificate     /etc/letsencrypt/live/shading.example.org/fullchain.pem;" in body
+    assert "ssl_certificate_key /etc/letsencrypt/live/shading.example.org/privkey.pem;" in body
+    assert "proxy_pass http://box.lan:9999;" in body, body
+
+
+def test_site_content_required_directives():
+    body = _bash(
+        'shading_https_site_content "$(shading_https_hostname)" "$(shading_https_upstream)"'
+    )
+    # 80 -> 301 https redirect (secure context required for PWA install)
+    assert "return 301 https://$host$request_uri;" in body, body
+    # nginx 1.24: http2 rides on `listen`, NEVER the `http2 on;` directive
+    assert "listen 443 ssl http2;" in body, body
+    # nginx 1.24 has no `http2 on;` DIRECTIVE (a line on its own) — the comment mentioning it is fine
+    assert re.search(r"(?m)^\s*http2 on;", body) is None, "must not use the `http2 on;` directive"
+    # WebSocket passthrough (HTTP/1.1 + Upgrade/Connection)
+    assert "proxy_http_version 1.1;" in body, body
+    assert "proxy_set_header Upgrade $http_upgrade;" in body, body
+    assert "proxy_set_header Connection $http_connection;" in body, body
+    # long read timeout + no buffering for WS/SSE
+    assert "proxy_read_timeout 3600s;" in body, body
+    assert "proxy_buffering off;" in body, body
+    assert "proxy_set_header X-Forwarded-Proto https;" in body, body
+    assert "proxy_set_header X-Forwarded-For $remote_addr;" in body, body
+
+
+def test_certbot_argv():
+    out = _bash(
+        'shading_https_certbot_argv "%s" "%s" "%s" "30"' % (HOSTNAME, EMAIL, CF_INI)
+    )
+    lines = [ln for ln in out.splitlines()]
+    assert lines[0] == "certonly", lines
+    joined = "\n".join(lines)
+    for tok in (
+        "--dns-cloudflare",
+        "--dns-cloudflare-credentials",
+        CF_INI,
+        "--dns-cloudflare-propagation-seconds",
+        "30",
+        "-d",
+        HOSTNAME,
+        "--non-interactive",
+        "--agree-tos",
+        "-m",
+        EMAIL,
+        "--no-eff-email",
+    ):
+        assert tok in lines, "certbot argv missing %r: %s" % (tok, joined)
+
+
+def test_deploy_hook_content():
+    body = _bash("shading_https_deploy_hook_content")
+    assert body.startswith("#!/bin/sh"), body
+    assert "set -e" in body, body
+    assert "systemctl reload nginx" in body, body
+
+
+def test_cf_ini_content_shape():
+    body = _bash('shading_https_cf_ini_content "%s"' % FAKE_CRED)
+    assert body.strip() == "dns_cloudflare_api_token = %s" % FAKE_CRED, body
+
+
+def test_check_classify():
+    # all ok -> OK, exit 0
+    r = subprocess.run(
+        ["bash", "-c", '. "%s"; shading_https_check_classify ok ok ok ok ok' % LIB],
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    assert r.stdout.strip() == "OK", r.stdout
+    # one fail -> FAIL naming it, exit 1
+    r = subprocess.run(
+        ["bash", "-c", '. "%s"; shading_https_check_classify ok fail ok ok ok' % LIB],
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+    assert r.stdout.strip() == "FAIL: dns", r.stdout
+    # several fail -> all named
+    r = subprocess.run(
+        ["bash", "-c", '. "%s"; shading_https_check_classify fail ok ok fail fail' % LIB],
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 1
+    assert r.stdout.strip() == "FAIL: packages site curl", r.stdout
+
+
+def test_no_secret_committed_anywhere():
+    # No real Cloudflare token-shaped literal in any committed file of this milestone. The token is
+    # read from a file at runtime and referenced by path only.
+    for p in (SCRIPT, LIB, CONF):
+        with open(p, encoding="utf-8") as f:
+            txt = f.read()
+        # a token value literally assigned into the ini must not be present (only the %s renderer)
+        assert not re.search(r"dns_cloudflare_api_token\s*=\s*[A-Za-z0-9_\-]{20,}", txt), p
+        # no long secret-shaped blob committed
+        assert "eyJ" not in txt, p
+    # the installer reads the token from the secret file, never inlines it
+    with open(SCRIPT, encoding="utf-8") as f:
+        s = f.read()
+    assert "cloudflare-newlevel" in s or "CF_TOKEN_FILE" in s, s
+
+
+def test_provision_script_sources_lib_and_has_modes():
+    with open(SCRIPT, encoding="utf-8") as f:
+        s = f.read()
+    assert "shading-https.sh" in s, "script must source the shared helper"
+    assert "--check" in s and "--install" in s
+    assert "cli_cloudflare_dns" in s, "install must use the airuleset Cloudflare DNS client"
+    assert "install -m 600" in s, "the credentials file must be written 0600"
+    # never `sudo` inside the script — it writes /etc directly with the privilege it is run with
+    assert not re.search(r"\bsudo\b", s), "script must not invoke sudo"
+
+
+def test_no_bluetooth_anywhere():
+    for p in (SCRIPT, LIB, CONF):
+        with open(p, encoding="utf-8") as f:
+            txt = f.read().lower()
+        assert "bluetooth" not in txt and "ble" not in txt.split(), p
+
+
+def _fake_bin(record_path, name, extra="", body_first=""):
+    """A stand-in executable that records its argv (one call per line) and succeeds."""
+    d = tempfile.mkdtemp()
+    p = os.path.join(d, name)
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(
+            "#!/usr/bin/env bash\n%s"
+            'printf "%%s\\n" "$*" >> "%s"\n%s' % (body_first, record_path, extra)
+        )
+    os.chmod(p, 0o755)
+    return p
+
+
+def _fake_airuleset(root):
+    """A temp dir holding a fake `cli_cloudflare_dns` module that records ensure_record kwargs to a
+    JSON line and returns ok — so the installer's REAL python snippet is exercised without the API."""
+    d = os.path.join(root, "airuleset")
+    os.makedirs(d, exist_ok=True)
+    rec = os.path.join(root, "dns-call.json")
+    with open(os.path.join(d, "cli_cloudflare_dns.py"), "w", encoding="utf-8") as f:
+        f.write(
+            "import json, os\n"
+            "def _load_token(path):\n"
+            "    with open(os.path.expanduser(path)) as fh:\n"
+            "        return fh.read().strip()\n"
+            "class DnsClient:\n"
+            "    def __init__(self, token=None, transport=None):\n"
+            "        self.token = token\n"
+            "def ensure_record(client, zone_name, name, rtype, content, proxied,\n"
+            "                  comment='', dry_run=True):\n"
+            "    with open(%r, 'w') as fh:\n"
+            "        json.dump({'zone_name': zone_name, 'name': name, 'rtype': rtype,\n"
+            "                   'content': content, 'proxied': proxied, 'dry_run': dry_run,\n"
+            "                   'token_len': len(client.token or '')}, fh)\n"
+            "    return {'ok': True, 'action': ('would_create' if dry_run else 'created'),\n"
+            "            'record_id': 'rec1', 'error': None}\n" % rec
+        )
+    return d, rec
+
+
+def _install_env(root, calls, dryrun=False):
+    apt = _fake_bin(calls, "apt-get")
+    certbot = _fake_bin(calls, "certbot")
+    nginx = _fake_bin(calls, "nginx")  # `nginx -t` -> exit 0
+    systemctl = _fake_bin(calls, "systemctl")
+    airu, rec = _fake_airuleset(root)
+    token_file = os.path.join(root, "cloudflare-newlevel")
+    with open(token_file, "w", encoding="utf-8") as f:
+        f.write(FAKE_CRED + "\n")
+    os.chmod(token_file, 0o600)
+    env = dict(
+        os.environ,
+        SHADING_HTTPS_APT=apt,
+        SHADING_HTTPS_CERTBOT=certbot,
+        SHADING_HTTPS_NGINX=nginx,
+        SHADING_HTTPS_SYSTEMCTL=systemctl,
+        SHADING_HTTPS_PYTHON="python3",
+        SHADING_HTTPS_AIRULESET_DIR=airu,
+        SHADING_HTTPS_CF_TOKEN_FILE=token_file,
+        SHADING_HTTPS_CF_INI=os.path.join(root, "etc", "cloudflare.ini"),
+        SHADING_HTTPS_SITE_AVAILABLE=os.path.join(root, "nginx", "sites-available", "shading"),
+        SHADING_HTTPS_SITE_ENABLED=os.path.join(root, "nginx", "sites-enabled", "shading"),
+        SHADING_HTTPS_DEFAULT_ENABLED=os.path.join(root, "nginx", "sites-enabled", "default"),
+        SHADING_HTTPS_DEPLOY_HOOK=os.path.join(root, "etc", "hooks", "nginx-reload.sh"),
+        SHADING_HTTPS_CERT_DIR=os.path.join(root, "etc", "live", HOSTNAME),
+    )
+    return env, rec
+
+
+def test_install_end_to_end():
+    root = tempfile.mkdtemp()
+    try:
+        calls = os.path.join(root, "calls.log")
+        env, rec = _install_env(root, calls)
+        # a pre-existing default site symlink must be removed
+        os.makedirs(os.path.join(root, "nginx", "sites-enabled"), exist_ok=True)
+        default_link = env["SHADING_HTTPS_DEFAULT_ENABLED"]
+        real_default = os.path.join(root, "nginx", "default-real")
+        with open(real_default, "w") as f:
+            f.write("x")
+        os.symlink(real_default, default_link)
+
+        r = subprocess.run(["bash", SCRIPT, "--install"], capture_output=True, text=True, env=env)
+        assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+
+        # site file written == committed conf
+        with open(env["SHADING_HTTPS_SITE_AVAILABLE"], encoding="utf-8") as f:
+            site = f.read()
+        with open(CONF, encoding="utf-8") as f:
+            assert site == f.read(), "installed site file != committed conf"
+        # sites-enabled symlink present + resolves
+        assert os.path.islink(env["SHADING_HTTPS_SITE_ENABLED"])
+        assert os.path.exists(env["SHADING_HTTPS_SITE_ENABLED"])
+        # default site removed
+        assert not os.path.lexists(default_link), "default site symlink must be removed"
+
+        # cloudflare.ini written 0600 with the token, and the token NEVER echoed
+        ini = env["SHADING_HTTPS_CF_INI"]
+        assert os.path.isfile(ini)
+        mode = stat.S_IMODE(os.stat(ini).st_mode)
+        assert mode == 0o600, "cloudflare.ini mode %o != 600" % mode
+        with open(ini, encoding="utf-8") as f:
+            assert "dns_cloudflare_api_token = %s" % FAKE_CRED in f.read()
+        assert FAKE_CRED not in (r.stdout + r.stderr), "token must NEVER be printed"
+
+        # deploy hook written 755 with the reload
+        hook = env["SHADING_HTTPS_DEPLOY_HOOK"]
+        assert os.path.isfile(hook)
+        assert stat.S_IMODE(os.stat(hook).st_mode) == 0o755
+        with open(hook, encoding="utf-8") as f:
+            assert "systemctl reload nginx" in f.read()
+
+        # DNS record created via the real snippet against the fake module
+        import json
+        with open(rec, encoding="utf-8") as f:
+            dns = json.load(f)
+        assert dns["name"] == HOSTNAME, dns
+        assert dns["content"] == LAN_IP, dns
+        assert dns["rtype"] == "A", dns
+        assert dns["proxied"] is False, dns
+        assert dns["dry_run"] is False, dns
+        assert dns["token_len"] == len(FAKE_CRED), dns
+
+        # certbot + nginx -t + reload all invoked
+        with open(calls, encoding="utf-8") as f:
+            log = f.read()
+        assert "certonly" in log, log
+        assert "-d %s" % HOSTNAME in log or ("-d" in log and HOSTNAME in log), log
+        assert "-t" in log, "nginx -t must run"
+        assert "reload nginx" in log, log
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_install_dry_run_dns():
+    root = tempfile.mkdtemp()
+    try:
+        calls = os.path.join(root, "calls.log")
+        env, rec = _install_env(root, calls)
+        r = subprocess.run(
+            ["bash", SCRIPT, "--install", "--dry-run"], capture_output=True, text=True, env=env
+        )
+        assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+        import json
+        with open(rec, encoding="utf-8") as f:
+            dns = json.load(f)
+        assert dns["dry_run"] is True, dns
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_install_fails_when_token_file_missing():
+    root = tempfile.mkdtemp()
+    try:
+        calls = os.path.join(root, "calls.log")
+        env, _rec = _install_env(root, calls)
+        env["SHADING_HTTPS_CF_TOKEN_FILE"] = os.path.join(root, "does-not-exist")
+        r = subprocess.run(["bash", SCRIPT, "--install"], capture_output=True, text=True, env=env)
+        assert r.returncode != 0, (r.returncode, r.stdout, r.stderr)
+        assert "token file" in (r.stdout + r.stderr).lower()
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _check_env(root, packages=True, dns=True, cert=True, site=True, curl=True):
+    calls = os.path.join(root, "calls.log")
+    nginx = _fake_bin(calls, "nginx") if site else _fake_bin(calls, "nginx", extra="exit 1\n")
+    certbot = _fake_bin(calls, "certbot")
+    getent = _fake_bin(
+        calls, "getent",
+        body_first=('echo "%s %s"\n' % (LAN_IP if dns else "1.2.3.4", HOSTNAME)),
+    )
+    curl_bin = _fake_bin(
+        calls, "curl", body_first=('printf "%s"\n' % ("200" if curl else "502")),
+    )
+    cert_dir = os.path.join(root, "etc", "live", HOSTNAME)
+    if cert:
+        os.makedirs(cert_dir, exist_ok=True)
+        with open(os.path.join(cert_dir, "fullchain.pem"), "w") as f:
+            f.write("cert")
+    site_enabled = os.path.join(root, "nginx", "sites-enabled", "shading")
+    site_available = os.path.join(root, "nginx", "sites-available", "shading")
+    if site:
+        os.makedirs(os.path.dirname(site_available), exist_ok=True)
+        os.makedirs(os.path.dirname(site_enabled), exist_ok=True)
+        with open(site_available, "w") as f:
+            f.write("site")
+        os.symlink(site_available, site_enabled)
+    env = dict(
+        os.environ,
+        SHADING_HTTPS_NGINX=(nginx if packages else "/nonexistent/nginx"),
+        SHADING_HTTPS_CERTBOT=(certbot if packages else "/nonexistent/certbot"),
+        SHADING_HTTPS_GETENT=getent,
+        SHADING_HTTPS_CURL=curl_bin,
+        SHADING_HTTPS_CERT_DIR=cert_dir,
+        SHADING_HTTPS_SITE_ENABLED=site_enabled,
+    )
+    return env
+
+
+def test_check_passes_when_all_present():
+    root = tempfile.mkdtemp()
+    try:
+        env = _check_env(root)
+        r = subprocess.run(["bash", SCRIPT, "--check"], capture_output=True, text=True, env=env)
+        assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+        assert "OK" in r.stdout
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_check_fails_when_cert_missing():
+    root = tempfile.mkdtemp()
+    try:
+        env = _check_env(root, cert=False)
+        r = subprocess.run(["bash", SCRIPT, "--check"], capture_output=True, text=True, env=env)
+        assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+        assert "--install" in (r.stdout + r.stderr)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_check_fails_when_dns_wrong():
+    root = tempfile.mkdtemp()
+    try:
+        env = _check_env(root, dns=False)
+        r = subprocess.run(["bash", SCRIPT, "--check"], capture_output=True, text=True, env=env)
+        assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_unknown_arg_exits_2():
+    r = subprocess.run(["bash", SCRIPT, "--bogus"], capture_output=True, text=True)
+    assert r.returncode == 2, (r.returncode, r.stdout, r.stderr)
+
+
+def test_missing_option_value_exits_2():
+    r = subprocess.run(
+        ["bash", SCRIPT, "--install", "--hostname"], capture_output=True, text=True
+    )
+    assert r.returncode == 2, (r.returncode, r.stdout, r.stderr)
+
+
+if __name__ == "__main__":
+    for _name, _fn in sorted(globals().items()):
+        if _name.startswith("test_") and callable(_fn):
+            _fn()
+            print("ok %s" % _name)
+    print("all passed")

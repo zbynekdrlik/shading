@@ -55,17 +55,19 @@ async fn set_params(
     Json(req): Json<SetRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
     let s = session.clone();
-    // issue 1309: funnel through the single-flight coalescing gate so two rapid SETs never fork
-    // two concurrent gphoto2 processes. A coalesced SET is ACCEPTED (queued) — the in-flight write
-    // will apply the latest-wins merge — so it returns 202 `{"coalesced": true}`.
+    // issue 1309/1337: funnel through the single-flight FIFO gate + write-burst so rapid SETs never
+    // fork two concurrent gphoto2 processes. An `Applied` write returns 200 with the applied count
+    // AND the projected resulting state (`{"applied": n, "state": {...}}`) so the service can push
+    // an immediate confirmation to the panel; a SET that queued behind an in-flight burst returns
+    // 202 `{"queued": true}` (it is applied in order by the in-flight worker).
     match tokio::task::spawn_blocking(move || s.submit(&req)).await {
-        Ok(Ok(ApplyOutcome::Applied(applied))) => Ok((
+        Ok(Ok(ApplyOutcome::Applied { count, state })) => Ok((
             StatusCode::OK,
-            Json(serde_json::json!({ "applied": applied })),
+            Json(serde_json::json!({ "applied": count, "state": *state })),
         )),
-        Ok(Ok(ApplyOutcome::Coalesced)) => Ok((
+        Ok(Ok(ApplyOutcome::Queued)) => Ok((
             StatusCode::ACCEPTED,
-            Json(serde_json::json!({ "coalesced": true })),
+            Json(serde_json::json!({ "queued": true })),
         )),
         // A gphoto2 error (camera unplugged / busy) is an upstream failure, not our bug.
         Ok(Err(e)) => Err((StatusCode::BAD_GATEWAY, e.to_string())),

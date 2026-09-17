@@ -457,3 +457,24 @@ if __name__ == "__main__":
             print("FAIL %s: %s" % (fn.__name__, e))
     print("\n%d/%d passed" % (len(fns) - failed, len(fns)))
     sys.exit(1 if failed else 0)
+
+
+def test_ps1_execute_starts_service_via_scheduled_task_not_ssh_job():
+    """Issue 808 / 17.9.2026 live finding: `bkshading-deploy-service.sh --execute` runs this installer
+    OVER SSH. A service launched by a plain Start-Process inside that ssh session lives in the ssh
+    job object and is KILLED when the ssh command returns -- the port verify reads Listening, the
+    deploy prints OK, and the panel is a 502 seconds later until the 5-min keep-alive relaunches it
+    (observed twice: 22:16 and 23:12 CEST). The -Execute path must therefore start the service
+    THROUGH the registered keep-alive scheduled task (Task Scheduler is not in the ssh job) and only
+    fall back to the direct launch when the task cannot be started."""
+    s = _ps1()
+    # the -Execute start must go through Start-ScheduledTask of the keep-alive task
+    assert re.search(r"Start-ScheduledTask\s+-TaskName\s+\$TaskName", s), (
+        "-Execute must start the service via the keep-alive scheduled task (survives the ssh job object)"
+    )
+    # the direct launch stays ONLY as the keep-alive pass + explicit fallback, never the primary -Execute path
+    execute_block = s.split("Register-ScheduledTask")[-1]
+    assert "Start-ScheduledTask" in execute_block, "the task start must sit after the task registration"
+    assert execute_block.index("Start-ScheduledTask") < execute_block.index("Start-BkshadingService"), (
+        "Start-ScheduledTask must be attempted BEFORE any direct Start-BkshadingService fallback"
+    )

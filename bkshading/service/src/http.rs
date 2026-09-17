@@ -17,11 +17,11 @@ use axum::{
     routing::{get, put},
     Router,
 };
-use bkshading_proto::wire::{Aggregate, ServerMsg, SetRequest};
+use bkshading_proto::wire::{Aggregate, RelayState, ServerMsg, SetRequest};
 use tokio::sync::watch;
 
-use crate::aggregator::Aggregator;
-use crate::config::ServiceConfig;
+use crate::aggregator::{aggregate_with_camera_update, Aggregator};
+use crate::config::{CameraConfig, ServiceConfig};
 use crate::preview::store::PreviewStore;
 
 const INDEX_HTML: &str = include_str!("../web/index.html");
@@ -76,6 +76,10 @@ pub struct AppState {
     /// milestone). `/ws` clients subscribe to this; keeping the receiver here means there is
     /// always at least one receiver, so the pump's `send` never fails for "no receivers".
     pub live: watch::Receiver<Arc<Aggregate>>,
+    /// The publish handle for the live aggregate (issue 1337), shared with the pump. `set_params`
+    /// uses it to push an IMMEDIATE per-camera confirmation over the WS after a successful write,
+    /// instead of waiting up to 2 s for the next pump tick (the owner's "číslo sa hneď zmení").
+    pub live_tx: Arc<watch::Sender<Arc<Aggregate>>>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -203,9 +207,27 @@ async fn set_params(
         return Err((StatusCode::NOT_FOUND, format!("no camera '{id}'")));
     };
     match state.agg.forward_set(cam, &req).await {
-        Ok(()) => Ok(Json(serde_json::json!({ "ok": true }))),
+        Ok(relay_state) => {
+            // issue 1337: push an IMMEDIATE confirmation over the WS if the relay returned its
+            // projected state, instead of waiting for the next ~2 s pump tick. Only THIS camera's
+            // view is rebuilt + replaced in the current aggregate (no re-poll of every relay).
+            if let Some(rs) = relay_state {
+                push_camera_update(&state, cam, rs);
+            }
+            Ok(Json(serde_json::json!({ "ok": true })))
+        }
         Err(e) => Err((StatusCode::BAD_GATEWAY, e.to_string())),
     }
+}
+
+/// Pushes an immediate single-camera update over the live WS channel (issue 1337): take the
+/// current aggregate, rebuild ONLY `cam`'s view from the relay-returned state, and republish. A
+/// no-op if the camera vanished from the config in between. The pump keeps publishing full
+/// snapshots on its own cadence; this just shortcuts the confirmation for a just-applied write.
+fn push_camera_update(state: &AppState, cam: &CameraConfig, relay_state: RelayState) {
+    let current = state.live_tx.borrow().clone();
+    let updated = aggregate_with_camera_update(&current, cam, relay_state);
+    let _ = state.live_tx.send(Arc::new(updated));
 }
 
 /// The latest JPEG preview frame for a camera. The web UI's preview block reloads an `<img>`

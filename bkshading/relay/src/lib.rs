@@ -4,5 +4,6 @@
 //! (`tests/relay.rs`) with a fake gphoto2 runner, no camera required. The `bkshading-relay`
 //! binary (`src/main.rs`) is a thin wrapper over this.
 
+pub mod burst;
 pub mod http;
 pub mod transport;

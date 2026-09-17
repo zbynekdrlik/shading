@@ -221,6 +221,54 @@ pub fn nearest_choice_norm(value: f64, labels: &[String]) -> Option<f64> {
     Some(choices_to_norm(best_i as i64, n as i64))
 }
 
+/// Target choice INDEX when stepping the aperture from the camera's REAL current f-number across
+/// the enumerated choice grid, in direction `dir` (+1 = one stop up in f-number, -1 = one down).
+/// `choices` are the camera's f-number choices, ascending (the [`parse_fnumber_labels`] order).
+/// "+" = the FIRST choice STRICTLY ABOVE `current_fnumber`; "-" = the LAST choice STRICTLY BELOW it.
+///
+/// The point (issue 1337): step from the camera's actual f-number, NOT from a normalised slider
+/// position. A lens open BELOW the first enumerated stop (cam1 f/4.0 vs a grid from f/4.5; cam3
+/// f/3.36 — issue 1306) reports `aperture_norm` = idx 0, so the old panel step (`round(norm*(n-1))`
+/// then `±1`) sent the SECOND stop on the first "+" and disabled "-". Here that off-grid lens
+/// clamps to the MIN choice from EITHER direction, so the FIRST step always moves it onto the grid
+/// (the min), never past it. On-grid it is a plain `±1`; at a bound it stays put (the panel then
+/// disables that button, but this never indexes out of range). `None` for an empty choice list.
+///
+/// f-number is strictly monotonic in AV (`AV = 2*log2(f)`), so stepping by f-number value and by
+/// AV give the same ordering — the panel passes the f-number it derives from `apertureAv`. This is
+/// the pure spec the panel's JS `stepAperture` mirrors (it then sends the ABSOLUTE
+/// `apertureNorm = idx/(n-1)`, the exact inverse of [`norm_to_choice_index`], keeping the wire
+/// byte-compatible). Pure — Tier-0 tested + JS-mirror-pinned.
+pub fn step_choice(current_fnumber: f64, choices: &[f64], dir: i32) -> Option<usize> {
+    let n = choices.len();
+    if n == 0 {
+        return None;
+    }
+    if n == 1 {
+        return Some(0);
+    }
+    if dir > 0 {
+        // First choice strictly above the current f-number; at/above the max, stay at the max.
+        Some(
+            choices
+                .iter()
+                .position(|&c| c > current_fnumber)
+                .unwrap_or(n - 1),
+        )
+    } else if dir < 0 {
+        // Last choice strictly below the current f-number; at/below the min (incl. off-grid), the
+        // min. So an off-grid lens moves onto the grid at idx 0 rather than staying dead.
+        Some(
+            choices
+                .iter()
+                .rposition(|&c| c < current_fnumber)
+                .unwrap_or(0),
+        )
+    } else {
+        Some(0)
+    }
+}
+
 /// Parses an f-number choice string like `"f/5.2"` into `5.2`, or `None` if unparseable
 /// — matches `mapping.py`'s `re.fullmatch(r"f/(\d+(?:\.\d+)?)")`.
 pub fn parse_fnumber(s: &str) -> Option<f64> {

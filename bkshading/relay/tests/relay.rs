@@ -767,13 +767,15 @@ fn submit_runs_a_lone_set_and_reports_applied() {
         ..Default::default()
     };
     match session.submit(&req).expect("submit ok") {
-        ApplyOutcome::Applied(n) => assert!(n >= 2, "applied at least iso+fps writes, got {n}"),
-        ApplyOutcome::Coalesced => panic!("an idle queue must RUN the SET, not coalesce it"),
+        ApplyOutcome::Applied { count, .. } => {
+            assert!(count >= 2, "applied at least iso+fps writes, got {count}")
+        }
+        ApplyOutcome::Queued => panic!("an idle queue must RUN the SET, not queue it"),
     }
     // Queue is idle again -> the next SET also runs.
     assert!(matches!(
         session.submit(&req).expect("submit ok"),
-        ApplyOutcome::Applied(_)
+        ApplyOutcome::Applied { .. }
     ));
 }
 

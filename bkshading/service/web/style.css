@@ -94,7 +94,6 @@ body {
 .slider { width: 100%; accent-color: var(--accent); height: 1.6rem; }
 .iris-control .slider { height: 2rem; } /* aperture is the dominant, "thumb-zone" control */
 
-.btn-group { display: flex; flex-wrap: wrap; gap: 0.3rem; }
 .btn {
   background: var(--panel);
   color: var(--text);
@@ -106,7 +105,6 @@ body {
   min-height: 2.1rem;
 }
 .btn:hover { border-color: var(--accent); }
-.btn.active { background: var(--accent); border-color: var(--accent); color: #0b1016; font-weight: 600; }
 .wb-auto { margin-top: 0.4rem; }
 
 /* issue 1304: +/- step buttons flanking a slider ( − [slider] + ). The slider takes the
@@ -138,3 +136,9 @@ body {
 @media (max-width: 480px) {
   .camera-grid { grid-template-columns: 1fr; }
 }
+
+/* issue 1337: an OPTIMISTIC value shown the instant a control is clicked, before the server
+   confirms it — rendered in the accent colour + italic so the operator sees it is "pending", then
+   the next server push reconciles it (removes .pending). Applied to the value labels
+   (fnum / iso-val / kelvin-val / tint-val / shutter-val) by app.js. */
+.pending { color: var(--accent); font-style: italic; }

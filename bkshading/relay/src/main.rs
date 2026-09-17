@@ -62,6 +62,9 @@ async fn main() -> Result<()> {
         parse_min_read_interval_env(std::env::var("BKSHADING_RELAY_MIN_READ_INTERVAL_MS").ok())
             .unwrap_or(DEFAULT_MIN_READ_INTERVAL_MS);
 
+    // issue 1337: the SAME gphoto2 binary drives both the per-invocation CLI (reads + write
+    // fallback) and the persistent write-burst `--shell` (fast writes during a burst of clicks).
+    let gphoto2_binary = args.gphoto2.clone();
     let session = Arc::new(
         CameraSession::new(
             Box::new(Gphoto2Cli {
@@ -70,7 +73,8 @@ async fn main() -> Result<()> {
             VERSION,
         )
         .with_capture_fps(capture_fps)
-        .with_min_read_interval_ms(min_read_interval_ms),
+        .with_min_read_interval_ms(min_read_interval_ms)
+        .with_gphoto2_binary(gphoto2_binary),
     );
 
     tracing::info!(

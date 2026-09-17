@@ -254,7 +254,21 @@ Write-Output "registered keep-alive task '$TaskName' (AtLogOn + every $KeepAlive
 # "something is Listening on 8770" check would false-green when a stale/foreign instance holds the
 # port while our exe fails to bind (issue 808 review) -- so resolve the connection's owning process
 # and require its path to be exactly $ExePath.
-if (-not (Test-ServiceRunning)) { Start-BkshadingService }
+if (-not (Test-ServiceRunning)) {
+  # issue 808 (live 17.9.2026, twice): this installer runs OVER SSH (bkshading-deploy-service.sh). A
+  # direct Start-Process child lives in the ssh session's job object and is KILLED when the ssh command
+  # returns -- the port verify below reads Listening, the deploy prints OK, and the panel is a 502 until
+  # the keep-alive tick relaunches it (<= 5 min). Start THROUGH the keep-alive scheduled task instead
+  # (Task Scheduler is outside the ssh job, and its -KeepAlive pass performs the same direct launch with the
+  # same log redirection); fall back to the direct launch only when the task cannot be started.
+  try {
+    Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+    Write-Output "started the service via scheduled task '$TaskName' (survives the ssh job object)"
+  } catch {
+    Write-Output "WARNING: Start-ScheduledTask '$TaskName' failed ($($_.Exception.Message)) -- falling back to a direct launch (dies with an ssh session)"
+    Start-BkshadingService
+  }
+}
 Write-Output "waiting for port $Port to Listen (owned by $ExePath) ..."
 $listening = $false
 $foreignOwner = $null

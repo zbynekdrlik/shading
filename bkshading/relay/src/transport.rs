@@ -12,10 +12,17 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use bkshading_proto::mapping::{parse_fnumber_labels, DEFAULT_FPS100};
+use bkshading_proto::mapping::{
+    choices_to_norm, fnumber_to_av, norm_to_choice_index, parse_fnumber, parse_fnumber_labels,
+    DEFAULT_FPS100,
+};
 use bkshading_proto::read::{fps_supported, params_and_caps, plan_writes, RawConfigs};
 use bkshading_proto::wire::{
-    summarize_set_request, RelayState, SetQueue, SetRequest, SubmitAction,
+    summarize_set_request, RelayState, SetQueue, SetRequest, ShadingParams, SubmitAction,
+};
+
+use crate::burst::{
+    burst_step, BurstAction, BurstEvent, BurstState, Gphoto2Shell, WRITE_SESSION_IDLE_MS,
 };
 
 /// Hard per-gphoto2-command timeout (issue 1309). A gphoto2 that hangs on a busy / unresponsive
@@ -24,13 +31,19 @@ use bkshading_proto::wire::{
 /// reaped, and the command reports an error (a read then degrades to offline, a write returns 502).
 pub const GPHOTO2_TIMEOUT: Duration = Duration::from_secs(8);
 
-/// The outcome of a [`CameraSession::submit`] (issue 1309): the write actually ran (`Applied(n)`
-/// gphoto2 writes), or it was COALESCED into an in-flight write's queue (latest-wins) and will be
-/// applied by that worker when it finishes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The outcome of a [`CameraSession::submit`] (issue 1309 single-flight; issue 1337 immediate
+/// response). `Applied` = this call ran the write(s) now and carries the count PLUS the relay's
+/// resulting shading state (projected from the writes it just applied), so the service can push an
+/// immediate confirmation to the panel without waiting for the next 2 s pump tick. `Queued` = a
+/// write was already in flight, so this SET was appended to the FIFO queue and will be applied
+/// IN ORDER by that in-flight worker (never a second parallel gphoto2 — the issue-1309 guarantee).
+#[derive(Debug, Clone, PartialEq)]
 pub enum ApplyOutcome {
-    Applied(usize),
-    Coalesced,
+    Applied {
+        count: usize,
+        state: Box<RelayState>,
+    },
+    Queued,
 }
 
 /// RAII guard around the single-flight write drain (issue 1309, review YELLOW): while `armed`, its
@@ -53,10 +66,10 @@ impl FlightGuard<'_> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .abort();
-        if let Some(req) = dropped {
+        for req in &dropped {
             tracing::warn!(
-                dropped = %summarize_set_request(&req),
-                "shading SET dropped: the in-flight write failed and a coalesced follow-up (already acknowledged) was not applied"
+                dropped = %summarize_set_request(req),
+                "shading SET dropped: the in-flight write failed and a queued follow-up (already acknowledged) was not applied"
             );
         }
     }
@@ -65,15 +78,16 @@ impl FlightGuard<'_> {
 impl Drop for FlightGuard<'_> {
     fn drop(&mut self) {
         if self.armed {
-            // Reached only on an UNWIND (a panic in `apply`) — reset the gate so the next SET runs.
+            // Reached only on an UNWIND (a panic in the burst apply) — reset the gate so the next
+            // SET runs, and log every queued follow-up dropped with it.
             let dropped = self
                 .queue
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .abort();
-            if let Some(req) = dropped {
+            for req in &dropped {
                 tracing::warn!(
-                    dropped = %summarize_set_request(&req),
+                    dropped = %summarize_set_request(req),
                     "shading SET dropped: the in-flight write panicked; single-flight gate reset"
                 );
             }
@@ -505,6 +519,67 @@ struct CachedRead {
     read_at_ms: u64,
 }
 
+/// Projects the writes of a [`SetRequest`] onto a base [`ShadingParams`] (issue 1337): the params
+/// the camera WILL report after the burst applies them, computed WITHOUT a fresh USB read. This is
+/// returned in the `PUT /api/params` response so the service can push an immediate confirmation to
+/// the panel (the authoritative read at burst close corrects any drift). Aperture is resolved
+/// through the SAME `fnumber_labels` + [`norm_to_choice_index`] the write itself uses, so the
+/// projected `aperture_av`/`aperture_norm` land exactly where the camera will. A `None` field in
+/// `req` leaves the base value untouched. Pure — Tier-0 tested + rustc-replicated.
+pub fn project_shading(
+    base: &ShadingParams,
+    req: &SetRequest,
+    fnumber_labels: &[String],
+) -> ShadingParams {
+    let mut p = base.clone();
+    if let Some(norm) = req.aperture_norm {
+        let n = fnumber_labels.len() as i64;
+        let idx = norm_to_choice_index(norm, n);
+        if let Some(f) = fnumber_labels
+            .get(idx as usize)
+            .and_then(|l| parse_fnumber(l))
+        {
+            p.aperture_av = fnumber_to_av(f);
+            p.aperture_norm = Some(choices_to_norm(idx, n));
+        }
+    }
+    if let Some(iso) = req.iso {
+        p.iso = Some(iso);
+    }
+    if let Some(kelvin) = req.kelvin {
+        p.kelvin = Some(kelvin);
+    }
+    if let Some(tint) = req.tint {
+        p.tint = Some(tint);
+    }
+    if let Some(shutter) = req.shutter {
+        p.shutter = Some(shutter);
+    }
+    if let Some(fps) = req.fps {
+        p.fps100 = Some(fps * 100);
+    }
+    p
+}
+
+/// The relay's write-burst session state (issue 1337) — behind ONE mutex on the [`CameraSession`].
+/// Holds the burst lifecycle [`BurstState`], the persistent `gphoto2 --shell` child while a burst
+/// is open, and the plan basis (f-number labels + fps100) captured by the ONE read at burst open so
+/// every subsequent write in the burst is planned WITHOUT a pre-write read.
+#[derive(Default)]
+struct BurstSession {
+    state: BurstState,
+    shell: Option<Gphoto2Shell>,
+    /// `(fnumber_labels, fps100)` read once at burst open; `None` between bursts (re-read next open).
+    plan: Option<(Vec<String>, i64)>,
+    /// The full [`RelayState`] read at burst open — the base the PUT-response state projects the
+    /// burst's writes onto (so the panel gets an immediate confirmation with the camera's real
+    /// caps/model). `None` between bursts.
+    open_state: Option<RelayState>,
+    /// A shell open/write failed this burst ⇒ use the CLI write path for the REST of the burst
+    /// (never re-open a broken shell per write). Cleared when the burst idle-closes.
+    shell_disabled: bool,
+}
+
 /// One camera the relay owns, driven through a [`Gphoto2Runner`].
 pub struct CameraSession {
     runner: Box<dyn Gphoto2Runner>,
@@ -528,10 +603,21 @@ pub struct CameraSession {
     /// line per transition (online -> offline and back), so the journal records a camera
     /// coming/going without per-read-cycle noise.
     last_online: Mutex<Option<bool>>,
-    /// Single-flight coalescing gate for shading writes (issue 1309). `submit` funnels every
-    /// `PUT /api/params` through it so a burst of SETs (the owner "raised the aperture twice")
-    /// never forks a second gphoto2; the in-flight write drains the coalesced (latest-wins) queue.
+    /// Single-flight FIFO gate for shading writes (issue 1309 single-flight; issue 1337 FIFO).
+    /// `submit` funnels every `PUT /api/params` through it so a burst of SETs never forks a second
+    /// gphoto2; the in-flight worker drains the FIFO queue IN ORDER (20 clicks = 20 moves).
     set_queue: Mutex<SetQueue>,
+    /// The write-burst session (issue 1337): the persistent `gphoto2 --shell` + its lifecycle +
+    /// the cached plan basis. ONE mutex, taken by `submit` for a whole burst drain and by
+    /// `read_state` for its idle-close check — so ALL camera access is serialized through it plus
+    /// the read-cache lock (a burst holds this across its writes; `read_state` serves cache while
+    /// the shell owns the camera, and only reads when the burst is idle).
+    burst: Mutex<BurstSession>,
+    /// The `gphoto2` binary path used to OPEN the burst shell (issue 1337). Empty string = the burst
+    /// shell is disabled (fake-runner tests, or an explicit opt-out) — the burst then always uses
+    /// the CLI runner write path, which is still pre-read-free and fast. The real binary comes from
+    /// the CLI `--gphoto2` arg via [`with_gphoto2_binary`](Self::with_gphoto2_binary).
+    gphoto2_binary: String,
 }
 
 impl CameraSession {
@@ -545,7 +631,17 @@ impl CameraSession {
             read_cache: Mutex::new(None),
             last_online: Mutex::new(None),
             set_queue: Mutex::new(SetQueue::default()),
+            burst: Mutex::new(BurstSession::default()),
+            gphoto2_binary: String::new(),
         }
+    }
+
+    /// Sets the `gphoto2` binary path used to open the write-burst shell (issue 1337). The binary
+    /// passes the CLI `--gphoto2` value; when unset (empty), the burst uses the CLI runner write
+    /// path only (no persistent shell) — still pre-read-free, just one process per write.
+    pub fn with_gphoto2_binary(mut self, binary: impl Into<String>) -> Self {
+        self.gphoto2_binary = binary.into();
+        self
     }
 
     /// Sets the box's capture-mode fps this relay reports (issue 809). The binary passes
@@ -642,9 +738,53 @@ impl CameraSession {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let now_ms = self.clock.now_ms();
-        if let Some(cached) = cache.as_ref() {
-            if read_is_fresh(Some(cached.read_at_ms), now_ms, self.min_read_interval_ms) {
-                return cached.state.clone();
+        // issue 1337: coordinate with the write-burst. The burst lock is held ACROSS the read below
+        // so a burst's shell and this CLI read can never run two gphoto2 processes against the one
+        // USB camera at once (lock order: read_cache -> burst here; `submit` takes burst only, so no
+        // cycle). While a burst's shell owns the camera, serve the cache (never read). When the
+        // burst has gone idle, close the shell and take ONE authoritative read at burst close,
+        // bypassing the issue-1229 floor once (a rare, user-interaction-driven event, not polling).
+        let mut burst = self
+            .burst
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (next_state, action) = burst_step(
+            burst.state,
+            BurstEvent::IdleCheck { now_ms },
+            WRITE_SESSION_IDLE_MS,
+        );
+        let force_read = match action {
+            BurstAction::CloseShellFinalRead => {
+                burst.state = next_state;
+                if let Some(shell) = burst.shell.take() {
+                    shell.close();
+                }
+                burst.plan = None;
+                burst.open_state = None;
+                burst.shell_disabled = false;
+                tracing::info!("shading write-burst idle-closed; taking one authoritative read");
+                true
+            }
+            _ if matches!(burst.state, BurstState::Open { .. }) => {
+                // The shell owns the camera this instant — serve the last read_state snapshot,
+                // never a second concurrent gphoto2 read. The burst plans from its OWN cache
+                // (`burst.plan`), not `read_cache`, so this snapshot may be slightly pre-burst; the
+                // burst-close read below refreshes it. A benign offline snapshot if no read yet.
+                return cache
+                    .as_ref()
+                    .map(|c| c.state.clone())
+                    .unwrap_or_else(|| RelayState {
+                        capture_fps: self.capture_fps,
+                        ..RelayState::offline(self.version.clone())
+                    });
+            }
+            _ => false, // burst Idle -> normal floored read
+        };
+        if !force_read {
+            if let Some(cached) = cache.as_ref() {
+                if read_is_fresh(Some(cached.read_at_ms), now_ms, self.min_read_interval_ms) {
+                    return cached.state.clone();
+                }
             }
         }
         let state = self.read_state_uncached();
@@ -719,6 +859,13 @@ impl CameraSession {
     /// Applies a shading write request. Returns the number of gphoto2 `set-config` writes
     /// performed. Aperture is planned against the camera's live f-number choices and the
     /// live fps (for the shutter angle), so a write always matches the current camera.
+    ///
+    /// NOTE (issue 1337): this is the ORIGINAL per-invocation write path (read_raw + one
+    /// `set_config` per param), UNCHANGED so its direct unit test still holds. The production
+    /// `PUT /api/params` handler calls [`submit`](Self::submit) (the write-burst path), NOT this.
+    /// `apply` locks only `read_cache` and is NOT burst-aware, so it MUST NOT be called
+    /// concurrently with `submit` (which locks `burst`) — the two would not mutually exclude and
+    /// could run two gphoto2 processes against the one USB camera. Keep it test-only.
     pub fn apply(&self, req: &SetRequest) -> Result<usize> {
         // issue 1229: HOLD the `read_cache` lock across the ENTIRE apply (the `read_raw` + the
         // `set_config` writes), not just at the final invalidate. `http.rs` dispatches `read_state`
@@ -764,14 +911,18 @@ impl CameraSession {
         }
     }
 
-    /// Submits a shading write through the single-flight coalescing gate (issue 1309) — the entry
-    /// point the HTTP `PUT /api/params` handler uses. If NO write is in flight, this call runs
-    /// [`apply`](Self::apply) now and, when it finishes, drains any SET that was coalesced while it
-    /// ran (latest-wins), applying the newest until the queue is idle. If a write IS already in
-    /// flight, this SET is folded into the pending slot and returns [`ApplyOutcome::Coalesced`] —
-    /// so the owner "raising the aperture twice" NEVER forks a second concurrent gphoto2 process
-    /// (the 2026-09-15 "shading crashol po dvoch zdvihnutiach clony" class). `apply` itself is
-    /// unchanged, so a lone SET behaves exactly as before.
+    /// Submits a shading write through the single-flight FIFO gate + the write-burst session
+    /// (issue 1309 single-flight; issue 1337 immediate response) — the entry point the HTTP
+    /// `PUT /api/params` handler uses. If NO write is in flight, this call drives the burst now and,
+    /// as it runs, drains every SET that queued behind it IN ORDER (FIFO — 20 rapid clicks = 20
+    /// camera moves). If a write IS already in flight, this SET is appended to the FIFO and returns
+    /// [`ApplyOutcome::Queued`] (never a second concurrent gphoto2 — the issue-1309 guarantee).
+    ///
+    /// The burst plans each write from the choices read ONCE at burst open (no pre-write read) and
+    /// applies it through the persistent `gphoto2 --shell` (falling back to a per-invocation CLI
+    /// write on any shell error), so a click moves the camera in ~150 ms instead of ~1-3 s. The
+    /// returned [`ApplyOutcome::Applied`] carries the projected resulting state so the service can
+    /// push an immediate confirmation; the authoritative read happens when the burst idle-closes.
     pub fn submit(&self, req: &SetRequest) -> Result<ApplyOutcome> {
         let mut current = {
             let mut q = self
@@ -779,36 +930,51 @@ impl CameraSession {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             match q.submit(req.clone()) {
-                SubmitAction::Coalesced { total } => {
+                SubmitAction::Queued { total } => {
                     tracing::info!(
-                        coalesced_total = total,
-                        "shading SET coalesced (a gphoto2 write is already in flight; latest-wins per param)"
+                        queued_total = total,
+                        "shading SET queued behind an in-flight burst (FIFO, applied in order)"
                     );
-                    return Ok(ApplyOutcome::Coalesced);
+                    return Ok(ApplyOutcome::Queued);
                 }
                 SubmitAction::RunNow(r) => r,
             }
         };
-        // Unwind guard (issue 1309, review YELLOW): if `apply` PANICS, the panic unwinds past the
-        // explicit Err handling below and would leave `in_flight` stuck `true` forever — every
-        // later SET would then coalesce and no shading write would ever run again until a relay
-        // restart, the exact half-dead availability class this ticket fights. The guard's Drop
-        // resets the gate (and logs any dropped coalesced follow-up) on ANY early exit it is not
-        // disarmed for; on the normal return paths below it is explicitly disarmed first.
+        // Hold the burst lock for the WHOLE drain: the shell (or CLI fallback) exclusively owns the
+        // camera until the drain finishes, so `read_state` serves cache meanwhile (no second
+        // concurrent gphoto2). New clicks never block here — they touch only the set_queue above and
+        // queue. Lock order: burst here (+ set_queue for finish/abort); never read_cache while held.
+        let mut burst = self
+            .burst
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Unwind guard (issue 1309, review YELLOW): a panic in the burst apply must reset the
+        // single-flight gate (and log any dropped queued follow-up), or every later SET would
+        // coalesce forever — the half-dead availability class this fights.
         let mut guard = FlightGuard {
             queue: &self.set_queue,
             armed: true,
         };
+        let mut total_applied = 0usize;
+        let mut projected: Option<ShadingParams> = None;
         loop {
-            match self.apply(&current) {
+            match self.burst_apply(&mut burst, &current) {
                 Err(e) => {
-                    // Drop the in-flight state AND any queued follow-up: a write planned against a
-                    // now-uncertain camera must not run blind. The handler maps this to a 502. A
-                    // coalesced follow-up was already acked to the client, so log its loss.
+                    // A CLI-write failure (real camera error): drop the in-flight state AND the
+                    // whole queued FIFO — writes planned against a now-uncertain camera must not run
+                    // blind. The handler maps this to a 502.
                     guard.disarm_and_abort();
                     return Err(e);
                 }
                 Ok(applied) => {
+                    total_applied += applied;
+                    if let Some((labels, _)) = burst.plan.as_ref() {
+                        let base = projected
+                            .take()
+                            .or_else(|| burst.open_state.as_ref().map(|s| s.params.clone()))
+                            .unwrap_or_default();
+                        projected = Some(project_shading(&base, &current, labels));
+                    }
                     let next = self
                         .set_queue
                         .lock()
@@ -816,16 +982,142 @@ impl CameraSession {
                         .finish();
                     match next {
                         Some(r) => {
-                            tracing::info!("draining coalesced shading SET (applying the latest)");
+                            tracing::info!("draining queued shading SET (FIFO, in order)");
                             current = r;
                         }
                         None => {
-                            guard.armed = false; // clean completion — finish() already idled the gate
-                            return Ok(ApplyOutcome::Applied(applied));
+                            guard.armed = false; // clean completion — finish() idled the gate
+                            break;
                         }
                     }
                 }
             }
         }
+        // Build the PUT-response state from the burst-open read with the writes projected onto it —
+        // no fresh USB read (the authoritative read happens at burst idle-close). `open_state` is
+        // Some in every Ok path (set alongside `plan` at burst open).
+        let open = burst.open_state.clone();
+        drop(burst);
+        let state = match open {
+            Some(open) => {
+                let params = projected.unwrap_or_else(|| open.params.clone());
+                RelayState { params, ..open }
+            }
+            None => RelayState {
+                capture_fps: self.capture_fps,
+                ..RelayState::offline(self.version.clone())
+            },
+        };
+        Ok(ApplyOutcome::Applied {
+            count: total_applied,
+            state: Box::new(state),
+        })
+    }
+
+    /// Applies ONE shading write inside an open (or opening) burst (issue 1337): plan the writes
+    /// from the choices read ONCE at burst open (NO pre-write read), then run them through the
+    /// persistent `gphoto2 --shell` — falling any shell error back to a per-invocation CLI write for
+    /// the rest of the burst so a broken/slow shell never loses a write and never wedges the relay.
+    /// Returns the number of gphoto2 writes performed. Called only from [`submit`] under the burst
+    /// lock. A CLI-path write failure is a real camera error and propagates (→ 502).
+    fn burst_apply(&self, burst: &mut BurstSession, req: &SetRequest) -> Result<usize> {
+        // 1. Plan basis: read the camera ONCE at burst open (detect + core batch + focus/summary =
+        //    the normal 3-session read, NOT one per write), caching the f-number choices + fps100
+        //    AND the full state to project the response onto. Subsequent writes in the burst pay NO
+        //    read. A read failure (absent/busy camera) propagates -> 502, exactly like `apply`.
+        if burst.plan.is_none() {
+            let camera = self.detect();
+            let raw = self.read_raw()?;
+            let (params, caps) = params_and_caps(&raw);
+            let fps100 = params.fps100.unwrap_or(DEFAULT_FPS100);
+            let labels = parse_fnumber_labels(&raw.fnumber);
+            let open_state = RelayState {
+                online: camera.is_some(),
+                camera,
+                params,
+                caps: Some(caps),
+                fps_supported: fps_supported(&raw),
+                capture_fps: self.capture_fps,
+                version: self.version.clone(),
+            };
+            burst.plan = Some((labels, fps100));
+            burst.open_state = Some(open_state);
+        }
+        let (labels, fps100) = burst
+            .plan
+            .clone()
+            .expect("burst.plan set immediately above");
+        let writes = plan_writes(req, &labels, fps100);
+        let n = writes.len();
+        // 2. Burst state machine: this SET arrived (opens the burst on the first set).
+        let now = self.clock.now_ms();
+        let (state_after_set, action) = burst_step(
+            burst.state,
+            BurstEvent::Set { now_ms: now },
+            WRITE_SESSION_IDLE_MS,
+        );
+        burst.state = state_after_set;
+        // 3. Open the persistent shell on the first set of a burst (unless disabled this burst, or
+        //    no gphoto2 binary was configured — then the CLI write path is used, still pre-read-free).
+        if matches!(action, BurstAction::OpenShellThenWrite)
+            && burst.shell.is_none()
+            && !burst.shell_disabled
+            && !self.gphoto2_binary.is_empty()
+        {
+            match Gphoto2Shell::open(&self.gphoto2_binary) {
+                Ok(sh) => {
+                    burst.shell = Some(sh);
+                    tracing::info!("shading write-burst shell opened");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "shading write-burst shell open failed; CLI for this burst");
+                    burst.shell_disabled = true;
+                }
+            }
+        }
+        // 4. Run the writes: shell fast-path, CLI fallback on any shell error. `as_mut().map(...)`
+        //    runs the shell write (if a shell is open) and RELEASES the borrow before the match, so
+        //    the error arm can `take()` the shell to kill it.
+        for (key, value) in &writes {
+            match burst.shell.as_mut().map(|sh| sh.set_config(key, value)) {
+                Some(Ok(())) => {} // shell write applied
+                Some(Err(e)) => {
+                    // Shell wedged/errored: kill it, disable the shell for the rest of this burst,
+                    // and RETRY this write on the CLI (never lose the write).
+                    tracing::warn!(error = %e, key = %key, "write-burst shell error; kill shell + CLI fallback");
+                    if let Some(sh) = burst.shell.take() {
+                        sh.close();
+                    }
+                    burst.shell_disabled = true;
+                    if let Err(e2) = self.runner.set_config(key, value) {
+                        // The CLI FALLBACK also failed -> a real camera error; invalidate the plan
+                        // basis (same as the no-shell CLI path below) so the next burst re-reads the
+                        // now-uncertain camera, then propagate (-> 502).
+                        burst.plan = None;
+                        burst.open_state = None;
+                        return Err(e2)
+                            .with_context(|| format!("CLI fallback set-config {key}={value}"));
+                    }
+                }
+                None => {
+                    // No shell (disabled / not configured): CLI. A failure is a real camera error —
+                    // invalidate the plan so the next burst re-reads the now-uncertain camera.
+                    if let Err(e) = self.runner.set_config(key, value) {
+                        burst.plan = None;
+                        burst.open_state = None;
+                        return Err(e);
+                    }
+                }
+            }
+        }
+        // 5. Writes applied — refresh the burst idle clock.
+        let now2 = self.clock.now_ms();
+        let (state_after_ok, _) = burst_step(
+            burst.state,
+            BurstEvent::WriteOk { now_ms: now2 },
+            WRITE_SESSION_IDLE_MS,
+        );
+        burst.state = state_after_ok;
+        Ok(n)
     }
 }

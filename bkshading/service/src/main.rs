@@ -91,9 +91,13 @@ async fn main() -> Result<()> {
     // initial snapshot so a client connecting before the first tick still gets current state.
     let initial = Arc::new(agg.snapshot(&config).await);
     let (live_tx, live_rx) = tokio::sync::watch::channel(initial);
+    // issue 1337: share the publish handle so `set_params` can push an immediate confirmation over
+    // the WS after a write (the pump also holds a clone for its ~2 s cadence snapshots).
+    let live_tx = Arc::new(live_tx);
     {
         let agg = agg.clone();
         let config = config.clone();
+        let live_tx = live_tx.clone();
         tokio::spawn(async move {
             let mut ticker =
                 tokio::time::interval(std::time::Duration::from_millis(LIVE_PUSH_INTERVAL_MS));
@@ -143,6 +147,7 @@ async fn main() -> Result<()> {
         config,
         previews,
         live: live_rx,
+        live_tx,
     };
 
     tracing::info!(
