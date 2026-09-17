@@ -834,8 +834,9 @@ resolves to dev1's PRIVATE LAN IP** — never the cloudflared tunnel.
   lookup poisons resolver negative caches for the zone SOA minimum (**1800 s**). `--install` creates
   the record FIRST; run `--check` (which queries) only after.
 - **GOTCHA — h2 vs WebSocket:** the panel pushes live state over WS, and browsers speak WS over
-  **HTTP/1.1** (the proxy uses `proxy_http_version 1.1` + `Upgrade`/`Connection` passthrough, verified
-  `/ws` → 101). Over HTTP/2 the `Upgrade` handshake is rejected 400 — so a raw `curl --http2` WS
+  **HTTP/1.1** (the proxy uses `proxy_http_version 1.1` + `Upgrade`/`Connection` passthrough; the
+  supervisor's live dev1 stand-up confirmed `/ws` → 101). Over HTTP/2 the `Upgrade` handshake is
+  rejected 400 — so a raw `curl --http2` WS
   probe returns 400 while a real browser (which negotiates 1.1 for the WS) works. Test WS with an
   HTTP/1.1 client, not `curl` over h2. nginx 1.24 has NO `http2 on;` directive — the http2 flag rides
   on `listen 443 ssl http2;`.
