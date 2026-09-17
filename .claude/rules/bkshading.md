@@ -800,9 +800,49 @@ The panel is installable as a windowed web app (own icon in the Windows dock, no
   `localhost`. So: (a) on the strih PC itself, `http://localhost:8770` gives the FULL install; (b)
   on another PC over plain-HTTP LAN (`http://strih.lan:8770`) the browser gives no install prompt —
   use Edge "Apps → Install this site as an app" / Chrome "Cast, save and share → Install page as
-  app" to create a windowed shortcut (icon + name come from this change); (c) a full PWA from
-  anywhere = the cloudflared HTTPS hostname (`scripts/bkshading-provision-cloudflared.sh`). Do NOT
+  app" to create a windowed shortcut (icon + name come from this change) — this stays a FALLBACK;
+  (c) a full PWA from any LAN device = the **LAN HTTPS front** (below), the PRIMARY path. Do NOT
   add self-signed HTTPS to the service (an untrusted cert is still an insecure context).
+
+### LAN HTTPS front — PRIMARY full-PWA path (issue 808, owner ruling 17.9.2026)
+
+The owner ruled 17.9.2026: HTTPS **áno, ale cez lokálnu sieť, nie cez internet** — a trusted-cert
+HTTPS origin, but traffic stays on the LAN, never through the internet. So the full PWA install
+from any LAN PC/mobile now comes from a **dev1 nginx TLS reverse proxy on a PUBLIC DNS NAME that
+resolves to dev1's PRIVATE LAN IP** — never the cloudflared tunnel.
+
+- **Topology:** browser (strih/stream/mobile on the LAN) → DNS `shading.newlevel.media` =
+  `10.77.9.200` (dev1 LAN, **DNS-only / not proxied**) → dev1 nginx `:443` (Let's Encrypt cert via
+  DNS-01) → `http://strih.lan:8770` (the bkshading panel). Traffic never leaves the LAN; the
+  internet is used **only** for the DNS lookup and the ACME cert renewal (the rig on an event has
+  mobile data for those).
+- **Reproduce it on dev1:** `scripts/dev1-shading-https-install.sh --install` (idempotent) and
+  `--check` (report-only: packages, DNS answer, cert presence, nginx site enabled + `nginx -t`,
+  `curl` 200 on the manifest). The committed nginx site is `scripts/nginx/shading.newlevel.media.conf`
+  (== the lib's default render — a drift-guard test pins the equality). The pure decisions (site
+  render, certbot argv, deploy hook, cloudflare.ini, --check verdict) live in
+  `scripts/lib/shading-https.sh` and are Tier-0 tested by `tests/python/test_shading_https_install_808.py`.
+  Flags: `--hostname` / `--upstream` / `--lan-ip` / `--email` (live defaults baked in), `--dry-run`
+  (rehearse the DNS record step). The installer needs privilege for `/etc` writes; the owner/
+  supervisor runs it on dev1 (never a lane worker).
+- **Cloudflare pieces (dev1, NOT committed):** the DNS A record is created via the airuleset
+  `cli_cloudflare_dns` API client (zone token `~/.secrets/cloudflare-newlevel`); the certbot DNS-01
+  credentials live in `/etc/letsencrypt/cloudflare.ini` (root:600, token copied from that secret
+  file — NEVER printed, NEVER committed); `certbot.timer` renews and the deploy hook
+  `/etc/letsencrypt/renewal-hooks/deploy/nginx-reload.sh` reloads nginx.
+- **GOTCHA — negative DNS cache:** never query the public name BEFORE the A record exists. A failed
+  lookup poisons resolver negative caches for the zone SOA minimum (**1800 s**). `--install` creates
+  the record FIRST; run `--check` (which queries) only after.
+- **GOTCHA — h2 vs WebSocket:** the panel pushes live state over WS, and browsers speak WS over
+  **HTTP/1.1** (the proxy uses `proxy_http_version 1.1` + `Upgrade`/`Connection` passthrough, verified
+  `/ws` → 101). Over HTTP/2 the `Upgrade` handshake is rejected 400 — so a raw `curl --http2` WS
+  probe returns 400 while a real browser (which negotiates 1.1 for the WS) works. Test WS with an
+  HTTP/1.1 client, not `curl` over h2. nginx 1.24 has NO `http2 on;` directive — the http2 flag rides
+  on `listen 443 ssl http2;`.
+- **Rejected alternative — cloudflared tunnel** (`scripts/bkshading-provision-cloudflared.sh`, kept
+  for reference): the owner rejected any internet path 17.9.2026 (every request would leave the LAN
+  and come back). The provisioning script + its systemd unit stay in the repo as the optional
+  alternative, but the LAN HTTPS front above is the canonical path.
 
 
 ## Clona `f/—`: off-grid aperture from `gphoto2 --summary` (issue 1306)
