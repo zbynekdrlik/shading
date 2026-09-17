@@ -440,18 +440,38 @@ fn step_choice_from_off_grid_and_on_grid_1337() {
     // cam1: lens at f/4.0, choices start at f/4.5 (below the first enumerated stop). The first "+"
     // must move to the FIRST real stop (f/4.5 = idx 0), not the SECOND (the pre-fix idx-0-snap +1).
     let cam1 = [4.5_f64, 5.0, 5.6, 6.3, 7.1, 8.0];
-    assert_eq!(step_choice(4.0, &cam1, 1), Some(0), "off-grid below: + -> first stop (min)");
-    assert_eq!(step_choice(4.0, &cam1, -1), Some(0), "off-grid below: - clamps to min");
+    assert_eq!(
+        step_choice(4.0, &cam1, 1),
+        Some(0),
+        "off-grid below: + -> first stop (min)"
+    );
+    assert_eq!(
+        step_choice(4.0, &cam1, -1),
+        Some(0),
+        "off-grid below: - clamps to min"
+    );
 
     // cam3: lens at f/3.36 (further below the grid) — "-" must reach the min choice (not stay dead).
     let cam3 = [4.5_f64, 5.0, 5.6, 6.3];
-    assert_eq!(step_choice(3.36, &cam3, -1), Some(0), "off-grid below: - -> min choice");
-    assert_eq!(step_choice(3.36, &cam3, 1), Some(0), "off-grid below: + -> first stop (min)");
+    assert_eq!(
+        step_choice(3.36, &cam3, -1),
+        Some(0),
+        "off-grid below: - -> min choice"
+    );
+    assert_eq!(
+        step_choice(3.36, &cam3, 1),
+        Some(0),
+        "off-grid below: + -> first stop (min)"
+    );
 
     // on-grid: exactly at a choice, +/- move by one index.
     let g = [2.8_f64, 4.0, 5.2, 8.0];
     assert_eq!(step_choice(5.2, &g, 1), Some(3), "on-grid: + -> next index");
-    assert_eq!(step_choice(5.2, &g, -1), Some(1), "on-grid: - -> prev index");
+    assert_eq!(
+        step_choice(5.2, &g, -1),
+        Some(1),
+        "on-grid: - -> prev index"
+    );
 
     // bounds: at the max, "+" stays at max; at the min, "-" stays at min (no move -> the panel
     // disables the button, but the mapper never indexes out of range).
@@ -459,14 +479,34 @@ fn step_choice_from_off_grid_and_on_grid_1337() {
     assert_eq!(step_choice(2.8, &g, -1), Some(0), "at min: - stays at min");
 
     // between two choices: "+" to the choice above, "-" to the choice below.
-    assert_eq!(step_choice(4.6, &g, 1), Some(2), "between: + -> next choice above");
-    assert_eq!(step_choice(4.6, &g, -1), Some(1), "between: - -> next choice below");
+    assert_eq!(
+        step_choice(4.6, &g, 1),
+        Some(2),
+        "between: + -> next choice above"
+    );
+    assert_eq!(
+        step_choice(4.6, &g, -1),
+        Some(1),
+        "between: - -> next choice below"
+    );
 
     // above the whole grid: "+" clamps to max, "-" to the choice below (the max).
-    assert_eq!(step_choice(9.0, &g, 1), Some(3), "above grid: + clamps to max");
-    assert_eq!(step_choice(9.0, &g, -1), Some(3), "above grid: - -> last below (max)");
+    assert_eq!(
+        step_choice(9.0, &g, 1),
+        Some(3),
+        "above grid: + clamps to max"
+    );
+    assert_eq!(
+        step_choice(9.0, &g, -1),
+        Some(3),
+        "above grid: - -> last below (max)"
+    );
 
     // degenerate: no / single choice.
     assert_eq!(step_choice(4.0, &[], 1), None, "no choices -> None");
-    assert_eq!(step_choice(4.0, &[5.6], 1), Some(0), "single choice -> idx 0");
+    assert_eq!(
+        step_choice(4.0, &[5.6], 1),
+        Some(0),
+        "single choice -> idx 0"
+    );
 }
