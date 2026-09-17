@@ -276,16 +276,17 @@ A handheld camera runs the SAME `bkshading-relay` on **a separately powered zero
 with WiFi**: camera USB → SBC host port (PTP/gphoto2), SBC on the rig WiFi. **The board is
 DEVICE-AGNOSTIC** (owner has not finally chosen — Design v3, comment 5664682477 + ROZHODNUTÉ
 5664746806): a Raspberry **Pi Zero 2 W**, a **Radxa ZERO 3W**, or an **Orange Pi Zero 2W** (the
-ordered prototype). **Power is the camera cage's V-mount 5 V USB splitter** (5 V USB-C/USB-A out, or
-a D-tap→USB-C **5 V** cable) — **never a power bank, never PiSugar, never raw 15 V D-tap; all
-candidate boards are 5 V-only.** The box can never be powered BY the camera: PTP makes the camera
-the USB *device* (the power sink), so the box needs its own 5 V. The service already understands the
+ordered prototype). **The box's power supply is the OWNER's own business (ruling 17.9.2026, #808
+comment 5711321335: „napajanie si normalne ja riesim") — never a design item, never a bench item,
+never a question to him.** The only electrical fact the docs state: **all candidate boards are
+5 V-only — 5 V on the board's power port, never raw 15 V / D-tap.** (Background only: PTP makes the
+camera the USB *device*, so the camera itself is not the box's power source.) The service already understands the
 handheld (`Transport::SbcRelay`, `handheld-1..3` / `transport="sbc-relay"` in
 `bkshading.example.toml`, a params-only block — no NDI preview). The box side is
 `scripts/bkshading-provision-sbc.sh` (+ pure lib `scripts/lib/bkshading-sbc-runtime.sh`), mirroring
 the relay/cloudflared provisioning canon but with two deliberate deltas + one gotcha:
 - **Do NOT hard-code one board's port topology.** Per-board (all one USB cable to the camera + a 5 V
-  feed from the splitter): **Pi Zero 2 W** = micro-USB OTG host + a separate micro-USB 5 V power-in
+  feed the owner arranges): **Pi Zero 2 W** = micro-USB OTG host + a separate micro-USB 5 V power-in
   (2.4 GHz WiFi only → needs a 2.4 GHz SSID on site); **Radxa ZERO 3W** = USB3-C host + OTG-C 5 V-in
   (dual-band); **Orange Pi Zero 2W** = two USB-C (host-vs-power is revision-dependent — probe both;
   dual-band).
@@ -340,10 +341,9 @@ the relay/cloudflared provisioning canon but with two deliberate deltas + one go
 
 ### Supervisor bench checklist (run when the prototype board arrives — the HARDWARE half, UNVERIFIED in code lanes)
 The code lane ships the provisioning + `--check`; these live-hardware steps are the supervisor's:
-1. **PD / power-role listener on the camera's USB-C port** (M1) — confirm the camera never
-   advertises Source / never answers a `PR_Swap`, i.e. it cannot power the box (closes the
-   "one-cable, camera-powered" question by measurement; e.g. FNIRSI FNB58 in-line). Feed the box
-   from the cage V-mount **5 V** splitter only — never 15 V/D-tap directly.
+1. ~~PD / power-role listener on the camera's USB-C port~~ — **DROPPED (owner ruling 17.9.2026):
+   the box's power supply is the owner's business; nothing about power is measured, designed or
+   asked.** The board arrives powered by whatever the owner arranged (5 V on its power port).
 2. **`gphoto2 --auto-detect` on the real board** — the camera enumerates on the SBC's USB host port
    and PTP control works (the relay's transport).
 3. **WiFi join** — the board is on the rig WiFi SSID; on a **2.4 GHz-only** board bring up a 2.4 GHz
