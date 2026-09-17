@@ -141,14 +141,17 @@ Blackmagic Design Pocket Cinema Camera 4K usb:002,005";
 /// focus/summary read) and RECORDS every `set_config`, answering reads from a full-camera config.
 /// Lets a burst test assert: (a) a multi-param SET reads ONCE (no per-write read); (b) a second
 /// SET in the same burst re-uses the cached plan (zero further reads); (c) the writes recorded.
+/// Recorded `(key, value)` writes, shared with the test body.
+type RecordedWrites = Arc<Mutex<Vec<(String, String)>>>;
+
 struct BurstFakeRunner {
     configs: HashMap<String, String>,
     reads: Arc<AtomicUsize>,
-    writes: Arc<Mutex<Vec<(String, String)>>>,
+    writes: RecordedWrites,
 }
 
 impl BurstFakeRunner {
-    fn full() -> (Self, Arc<AtomicUsize>, Arc<Mutex<Vec<(String, String)>>>) {
+    fn full() -> (Self, Arc<AtomicUsize>, RecordedWrites) {
         let mut configs = HashMap::new();
         configs.insert(
             "iso".into(),
