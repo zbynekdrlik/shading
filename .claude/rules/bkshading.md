@@ -931,8 +931,22 @@ slider norm (0) instead of the real f-number. Fixed across THREE layers, each Ti
 ### Layer 3 — optimistic panel + step-from-real-value (`web/app.js`)
 - A click shows its new value immediately as `.pending` (accent + italic), reconciled by the next
   push. `render()` no longer drops the whole push while interacting (that hid every confirmation
-  during a click sequence — the number lag); only the ISO/shutter button REBUILD is guarded (a
-  mid-tap could be eaten), the dragged slider stays protected by the `activeElement` check.
+  during a click sequence — the number lag); a dragged slider stays protected by the
+  `document.activeElement` check in `updateBlock` (never a whole-push drop).
+- **ISO + uzávierka share the aperture-style `−`/index-slider/`+` stepper (addendum #1337, owner:
+  "selektory na iso ako samostatné tlačidlá je blbosť, daj to ako ostatné" + "uzávierka tiež").**
+  The rows of per-value choice buttons (`renderButtonGroup`, `.btn-group`) are GONE — one control
+  per parameter, no second way to set it. `ISO_STEPPER`/`SHUTTER_STEPPER` configs drive a shared
+  `stepEnum(el, id, cfg, dir)`: it steps ONE enumerated choice from the camera's REAL current value
+  (`dataset.isoVal`/`dataset.shutterVal`) via the SAME `stepChoice` (both `iso_choices` and
+  `shutter_choices_for_fps` are ASCENDING `Vec<i64>`, so the ascending semantics apply directly),
+  then PUTs the ABSOLUTE value (`{iso: v}` / `{shutter: v}`) — NOT a norm (that stays aperture-only).
+  The slider is an INDEX (`0..n-1`) over `caps.isoChoices`/`caps.shutterChoices`; `updateBlock`
+  positions it via `nearestIndex` (off-grid tolerant) and reconciles the optimistic `.pending` echo.
+  Removing the button rebuild retired the write-only `interacting` flag (sliders were already
+  `activeElement`-guarded). Pinned by `test_bkshading_webui.py` (steppers present, no `btn-group`,
+  `stepEnum` uses `stepChoice`, absolute PUT) + the panel Playwright E2E (ISO 400→800, shutter
+  50→60 off-grid onto the grid).
 - Aperture stepping uses a JS `stepChoice` MIRROR of the proto `mapping::step_choice`, stepping from
   the camera's REAL current f-number (`dataset.apertureFnum` from `apertureAv`) — an off-grid lens
   (cam1 f/4.0 below the first stop 4.5; cam3 f/3.36) moves ONTO the grid on the first tap instead of
