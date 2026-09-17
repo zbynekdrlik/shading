@@ -259,7 +259,7 @@ if (-not (Test-ServiceRunning)) {
   # direct Start-Process child lives in the ssh session's job object and is KILLED when the ssh command
   # returns -- the port verify below reads Listening, the deploy prints OK, and the panel is a 502 until
   # the keep-alive tick relaunches it (<= 5 min). Start THROUGH the keep-alive scheduled task instead
-  # (Task Scheduler is outside the ssh job, and its -KeepAlive pass calls Start-BkshadingService with the
+  # (Task Scheduler is outside the ssh job, and its -KeepAlive pass performs the same direct launch with the
   # same log redirection); fall back to the direct launch only when the task cannot be started.
   try {
     Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop
