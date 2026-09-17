@@ -880,3 +880,78 @@ aperture SETs = two gphoto2 shell-outs. The fix makes the whole chain reconstruc
 ## Service redeploy on strih: the installer's start dies with the ssh session — relaunch via the keep-alive task (16.9.2026)
 
 `scripts/bkshading-deploy-service.sh --execute` copies the exe, registers the `bkshading-service` keep-alive task and starts the service from the ssh session; Windows OpenSSH tears that process down at disconnect (the same job-object physics as OBS-over-ssh, issue 859), so 60 s later there is no process and no `:8770` listener while the script printed `OK … Listening`. Recovery = `schtasks /run /tn bkshading-service` over ssh (session-agnostic; the task launches the exe detached) → `keep-alive: bkshading service was not running - relaunched`; verify from dev1 with `curl :8770/api/version`. The relay on a cambox is unaffected (systemd unit). Followup for the script: start via the task, verify from a SECOND connection.
+
+
+## Immediate control responsiveness — write-burst session + optimistic panel (issue 1337, 17.9.2026)
+
+Owner complaint during live shading: every panel click had a ~1-3 s response and the confirmation
+number lagged 2-3 s, and the clona (aperture) would not move from the first click. Root cause: the
+relay ran a full `read_raw()` (3 gphoto2 spawns) BEFORE every write + one `--set-config` spawn per
+param (~4 processes/click ≈ 1 s); the service `forward_set` shared the 1.5 s poll `reqwest` client
+so a ~1 s write timed out mid-apply (no confirmation → the owner re-clicked); the panel dropped the
+whole push while `interacting` and had no optimistic echo; and the aperture step read the off-grid
+slider norm (0) instead of the real f-number. Fixed across THREE layers, each Tier-0 tested:
+
+### Layer 1 — relay write-burst session (`bkshading/relay/src/burst.rs` + `transport.rs`)
+- A persistent `gphoto2 --shell` child (`Gphoto2Shell`) is used ONLY inside a WRITE BURST: opened on
+  the first set, kept warm across a burst of clicks, closed after `WRITE_SESSION_IDLE_MS` (5 s) idle.
+  Inside a burst each write is planned from the f-number choices read ONCE at burst open (NO
+  pre-write read), and applied through the shell — so a click moves the camera in ~150 ms.
+- **It is a best-effort OPTIMISATION with a hard CLI FALLBACK.** Any shell error, or no completion
+  within `WRITE_SESSION_WEDGE_MS` (3 s), KILLS the child and falls the write back to a per-invocation
+  CLI `--set-config` (bounded by the existing 8 s `GPHOTO2_TIMEOUT`). So correctness NEVER depends on
+  the shell — a broken/slow shell just always uses the CLI path (still pre-read-free). This is why
+  re-introducing the shell here is safe even though issue 1229 REJECTED it for READS: the kill
+  boundary + CLI fallback are the whole safety story, and the read path is untouched (still
+  per-invocation CLI, floored — the issue-1229 quiet-bus doctrine resumes the moment the burst closes).
+- **The `--shell` command grammar (`set-config key=value`) + prompt shape are UNVERIFIED against a
+  live camera** — a Tier-0 lane has no gphoto2/camera. The fallback makes that acceptable; the
+  supervisor's rig acceptance (below) confirms/tunes the shell speedup. The PURE pieces (the
+  `burst_step` state machine, `burst_idle_expired`, the shell-line classifiers, `project_shading`,
+  the FIFO `SetQueue`) ARE Tier-0 tested (rustc replicas + `tests/burst_1337.rs` incl. a fake
+  `gphoto2 --shell` script).
+- **Wedge watchdog:** the shell read is bounded by `WRITE_SESSION_WEDGE_MS` via a reader-thread +
+  `recv_timeout` (the `wedge-watchdog-pattern.md` idea — a bounded kill boundary, never an unbounded
+  block); the camera lock is never held across an unbounded wait.
+- **`SetQueue` is FIFO, not latest-wins coalesce (issue 1309 → 1337):** 20 rapid clicks become 20
+  in-order camera moves (the shell makes that fast), still single-flight (never a second parallel
+  gphoto2). `read_state` serves cache while the shell owns the camera and does ONE authoritative read
+  at burst idle-close; ALL camera access stays serialized (read-cache lock + the new burst lock, lock
+  order read_cache→burst, `submit` never nests read_cache under burst → no deadlock).
+- `PUT /api/params` now returns `{"applied":n,"state":{...}}` — the projected resulting state (pure
+  `project_shading`) so the service can push an immediate confirmation.
+
+### Layer 2 — service dedicated write client + immediate WS push (`aggregator.rs` + `http.rs`)
+- `forward_set` uses a DEDICATED write client (1 s connect, 10 s total) — the 1.5 s poll client
+  timed out mid-write. After a successful write the service pushes an IMMEDIATE per-camera
+  confirmation over the WS (pure `aggregate_with_camera_update` — rebuilds ONLY the target camera's
+  view, no fleet re-poll), instead of waiting up to 2 s for the pump tick. The publish handle is
+  shared (`Arc<watch::Sender>`) between the pump and `set_params`.
+
+### Layer 3 — optimistic panel + step-from-real-value (`web/app.js`)
+- A click shows its new value immediately as `.pending` (accent + italic), reconciled by the next
+  push. `render()` no longer drops the whole push while interacting (that hid every confirmation
+  during a click sequence — the number lag); only the ISO/shutter button REBUILD is guarded (a
+  mid-tap could be eaten), the dragged slider stays protected by the `activeElement` check.
+- Aperture stepping uses a JS `stepChoice` MIRROR of the proto `mapping::step_choice`, stepping from
+  the camera's REAL current f-number (`dataset.apertureFnum` from `apertureAv`) — an off-grid lens
+  (cam1 f/4.0 below the first stop 4.5; cam3 f/3.36) moves ONTO the grid on the first tap instead of
+  the pre-fix idx-0 nearest-snap +1. `step_choice` is the pure Rust spec, JS-mirror-pinned by a node
+  parity check + `test_bkshading_webui.py`.
+
+### Standing rules that DID NOT change
+- **One tap = one PUT, no auto-repeat on hold** (the issue-1229 USB-PTP shared-bus doctrine).
+- **The relay is stopped+disabled in `rig-mode.sh test`, started in `event`** (issue 1311) — the
+  burst only runs while the relay is live (EVENT mode), so development runs pay no relay bus traffic.
+- **NEVER deploy OR restart a cambox relay during production** (the rig-busy-gated deploy + the
+  rig-idle-only restart, above). Deploy ORDER for this change: the SERVICE lands on strih anytime
+  (owner 17.9.: shading during a live show is allowed), the RELAY lands on the camboxes only OUTSIDE
+  production and its restart is a separate rig-idle supervisor step.
+
+### Rig acceptance (supervisor, relay half OUTSIDE production, EVENT mode)
+Deploy service → strih (anytime) + relay → camboxes (outside production only), start the relay, then:
+set `duration_ms` ≤ 150 ms per set in a burst (relay log); click → confirmed number ≤ 1 s; 20 rapid
+clicks = 20 moves; cam1 grabber `Streaming: sent/captured` flat during a 60 s burst (issue-1229
+metric); no `gphoto2` process 5 s after the burst (`pgrep gphoto2` empty). The `--shell` speedup
+itself is UNVERIFIED in code lanes — if the shell path never completes it silently uses the CLI
+(still pre-read-free, ~1 set/spawn), which the rig step confirms/tunes.
