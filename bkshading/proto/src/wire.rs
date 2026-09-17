@@ -329,27 +329,7 @@ pub enum ServerMsg {
     State(Aggregate),
 }
 
-// --- issue 1309: shading-write coalescing policy + a shared SET summary -------------------------
-
-/// Merge a newer shading write over any still-pending one, LATEST-WINS per parameter (issue 1309).
-/// Each field of `new` wins when present, else the pending value is kept — so a burst of PUTs
-/// (the owner "raised the aperture twice") collapses to ONE follow-up carrying the newest value of
-/// every touched param, instead of running N sequential gphoto2 writes. Pure — the single source
-/// of truth for the coalesce, unit-tested (rustc `--test`).
-pub fn coalesce_set_requests(prev: Option<SetRequest>, new: SetRequest) -> SetRequest {
-    match prev {
-        None => new,
-        Some(p) => SetRequest {
-            aperture_norm: new.aperture_norm.or(p.aperture_norm),
-            iso: new.iso.or(p.iso),
-            kelvin: new.kelvin.or(p.kelvin),
-            tint: new.tint.or(p.tint),
-            shutter: new.shutter.or(p.shutter),
-            fps: new.fps.or(p.fps),
-            auto_wb: new.auto_wb.or(p.auto_wb),
-        },
-    }
-}
+// --- issue 1309 / 1337: shading-write single-flight FIFO queue + a shared SET summary -----------
 
 /// One-line human summary of the non-`None` params in a SET (issue 1309), for the relay + service
 /// logs (so a "crash after two SETs" is reconstructible from the log alone). Pure — unit-tested.
@@ -383,38 +363,41 @@ pub fn summarize_set_request(req: &SetRequest) -> String {
     }
 }
 
-/// The action a [`SetQueue`] decided for an incoming SET (issue 1309).
+/// The action a [`SetQueue`] decided for an incoming SET (issue 1309/1337).
 #[derive(Debug, Clone, PartialEq)]
 pub enum SubmitAction {
-    /// No write is in flight — run THIS request now (the caller then drives gphoto2).
+    /// No write is in flight — run THIS request now (the caller then drives gphoto2 and, while it
+    /// runs, drains any SETs that queued behind it, in ORDER).
     RunNow(SetRequest),
-    /// A write is already in flight — this request was coalesced into the pending slot
-    /// (latest-wins). `total` is the running count of coalesced SETs, for the log line.
-    Coalesced { total: u64 },
+    /// A write is already in flight — this request was appended to the FIFO queue and will be
+    /// applied IN ORDER by the in-flight worker. `total` is the running count of queued SETs.
+    Queued { total: u64 },
 }
 
-/// Single-flight coalescing queue for shading writes (issue 1309). The relay wraps ONE of these in
-/// a `Mutex`: the FIRST SET flips `in_flight` and runs gphoto2; any SET arriving while a write is
-/// in flight folds latest-wins into `pending` (never a second parallel gphoto2 fork); when the
-/// in-flight worker finishes it drains `pending` and runs the coalesced latest, else clears
-/// `in_flight`. Pure state machine — the actual gphoto2 I/O lives in the relay; this is
-/// exhaustively rustc-testable.
+/// Single-flight FIFO queue for shading writes (issue 1309 single-flight; issue 1337 FIFO). The
+/// relay wraps ONE of these in a `Mutex`: the FIRST SET flips `in_flight` and runs gphoto2; any SET
+/// arriving while a write is in flight is APPENDED to `pending` (never a second parallel gphoto2
+/// fork — the issue-1309 guarantee); when the in-flight worker finishes it pops the FRONT of
+/// `pending` and runs it, else clears `in_flight`. FIFO (not the former latest-wins coalesce) so a
+/// burst of 20 rapid clicks becomes 20 in-order camera moves — the owner's issue-1337 requirement,
+/// which the persistent write-burst shell makes fast enough to run each rather than collapse them.
+/// Pure state machine — the actual gphoto2 I/O lives in the relay; this is exhaustively rustc-testable.
 #[derive(Debug, Default, Clone)]
 pub struct SetQueue {
     in_flight: bool,
-    pending: Option<SetRequest>,
-    coalesced_total: u64,
+    pending: std::collections::VecDeque<SetRequest>,
+    queued_total: u64,
 }
 
 impl SetQueue {
-    /// Decide what to do with an incoming SET. `RunNow` when idle (marks in-flight); `Coalesced`
-    /// (latest-wins merge into `pending`) when a write is already running.
+    /// Decide what to do with an incoming SET. `RunNow` when idle (marks in-flight); `Queued`
+    /// (appended to the FIFO tail) when a write is already running.
     pub fn submit(&mut self, req: SetRequest) -> SubmitAction {
         if self.in_flight {
-            self.pending = Some(coalesce_set_requests(self.pending.take(), req));
-            self.coalesced_total += 1;
-            SubmitAction::Coalesced {
-                total: self.coalesced_total,
+            self.pending.push_back(req);
+            self.queued_total += 1;
+            SubmitAction::Queued {
+                total: self.queued_total,
             }
         } else {
             self.in_flight = true;
@@ -422,11 +405,11 @@ impl SetQueue {
         }
     }
 
-    /// Called by the in-flight worker after each gphoto2 write completes: `Some(next)` = a
-    /// coalesced request was queued, stay in-flight and run it; `None` = nothing queued, clear
-    /// in-flight (the queue is idle again).
+    /// Called by the in-flight worker after each gphoto2 write completes: `Some(next)` = a queued
+    /// request is next (FIFO front), stay in-flight and run it; `None` = queue empty, clear
+    /// in-flight (idle again).
     pub fn finish(&mut self) -> Option<SetRequest> {
-        match self.pending.take() {
+        match self.pending.pop_front() {
             Some(next) => Some(next),
             None => {
                 self.in_flight = false;
@@ -435,18 +418,17 @@ impl SetQueue {
         }
     }
 
-    /// Called on a write error (or an unwind guard): drop the in-flight state AND any pending
-    /// follow-up (a queued write planned against a now-uncertain camera must not be run blind), and
-    /// RETURN that dropped follow-up so the caller can log it — the coalesced SET was already
-    /// acknowledged to the client, so its loss must at least be reconstructible. The next SET starts
-    /// fresh. Idempotent: a second `abort()` returns `None`.
-    pub fn abort(&mut self) -> Option<SetRequest> {
+    /// Called on a write error (or an unwind guard): drop the in-flight state AND the WHOLE queued
+    /// FIFO (writes planned against a now-uncertain camera must not run blind), returning every
+    /// dropped follow-up so the caller can log the loss — those SETs were already acknowledged to
+    /// the client. The next SET starts fresh. Idempotent: a second `abort()` returns an empty Vec.
+    pub fn abort(&mut self) -> Vec<SetRequest> {
         self.in_flight = false;
-        self.pending.take()
+        self.pending.drain(..).collect()
     }
 
-    /// Total number of SETs coalesced over this queue's lifetime (for diagnostics).
-    pub fn coalesced_total(&self) -> u64 {
-        self.coalesced_total
+    /// Total number of SETs queued over this queue's lifetime (for diagnostics).
+    pub fn queued_total(&self) -> u64 {
+        self.queued_total
     }
 }

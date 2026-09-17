@@ -1,9 +1,10 @@
-//! issue 1309: the shading-write coalescing policy (`SetQueue` / `coalesce_set_requests`) + the
-//! shared `summarize_set_request` log helper. Pure — no camera, no I/O.
+//! The shading-write single-flight FIFO queue (`SetQueue`) + the shared `summarize_set_request`
+//! log helper. issue 1309 established the single-flight gate (never a second parallel gphoto2);
+//! issue 1337 changed the pending policy from latest-wins COALESCE to FIFO, so a burst of rapid
+//! clicks becomes N in-order camera moves (the persistent write-burst shell makes that fast).
+//! Pure — no camera, no I/O.
 
-use bkshading_proto::wire::{
-    coalesce_set_requests, summarize_set_request, SetQueue, SetRequest, SubmitAction,
-};
+use bkshading_proto::wire::{summarize_set_request, SetQueue, SetRequest, SubmitAction};
 
 fn req_iso(iso: i64) -> SetRequest {
     SetRequest {
@@ -13,60 +14,47 @@ fn req_iso(iso: i64) -> SetRequest {
 }
 
 #[test]
-fn coalesce_is_latest_wins_per_param() {
-    let prev = SetRequest {
-        iso: Some(400),
-        aperture_norm: Some(0.2),
-        ..Default::default()
-    };
-    let new = SetRequest {
-        iso: Some(800),       // overrides prev
-        kelvin: Some(6500),   // adds
-        ..Default::default()  // aperture_norm None -> keeps prev's 0.2
-    };
-    let merged = coalesce_set_requests(Some(prev), new);
-    assert_eq!(merged.iso, Some(800)); // newer wins
-    assert_eq!(merged.aperture_norm, Some(0.2)); // preserved from pending
-    assert_eq!(merged.kelvin, Some(6500)); // added
-}
-
-#[test]
-fn coalesce_none_prev_is_identity() {
-    let new = req_iso(200);
-    assert_eq!(coalesce_set_requests(None, new.clone()), new);
-}
-
-#[test]
-fn set_queue_single_flight_runs_first_coalesces_rest() {
+fn set_queue_single_flight_runs_first_queues_rest_fifo() {
     let mut q = SetQueue::default();
     // First SET runs immediately.
     match q.submit(req_iso(100)) {
         SubmitAction::RunNow(r) => assert_eq!(r.iso, Some(100)),
         other => panic!("expected RunNow, got {other:?}"),
     }
-    // While in flight, two more coalesce (never a second parallel run).
-    assert_eq!(q.submit(req_iso(200)), SubmitAction::Coalesced { total: 1 });
-    assert_eq!(q.submit(req_iso(300)), SubmitAction::Coalesced { total: 2 });
-    // Worker finishes the first: drains the LATEST coalesced value (300 beat 200).
-    let drained = q.finish().expect("a coalesced SET is pending");
+    // While in flight, more are QUEUED (never a second parallel run) — FIFO, not coalesced.
+    assert_eq!(q.submit(req_iso(200)), SubmitAction::Queued { total: 1 });
+    assert_eq!(q.submit(req_iso(300)), SubmitAction::Queued { total: 2 });
+    // Worker finishes the first: drains the FRONT of the FIFO (200 before 300 — in ORDER, so 20
+    // rapid clicks become 20 in-order moves, not one latest-wins collapse).
+    let drained = q.finish().expect("a queued SET is pending");
+    assert_eq!(drained.iso, Some(200), "FIFO front, not latest-wins");
+    let drained = q.finish().expect("a second queued SET is pending");
     assert_eq!(drained.iso, Some(300));
-    // Worker finishes the drained one: nothing left -> queue idle again.
+    // Worker finishes the last drained one: nothing left -> queue idle again.
     assert!(q.finish().is_none());
-    assert_eq!(q.coalesced_total(), 2);
+    assert_eq!(q.queued_total(), 2);
     // Idle again: the next SET runs immediately.
     assert!(matches!(q.submit(req_iso(400)), SubmitAction::RunNow(_)));
 }
 
 #[test]
-fn set_queue_abort_clears_in_flight_and_pending() {
+fn set_queue_abort_clears_in_flight_and_whole_fifo() {
     let mut q = SetQueue::default();
     assert!(matches!(q.submit(req_iso(1)), SubmitAction::RunNow(_)));
-    assert_eq!(q.submit(req_iso(2)), SubmitAction::Coalesced { total: 1 });
-    let dropped = q.abort(); // a write error drops both in-flight AND the queued follow-up
-    assert_eq!(dropped.and_then(|r| r.iso), Some(2)); // abort RETURNS the dropped follow-up (to log)
-    assert!(q.abort().is_none()); // idempotent — a second abort has nothing to drop
+    assert_eq!(q.submit(req_iso(2)), SubmitAction::Queued { total: 1 });
+    assert_eq!(q.submit(req_iso(3)), SubmitAction::Queued { total: 2 });
+    // A write error drops both in-flight AND the WHOLE queued FIFO, returning every dropped
+    // follow-up (in order) so their loss is reconstructible from the log.
+    let dropped = q.abort();
+    let dropped_isos: Vec<i64> = dropped.iter().filter_map(|r| r.iso).collect();
+    assert_eq!(
+        dropped_isos,
+        vec![2, 3],
+        "abort returns the whole FIFO in order"
+    );
+    assert!(q.abort().is_empty()); // idempotent — a second abort has nothing to drop
     assert!(q.finish().is_none()); // nothing pending
-    assert!(matches!(q.submit(req_iso(3)), SubmitAction::RunNow(_))); // fresh start
+    assert!(matches!(q.submit(req_iso(4)), SubmitAction::RunNow(_))); // fresh start
 }
 
 #[test]
