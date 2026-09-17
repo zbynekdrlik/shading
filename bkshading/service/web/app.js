@@ -1,7 +1,9 @@
 "use strict";
-// bkshading web panel (issue 808). Server-truth: the panel renders whatever /api/cameras
-// reports and never keeps optimistic local state. Controls PUT a shading change to
-// /api/cameras/<id>/params (forwarded to the camera's relay). M2: a camera with an NDI
+// bkshading web panel (issue 808). Server-truth with an OPTIMISTIC echo (issue 1337): a control
+// shows its new value immediately as "pending" the instant it is clicked, then the next server push
+// (from /ws, or the /api/cameras poll fallback) RECONCILES it — the server stays the single source
+// of truth, the optimistic value just removes the click->confirm lag the owner reported. Controls
+// PUT a shading change to /api/cameras/<id>/params (forwarded to the camera's relay). M2: a camera with an NDI
 // preview shows a live JPEG preview (top block) reloaded a few times a second from
 // /api/cameras/<id>/preview.jpg; a camera with no preview shows a params-only block.
 
@@ -29,7 +31,8 @@ async function setParam(id, patch) {
       body: JSON.stringify(patch),
     });
   } catch (e) {
-    // A failed write surfaces on the next poll (server-truth); no optimistic UI.
+    // The write failed; the optimistic pending value is reconciled (reverted) by the next server
+    // push (server-truth). Log for diagnosis.
     console.warn("set failed", id, e);
   }
 }
@@ -65,10 +68,16 @@ function refreshStepDisabled(el) {
       b.title = "Kroky clony nie sú dostupné (relay neposiela voľby clony)";
     }
   } else {
+    // issue 1337: bounds from the REAL current f-number, not the slider norm. On-grid at an extreme
+    // disables that direction; off-grid (open below/above the grid, or between two stops) leaves
+    // BOTH enabled so the first step moves the lens onto the grid (the owner's "-" must work).
     const n = choices.length;
-    const idx = Math.round(Number(q("aperture").value) * (n - 1));
-    apDec.disabled = idx <= 0;
-    apInc.disabled = idx >= n - 1;
+    const cur = Number(el.dataset.apertureFnum);
+    const onGridIdx = Number.isFinite(cur)
+      ? choices.findIndex((c) => Math.abs(c - cur) < 1e-6)
+      : -1;
+    apDec.disabled = onGridIdx === 0;
+    apInc.disabled = onGridIdx === n - 1;
     apDec.title = "";
     apInc.title = "";
   }
@@ -83,21 +92,46 @@ function refreshStepDisabled(el) {
   }
 }
 
-// issue 1304: step the aperture by ONE f-number choice. Server-truth: read the slider's current
-// (last server) value, map to the nearest choice index, step by one, clamp to [0, n-1], set the
-// slider locally (so a quick second tap that lands BEFORE the next server push builds on it, like
-// a drag; once a push arrives the slider re-syncs to the server value) and PUT the ABSOLUTE
-// apertureNorm = idx'/(n-1). That is the inverse of the relay's norm_to_choice_index over the
-// SAME parseable choice list, so it lands exactly on the neighbouring f-number. One tap = one PUT.
+// issue 1337: JS mirror of the proto `mapping::step_choice` — the target choice INDEX stepping the
+// aperture from the camera's REAL current f-number across the enumerated grid. "+" = the first
+// choice strictly ABOVE the current f-number, "-" = the last strictly BELOW; a lens open below the
+// first enumerated stop clamps to the min choice from either direction (so the FIRST step moves it
+// ONTO the grid, never the pre-fix nearest-snap-to-idx-0 +1 that owner reported as "clona sa
+// nezdvihne"). Ascending choices. Pinned against the Rust spec by test_app_js_step_choice_1337.
+function stepChoice(currentFnum, choices, dir) {
+  const n = choices.length;
+  if (n === 0) return null;
+  if (n === 1) return 0;
+  if (dir > 0) {
+    const i = choices.findIndex((c) => c > currentFnum);
+    return i === -1 ? n - 1 : i;
+  }
+  for (let i = n - 1; i >= 0; i--) if (choices[i] < currentFnum) return i;
+  return 0;
+}
+
+// issue 1304 + 1337: step the aperture by ONE f-number choice, from the camera's REAL current
+// f-number (stored on the dataset from apertureAv) — NOT from the slider's normalised position,
+// which an off-grid lens reports as 0 (the #1337 bug). The target index comes from stepChoice; the
+// panel sets the slider locally + shows the target f-number as an OPTIMISTIC pending confirmation
+// (reconciled by the next server push), and PUTs the ABSOLUTE apertureNorm = idx/(n-1) — the exact
+// inverse of the relay's norm_to_choice_index over the SAME choice list. One tap = one PUT.
 function stepAperture(el, id, dir) {
   const choices = readFnumChoices(el);
   if (choices.length < 2) return; // no choices -> no fabricated step (the button is disabled)
   const n = choices.length;
   const s = el.querySelector('[data-role="aperture"]');
-  let idx = Math.round(Number(s.value) * (n - 1));
-  idx = Math.min(n - 1, Math.max(0, idx + dir));
+  const curFnum = Number(el.dataset.apertureFnum);
+  const idx = Number.isFinite(curFnum)
+    ? stepChoice(curFnum, choices, dir)
+    : Math.min(n - 1, Math.max(0, Math.round(Number(s.value) * (n - 1)) + dir));
   const norm = idx / (n - 1);
   s.value = norm;
+  // Optimistic: show the target f-number immediately (pending) so the number moves on the first tap.
+  const fnEl = el.querySelector('[data-role="fnum"]');
+  fnEl.textContent = "f/" + choices[idx].toFixed(1);
+  fnEl.classList.add("pending");
+  el.dataset.apertureFnum = String(choices[idx]);
   setParam(id, { apertureNorm: norm });
   refreshStepDisabled(el);
 }
@@ -112,6 +146,13 @@ function stepLinear(el, id, role, key, amount, dir) {
   let next = Math.round(Number(s.value)) + dir * amount;
   next = Math.min(max, Math.max(min, next));
   s.value = next;
+  // issue 1337: optimistic pending label so the number moves on the first tap (reconciled by the
+  // next server push).
+  const valEl = el.querySelector(`[data-role="${role}-val"]`);
+  if (valEl) {
+    valEl.textContent = role === "kelvin" ? next + "K" : String(next);
+    valEl.classList.add("pending");
+  }
   setParam(id, { [key]: next });
   refreshStepDisabled(el);
 }
@@ -133,9 +174,31 @@ function wire(el, id) {
     input.addEventListener("focus", () => (interacting = true));
     input.addEventListener("blur", () => (interacting = false));
   });
-  q("aperture").addEventListener("change", guard((e) => setParam(id, { apertureNorm: Number(e.target.value) })));
-  q("kelvin").addEventListener("change", guard((e) => setParam(id, { kelvin: Math.round(Number(e.target.value)) })));
-  q("tint").addEventListener("change", guard((e) => setParam(id, { tint: Math.round(Number(e.target.value)) })));
+  // issue 1337: each slider change echoes an OPTIMISTIC pending value immediately (reconciled by
+  // the next server push) so the number moves the instant the operator releases the slider.
+  q("aperture").addEventListener("change", guard((e) => {
+    const norm = Number(e.target.value);
+    const choices = readFnumChoices(el);
+    if (choices.length >= 2) {
+      const idx = Math.min(choices.length - 1, Math.max(0, Math.round(norm * (choices.length - 1))));
+      q("fnum").textContent = "f/" + choices[idx].toFixed(1);
+      q("fnum").classList.add("pending");
+      el.dataset.apertureFnum = String(choices[idx]);
+    }
+    setParam(id, { apertureNorm: norm });
+  }));
+  q("kelvin").addEventListener("change", guard((e) => {
+    const v = Math.round(Number(e.target.value));
+    q("kelvin-val").textContent = v + "K";
+    q("kelvin-val").classList.add("pending");
+    setParam(id, { kelvin: v });
+  }));
+  q("tint").addEventListener("change", guard((e) => {
+    const v = Math.round(Number(e.target.value));
+    q("tint-val").textContent = String(v);
+    q("tint-val").classList.add("pending");
+    setParam(id, { tint: v });
+  }));
   q("auto-wb").addEventListener("click", () => setParam(id, { autoWb: true }));
 
   // issue 1304: +/- step buttons. Each is a plain CLICK handler (one tap = one PUT) — NEVER a
@@ -222,21 +285,39 @@ function updateBlock(el, cam) {
   const p = online ? cam.state.params : {};
   const caps = online && cam.state.caps ? cam.state.caps : null;
 
-  // Aperture.
+  // Aperture. issue 1337: store the REAL current f-number on the dataset (stepAperture/
+  // refreshStepDisabled step from it, not the off-grid slider norm) and reconcile any optimistic
+  // pending value from a step with this authoritative push.
   const fn = fNumberFromAv(p.apertureAv);
-  q("fnum").textContent = fn == null ? "f/—" : "f/" + fn.toFixed(1);
+  const fnumEl = q("fnum");
+  fnumEl.textContent = fn == null ? "f/—" : "f/" + fn.toFixed(1);
+  fnumEl.classList.remove("pending");
+  el.dataset.apertureFnum = fn == null ? "" : String(fn);
   const apEl = q("aperture");
   if (document.activeElement !== apEl && p.apertureNorm != null) apEl.value = p.apertureNorm;
 
-  // ISO.
-  q("iso-val").textContent = p.iso == null ? "—" : String(p.iso);
-  renderButtonGroup(q("iso"), caps ? caps.isoChoices : [], p.iso, (v) => setParam(cam.id, { iso: v }));
+  // ISO. Skip the button REBUILD while interacting so a poll can't replace a button mid-tap; the
+  // value label + optimistic pending still reconcile live (issue 1337).
+  const isoVal = q("iso-val");
+  isoVal.textContent = p.iso == null ? "—" : String(p.iso);
+  isoVal.classList.remove("pending");
+  if (!interacting) {
+    renderButtonGroup(q("iso"), caps ? caps.isoChoices : [], p.iso, (v) => {
+      isoVal.textContent = String(v); // optimistic
+      isoVal.classList.add("pending");
+      setParam(cam.id, { iso: v });
+    });
+  }
 
   // White balance.
-  q("kelvin-val").textContent = p.kelvin == null ? "—" : p.kelvin + "K";
+  const kVal = q("kelvin-val");
+  kVal.textContent = p.kelvin == null ? "—" : p.kelvin + "K";
+  kVal.classList.remove("pending");
   const kEl = q("kelvin");
   if (document.activeElement !== kEl && p.kelvin != null) kEl.value = p.kelvin;
-  q("tint-val").textContent = p.tint == null ? "—" : String(p.tint);
+  const tVal = q("tint-val");
+  tVal.textContent = p.tint == null ? "—" : String(p.tint);
+  tVal.classList.remove("pending");
   const tEl = q("tint");
   if (document.activeElement !== tEl && p.tint != null) tEl.value = p.tint;
 
@@ -247,9 +328,17 @@ function updateBlock(el, cam) {
   el.dataset.fnumberChoices = JSON.stringify(fnumChoices);
   refreshStepDisabled(el);
 
-  // Shutter.
-  q("shutter-val").textContent = p.shutter == null ? "—" : "1/" + p.shutter;
-  renderButtonGroup(q("shutter"), caps ? caps.shutterChoices : [], p.shutter, (v) => setParam(cam.id, { shutter: v }));
+  // Shutter. Same interacting-guard + optimistic pending as ISO (issue 1337).
+  const shVal = q("shutter-val");
+  shVal.textContent = p.shutter == null ? "—" : "1/" + p.shutter;
+  shVal.classList.remove("pending");
+  if (!interacting) {
+    renderButtonGroup(q("shutter"), caps ? caps.shutterChoices : [], p.shutter, (v) => {
+      shVal.textContent = "1/" + v; // optimistic
+      shVal.classList.add("pending");
+      setParam(cam.id, { shutter: v });
+    });
+  }
 
   // fps + issue-809 grab-mode sync.
   const camFps = p.fps100 == null ? null : p.fps100 / 100;
@@ -296,7 +385,10 @@ function updateBlock(el, cam) {
 
 function render(agg) {
   document.getElementById("app-version").textContent = "v" + agg.version;
-  if (interacting) return;
+  // issue 1337: DO NOT drop the whole push while interacting — that made every confirmation
+  // arriving during a click sequence invisible (the owner's 2-3 s number lag). updateBlock protects
+  // only the control being actively dragged (activeElement) and the ISO/shutter button REBUILD
+  // (which could eat a mid-tap); every value LABEL still reconciles live.
   emptyNote.hidden = agg.cameras.length !== 0;
   const seen = new Set();
   for (const cam of agg.cameras) {

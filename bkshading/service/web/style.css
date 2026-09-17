@@ -138,3 +138,9 @@ body {
 @media (max-width: 480px) {
   .camera-grid { grid-template-columns: 1fr; }
 }
+
+/* issue 1337: an OPTIMISTIC value shown the instant a control is clicked, before the server
+   confirms it — rendered in the accent colour + italic so the operator sees it is "pending", then
+   the next server push reconciles it (removes .pending). Applied to the value labels
+   (fnum / iso-val / kelvin-val / tint-val / shutter-val) by app.js. */
+.pending { color: var(--accent); font-style: italic; }

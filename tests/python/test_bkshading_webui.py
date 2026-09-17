@@ -251,7 +251,52 @@ def _run():
         fn()
         print(f"ok  {fn.__name__}")
     print(f"\n{len(fns)} passed")
+def test_app_js_aperture_steps_from_real_fnumber_1337():
+    # issue 1337: the aperture step must start from the camera's REAL current f-number (an off-grid
+    # lens reports slider norm 0, which the old code stepped from -> "clona sa nezdvihne"). The panel
+    # carries a JS `stepChoice` mirror of the proto step_choice, steps from `dataset.apertureFnum`,
+    # and updateBlock stores that dataset from apertureAv.
+    js = _read("app.js")
+    assert "function stepChoice(" in js, "JS mirror of proto step_choice present"
+    ap = _js_fn_body(js, "function stepAperture(")
+    assert "dataset.apertureFnum" in ap, "stepAperture steps from the real f-number, not the norm"
+    assert "stepChoice(" in ap, "stepAperture uses the stepChoice mirror"
+    # updateBlock stores the real f-number on the dataset for the step handler + disable logic.
+    ub = _js_fn_body(js, "function updateBlock(")
+    assert "dataset.apertureFnum" in ub, "updateBlock stores the current f-number on the dataset"
+    # the disable logic no longer uses the (off-grid) slider norm for the aperture bounds.
+    rd = _js_fn_body(js, "function refreshStepDisabled(")
+    assert "dataset.apertureFnum" in rd, "aperture bounds come from the real f-number, not the norm"
 
+
+def test_app_js_optimistic_pending_echo_1337():
+    # issue 1337: a click shows its new value immediately as "pending" (reconciled by the next push).
+    js = _read("app.js")
+    ap = _js_fn_body(js, "function stepAperture(")
+    assert 'classList.add("pending")' in ap, "aperture step shows an optimistic pending value"
+    lin = _js_fn_body(js, "function stepLinear(")
+    assert 'classList.add("pending")' in lin, "kelvin/tint step shows an optimistic pending value"
+    # updateBlock RECONCILES: it removes the pending class when it renders the authoritative value.
+    ub = _js_fn_body(js, "function updateBlock(")
+    assert 'classList.remove("pending")' in ub, "the next push reconciles (clears) the pending value"
+    # the pending state is visibly styled.
+    css = _read("style.css")
+    assert ".pending" in css, "the pending value is visibly styled"
+
+
+def test_app_js_render_no_longer_drops_whole_push_while_interacting_1337():
+    # issue 1337: render must NOT `return` on `interacting` (that dropped every confirmation during a
+    # click sequence -> the owner's 2-3 s number lag). Instead updateBlock guards ONLY the button
+    # REBUILD (which could eat a mid-tap) with `!interacting`; value labels always reconcile.
+    js = _read("app.js")
+    rb = _js_fn_body(js, "function render(")
+    assert "if (interacting) return" not in rb, "render must not drop the whole push while interacting"
+    ub = _js_fn_body(js, "function updateBlock(")
+    assert "if (!interacting)" in ub, "only the button rebuild is guarded, not the whole render"
+    # one tap is still one PUT with no auto-repeat (the issue-1229 bus doctrine is unchanged).
+    for sig in ("function stepAperture(", "function stepLinear("):
+        body = _js_fn_body(js, sig)
+        assert "setInterval" not in body and "setTimeout" not in body, f"{sig} must not auto-repeat"
 
 if __name__ == "__main__":
     _run()
