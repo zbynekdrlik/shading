@@ -1067,11 +1067,15 @@ impl CameraSession {
                 }
             }
         }
-        // 4. Run the writes: shell fast-path, CLI fallback on any shell error.
+        // 4. Run the writes: shell fast-path, CLI fallback on any shell error. `as_mut().map(...)`
+        //    runs the shell write (if a shell is open) and RELEASES the borrow before the match, so
+        //    the error arm can `take()` the shell to kill it.
         for (key, value) in &writes {
-            if burst.shell.is_some() {
-                let res = burst.shell.as_mut().unwrap().set_config(key, value);
-                if let Err(e) = res {
+            match burst.shell.as_mut().map(|sh| sh.set_config(key, value)) {
+                Some(Ok(())) => {} // shell write applied
+                Some(Err(e)) => {
+                    // Shell wedged/errored: kill it, disable the shell for the rest of this burst,
+                    // and RETRY this write on the CLI (never lose the write).
                     tracing::warn!(error = %e, key = %key, "write-burst shell error; kill shell + CLI fallback");
                     if let Some(sh) = burst.shell.take() {
                         sh.close();
@@ -1081,12 +1085,15 @@ impl CameraSession {
                         .set_config(key, value)
                         .with_context(|| format!("CLI fallback set-config {key}={value}"))?;
                 }
-            } else if let Err(e) = self.runner.set_config(key, value) {
-                // A CLI-path failure is a real camera error — invalidate the plan basis so the next
-                // burst re-reads against the now-uncertain camera, then propagate.
-                burst.plan = None;
-                burst.open_state = None;
-                return Err(e);
+                None => {
+                    // No shell (disabled / not configured): CLI. A failure is a real camera error —
+                    // invalidate the plan so the next burst re-reads the now-uncertain camera.
+                    if let Err(e) = self.runner.set_config(key, value) {
+                        burst.plan = None;
+                        burst.open_state = None;
+                        return Err(e);
+                    }
+                }
             }
         }
         // 5. Writes applied — refresh the burst idle clock.
