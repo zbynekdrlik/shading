@@ -55,7 +55,15 @@
 
         <div class="control iso-control">
           <div class="control-head"><span>ISO</span><span class="value" data-role="iso-val">—</span></div>
-          <div class="btn-group" data-role="iso"></div>
+          <!-- issue 1337: ISO shares the aperture-style −/slider/+ stepper (owner: "selektory na iso
+               ako samostatné tlačidlá je blbosť, daj to ako ostatné"). The slider is an INDEX over
+               caps.isoChoices; one tap = one PUT of the absolute ISO value (issue 1229 one-tap rule,
+               no auto-repeat). -->
+          <div class="slider-row">
+            <button type="button" class="btn step-btn" data-role="iso-dec" aria-label="ISO o krok nižšie">−</button>
+            <input type="range" min="0" max="1" step="1" value="0" class="slider" data-role="iso" aria-label="ISO" />
+            <button type="button" class="btn step-btn" data-role="iso-inc" aria-label="ISO o krok vyššie">+</button>
+          </div>
         </div>
 
         <div class="control wb-control">
@@ -78,7 +86,14 @@
 
         <div class="control shutter-control">
           <div class="control-head"><span>Uzávierka</span><span class="value" data-role="shutter-val">—</span></div>
-          <div class="btn-group" data-role="shutter"></div>
+          <!-- issue 1337: uzávierka shares the aperture-style −/slider/+ stepper (owner: "uzávierka
+               tiež"). The slider is an INDEX over caps.shutterChoices; one tap = one PUT of the
+               absolute shutter value (issue 1229 one-tap rule, no auto-repeat). -->
+          <div class="slider-row">
+            <button type="button" class="btn step-btn" data-role="shutter-dec" aria-label="Uzávierka o krok nižšie">−</button>
+            <input type="range" min="0" max="1" step="1" value="0" class="slider" data-role="shutter" aria-label="Uzávierka" />
+            <button type="button" class="btn step-btn" data-role="shutter-inc" aria-label="Uzávierka o krok vyššie">+</button>
+          </div>
         </div>
 
         <div class="control fps-control">

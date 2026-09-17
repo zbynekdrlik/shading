@@ -12,7 +12,6 @@ const tmpl = document.getElementById("camera-block");
 const connEl = document.getElementById("conn-status");
 const emptyNote = document.getElementById("empty-note");
 const blocks = new Map(); // camera id -> block element (reused to preserve control focus)
-let interacting = false; // pause re-render while the operator is dragging a control
 
 // Live preview refresh rate (Hz). Shading is about colour/exposure, not motion, so a few
 // fps is plenty; keep it in step with the service-side decimation (~3 fps).
@@ -42,16 +41,47 @@ async function setParam(id, patch) {
 const KELVIN_STEP = 100; // K per tap
 const TINT_STEP = 1; // tint units per tap
 
-// issue 1304: a block's f-number choices, stored on its dataset by updateBlock (from
-// caps.fNumberChoices). Empty/absent -> the aperture +/- step is disabled (never fabricated).
-function readFnumChoices(el) {
+// A block's enumerated choice list, stored on its dataset by updateBlock. Empty/absent -> the
+// matching +/- step is disabled (never fabricated). issue 1304 (aperture) + issue 1337 (ISO/shutter).
+function readChoices(el, datasetKey) {
   try {
-    const a = JSON.parse(el.dataset.fnumberChoices || "[]");
+    const a = JSON.parse(el.dataset[datasetKey] || "[]");
     return Array.isArray(a) ? a : [];
   } catch (e) {
     return [];
   }
 }
+
+// issue 1304: the aperture's f-number choices (from caps.fNumberChoices).
+function readFnumChoices(el) {
+  return readChoices(el, "fnumberChoices");
+}
+
+// issue 1337: ISO and uzávierka share the aperture-style −/slider/+ stepper (owner: "selektory na
+// iso ako samostatné tlačidlá je blbosť, daj to ako ostatné" + "uzávierka tiež"). Each is an
+// enumerated choice list (caps.isoChoices / caps.shutterChoices); a tap steps ONE choice from the
+// camera's REAL current value via the SHARED stepChoice, then PUTs the ABSOLUTE value (choices[idx])
+// — not a norm. The slider is an INDEX (0..n-1) over the choices. One config per parameter is the
+// single source of truth for its dataset keys, wire key, and value formatting.
+const ISO_STEPPER = {
+  role: "iso",
+  valRole: "iso-val",
+  choicesKey: "isoChoices",
+  valKey: "isoVal",
+  key: "iso",
+  fmt: (v) => String(v),
+  emptyTitle: "Kroky ISO nie sú dostupné (relay neposiela voľby ISO)",
+};
+const SHUTTER_STEPPER = {
+  role: "shutter",
+  valRole: "shutter-val",
+  choicesKey: "shutterChoices",
+  valKey: "shutterVal",
+  key: "shutter",
+  fmt: (v) => "1/" + v,
+  emptyTitle: "Kroky uzávierky nie sú dostupné (relay neposiela voľby uzávierky)",
+};
+const ENUM_STEPPERS = [ISO_STEPPER, SHUTTER_STEPPER];
 
 // issue 1304: enable/disable the six +/- step buttons. Aperture is disabled entirely when the
 // relay sends no f-number choices (a title explains why — never a fabricated step) and at the
@@ -89,6 +119,29 @@ function refreshStepDisabled(el) {
     const cur = Number(s.value);
     q(dec).disabled = cur <= Number(s.min);
     q(inc).disabled = cur >= Number(s.max);
+  }
+  // issue 1337: ISO/uzávierka bounds from the REAL current value (like the aperture), NEVER the
+  // slider index. On-grid at an extreme disables that direction; off-grid (below/above/between the
+  // grid) leaves BOTH enabled so the first step moves onto the grid. Disabled entirely when the
+  // relay sends no choices (a title explains why — never a fabricated step).
+  for (const cfg of ENUM_STEPPERS) {
+    const dec = q(cfg.role + "-dec");
+    const inc = q(cfg.role + "-inc");
+    const choices = readChoices(el, cfg.choicesKey);
+    if (choices.length < 2) {
+      for (const b of [dec, inc]) {
+        b.disabled = true;
+        b.title = cfg.emptyTitle;
+      }
+    } else {
+      const n = choices.length;
+      const cur = currentEnum(el, cfg.valKey);
+      const onGridIdx = Number.isFinite(cur) ? choices.findIndex((c) => c === cur) : -1;
+      dec.disabled = onGridIdx === 0;
+      inc.disabled = onGridIdx === n - 1;
+      dec.title = "";
+      inc.title = "";
+    }
   }
 }
 
@@ -144,6 +197,52 @@ function stepAperture(el, id, dir) {
   refreshStepDisabled(el);
 }
 
+// issue 1337: a block's REAL current enumerated value (ISO/shutter), or NaN when unknown. Guards
+// the `Number("") === 0` trap — an unreadable value (dataset "") must NOT read as a finite 0.
+function currentEnum(el, valKey) {
+  const raw = el.dataset[valKey];
+  return raw === "" || raw == null ? NaN : Number(raw);
+}
+
+// issue 1337: index of the choice closest to `value` — positions the index slider from a server
+// push, including an off-grid value the camera reports between/below the enumerated steps.
+function nearestIndex(choices, value) {
+  let best = 0;
+  let bestDist = Infinity;
+  for (let i = 0; i < choices.length; i++) {
+    const d = Math.abs(choices[i] - value);
+    if (d < bestDist) {
+      bestDist = d;
+      best = i;
+    }
+  }
+  return best;
+}
+
+// issue 1337: step an enumerated parameter (ISO, uzávierka) by ONE choice from the camera's REAL
+// current value across the grid, using the SAME stepChoice semantics as the aperture ("+" = the
+// first choice above the current value, "-" = the last below; off-grid → onto the grid on the first
+// tap). One tap = one PUT of the ABSOLUTE value; the panel sets the slider index locally and shows
+// the target value as an OPTIMISTIC pending confirmation (reconciled by the next server push).
+function stepEnum(el, id, cfg, dir) {
+  const choices = readChoices(el, cfg.choicesKey);
+  if (choices.length < 2) return; // no choices -> no fabricated step (the button is disabled)
+  const n = choices.length;
+  const s = el.querySelector(`[data-role="${cfg.role}"]`);
+  const cur = currentEnum(el, cfg.valKey);
+  const idx = Number.isFinite(cur)
+    ? stepChoice(cur, choices, dir)
+    : Math.min(n - 1, Math.max(0, Math.round(Number(s.value)) + dir));
+  const value = choices[idx];
+  s.value = idx;
+  el.dataset[cfg.valKey] = String(value);
+  const valEl = el.querySelector(`[data-role="${cfg.valRole}"]`);
+  valEl.textContent = cfg.fmt(value);
+  valEl.classList.add("pending");
+  setParam(id, { [cfg.key]: value });
+  refreshStepDisabled(el);
+}
+
 // issue 1304: step a linear slider (kelvin by KELVIN_STEP K, tint by TINT_STEP) by `amount`,
 // clamped to the slider's own min/max, sending the ABSOLUTE new value. One tap = one PUT, no
 // auto-repeat on hold (the issue-1229 USB-PTP bus doctrine: one write = one gphoto2 session).
@@ -168,23 +267,11 @@ function stepLinear(el, id, role, key, amount, dir) {
 // Wire a freshly cloned block's controls to their PUT handlers (attached once per block).
 function wire(el, id) {
   const q = (role) => el.querySelector(`[data-role="${role}"]`);
-  // Pause the 2s re-render for the whole block while a control is being touched, so a poll
-  // between a button's pointerdown and its click never rebuilds (and eats) the tap.
-  el.addEventListener("pointerdown", () => (interacting = true));
-  el.addEventListener("pointerup", () => setTimeout(() => (interacting = false), 250));
-  const guard = (fn) => (ev) => {
-    interacting = false;
-    fn(ev);
-  };
-  ["aperture", "kelvin", "tint"].forEach((role) => {
-    const input = q(role);
-    input.addEventListener("pointerdown", () => (interacting = true));
-    input.addEventListener("focus", () => (interacting = true));
-    input.addEventListener("blur", () => (interacting = false));
-  });
   // issue 1337: each slider change echoes an OPTIMISTIC pending value immediately (reconciled by
-  // the next server push) so the number moves the instant the operator releases the slider.
-  q("aperture").addEventListener("change", guard((e) => {
+  // the next server push) so the number moves the instant the operator releases the slider. A slider
+  // being dragged is protected from a mid-drag overwrite by the `document.activeElement` check in
+  // updateBlock — never by dropping the whole push (that hid the confirmations, the owner's lag).
+  q("aperture").addEventListener("change", (e) => {
     const norm = Number(e.target.value);
     const choices = readFnumChoices(el);
     if (choices.length >= 2) {
@@ -194,30 +281,50 @@ function wire(el, id) {
       el.dataset.apertureFnum = String(choices[idx]);
     }
     setParam(id, { apertureNorm: norm });
-  }));
-  q("kelvin").addEventListener("change", guard((e) => {
+  });
+  q("kelvin").addEventListener("change", (e) => {
     const v = Math.round(Number(e.target.value));
     q("kelvin-val").textContent = v + "K";
     q("kelvin-val").classList.add("pending");
     setParam(id, { kelvin: v });
-  }));
-  q("tint").addEventListener("change", guard((e) => {
+  });
+  q("tint").addEventListener("change", (e) => {
     const v = Math.round(Number(e.target.value));
     q("tint-val").textContent = String(v);
     q("tint-val").classList.add("pending");
     setParam(id, { tint: v });
-  }));
+  });
+  // issue 1337: ISO/uzávierka index sliders — on release, map the index to the enumerated choice and
+  // PUT the ABSOLUTE value, with the same optimistic pending echo (reconciled by the next push).
+  for (const cfg of ENUM_STEPPERS) {
+    q(cfg.role).addEventListener("change", (e) => {
+      const choices = readChoices(el, cfg.choicesKey);
+      if (!choices.length) return;
+      const idx = Math.min(choices.length - 1, Math.max(0, Math.round(Number(e.target.value))));
+      const value = choices[idx];
+      el.dataset[cfg.valKey] = String(value);
+      const valEl = q(cfg.valRole);
+      valEl.textContent = cfg.fmt(value);
+      valEl.classList.add("pending");
+      setParam(id, { [cfg.key]: value });
+    });
+  }
   q("auto-wb").addEventListener("click", () => setParam(id, { autoWb: true }));
 
-  // issue 1304: +/- step buttons. Each is a plain CLICK handler (one tap = one PUT) — NEVER a
-  // pointerdown-hold with a repeat timer, per the issue-1229 USB-PTP bus doctrine. `guard`
-  // clears `interacting` like the slider's change handler so the next render isn't eaten.
-  q("aperture-dec").addEventListener("click", guard(() => stepAperture(el, id, -1)));
-  q("aperture-inc").addEventListener("click", guard(() => stepAperture(el, id, 1)));
-  q("kelvin-dec").addEventListener("click", guard(() => stepLinear(el, id, "kelvin", "kelvin", KELVIN_STEP, -1)));
-  q("kelvin-inc").addEventListener("click", guard(() => stepLinear(el, id, "kelvin", "kelvin", KELVIN_STEP, 1)));
-  q("tint-dec").addEventListener("click", guard(() => stepLinear(el, id, "tint", "tint", TINT_STEP, -1)));
-  q("tint-inc").addEventListener("click", guard(() => stepLinear(el, id, "tint", "tint", TINT_STEP, 1)));
+  // issue 1304 + 1337: +/- step buttons. Each is a plain CLICK handler (one tap = one PUT) — NEVER a
+  // pointerdown-hold with a repeat timer, per the issue-1229 USB-PTP shared-bus doctrine (one write =
+  // one gphoto2 session). Aperture is a norm step; ISO/uzávierka step the enumerated choice via
+  // stepEnum; kelvin/tint are linear.
+  q("aperture-dec").addEventListener("click", () => stepAperture(el, id, -1));
+  q("aperture-inc").addEventListener("click", () => stepAperture(el, id, 1));
+  q("kelvin-dec").addEventListener("click", () => stepLinear(el, id, "kelvin", "kelvin", KELVIN_STEP, -1));
+  q("kelvin-inc").addEventListener("click", () => stepLinear(el, id, "kelvin", "kelvin", KELVIN_STEP, 1));
+  q("tint-dec").addEventListener("click", () => stepLinear(el, id, "tint", "tint", TINT_STEP, -1));
+  q("tint-inc").addEventListener("click", () => stepLinear(el, id, "tint", "tint", TINT_STEP, 1));
+  q("iso-dec").addEventListener("click", () => stepEnum(el, id, ISO_STEPPER, -1));
+  q("iso-inc").addEventListener("click", () => stepEnum(el, id, ISO_STEPPER, 1));
+  q("shutter-dec").addEventListener("click", () => stepEnum(el, id, SHUTTER_STEPPER, -1));
+  q("shutter-inc").addEventListener("click", () => stepEnum(el, id, SHUTTER_STEPPER, 1));
 
   // issue 809: explicit "align camera fps to the box's grab mode" button. Never an auto-write
   // (a camera-side format change can interrupt recording) — the operator must click. The grab
@@ -261,19 +368,6 @@ function refreshPreviews() {
   }
 }
 
-// Rebuild a value-button group (ISO, shutter) from the camera caps, marking the current one.
-function renderButtonGroup(container, values, current, onPick) {
-  container.textContent = "";
-  for (const v of values) {
-    const b = document.createElement("button");
-    b.type = "button";
-    b.className = "btn val-btn" + (v === current ? " active" : "");
-    b.textContent = String(v);
-    b.addEventListener("click", () => onPick(v));
-    container.appendChild(b);
-  }
-}
-
 function updateBlock(el, cam) {
   const q = (role) => el.querySelector(`[data-role="${role}"]`);
   q("label").textContent = cam.label;
@@ -304,17 +398,19 @@ function updateBlock(el, cam) {
   const apEl = q("aperture");
   if (document.activeElement !== apEl && p.apertureNorm != null) apEl.value = p.apertureNorm;
 
-  // ISO. Skip the button REBUILD while interacting so a poll can't replace a button mid-tap; the
-  // value label + optimistic pending still reconcile live (issue 1337).
+  // ISO. issue 1337: the aperture-style stepper — store the choices + REAL value on the dataset
+  // (stepEnum/refreshStepDisabled step from them), position the index slider (guarded while the
+  // operator drags it), and reconcile any optimistic pending value from a step.
   const isoVal = q("iso-val");
   isoVal.textContent = p.iso == null ? "—" : String(p.iso);
   isoVal.classList.remove("pending");
-  if (!interacting) {
-    renderButtonGroup(q("iso"), caps ? caps.isoChoices : [], p.iso, (v) => {
-      isoVal.textContent = String(v); // optimistic
-      isoVal.classList.add("pending");
-      setParam(cam.id, { iso: v });
-    });
+  const isoChoices = caps && Array.isArray(caps.isoChoices) ? caps.isoChoices : [];
+  el.dataset.isoChoices = JSON.stringify(isoChoices);
+  el.dataset.isoVal = p.iso == null ? "" : String(p.iso);
+  const isoEl = q("iso");
+  if (isoChoices.length >= 2) isoEl.max = isoChoices.length - 1;
+  if (document.activeElement !== isoEl && p.iso != null && isoChoices.length) {
+    isoEl.value = nearestIndex(isoChoices, p.iso);
   }
 
   // White balance.
@@ -330,23 +426,26 @@ function updateBlock(el, cam) {
   if (document.activeElement !== tEl && p.tint != null) tEl.value = p.tint;
 
   // issue 1304: expose the camera's f-number choices for the aperture +/- step (stored on the
-  // dataset, read by the step handler — the same pattern as grabFps), and refresh the
-  // enable/disable state of all six step buttons (disabled without choices and at the bounds).
+  // dataset, read by the step handler — the same pattern as grabFps).
   const fnumChoices = caps && Array.isArray(caps.fNumberChoices) ? caps.fNumberChoices : [];
   el.dataset.fnumberChoices = JSON.stringify(fnumChoices);
-  refreshStepDisabled(el);
 
-  // Shutter. Same interacting-guard + optimistic pending as ISO (issue 1337).
+  // Shutter. issue 1337: same aperture-style index-slider stepper as ISO.
   const shVal = q("shutter-val");
   shVal.textContent = p.shutter == null ? "—" : "1/" + p.shutter;
   shVal.classList.remove("pending");
-  if (!interacting) {
-    renderButtonGroup(q("shutter"), caps ? caps.shutterChoices : [], p.shutter, (v) => {
-      shVal.textContent = "1/" + v; // optimistic
-      shVal.classList.add("pending");
-      setParam(cam.id, { shutter: v });
-    });
+  const shutterChoices = caps && Array.isArray(caps.shutterChoices) ? caps.shutterChoices : [];
+  el.dataset.shutterChoices = JSON.stringify(shutterChoices);
+  el.dataset.shutterVal = p.shutter == null ? "" : String(p.shutter);
+  const shEl = q("shutter");
+  if (shutterChoices.length >= 2) shEl.max = shutterChoices.length - 1;
+  if (document.activeElement !== shEl && p.shutter != null && shutterChoices.length) {
+    shEl.value = nearestIndex(shutterChoices, p.shutter);
   }
+
+  // issue 1304 + 1337: refresh the enable/disable state of ALL step buttons (aperture, ISO,
+  // uzávierka, kelvin, tint) now that every block's choices + real value are on the dataset.
+  refreshStepDisabled(el);
 
   // fps + issue-809 grab-mode sync.
   const camFps = p.fps100 == null ? null : p.fps100 / 100;
@@ -393,10 +492,11 @@ function updateBlock(el, cam) {
 
 function render(agg) {
   document.getElementById("app-version").textContent = "v" + agg.version;
-  // issue 1337: DO NOT drop the whole push while interacting — that made every confirmation
-  // arriving during a click sequence invisible (the owner's 2-3 s number lag). updateBlock protects
-  // only the control being actively dragged (activeElement) and the ISO/shutter button REBUILD
-  // (which could eat a mid-tap); every value LABEL still reconciles live.
+  // issue 1337: DO NOT drop the whole push while the operator interacts — that made every
+  // confirmation arriving during a click sequence invisible (the owner's 2-3 s number lag).
+  // updateBlock protects only the control being actively dragged (the activeElement slider check);
+  // every value LABEL always reconciles live. (Addendum #1337 replaced the ISO/shutter button groups
+  // with index-slider steppers, so there is no button REBUILD left to eat a mid-tap.)
   emptyNote.hidden = agg.cameras.length !== 0;
   const seen = new Set();
   for (const cam of agg.cameras) {
