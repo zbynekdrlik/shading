@@ -766,9 +766,10 @@ impl CameraSession {
                 true
             }
             _ if matches!(burst.state, BurstState::Open { .. }) => {
-                // The shell owns the camera this instant — serve the last snapshot, never a
-                // second concurrent gphoto2 read. The burst-open read populated the cache; if a
-                // burst somehow opened before any read, a benign offline snapshot is returned.
+                // The shell owns the camera this instant — serve the last read_state snapshot,
+                // never a second concurrent gphoto2 read. The burst plans from its OWN cache
+                // (`burst.plan`), not `read_cache`, so this snapshot may be slightly pre-burst; the
+                // burst-close read below refreshes it. A benign offline snapshot if no read yet.
                 return cache
                     .as_ref()
                     .map(|c| c.state.clone())
@@ -858,6 +859,13 @@ impl CameraSession {
     /// Applies a shading write request. Returns the number of gphoto2 `set-config` writes
     /// performed. Aperture is planned against the camera's live f-number choices and the
     /// live fps (for the shutter angle), so a write always matches the current camera.
+    ///
+    /// NOTE (issue 1337): this is the ORIGINAL per-invocation write path (read_raw + one
+    /// `set_config` per param), UNCHANGED so its direct unit test still holds. The production
+    /// `PUT /api/params` handler calls [`submit`](Self::submit) (the write-burst path), NOT this.
+    /// `apply` locks only `read_cache` and is NOT burst-aware, so it MUST NOT be called
+    /// concurrently with `submit` (which locks `burst`) — the two would not mutually exclude and
+    /// could run two gphoto2 processes against the one USB camera. Keep it test-only.
     pub fn apply(&self, req: &SetRequest) -> Result<usize> {
         // issue 1229: HOLD the `read_cache` lock across the ENTIRE apply (the `read_raw` + the
         // `set_config` writes), not just at the final invalidate. `http.rs` dispatches `read_state`
@@ -1081,9 +1089,15 @@ impl CameraSession {
                         sh.close();
                     }
                     burst.shell_disabled = true;
-                    self.runner
-                        .set_config(key, value)
-                        .with_context(|| format!("CLI fallback set-config {key}={value}"))?;
+                    if let Err(e2) = self.runner.set_config(key, value) {
+                        // The CLI FALLBACK also failed -> a real camera error; invalidate the plan
+                        // basis (same as the no-shell CLI path below) so the next burst re-reads the
+                        // now-uncertain camera, then propagate (-> 502).
+                        burst.plan = None;
+                        burst.open_state = None;
+                        return Err(e2)
+                            .with_context(|| format!("CLI fallback set-config {key}={value}"));
+                    }
                 }
                 None => {
                     // No shell (disabled / not configured): CLI. A failure is a real camera error —

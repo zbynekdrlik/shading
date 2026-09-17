@@ -72,7 +72,7 @@ function refreshStepDisabled(el) {
     // disables that direction; off-grid (open below/above the grid, or between two stops) leaves
     // BOTH enabled so the first step moves the lens onto the grid (the owner's "-" must work).
     const n = choices.length;
-    const cur = Number(el.dataset.apertureFnum);
+    const cur = currentFnum(el);
     const onGridIdx = Number.isFinite(cur)
       ? choices.findIndex((c) => Math.abs(c - cur) < 1e-6)
       : -1;
@@ -102,12 +102,20 @@ function stepChoice(currentFnum, choices, dir) {
   const n = choices.length;
   if (n === 0) return null;
   if (n === 1) return 0;
+  if (dir === 0) return 0; // parity with the Rust step_choice (dir 0 is never sent by the panel)
   if (dir > 0) {
     const i = choices.findIndex((c) => c > currentFnum);
     return i === -1 ? n - 1 : i;
   }
   for (let i = n - 1; i >= 0; i--) if (choices[i] < currentFnum) return i;
   return 0;
+}
+
+// issue 1337: the block's REAL current f-number, or NaN when aperture is unknown. Guards the
+// `Number("") === 0` trap — an unreadable aperture (dataset "") must NOT read as a finite 0.
+function currentFnum(el) {
+  const raw = el.dataset.apertureFnum;
+  return raw === "" || raw == null ? NaN : Number(raw);
 }
 
 // issue 1304 + 1337: step the aperture by ONE f-number choice, from the camera's REAL current
@@ -121,7 +129,7 @@ function stepAperture(el, id, dir) {
   if (choices.length < 2) return; // no choices -> no fabricated step (the button is disabled)
   const n = choices.length;
   const s = el.querySelector('[data-role="aperture"]');
-  const curFnum = Number(el.dataset.apertureFnum);
+  const curFnum = currentFnum(el);
   const idx = Number.isFinite(curFnum)
     ? stepChoice(curFnum, choices, dir)
     : Math.min(n - 1, Math.max(0, Math.round(Number(s.value) * (n - 1)) + dir));

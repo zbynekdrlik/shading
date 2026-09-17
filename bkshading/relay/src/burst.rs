@@ -269,11 +269,22 @@ impl Gphoto2Shell {
         }
     }
 
-    /// Kills + reaps the shell child (issue 1337). Called on close (idle) or on any error before
-    /// the CLI fallback. Best-effort — a kill/wait error is swallowed (the child is going away).
+    /// Closes the shell (issue 1337): sends a `quit` hint, then lets [`Drop`] kill + reap the child.
+    /// Called on idle-close or on any error before the CLI fallback. Best-effort.
     pub fn close(mut self) {
         let _ = self.stdin.write_all(b"quit\n");
         let _ = self.stdin.flush();
+        // The child is killed + reaped by Drop (below), so a `close()`d shell and a
+        // never-`close()`d (dropped) shell both leave no orphan.
+    }
+}
+
+impl Drop for Gphoto2Shell {
+    /// Defensive teardown (issue 1337): std `Child::drop` does NOT kill, so a `Gphoto2Shell` that
+    /// is dropped without `close()` (a burst abandoned mid-flight) would otherwise leak the
+    /// `gphoto2 --shell` child. Kill + reap here so every drop path leaves no orphan holding the
+    /// USB camera. Best-effort — a kill/wait error (already-dead child) is swallowed.
+    fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }

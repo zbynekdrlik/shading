@@ -264,9 +264,13 @@ def test_app_js_aperture_steps_from_real_fnumber_1337():
     # updateBlock stores the real f-number on the dataset for the step handler + disable logic.
     ub = _js_fn_body(js, "function updateBlock(")
     assert "dataset.apertureFnum" in ub, "updateBlock stores the current f-number on the dataset"
-    # the disable logic no longer uses the (off-grid) slider norm for the aperture bounds.
+    # the current f-number is read through the currentFnum() helper (guards the Number("")===0 trap),
+    # which reads dataset.apertureFnum -- not the off-grid slider norm.
+    cf = _js_fn_body(js, "function currentFnum(")
+    assert "dataset.apertureFnum" in cf, "currentFnum reads the real f-number from the dataset"
+    # the disable logic derives the aperture bounds from the real f-number, not the slider norm.
     rd = _js_fn_body(js, "function refreshStepDisabled(")
-    assert "dataset.apertureFnum" in rd, "aperture bounds come from the real f-number, not the norm"
+    assert "currentFnum(" in rd, "aperture bounds come from the real f-number (currentFnum), not the norm"
 
 
 def test_app_js_optimistic_pending_echo_1337():
