@@ -43,10 +43,36 @@ pub fn camera_view(cam: &CameraConfig, state: Option<RelayState>) -> CameraView 
     }
 }
 
+/// Rebuilds ONE camera's view (from its config + a fresh relay state) inside a copy of `current`
+/// (issue 1337) — the pure core of the immediate-confirmation WS push after a shading write. Every
+/// OTHER camera is untouched; if the camera id is not in the aggregate (config changed underneath)
+/// the copy is returned unchanged. Pure — Tier-0 tested, so the "push only this camera, no re-poll"
+/// decision is verified without standing up an HTTP server.
+pub fn aggregate_with_camera_update(
+    current: &Aggregate,
+    cam: &CameraConfig,
+    relay_state: RelayState,
+) -> Aggregate {
+    let mut agg = current.clone();
+    let new_view = camera_view(cam, Some(relay_state));
+    if let Some(slot) = agg.cameras.iter_mut().find(|c| c.id == cam.id) {
+        *slot = new_view;
+    }
+    agg
+}
+
 /// Polls relays and assembles the aggregate the panel renders.
 #[derive(Clone)]
 pub struct Aggregator {
+    /// The POLL client (issue 1229 read-floor cadence): a short TOTAL timeout so one slow/down
+    /// relay never stalls the ~2 s pump snapshot.
     client: reqwest::Client,
+    /// The WRITE client (issue 1337): a dedicated `PUT /api/params` client with a 1 s CONNECT
+    /// timeout but a 10 s TOTAL timeout — the relay's write-burst can legitimately take ~1 s to
+    /// apply + read back, and the old 1.5 s TOTAL (shared with the poll client) timed out mid-apply
+    /// so the panel never got a confirmation and the owner clicked again ("ani sa nezdvihne kým
+    /// nepoklikám viackrát"). Separate client so tuning the write path never touches the poll path.
+    write_client: reqwest::Client,
     version: String,
 }
 
@@ -55,8 +81,13 @@ impl Aggregator {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_millis(1500))
             .build()?;
+        let write_client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_millis(1000))
+            .timeout(Duration::from_millis(10_000))
+            .build()?;
         Ok(Aggregator {
             client,
+            write_client,
             version: version.into(),
         })
     }
@@ -99,22 +130,36 @@ impl Aggregator {
         }
     }
 
-    /// Forwards a shading write to the camera's relay (`PUT /api/params`). issue 1309: logs EVERY
-    /// forward — camera id, the params requested, the relay HTTP status + latency, and the relay's
-    /// error body on failure — so a "crash after two SETs" is reconstructible from the strih log
-    /// alone (before this, a `PUT /api/params` left no trace on the service side).
-    pub async fn forward_set(&self, cam: &CameraConfig, req: &SetRequest) -> anyhow::Result<()> {
+    /// Forwards a shading write to the camera's relay (`PUT /api/params`). issue 1309 logs EVERY
+    /// forward (id, params, status, latency, error body); issue 1337 uses the dedicated 10 s write
+    /// client (so a legitimately ~1 s relay apply no longer times out mid-write) AND returns the
+    /// relay's projected state from the `{"applied":n,"state":{...}}` body so the caller can push an
+    /// immediate confirmation to the panel. A 202 queued write (or a body without `state`) yields
+    /// `Ok(None)` — no immediate state; the pump's next snapshot / burst-close read covers it.
+    pub async fn forward_set(
+        &self,
+        cam: &CameraConfig,
+        req: &SetRequest,
+    ) -> anyhow::Result<Option<RelayState>> {
         let url = format!("http://{}/api/params", cam.address);
         let params = summarize_set_request(req);
         let start = Instant::now();
-        let result = self.client.put(&url).json(req).send().await;
+        let result = self.write_client.put(&url).json(req).send().await;
         let latency_ms = start.elapsed().as_millis() as u64;
         match result {
             Ok(resp) if resp.status().is_success() => {
                 let status = resp.status();
+                // issue 1337: parse the relay's returned state (present on a 200 applied write).
+                let state = resp
+                    .json::<serde_json::Value>()
+                    .await
+                    .ok()
+                    .as_ref()
+                    .and_then(|b| b.get("state"))
+                    .and_then(|s| serde_json::from_value::<RelayState>(s.clone()).ok());
                 tracing::info!(id = %cam.id, params = %params, status = %status, latency_ms,
-                    "PUT /api/params -> relay ok");
-                Ok(())
+                    has_state = state.is_some(), "PUT /api/params -> relay ok");
+                Ok(state)
             }
             Ok(resp) => {
                 let status = resp.status();

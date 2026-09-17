@@ -1,8 +1,8 @@
 //! Service config-parsing + camera-view assembly tests — pure, no HTTP, no relay.
 
-use bkshading::aggregator::camera_view;
+use bkshading::aggregator::{aggregate_with_camera_update, camera_view};
 use bkshading::config::ServiceConfig;
-use bkshading_proto::wire::{FpsSync, RelayState, ShadingParams, Transport};
+use bkshading_proto::wire::{Aggregate, FpsSync, RelayState, ShadingParams, Transport};
 
 const EXAMPLE: &str = "\
 bind = \"0.0.0.0:8770\"
@@ -36,6 +36,50 @@ fn parses_camera_list_with_transports() {
     let handheld = &cfg.cameras[1];
     assert_eq!(handheld.transport, Transport::SbcRelay);
     assert_eq!(handheld.ndi_preview, None); // no preview -> params-only block
+}
+
+#[test]
+fn immediate_confirm_push_updates_only_the_target_camera_1337() {
+    // issue 1337 Layer 2: after a shading write the service pushes an IMMEDIATE confirmation by
+    // rebuilding ONLY the target camera's view from the relay-returned state — every other camera
+    // is untouched (no re-poll of the whole fleet).
+    let cfg = ServiceConfig::from_toml_str(EXAMPLE).unwrap();
+    let online_iso = |iso: i64| RelayState {
+        online: true,
+        camera: Some("Blackmagic Design Pocket Cinema Camera 4K".into()),
+        params: ShadingParams {
+            iso: Some(iso),
+            ..Default::default()
+        },
+        caps: None,
+        fps_supported: true,
+        capture_fps: None,
+        version: "1.7.0-dev.640".into(),
+    };
+    let cam1_before = camera_view(&cfg.cameras[0], Some(online_iso(400)));
+    let handheld = camera_view(&cfg.cameras[1], None);
+    let agg = Aggregate {
+        version: "1.7.0-dev.640".into(),
+        cameras: vec![cam1_before, handheld.clone()],
+    };
+    // A write applied to cam1 returned iso 800.
+    let updated = aggregate_with_camera_update(&agg, &cfg.cameras[0], online_iso(800));
+    let cam1 = updated.cameras.iter().find(|c| c.id == "cam1").unwrap();
+    assert_eq!(
+        cam1.state.as_ref().unwrap().params.iso,
+        Some(800),
+        "target camera reflects the applied write immediately"
+    );
+    let hh = updated
+        .cameras
+        .iter()
+        .find(|c| c.id == "handheld-1")
+        .unwrap();
+    assert_eq!(*hh, handheld, "other cameras are untouched (no re-poll)");
+    assert_eq!(
+        updated.version, "1.7.0-dev.640",
+        "aggregate version preserved"
+    );
 }
 
 #[test]
