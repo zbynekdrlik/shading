@@ -4,7 +4,7 @@
 //! `gphoto2 --shell` script (no camera). Mirrors the fake-runner model of `tests/relay.rs`.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
@@ -13,7 +13,9 @@ use bkshading_relay::burst::{
     burst_idle_expired, burst_step, shell_line_is_error, shell_line_is_prompt,
     shell_set_config_command, BurstAction, BurstEvent, BurstState, Gphoto2Shell,
 };
-use bkshading_relay::transport::{project_shading, ApplyOutcome, CameraSession, Gphoto2Runner};
+use bkshading_relay::transport::{
+    project_shading, ApplyOutcome, CameraSession, Gphoto2Runner, MonoClock,
+};
 
 // --- pure state machine + parsers -----------------------------------------------------------
 
@@ -325,4 +327,78 @@ fn gphoto2_shell_set_config_ok_and_error_1337() {
     assert!(Gphoto2Shell::open("/nonexistent/gphoto2-xyz").is_err());
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// --- issue 1343: write-not-applied surfacing at the burst idle-close ---------------------------
+
+/// A [`MonoClock`] a test drives directly, so the burst idle-close (issue 1337) fires without a
+/// real 5 s sleep.
+struct FakeClock(Arc<AtomicU64>);
+
+impl MonoClock for FakeClock {
+    fn now_ms(&self) -> u64 {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+#[test]
+fn burst_idle_close_flags_a_dropped_aperture_write_1343() {
+    // The BurstFakeRunner RECORDS writes but never mutates its config map — so from the camera's
+    // point of view every write is DROPPED (it ACKs + ignores it, exactly cam1's BMPCC today). We
+    // write the aperture to a DIFFERENT choice index than the current f/5.2 (idx 2 -> idx 3, f/8.0)
+    // and ISO to its CURRENT value (400). At the burst idle-close the relay takes ONE authoritative
+    // read and compares each written key against it: the aperture never moved (dropped) -> flagged;
+    // the ISO already equals the readback (applied) -> NOT flagged. So `not_applied == ["apertureNorm"]`.
+    let (runner, _reads, _writes) = BurstFakeRunner::full();
+    let clock = Arc::new(AtomicU64::new(0));
+    // No gphoto2 binary -> the burst uses the CLI write path (the fake runner records the writes).
+    let session = CameraSession::new(Box::new(runner), "1.7.0-dev.643")
+        .with_clock(Box::new(FakeClock(clock.clone())));
+
+    // t=0: open the burst and write aperture -> idx 3 (norm 1.0) + iso -> 400 (its current value).
+    let req = SetRequest {
+        aperture_norm: Some(1.0),
+        iso: Some(400),
+        ..Default::default()
+    };
+    session.submit(&req).expect("submit ok");
+
+    // Advance past the 5 s idle window and read: this fires the burst idle-close authoritative read,
+    // which fills `not_applied` from the written-vs-readback comparison.
+    clock.store(6_000, Ordering::SeqCst);
+    let state = session.read_state();
+
+    assert!(state.online, "the authoritative read saw the camera");
+    assert_eq!(
+        state.not_applied,
+        vec!["apertureNorm".to_string()],
+        "the dropped aperture write is flagged; the applied ISO is not"
+    );
+}
+
+#[test]
+fn burst_idle_close_flags_nothing_when_the_write_matches_the_readback_1343() {
+    // Write ISO to the readback's OWN current value (400) — the "camera applied it" case. The
+    // aperture is left untouched (None), so the only written key equals the readback and
+    // `not_applied` is empty.
+    let (runner, _reads, _writes) = BurstFakeRunner::full();
+    let clock = Arc::new(AtomicU64::new(0));
+    let session = CameraSession::new(Box::new(runner), "1.7.0-dev.643")
+        .with_clock(Box::new(FakeClock(clock.clone())));
+
+    let req = SetRequest {
+        iso: Some(400),
+        ..Default::default()
+    };
+    session.submit(&req).expect("submit ok");
+
+    clock.store(6_000, Ordering::SeqCst);
+    let state = session.read_state();
+
+    assert!(state.online);
+    assert!(
+        state.not_applied.is_empty(),
+        "a write that matches the readback flags nothing: {:?}",
+        state.not_applied
+    );
 }

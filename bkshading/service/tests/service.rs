@@ -55,6 +55,7 @@ fn immediate_confirm_push_updates_only_the_target_camera_1337() {
         fps_supported: true,
         capture_fps: None,
         version: "1.7.0-dev.640".into(),
+        not_applied: Vec::new(),
     };
     let cam1_before = camera_view(&cfg.cameras[0], Some(online_iso(400)));
     let handheld = camera_view(&cfg.cameras[1], None);
@@ -83,6 +84,52 @@ fn immediate_confirm_push_updates_only_the_target_camera_1337() {
 }
 
 #[test]
+fn not_applied_is_carried_through_the_camera_view_and_pushed_1343() {
+    // issue 1343: the relay's per-key `not_applied` (a camera that ACKed + ignored an aperture
+    // write) must flow UNTOUCHED through the service's camera-view assembly onto the pushed wire, as
+    // an additive `notApplied` array. The service is a pure pass-through — this proves the panel
+    // receives the flag on both the immediate-confirm push and the aggregate.
+    let cfg = ServiceConfig::from_toml_str(EXAMPLE).unwrap();
+    let state = RelayState {
+        online: true,
+        camera: Some("Blackmagic Design Pocket Cinema Camera 4K".into()),
+        params: ShadingParams {
+            iso: Some(400),
+            ..Default::default()
+        },
+        caps: None,
+        fps_supported: true,
+        capture_fps: None,
+        version: "1.7.0-dev.643".into(),
+        not_applied: vec!["apertureNorm".to_string()],
+    };
+    let view = camera_view(&cfg.cameras[0], Some(state));
+    assert_eq!(
+        view.state.as_ref().unwrap().not_applied,
+        vec!["apertureNorm".to_string()],
+        "the not_applied flag rides through camera_view"
+    );
+    // It serializes as the additive camelCase `notApplied` array on the pushed aggregate.
+    let agg = Aggregate {
+        version: "1.7.0-dev.643".into(),
+        cameras: vec![view],
+    };
+    let json = serde_json::to_string(&agg).unwrap();
+    assert!(
+        json.contains("\"notApplied\":[\"apertureNorm\"]"),
+        "notApplied pushed on the wire: {json}"
+    );
+    // An older relay that omits the field still deserializes (serde default -> empty), so an
+    // aggregate built from it carries an empty notApplied (old clients unaffected).
+    let older = "{\"online\":true,\"camera\":\"x\",\"params\":{},\"caps\":null,\"fpsSupported\":false,\"version\":\"y\"}";
+    let back: RelayState = serde_json::from_str(older).unwrap();
+    assert!(
+        back.not_applied.is_empty(),
+        "absent notApplied -> empty default"
+    );
+}
+
+#[test]
 fn empty_config_starts_clean() {
     let cfg = ServiceConfig::from_toml_str("").expect("empty parse");
     assert!(cfg.cameras.is_empty());
@@ -103,6 +150,7 @@ fn camera_with_ndi_preview_has_preview_block() {
         fps_supported: true,
         capture_fps: None,
         version: "1.7.0-dev.516".into(),
+        not_applied: Vec::new(),
     };
     let view = camera_view(&cfg.cameras[0], Some(state));
     assert!(
@@ -177,6 +225,7 @@ fn online_state_with_fps_and_capture(fps100: Option<i64>, capture_fps: Option<i6
         fps_supported: true,
         capture_fps,
         version: "1.7.0-dev.516".into(),
+        not_applied: Vec::new(),
     }
 }
 
