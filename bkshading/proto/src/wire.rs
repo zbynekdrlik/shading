@@ -117,6 +117,17 @@ pub struct RelayState {
     pub capture_fps: Option<i64>,
     /// The relay binary's own version (for diagnostics; the service shows its own).
     pub version: String,
+    /// The WIRE field names (`apertureNorm`, `iso`, `shutter`, `kelvin`, `tint`, `fps`) whose
+    /// write the camera did NOT apply, filled at the burst idle-close by comparing every key the
+    /// burst wrote against the authoritative readback (issue 1343). Empty when the last read was
+    /// not a burst-close, or when every write landed. The panel renders each listed value with a
+    /// `.not-applied` style so a silently-refused write (cam1 today: the BMPCC ACKs and ignores an
+    /// aperture/focus PTP write while ISO applies) is no longer invisible — today the optimistic
+    /// value just reverts. Cleared on the next burst or the next real read. `#[serde(default)]` so
+    /// an older relay that does not send it still deserializes (empty `Vec`), mirroring
+    /// [`RelayState::capture_fps`]; `rename_all = "camelCase"` emits it as `notApplied`.
+    #[serde(default)]
+    pub not_applied: Vec<String>,
 }
 
 impl RelayState {
@@ -132,6 +143,7 @@ impl RelayState {
             fps_supported: false,
             capture_fps: None,
             version: version.into(),
+            not_applied: Vec::new(),
         }
     }
 }

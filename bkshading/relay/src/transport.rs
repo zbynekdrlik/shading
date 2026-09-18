@@ -16,7 +16,9 @@ use bkshading_proto::mapping::{
     choices_to_norm, fnumber_to_av, norm_to_choice_index, parse_fnumber, parse_fnumber_labels,
     DEFAULT_FPS100,
 };
-use bkshading_proto::read::{fps_supported, params_and_caps, plan_writes, RawConfigs};
+use bkshading_proto::read::{
+    fps_supported, not_applied_keys, params_and_caps, plan_writes, RawConfigs,
+};
 use bkshading_proto::wire::{
     summarize_set_request, RelayState, SetQueue, SetRequest, ShadingParams, SubmitAction,
 };
@@ -575,9 +577,42 @@ struct BurstSession {
     /// burst's writes onto (so the panel gets an immediate confirmation with the camera's real
     /// caps/model). `None` between bursts.
     open_state: Option<RelayState>,
+    /// The MERGED [`SetRequest`] of everything this burst has written so far (issue 1343): each
+    /// SET's present fields overwrite. Compared field-by-field against the authoritative readback at
+    /// the burst idle-close (via [`not_applied_keys`]) to fill `RelayState.not_applied` — the signal
+    /// a silently-refused write (the BMPCC ACKs + ignores an aperture/focus PTP write) actually
+    /// happened. Reset at each burst open; cleared with `plan`/`open_state` on a write error.
+    written: SetRequest,
     /// A shell open/write failed this burst ⇒ use the CLI write path for the REST of the burst
     /// (never re-open a broken shell per write). Cleared when the burst idle-closes.
     shell_disabled: bool,
+}
+
+/// Merges every present (`Some`) field of `req` into `acc` (issue 1343) — a later SET's value wins,
+/// an absent field leaves the accumulated one. So a burst's `written` reflects the LAST value asked
+/// for each key, which is exactly what the readback at burst close should equal.
+fn merge_written(acc: &mut SetRequest, req: &SetRequest) {
+    if req.aperture_norm.is_some() {
+        acc.aperture_norm = req.aperture_norm;
+    }
+    if req.iso.is_some() {
+        acc.iso = req.iso;
+    }
+    if req.kelvin.is_some() {
+        acc.kelvin = req.kelvin;
+    }
+    if req.tint.is_some() {
+        acc.tint = req.tint;
+    }
+    if req.shutter.is_some() {
+        acc.shutter = req.shutter;
+    }
+    if req.fps.is_some() {
+        acc.fps = req.fps;
+    }
+    if req.auto_wb.is_some() {
+        acc.auto_wb = req.auto_wb;
+    }
 }
 
 /// One camera the relay owns, driven through a [`Gphoto2Runner`].
@@ -753,6 +788,9 @@ impl CameraSession {
             BurstEvent::IdleCheck { now_ms },
             WRITE_SESSION_IDLE_MS,
         );
+        // issue 1343: the writes this burst made, captured at idle-close to compare against the
+        // authoritative readback below (`not_applied_keys`) — `Some` only on the burst-close read.
+        let mut written_at_close: Option<SetRequest> = None;
         let force_read = match action {
             BurstAction::CloseShellFinalRead => {
                 burst.state = next_state;
@@ -761,6 +799,9 @@ impl CameraSession {
                 }
                 burst.plan = None;
                 burst.open_state = None;
+                // issue 1343: take the merged writes BEFORE resetting, so the authoritative read
+                // below can flag every key the camera did not apply.
+                written_at_close = Some(std::mem::take(&mut burst.written));
                 burst.shell_disabled = false;
                 tracing::info!("shading write-burst idle-closed; taking one authoritative read");
                 true
@@ -787,7 +828,28 @@ impl CameraSession {
                 }
             }
         }
-        let state = self.read_state_uncached();
+        let mut state = self.read_state_uncached();
+        // issue 1343: on the burst idle-close read, flag every written key the camera did NOT
+        // apply (compared against this authoritative readback). Only meaningful when the camera is
+        // online and reported its caps (the aperture comparison needs the choice grid); an offline
+        // close leaves `not_applied` empty. The flag rides the cached state to the panel via the
+        // pump and clears on the next real read.
+        if let Some(written) = written_at_close {
+            if state.online {
+                let choices: Vec<f64> = state
+                    .caps
+                    .as_ref()
+                    .map(|c| c.fnumber_choices.clone())
+                    .unwrap_or_default();
+                state.not_applied = not_applied_keys(&written, &state.params, &choices);
+                if !state.not_applied.is_empty() {
+                    tracing::info!(
+                        not_applied = ?state.not_applied,
+                        "shading write(s) NOT applied by the camera (ACKed + ignored)"
+                    );
+                }
+            }
+        }
         *cache = Some(CachedRead {
             state: state.clone(),
             read_at_ms: now_ms,
@@ -828,6 +890,9 @@ impl CameraSession {
                     fps_supported: fps_supported(&raw),
                     capture_fps: self.capture_fps,
                     version: self.version.clone(),
+                    // issue 1343: a plain read carries no write-comparison; the burst idle-close
+                    // path (read_state) fills this from `not_applied_keys` when it applies.
+                    not_applied: Vec::new(),
                 }
             }
             Err(_) => RelayState {
@@ -1039,9 +1104,13 @@ impl CameraSession {
                 fps_supported: fps_supported(&raw),
                 capture_fps: self.capture_fps,
                 version: self.version.clone(),
+                not_applied: Vec::new(),
             };
             burst.plan = Some((labels, fps100));
             burst.open_state = Some(open_state);
+            // issue 1343: a fresh burst starts a fresh write accumulation (the previous burst's
+            // writes were consumed at its idle-close). Reset here on the FIRST set of a burst.
+            burst.written = SetRequest::default();
         }
         let (labels, fps100) = burst
             .plan
@@ -1095,6 +1164,7 @@ impl CameraSession {
                         // now-uncertain camera, then propagate (-> 502).
                         burst.plan = None;
                         burst.open_state = None;
+                        burst.written = SetRequest::default(); // issue 1343: no stale not-applied
                         return Err(e2)
                             .with_context(|| format!("CLI fallback set-config {key}={value}"));
                     }
@@ -1105,12 +1175,16 @@ impl CameraSession {
                     if let Err(e) = self.runner.set_config(key, value) {
                         burst.plan = None;
                         burst.open_state = None;
+                        burst.written = SetRequest::default(); // issue 1343: no stale not-applied
                         return Err(e);
                     }
                 }
             }
         }
-        // 5. Writes applied — refresh the burst idle clock.
+        // 5. Writes applied — record what this SET wrote (issue 1343: the merged `written` is
+        //    compared against the authoritative readback at the burst idle-close) and refresh the
+        //    burst idle clock.
+        merge_written(&mut burst.written, req);
         let now2 = self.clock.now_ms();
         let (state_after_ok, _) = burst_step(
             burst.state,
