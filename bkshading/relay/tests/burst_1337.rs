@@ -417,8 +417,17 @@ fn read_state_serves_the_projected_state_while_the_burst_is_open_1343() {
     let session = CameraSession::new(Box::new(runner), "1.7.0-dev.643")
         .with_clock(Box::new(FakeClock(clock.clone())));
 
-    // t=0: raise ISO to 10000. The camera's real current is 400; the burst opens.
+    // Seed read_cache with the PRE-BURST value (iso 400) via one real read, so the mid-burst read
+    // below proves the projection beats a POPULATED stale cache — the owner's exact "reverts to 400"
+    // symptom, not merely an empty cache.
     clock.store(0, Ordering::SeqCst);
+    assert_eq!(
+        session.read_state().params.iso,
+        Some(400),
+        "pre-burst read caches iso 400"
+    );
+
+    // t=0: raise ISO to 10000. The camera's real current is 400; the burst opens.
     session
         .submit(&SetRequest {
             iso: Some(10000),
