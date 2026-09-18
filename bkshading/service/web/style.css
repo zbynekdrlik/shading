@@ -142,3 +142,27 @@ body {
    the next server push reconciles it (removes .pending). Applied to the value labels
    (fnum / iso-val / kelvin-val / tint-val / shutter-val) by app.js. */
 .pending { color: var(--accent); font-style: italic; }
+
+/* issue 1343: LOUD full-width offline banner. Shown by app.js when the panel has no live
+   connection to the service (WS closed AND last successful poll > 5 s old), so a frozen last-DOM is
+   never mistaken for a stuck relay. Explicit [hidden] rule so an author `display` never beats the
+   UA rule (the same M1 lesson as .block-preview[hidden]). */
+.conn-banner {
+  background: var(--bad);
+  color: #fff;
+  text-align: center;
+  padding: 0.75rem 1rem;
+  font-weight: 700;
+  font-size: 0.95rem;
+  letter-spacing: 0.01em;
+  border-bottom: 1px solid #7a1f1a;
+}
+.conn-banner[hidden] { display: none; }
+
+/* issue 1343: a value whose write the camera did NOT apply — the relay compared the write against
+   the authoritative readback at the burst close and flagged the key (the BMPCC ACKs + silently
+   ignores an aperture/focus PTP write while ISO applies). Rendered in the bad colour so the
+   operator sees the camera refused it (title: "Kamera tento zápis neprijala"); applied by app.js to
+   the value label AND its +/- stepper. */
+.not-applied { color: var(--bad); }
+.step-btn.not-applied, .btn.not-applied { border-color: var(--bad); color: var(--bad); }

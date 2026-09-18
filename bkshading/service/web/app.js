@@ -10,6 +10,7 @@
 const grid = document.getElementById("camera-grid");
 const tmpl = document.getElementById("camera-block");
 const connEl = document.getElementById("conn-status");
+const connBanner = document.getElementById("conn-banner"); // issue 1343: loud offline banner
 const emptyNote = document.getElementById("empty-note");
 const blocks = new Map(); // camera id -> block element (reused to preserve control focus)
 
@@ -447,6 +448,39 @@ function updateBlock(el, cam) {
   // uzávierka, kelvin, tint) now that every block's choices + real value are on the dataset.
   refreshStepDisabled(el);
 
+  // issue 1343: WRITE-NOT-APPLIED surfacing. The relay compares each key a write-burst wrote against
+  // the authoritative readback at burst close and sends `state.notApplied` (wire field names). A
+  // value whose key is listed is rendered `.not-applied` (bad colour) with an explanatory title on
+  // the value label AND its +/- stepper — so a silently-refused write (the BMPCC ACKs + ignores an
+  // aperture/focus PTP write while ISO applies) is no longer invisible (today the optimistic value
+  // just reverts). Runs AFTER refreshStepDisabled so it doesn't fight the disabled-reason titles.
+  const notApplied =
+    online && cam.state && Array.isArray(cam.state.notApplied) ? cam.state.notApplied : [];
+  const NA_TITLE = "Kamera tento zápis neprijala";
+  const flagNotApplied = (valRole, key, stepperRoles) => {
+    const flagged = notApplied.includes(key);
+    const valEl = q(valRole);
+    if (valEl) {
+      valEl.classList.toggle("not-applied", flagged);
+      valEl.title = flagged ? NA_TITLE : "";
+    }
+    for (const r of stepperRoles) {
+      const b = q(r);
+      if (!b) continue;
+      b.classList.toggle("not-applied", flagged);
+      // Only touch the button title when we own it: set NA when flagged + enabled; clear only if it
+      // is still our NA title (never clobber a disabled-reason title set by refreshStepDisabled).
+      if (flagged && !b.disabled) b.title = NA_TITLE;
+      else if (!flagged && b.title === NA_TITLE) b.title = "";
+    }
+  };
+  flagNotApplied("fnum", "apertureNorm", ["aperture-dec", "aperture-inc"]);
+  flagNotApplied("iso-val", "iso", ["iso-dec", "iso-inc"]);
+  flagNotApplied("kelvin-val", "kelvin", ["kelvin-dec", "kelvin-inc"]);
+  flagNotApplied("tint-val", "tint", ["tint-dec", "tint-inc"]);
+  flagNotApplied("shutter-val", "shutter", ["shutter-dec", "shutter-inc"]);
+  flagNotApplied("fps-val", "fps", ["fps-set-grab"]);
+
   // fps + issue-809 grab-mode sync.
   const camFps = p.fps100 == null ? null : p.fps100 / 100;
   q("fps-val").textContent = camFps == null ? "—" : camFps.toFixed(2);
@@ -519,6 +553,36 @@ function render(agg) {
   }
 }
 
+// issue 1343: connection model + LOUD offline banner. The panel is "connected" iff the WS is open
+// OR the last successful contact (a poll OR a WS push) is younger than CONN_STALE_MS. Otherwise a
+// full-width red banner with a live "posledný kontakt pred N s" counter is shown at the top of the
+// page — so a frozen last-DOM (a device off the venue LAN whose every fetch fails) is never mistaken
+// for a stuck relay. Cleared the instant a push/poll succeeds; the steppers stay enabled (a tap
+// still fires a PUT that may land on reconnect — the banner is the truth signal, not a lockout).
+const CONN_STALE_MS = 5000;
+let lastContactMs = Date.now(); // a fresh page gets a brief grace before the banner can show
+
+function isConnected() {
+  return wsConnected || Date.now() - lastContactMs < CONN_STALE_MS;
+}
+
+function updateConnBanner() {
+  if (!connBanner) return;
+  if (isConnected()) {
+    connBanner.hidden = true;
+  } else {
+    const ageS = Math.max(0, Math.floor((Date.now() - lastContactMs) / 1000));
+    connBanner.textContent = `Bez spojenia so službou (posledný kontakt pred ${ageS} s)`;
+    connBanner.hidden = false;
+  }
+}
+
+// A successful poll or WS push is "contact" — refresh the age and re-evaluate the banner now.
+function markContact() {
+  lastContactMs = Date.now();
+  updateConnBanner();
+}
+
 async function poll() {
   try {
     const r = await fetch("/api/cameras", { cache: "no-store" });
@@ -526,9 +590,11 @@ async function poll() {
     connEl.textContent = "online";
     connEl.classList.remove("bad");
     render(await r.json());
+    markContact(); // issue 1343: a successful poll clears the offline banner
   } catch (e) {
     connEl.textContent = "offline";
     connEl.classList.add("bad");
+    updateConnBanner(); // issue 1343: a failed poll may reveal the banner (once stale)
   }
 }
 
@@ -560,12 +626,16 @@ function connectWs() {
     wsBackoff = 1000;
     connEl.textContent = "online";
     connEl.classList.remove("bad");
+    markContact(); // issue 1343: an open WS is live contact — clear the offline banner
   });
   sock.addEventListener("message", (ev) => {
     try {
       const msg = JSON.parse(ev.data);
       // Flattened envelope: {type:"state", version, cameras} — render() reads version/cameras.
-      if (msg && msg.type === "state") render(msg);
+      if (msg && msg.type === "state") {
+        render(msg);
+        markContact(); // issue 1343: a live push is contact
+      }
     } catch (e) {
       console.warn("bad ws message", e);
     }
@@ -573,9 +643,13 @@ function connectWs() {
   sock.addEventListener("close", () => {
     wsConnected = false;
     scheduleWsReconnect();
+    updateConnBanner(); // issue 1343: re-evaluate the banner now the WS is down
   });
-  // An error is always followed by close; close drives the reconnect, so just log here.
-  sock.addEventListener("error", () => console.warn("ws error"));
+  // An error is always followed by close; close drives the reconnect, so nothing to do here.
+  // issue 1343: NO console.warn — a WS error while the service is unreachable is the EXPECTED
+  // offline path (the loud banner is the signal), and a warning per reconnect would violate
+  // browser-console-zero-errors on a legitimately-offline panel.
+  sock.addEventListener("error", () => {});
 }
 
 function scheduleWsReconnect() {
@@ -592,6 +666,10 @@ setInterval(() => {
   if (!wsConnected) poll();
 }, 2000);
 setInterval(refreshPreviews, Math.round(1000 / PREVIEW_FPS));
+// issue 1343: tick the offline banner's live "posledný kontakt pred N s" age counter (and reveal
+// it once contact goes stale) independently of the poll cadence.
+updateConnBanner();
+setInterval(updateConnBanner, 500);
 
 // issue 1305: register the service worker so the panel is installable as a PWA (own icon,
 // standalone window in the Windows dock). The SW is a pure network passthrough (no cache —

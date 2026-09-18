@@ -21,6 +21,13 @@
     <span id="conn-status" class="conn-status" data-role="conn">spájam…</span>
   </header>
 
+  <!-- issue 1343: a LOUD full-width offline banner. Shown when the panel has NO live connection to
+       the service (the WS is not open AND the last successful poll is older than 5 s), so a frozen
+       last-DOM (a device off the venue LAN) is never mistaken for a stuck relay. It carries a live
+       "last contact N s ago" counter and is cleared the moment a push or poll succeeds. The
+       steppers stay enabled — a tap still fires a PUT that may land on reconnect. -->
+  <div id="conn-banner" class="conn-banner" data-role="conn-banner" role="alert" aria-live="assertive" hidden></div>
+
   <!-- The 4+4 blocks (up to 4 camboxes + 4 handhelds) are rendered here from /api/cameras.
        Each block = a live NDI preview area on TOP (M2: JPEG frames from /api/cameras/<id>/
        preview.jpg) and the shading parameters BELOW it. A camera with no NDI preview gets a
