@@ -402,3 +402,65 @@ fn burst_idle_close_flags_nothing_when_the_write_matches_the_readback_1343() {
         state.not_applied
     );
 }
+
+// --- issue 1343 item 0: while a burst is open, read_state serves the PROJECTED state -----------
+
+#[test]
+fn read_state_serves_the_projected_state_while_the_burst_is_open_1343() {
+    // The owner's "the number changes then reverts after half a second": a click's optimistic value
+    // was reconciled back to the PRE-BURST value by the very next service-pump /api/state tick,
+    // because read_state's Open arm returned the pre-burst read_cache snapshot. It must instead
+    // serve the burst's PROJECTED state (open-read + every write applied so far) until the burst
+    // idle-closes, when the authoritative read wins.
+    let (runner, _reads, _writes) = BurstFakeRunner::full(); // current iso 400, kelvin 5600
+    let clock = Arc::new(AtomicU64::new(0));
+    let session = CameraSession::new(Box::new(runner), "1.7.0-dev.643")
+        .with_clock(Box::new(FakeClock(clock.clone())));
+
+    // t=0: raise ISO to 10000. The camera's real current is 400; the burst opens.
+    clock.store(0, Ordering::SeqCst);
+    session
+        .submit(&SetRequest {
+            iso: Some(10000),
+            ..Default::default()
+        })
+        .expect("submit ok");
+
+    // t=100 (burst still Open): a pump read must report the PROJECTED iso 10000, NOT the pre-burst
+    // 400 — this is the anti-revert fix.
+    clock.store(100, Ordering::SeqCst);
+    let mid = session.read_state();
+    assert_eq!(
+        mid.params.iso,
+        Some(10000),
+        "an open-burst read serves the projected iso, not the pre-burst value"
+    );
+
+    // t=200: a SECOND write in the SAME burst (kelvin) — the projection accumulates both.
+    clock.store(200, Ordering::SeqCst);
+    session
+        .submit(&SetRequest {
+            kelvin: Some(6500),
+            ..Default::default()
+        })
+        .expect("submit ok");
+    clock.store(300, Ordering::SeqCst);
+    let mid2 = session.read_state();
+    assert_eq!(mid2.params.iso, Some(10000), "iso still projected");
+    assert_eq!(mid2.params.kelvin, Some(6500), "kelvin projected too");
+
+    // t=6000: past the 5 s idle window -> the authoritative read wins. This fake runner never
+    // applies a write, so the readback is the ORIGINAL iso 400 (and not_applied flags it).
+    clock.store(6000, Ordering::SeqCst);
+    let after = session.read_state();
+    assert_eq!(
+        after.params.iso,
+        Some(400),
+        "after idle-close the authoritative read replaces the projection"
+    );
+    assert!(
+        after.not_applied.contains(&"iso".to_string()),
+        "the dropped iso is flagged at close: {:?}",
+        after.not_applied
+    );
+}
