@@ -49,6 +49,25 @@ fn applied_iso_write_is_empty_1343() {
 }
 
 #[test]
+fn applied_aperture_write_is_empty_1343() {
+    // The high-value false-positive guard: an aperture write the camera DID apply (readback choice
+    // index == requested choice index) must NOT be flagged. Locks the exact `choices_to_norm` <->
+    // `norm_to_choice_index` round-trip against a future mapping regression.
+    let written = SetRequest {
+        aperture_norm: Some(2.0 / 3.0), // idx 2 of 4 requested
+        ..Default::default()
+    };
+    let readback = ShadingParams {
+        aperture_norm: Some(2.0 / 3.0), // camera applied it -> same idx
+        ..Default::default()
+    };
+    assert!(
+        not_applied_keys(&written, &readback, &choices()).is_empty(),
+        "an applied aperture write flags nothing"
+    );
+}
+
+#[test]
 fn off_grid_current_fnumber_with_on_grid_request_is_flagged_1343() {
     // cam1 today: the lens sits at f/4, which is BELOW the camera's 4.5-minimum enumerated grid, so
     // params_and_caps snaps the readback aperture_norm to the NEAREST choice (index 0). The operator

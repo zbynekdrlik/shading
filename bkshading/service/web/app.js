@@ -563,6 +563,9 @@ const CONN_STALE_MS = 5000;
 let lastContactMs = Date.now(); // a fresh page gets a brief grace before the banner can show
 
 function isConnected() {
+  // An OPEN WS counts as connected even if it is silent; a half-open (partitioned) socket is
+  // resolved by TCP keepalive firing `close` -> scheduleWsReconnect -> updateConnBanner, which is
+  // the design's assumption (a genuinely dead socket becomes not-open, then the banner shows).
   return wsConnected || Date.now() - lastContactMs < CONN_STALE_MS;
 }
 

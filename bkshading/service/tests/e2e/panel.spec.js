@@ -85,8 +85,10 @@ test("offline banner shows when the service is unreachable and clears on reconne
   page.on("pageerror", (err) => problems.push(`pageerror: ${err.message}`));
 
   await page.addInitScript(DISABLE_WS);
-  // Block every /api/* fetch so the poll fails and the panel loses contact with the service.
-  await page.route("**/api/**", (route) => route.abort());
+  // Make every /api/* fetch fail with a clean 503 so the poll's `!r.ok` throw takes the offline
+  // path — NOT route.abort(), which logs a Chromium `net::ERR_FAILED` "Failed to load resource"
+  // console error that would trip this test's own zero-console assertion.
+  await page.route("**/api/**", (route) => route.fulfill({ status: 503, body: "" }));
 
   await page.goto("/");
 
@@ -114,9 +116,10 @@ test("a not-applied write flags the aperture value + stepper, console clean", as
   });
   page.on("pageerror", (err) => problems.push(`pageerror: ${err.message}`));
 
-  // Disable the WS and block every /api/* poll so nothing overwrites the injected fixture.
+  // Disable the WS and fail every /api/* poll with a clean 503 (never route.abort() — its
+  // net-error would trip the zero-console gate) so nothing overwrites the injected fixture.
   await page.addInitScript(DISABLE_WS);
-  await page.route("**/api/**", (route) => route.abort());
+  await page.route("**/api/**", (route) => route.fulfill({ status: 503, body: "" }));
 
   await page.goto("/");
   await page.waitForFunction(() => typeof window.render === "function");
