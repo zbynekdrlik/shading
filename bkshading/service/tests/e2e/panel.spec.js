@@ -7,6 +7,25 @@ const { test, expect } = require("@playwright/test");
 
 const STUB = process.env.STUB_BASE_URL || "http://127.0.0.1:8781";
 
+// issue 1343: the panel registers a passthrough service worker (sw.js, issue 1305) that
+// `clients.claim()`s the page on activate; from then on the page's fetches run THROUGH the SW and
+// `page.route()` never sees them — the offline / not-applied tests' /api/* routes silently stopped
+// intercepting after the first poll and the real service answered (CI run 35388393361). Neutralise
+// the registration in EVERY test before app.js runs (a never-settling promise: app.js's `.catch`
+// stays silent, nothing is logged). Not Playwright's `serviceWorkers: "block"` — that logs a
+// "Service Worker registration blocked by Playwright" console WARNING, which trips the zero-console
+// gate every test carries.
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => {
+    if (navigator.serviceWorker) {
+      Object.defineProperty(navigator.serviceWorker, "register", {
+        value: () => new Promise(() => {}),
+        configurable: true,
+      });
+    }
+  });
+});
+
 test("panel +/- step buttons PUT the expected absolute values, console clean", async ({ page }) => {
   const problems = [];
   page.on("console", (msg) => {
@@ -85,10 +104,13 @@ test("offline banner shows when the service is unreachable and clears on reconne
   page.on("pageerror", (err) => problems.push(`pageerror: ${err.message}`));
 
   await page.addInitScript(DISABLE_WS);
-  // Make every /api/* fetch fail with a clean 503 so the poll's `!r.ok` throw takes the offline
-  // path — NOT route.abort(), which logs a Chromium `net::ERR_FAILED` "Failed to load resource"
-  // console error that would trip this test's own zero-console assertion.
-  await page.route("**/api/**", (route) => route.fulfill({ status: 503, body: "" }));
+  // Make every /api/* fetch answer 200 with a NON-JSON body so the poll's `r.json()` throw takes
+  // the offline path. NOT route.abort() and NOT a 4xx/5xx fulfill: Chromium logs BOTH (a
+  // `net::ERR_FAILED` / "the server responded with a status of 503") as "Failed to load resource"
+  // console errors, which would trip this test's own zero-console assertion (CI run 35388393361).
+  // The service worker registration is neutralised by the beforeEach above — once its
+  // `clients.claim()` took the page over, page.route no longer saw these fetches.
+  await page.route("**/api/**", (route) => route.fulfill({ status: 200, contentType: "text/plain", body: "offline-fixture" }));
 
   await page.goto("/");
 
@@ -116,10 +138,11 @@ test("a not-applied write flags the aperture value + stepper, console clean", as
   });
   page.on("pageerror", (err) => problems.push(`pageerror: ${err.message}`));
 
-  // Disable the WS and fail every /api/* poll with a clean 503 (never route.abort() — its
-  // net-error would trip the zero-console gate) so nothing overwrites the injected fixture.
+  // Disable the WS and make every /api/* poll answer 200 with a non-JSON body (never route.abort()
+  // or a 4xx/5xx fulfill — Chromium logs both as console errors, tripping the zero-console gate) so
+  // nothing overwrites the injected fixture (the beforeEach above keeps the service worker out).
   await page.addInitScript(DISABLE_WS);
-  await page.route("**/api/**", (route) => route.fulfill({ status: 503, body: "" }));
+  await page.route("**/api/**", (route) => route.fulfill({ status: 200, contentType: "text/plain", body: "offline-fixture" }));
 
   await page.goto("/");
   await page.waitForFunction(() => typeof window.render === "function");

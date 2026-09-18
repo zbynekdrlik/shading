@@ -1010,3 +1010,21 @@ clicks = 20 moves; cam1 grabber `Streaming: sent/captured` flat during a 60 s bu
 metric); no `gphoto2` process 5 s after the burst (`pgrep gphoto2` empty). The `--shell` speedup
 itself is UNVERIFIED in code lanes — if the shell path never completes it silently uses the CLI
 (still pre-read-free, ~1 set/spawn), which the rig step confirms/tunes.
+
+## Panel Playwright E2E gotchas — the PWA service worker defeats `page.route`, and 4xx/5xx fixtures are console errors (issue 1343, 18.9.2026)
+
+- **`sw.js` (issue 1305) is a passthrough SW that `clients.claim()`s the page on activate. From that
+  moment the page's fetches run THROUGH the SW and Playwright's `page.route()` no longer intercepts
+  them** — an offline test that routes `/api/*` sees its first poll intercepted and every later poll
+  answered by the real service (CI run 35388393361: the banner never showed, the fixture got
+  overwritten). `panel.spec.js` neutralises the registration in a `test.beforeEach` init script
+  (`navigator.serviceWorker.register` → a never-settling promise, silent). NOT Playwright's
+  `serviceWorkers: "block"` — it logs a "Service Worker registration blocked by Playwright" console
+  WARNING that trips the zero-console gate.
+- **Chromium logs EVERY 4xx/5xx resource load as a console error** ("Failed to load resource: the
+  server responded with a status of 503"), exactly like `route.abort()`'s `net::ERR_FAILED`. An
+  "unreachable service" fixture that must keep the console clean answers `200` with a NON-JSON body;
+  the poll's `r.json()` throw takes the same offline path as a real failure.
+- Reproduce a panel E2E locally with ZERO builds: `python3 -m http.server 8799 --directory
+  bkshading/service/web` + the Playwright MCP `browser_run_code_unsafe` with the test's own init
+  script + route (the banner logic, routes and console gate all run without the Rust service).
