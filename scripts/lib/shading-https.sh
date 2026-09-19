@@ -71,23 +71,33 @@ shading_https_cert_dir() { printf '%s\n' "/etc/letsencrypt/live/${1:-$(shading_h
 
 # --- Pure renderers ---
 
-# Render the nginx site file for <hostname> proxying to <upstream>.
-#   $1 hostname (server_name + cert paths)   $2 upstream URL (proxy_pass)
-# The committed scripts/nginx/shading.newlevel.media.conf is exactly this with the live defaults —
-# the python test asserts equality so the two never drift. NO secret appears here.
+# Render the nginx site file for <hostname> proxying to <upstream>, with an OPTIONAL extra-location
+# block appended inside the :443 server (issue 1345 M3b — the second interkom site adds a `/janus`
+# WebSocket proxy).
+#   $1 hostname (server_name + cert paths)   $2 upstream URL (proxy_pass)   $3 extra locations (opt)
+# The committed scripts/nginx/shading.newlevel.media.conf is exactly this with the live defaults and
+# NO extra ($3 empty) — the python test asserts BOTH the empty-extra shading render and the interkom
+# render equal their committed files, so nothing drifts. NO secret appears here.
 # nginx runtime variables ($host, $http_upgrade, ...) are emitted literally (escaped \$); only the
-# shell parameters $hostname/$upstream are interpolated.
+# shell parameters $hostname/$upstream are interpolated. When $3 is empty the output is
+# byte-identical to the pre-M3b single-arg render (the extra block + its leading blank line are
+# emitted only when non-empty).
 shading_https_site_content() {
-  local hostname="$1" upstream="$2"
+  local hostname="$1" upstream="$2" extra="${3:-}"
+  # $4/$5 label the header for the site (defaults = the shading text, so the shading render stays
+  # byte-identical); the conf filename is derived from the hostname.
+  local fronted="${4:-the bkshading PWA panel}"
+  local default_served=$'bkshading\n# panel'
+  local served="${5:-$default_served}"
+  local conf_name="${hostname}.conf"
   cat <<EOF
-# scripts/nginx/shading.newlevel.media.conf — LAN-only HTTPS front for the bkshading PWA panel
+# scripts/nginx/${conf_name} — LAN-only HTTPS front for ${fronted}
 # (camera-box issue 808; owner ruling 17.9.2026: HTTPS over the LAN, never the internet). Rendered
 # by scripts/lib/shading-https.sh (shading_https_site_content); deployed to dev1 by
 # scripts/dev1-shading-https-install.sh. NO secrets in this file.
 #
 # Browser (strih/stream/mobile on the LAN) -> DNS ${hostname} = $(shading_https_lan_ip) (dev1 LAN,
-# DNS-only / not proxied) -> dev1 nginx :443 (Let's Encrypt cert, DNS-01) -> ${upstream} (bkshading
-# panel). Traffic stays on the LAN; the internet is used only for the DNS lookup + cert renewal.
+# DNS-only / not proxied) -> dev1 nginx :443 (Let's Encrypt cert, DNS-01) -> ${upstream} (${served}). Traffic stays on the LAN; the internet is used only for the DNS lookup + cert renewal.
 
 server {
     listen 80;
@@ -122,8 +132,68 @@ server {
         proxy_read_timeout 3600s;
         proxy_buffering off;
     }
-}
 EOF
+  # Optional extra location stanzas (issue 1345 M3b — the interkom site's /janus WS proxy). Emitted
+  # via printf (not the heredoc) so its literal nginx `$vars` pass through untouched; the leading
+  # blank line + the block appear only when $extra is non-empty (empty ⇒ byte-identical shading).
+  if [ -n "$extra" ]; then
+    printf '\n%s\n' "$extra"
+  fi
+  printf '}\n'
+}
+
+# --- issue 1345 M3b: the SECOND site — interkom.newlevel.media (the phone PWA + the Janus /janus WS
+# proxy). Same dev1 nginx TLS front, DNS-only A record to the same dev1 LAN IP; the upstream is the
+# strih-lx intercom hub, and a dedicated /janus location proxies the phone's WebRTC signalling to
+# the Janus WebSocket API. KEEP IN SYNC with scripts/nginx/interkom.newlevel.media.conf (the python
+# test cross-checks equality). ---
+
+# The public DNS name the phone PWA is served at (A record -> the same dev1 LAN IP as shading).
+interkom_https_hostname() { printf '%s\n' interkom.newlevel.media; }
+
+# The upstream the proxy forwards `/` to — the strih-lx intercom hub (its axum bind :8790).
+interkom_https_upstream() { printf '%s\n' http://10.77.9.203:8790; }
+
+# The upstream the `/janus` location forwards to — Janus's WebSocket API on strih-lx (:8188).
+interkom_https_janus_upstream() { printf '%s\n' http://10.77.9.203:8188; }
+
+# The nginx site name (basename under sites-available / sites-enabled) for the interkom front.
+interkom_https_site_name() { printf '%s\n' interkom; }
+
+# Render the extra `location /janus { ... }` block for the interkom site: the phone's janus.js
+# connects wss://<host>/janus and nginx proxies it to the Janus WS API with an HTTP/1.1 Upgrade
+# passthrough + a long read timeout for the persistent socket. $1 = janus upstream (default the
+# const above). Single-quoted heredoc so the literal nginx `$vars` pass through untouched.
+# shellcheck disable=SC2120  # the janus-upstream arg is optional (defaults to the const)
+interkom_https_janus_location() {
+  local janus="${1:-$(interkom_https_janus_upstream)}"
+  cat <<EOF
+    # Janus WebRTC signalling — the phone's janus.js connects wss://\$host/janus; nginx proxies it
+    # to the Janus WebSocket API. HTTP/1.1 Upgrade passthrough + a long read timeout for the WS.
+    location /janus {
+        proxy_pass ${janus};
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For \$remote_addr;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$http_connection;
+        proxy_read_timeout 3600s;
+        proxy_buffering off;
+    }
+EOF
+}
+
+# Render the whole interkom.newlevel.media site: the generic front (with the hub's /ws Upgrade
+# passthrough on `location /`) PLUS the /janus location. The committed
+# scripts/nginx/interkom.newlevel.media.conf is exactly this — the python test asserts equality.
+interkom_https_site_content() {
+  shading_https_site_content \
+    "$(interkom_https_hostname)" \
+    "$(interkom_https_upstream)" \
+    "$(interkom_https_janus_location)" \
+    "the strih-lx intercom hub + phone PWA (issue 1345)" \
+    "the strih-lx intercom hub"
 }
 
 # Render the certbot renewal deploy hook (reloads nginx after a cert renewal). Mode 755 at install.

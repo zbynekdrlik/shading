@@ -23,11 +23,15 @@ set -euo pipefail
 # committed. The DNS A record is created via the airuleset `cli_cloudflare_dns` API client.
 #
 # Usage:
-#   scripts/dev1-shading-https-install.sh --check
-#   scripts/dev1-shading-https-install.sh --install [--hostname H] [--upstream URL] [--lan-ip IP]
-#                                                    [--email ADDR] [--dry-run]
-#     --hostname   public DNS name the panel is served at (default shading.newlevel.media)
-#     --upstream   the bkshading panel origin the proxy forwards to (default http://strih.lan:8770)
+#   scripts/dev1-shading-https-install.sh [--site shading|interkom] --check
+#   scripts/dev1-shading-https-install.sh [--site shading|interkom] --install
+#                                         [--hostname H] [--upstream URL] [--lan-ip IP]
+#                                         [--email ADDR] [--dry-run]
+#     --site       which front to provision (default shading = the bkshading panel; interkom = the
+#                  strih-lx intercom hub + phone PWA, issue 1345 M3b — adds the /janus WS proxy).
+#                  The per-site host/upstream defaults apply unless --hostname/--upstream override.
+#     --hostname   public DNS name the panel is served at (default per --site)
+#     --upstream   the panel origin the proxy forwards to (default per --site)
 #     --lan-ip     dev1 LAN IP the A record points at (default 10.77.9.200)
 #     --email      Let's Encrypt registration contact (default claude-02@newlevel.media)
 #     --dry-run    rehearse the Cloudflare DNS record step (ensure_record dry_run) — no write
@@ -76,6 +80,12 @@ DEPLOY_HOOK="${SHADING_HTTPS_DEPLOY_HOOK:-$(shading_https_deploy_hook_path)}"
 
 MODE="--check"
 DRY_RUN=0
+# issue 1345 M3b: which site to provision. `shading` (default) = the bkshading panel front, existing
+# behaviour unchanged; `interkom` = the strih-lx intercom hub + phone PWA front (adds the /janus WS
+# proxy). Explicit --hostname/--upstream still win over the per-site defaults.
+SITE="shading"
+HOST_OVERRIDDEN=0
+UPSTREAM_OVERRIDDEN=0
 
 require_val() { # $1 = flag name, $2 = candidate value (may be empty/missing)
   local flag="$1" val="${2:-}"
@@ -101,14 +111,27 @@ while [ "$#" -gt 0 ]; do
       MODE="--install"
       shift
       ;;
+    --site)
+      require_val "$1" "${2:-}"
+      case "$2" in
+        shading|interkom) SITE="$2" ;;
+        *)
+          echo "--site must be 'shading' or 'interkom' (got: $2)" >&2
+          exit 2
+          ;;
+      esac
+      shift 2
+      ;;
     --hostname)
       require_val "$1" "${2:-}"
       SHADING_HOST="$2"
+      HOST_OVERRIDDEN=1
       shift 2
       ;;
     --upstream)
       require_val "$1" "${2:-}"
       UPSTREAM="$2"
+      UPSTREAM_OVERRIDDEN=1
       shift 2
       ;;
     --lan-ip)
@@ -136,7 +159,24 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-# CERT_DIR depends on the (possibly overridden) hostname.
+# issue 1345 M3b: resolve per-site values. For `interkom`, adopt the interkom host/upstream/site
+# name (unless a flag overrode them) and the /janus extra-location block + accurate header labels;
+# for `shading` these stay empty so the renderer keeps the byte-identical default. `if` blocks (not
+# `[ ] && …`) because a false test under `set -e` would abort the script.
+EXTRA_LOCATIONS=""
+FRONTED=""
+SERVED=""
+if [ "$SITE" = "interkom" ]; then
+  if [ "$HOST_OVERRIDDEN" = 0 ]; then SHADING_HOST="$(interkom_https_hostname)"; fi
+  if [ "$UPSTREAM_OVERRIDDEN" = 0 ]; then UPSTREAM="$(interkom_https_upstream)"; fi
+  EXTRA_LOCATIONS="$(interkom_https_janus_location)"
+  FRONTED="the strih-lx intercom hub + phone PWA (issue 1345)"
+  SERVED="the strih-lx intercom hub"
+  SITE_AVAILABLE="${SHADING_HTTPS_SITE_AVAILABLE:-/etc/nginx/sites-available/$(interkom_https_site_name)}"
+  SITE_ENABLED="${SHADING_HTTPS_SITE_ENABLED:-/etc/nginx/sites-enabled/$(interkom_https_site_name)}"
+fi
+
+# CERT_DIR depends on the (possibly overridden / per-site) hostname.
 CERT_DIR="${SHADING_HTTPS_CERT_DIR:-$(shading_https_cert_dir "$SHADING_HOST")}"
 
 # ============================================================================================
@@ -265,7 +305,7 @@ PY
   echo "[5/6] nginx site -> $SITE_AVAILABLE, enable, remove default, reload"
   install -d -m 755 "$(dirname "$SITE_AVAILABLE")"
   install -d -m 755 "$(dirname "$SITE_ENABLED")"
-  shading_https_site_content "$SHADING_HOST" "$UPSTREAM" > "$SITE_AVAILABLE"
+  shading_https_site_content "$SHADING_HOST" "$UPSTREAM" "$EXTRA_LOCATIONS" "$FRONTED" "$SERVED" > "$SITE_AVAILABLE"
   ln -sfn "$SITE_AVAILABLE" "$SITE_ENABLED"
   # The default nginx site would shadow our server_name-less :80 default — remove its symlink.
   rm -f "$DEFAULT_ENABLED"
