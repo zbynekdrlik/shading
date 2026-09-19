@@ -485,6 +485,141 @@ def test_missing_option_value_exits_2():
     assert r.returncode == 2, (r.returncode, r.stdout, r.stderr)
 
 
+# ============================================================================================
+# issue 1345 M3b — the SECOND site: interkom.newlevel.media (the phone PWA + the Janus /janus WS
+# proxy). The renderer is GENERALISED to take an extra-location block; the shading site (empty
+# extra) stays byte-identical, and the interkom site adds the `/janus` upgrade-passthrough block.
+# ============================================================================================
+
+INTERKOM_CONF = os.path.join(REPO, "scripts", "nginx", "interkom.newlevel.media.conf")
+INTERKOM_HOST = "interkom.newlevel.media"
+INTERKOM_UPSTREAM = "http://10.77.9.203:8790"
+INTERKOM_JANUS = "http://10.77.9.203:8188"
+INTERKOM_SITE_NAME = "interkom"
+
+
+def test_interkom_lib_constants():
+    assert _bash("interkom_https_hostname").strip() == INTERKOM_HOST
+    assert _bash("interkom_https_upstream").strip() == INTERKOM_UPSTREAM
+    assert _bash("interkom_https_janus_upstream").strip() == INTERKOM_JANUS
+    assert _bash("interkom_https_site_name").strip() == INTERKOM_SITE_NAME
+
+
+def test_generalised_renderer_empty_extra_is_byte_identical_shading():
+    # DRIFT GUARD (shading side): the generalised renderer with NO extra locations must still
+    # reproduce the committed shading site byte-for-byte — the shading site is untouched.
+    rendered = _bash(
+        'shading_https_site_content "$(shading_https_hostname)" "$(shading_https_upstream)" ""'
+    )
+    with open(CONF, encoding="utf-8") as f:
+        assert f.read() == rendered, "shading site drifted when the renderer gained an extra arg"
+
+
+def test_interkom_committed_conf_equals_lib_render():
+    # DRIFT GUARD (interkom side): the committed interkom nginx site == the lib's interkom render.
+    assert os.path.isfile(INTERKOM_CONF), INTERKOM_CONF
+    rendered = _bash("interkom_https_site_content")
+    with open(INTERKOM_CONF, encoding="utf-8") as f:
+        assert f.read() == rendered, "scripts/nginx/interkom.newlevel.media.conf drifted from the lib"
+
+
+def test_interkom_site_has_janus_upgrade_block():
+    body = _bash("interkom_https_site_content")
+    assert "server_name %s;" % INTERKOM_HOST in body, body
+    # the hub upstream on `location /`
+    assert "proxy_pass %s;" % INTERKOM_UPSTREAM in body, body
+    # the dedicated /janus location proxying to the Janus WS API with HTTP/1.1 Upgrade passthrough
+    assert re.search(r"(?m)^\s*location\s+/janus\b", body), "a /janus location is present"
+    assert "proxy_pass %s;" % INTERKOM_JANUS in body, body
+    # WS upgrade passthrough must appear for BOTH the hub (/ + /ws) and Janus (/janus)
+    assert body.count("proxy_set_header Upgrade $http_upgrade;") >= 2, body
+    assert body.count("proxy_set_header Connection $http_connection;") >= 2, body
+    assert body.count("proxy_read_timeout 3600s;") >= 2, body
+    # h2 flag rides on listen; never the `http2 on;` directive
+    assert "listen 443 ssl http2;" in body, body
+    assert re.search(r"(?m)^\s*http2 on;", body) is None, "must not use the `http2 on;` directive"
+    assert "return 301 https://$host$request_uri;" in body, body
+
+
+def _interkom_install_env(root, calls):
+    """An install env for the interkom site (dev1 nginx front; the A record still points at dev1)."""
+    apt = _fake_bin(calls, "apt-get")
+    certbot = _fake_bin(calls, "certbot")
+    nginx = _fake_bin(calls, "nginx")
+    systemctl = _fake_bin(calls, "systemctl")
+    airu, rec = _fake_airuleset(root)
+    token_file = os.path.join(root, "cloudflare-newlevel")
+    with open(token_file, "w", encoding="utf-8") as f:
+        f.write(FAKE_CRED + "\n")
+    os.chmod(token_file, 0o600)
+    env = dict(
+        os.environ,
+        SHADING_HTTPS_APT=apt,
+        SHADING_HTTPS_CERTBOT=certbot,
+        SHADING_HTTPS_NGINX=nginx,
+        SHADING_HTTPS_SYSTEMCTL=systemctl,
+        SHADING_HTTPS_PYTHON="python3",
+        SHADING_HTTPS_AIRULESET_DIR=airu,
+        SHADING_HTTPS_CF_TOKEN_FILE=token_file,
+        SHADING_HTTPS_CF_INI=os.path.join(root, "etc", "cloudflare.ini"),
+        SHADING_HTTPS_SITE_AVAILABLE=os.path.join(root, "nginx", "sites-available", INTERKOM_SITE_NAME),
+        SHADING_HTTPS_SITE_ENABLED=os.path.join(root, "nginx", "sites-enabled", INTERKOM_SITE_NAME),
+        SHADING_HTTPS_DEFAULT_ENABLED=os.path.join(root, "nginx", "sites-enabled", "default"),
+        SHADING_HTTPS_DEPLOY_HOOK=os.path.join(root, "etc", "hooks", "nginx-reload.sh"),
+        SHADING_HTTPS_CERT_DIR=os.path.join(root, "etc", "live", INTERKOM_HOST),
+    )
+    return env, rec
+
+
+def test_install_site_interkom_writes_the_interkom_conf():
+    root = tempfile.mkdtemp()
+    try:
+        calls = os.path.join(root, "calls.log")
+        env, rec = _interkom_install_env(root, calls)
+        r = subprocess.run(
+            ["bash", SCRIPT, "--install", "--site", "interkom"],
+            capture_output=True, text=True, env=env,
+        )
+        assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+        # the written site file == committed interkom conf
+        with open(env["SHADING_HTTPS_SITE_AVAILABLE"], encoding="utf-8") as f:
+            site = f.read()
+        with open(INTERKOM_CONF, encoding="utf-8") as f:
+            assert site == f.read(), "installed interkom site != committed interkom conf"
+        assert "location /janus" in site, "the /janus block must be in the installed interkom site"
+        # the DNS A record is for the interkom host (still dev1's LAN IP)
+        import json
+        with open(rec, encoding="utf-8") as f:
+            dns = json.load(f)
+        assert dns["name"] == INTERKOM_HOST, dns
+        assert dns["content"] == LAN_IP, dns
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_default_site_is_shading_backward_compatible():
+    # No --site flag ⇒ the existing shading behaviour is UNCHANGED (writes the shading conf).
+    root = tempfile.mkdtemp()
+    try:
+        calls = os.path.join(root, "calls.log")
+        env, rec = _install_env(root, calls)
+        r = subprocess.run(["bash", SCRIPT, "--install"], capture_output=True, text=True, env=env)
+        assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+        with open(env["SHADING_HTTPS_SITE_AVAILABLE"], encoding="utf-8") as f:
+            site = f.read()
+        with open(CONF, encoding="utf-8") as f:
+            assert site == f.read(), "default (no --site) must still write the shading conf"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_interkom_conf_no_secret_no_bluetooth():
+    with open(INTERKOM_CONF, encoding="utf-8") as f:
+        txt = f.read()
+    assert not re.search(r"dns_cloudflare_api_token\s*=\s*[A-Za-z0-9_\-]{20,}", txt)
+    assert "bluetooth" not in txt.lower()
+
+
 if __name__ == "__main__":
     for _name, _fn in sorted(globals().items()):
         if _name.startswith("test_") and callable(_fn):
