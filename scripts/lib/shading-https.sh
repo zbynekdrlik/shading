@@ -170,7 +170,7 @@ interkom_https_janus_location() {
   cat <<EOF
     # Janus WebRTC signalling — the phone's janus.js connects wss://\$host/janus; nginx proxies it
     # to the Janus WebSocket API. HTTP/1.1 Upgrade passthrough + a long read timeout for the WS.
-    location /janus {
+    location = /janus {
         proxy_pass ${janus};
         proxy_http_version 1.1;
         proxy_set_header Host \$host;
