@@ -528,8 +528,12 @@ def test_interkom_site_has_janus_upgrade_block():
     assert "server_name %s;" % INTERKOM_HOST in body, body
     # the hub upstream on `location /`
     assert "proxy_pass %s;" % INTERKOM_UPSTREAM in body, body
-    # the dedicated /janus location proxying to the Janus WS API with HTTP/1.1 Upgrade passthrough
-    assert re.search(r"(?m)^\s*location\s+/janus\b", body), "a /janus location is present"
+    # the dedicated /janus location proxying to the Janus WS API with HTTP/1.1 Upgrade passthrough.
+    # It MUST be an EXACT match (`location = /janus`): a prefix `location /janus` also captures the
+    # PWA's vendored `/janus.js` and proxies it to the Janus WS server, which answers 403 to a plain
+    # GET -- the phone page then never loads janus.js (live 19.9.2026 on interkom-lx.newlevel.media).
+    assert re.search(r"(?m)^\s*location\s+=\s+/janus\s*\{", body), "an EXACT-match /janus location is present"
+    assert not re.search(r"(?m)^\s*location\s+/janus\b", body), "no prefix-match /janus location (it would swallow /janus.js)"
     assert "proxy_pass %s;" % INTERKOM_JANUS in body, body
     # WS upgrade passthrough must appear for BOTH the hub (/ + /ws) and Janus (/janus)
     assert body.count("proxy_set_header Upgrade $http_upgrade;") >= 2, body
@@ -586,7 +590,7 @@ def test_install_site_interkom_writes_the_interkom_conf():
             site = f.read()
         with open(INTERKOM_CONF, encoding="utf-8") as f:
             assert site == f.read(), "installed interkom site != committed interkom conf"
-        assert "location /janus" in site, "the /janus block must be in the installed interkom site"
+        assert "location = /janus" in site, "the exact-match /janus block must be in the installed interkom site"
         # the DNS A record is for the interkom host (still dev1's LAN IP)
         import json
         with open(rec, encoding="utf-8") as f:
