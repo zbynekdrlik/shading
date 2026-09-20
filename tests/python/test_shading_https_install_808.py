@@ -795,6 +795,67 @@ def test_install_interkom_certbot_gets_every_san():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_alias_flags_replace_the_per_site_default():
+    # an explicit --alias set REPLACES the interkom crew default (same override semantics as
+    # --hostname/--upstream): certbot gets the flag aliases and NOT the default crew names.
+    root = tempfile.mkdtemp()
+    try:
+        calls = os.path.join(root, "calls.log")
+        env, _rec = _interkom_install_env(root, calls)
+        r = subprocess.run(
+            ["bash", SCRIPT, "--install", "--site", "interkom",
+             "--alias", "one.example.org", "--alias", "two.example.org"],
+            capture_output=True, text=True, env=env,
+        )
+        assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+        with open(calls, encoding="utf-8") as f:
+            log = f.read()
+        assert "-d one.example.org" in log, log
+        assert "-d two.example.org" in log, log
+        # the per-site crew default must NOT leak in when explicit flags were given
+        for name in INTERKOM_ALIASES:
+            assert ("-d %s" % name) not in log, (name, log)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_alias_env_replaces_default_and_first_flag_clears_env():
+    # SHADING_HTTPS_ALIASES env seeds the alias set (replacing the crew default); the FIRST --alias
+    # flag then CLEARS that env seed and starts fresh from flags.
+    root = tempfile.mkdtemp()
+    try:
+        # env only, no flag: the env seed replaces the crew default
+        calls = os.path.join(root, "calls-env.log")
+        env, _rec = _interkom_install_env(root, calls)
+        env["SHADING_HTTPS_ALIASES"] = "env1.example.org env2.example.org"
+        r = subprocess.run(
+            ["bash", SCRIPT, "--install", "--site", "interkom"],
+            capture_output=True, text=True, env=env,
+        )
+        assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+        with open(calls, encoding="utf-8") as f:
+            log = f.read()
+        assert "-d env1.example.org" in log and "-d env2.example.org" in log, log
+        for name in INTERKOM_ALIASES:
+            assert ("-d %s" % name) not in log, (name, log)
+
+        # env + a flag: the flag clears the env seed and wins
+        calls2 = os.path.join(root, "calls-flag.log")
+        env2, _rec2 = _interkom_install_env(root, calls2)
+        env2["SHADING_HTTPS_ALIASES"] = "env1.example.org"
+        r2 = subprocess.run(
+            ["bash", SCRIPT, "--install", "--site", "interkom", "--alias", "flag1.example.org"],
+            capture_output=True, text=True, env=env2,
+        )
+        assert r2.returncode == 0, (r2.returncode, r2.stdout, r2.stderr)
+        with open(calls2, encoding="utf-8") as f:
+            log2 = f.read()
+        assert "-d flag1.example.org" in log2, log2
+        assert "-d env1.example.org" not in log2, log2
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 if __name__ == "__main__":
     for _name, _fn in sorted(globals().items()):
         if _name.startswith("test_") and callable(_fn):
