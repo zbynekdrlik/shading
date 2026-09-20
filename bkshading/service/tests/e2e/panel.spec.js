@@ -205,3 +205,148 @@ test("a not-applied write flags the aperture value + stepper, console clean", as
 
   expect(problems, `console problems: ${problems.join(" | ")}`).toEqual([]);
 });
+
+// issue 1350: build a full aggregate fixture for cam1 with overridable params + notApplied, so the
+// tests can drive render() directly and feed a controlled sequence of server pushes (stale /
+// confirming / refused) without racing the real ~2 s pump. Mirrors the not-applied test's fixture.
+function makeFixture(opts = {}) {
+  const g = (v, d) => (v != null ? v : d);
+  return {
+    version: "1.7.0-dev.e2e",
+    cameras: [
+      {
+        id: "cam1",
+        label: "Cam 1",
+        transport: "cambox-relay",
+        hasPreview: false,
+        reachable: true,
+        grabFps: null,
+        grabFpsDesync: false,
+        fpsSync: "unknown",
+        state: {
+          online: true,
+          camera: "Blackmagic Design Pocket Cinema Camera 4K",
+          params: {
+            apertureAv: g(opts.apertureAv, 4.78), // f/5.2
+            apertureNorm: 2.0 / 3.0,
+            iso: g(opts.iso, 400),
+            kelvin: g(opts.kelvin, 5600),
+            tint: g(opts.tint, 0),
+            shutter: g(opts.shutter, 60),
+            fps100: 6000,
+            sensorFps100: 6000,
+            focusDistance: null,
+          },
+          caps: {
+            isoChoices: [100, 200, 400, 800],
+            fNumberChoices: [2.8, 4.0, 5.2, 8.0],
+            shutterChoices: [60, 100, 125],
+            fpsMin: 5,
+            fpsMax: 60,
+            kelvinMin: 2500,
+            kelvinMax: 10000,
+          },
+          fpsSupported: true,
+          captureFps: null,
+          version: "1.7.0-dev.e2e",
+          notApplied: opts.notApplied || [],
+        },
+      },
+    ],
+  };
+}
+
+test("an optimistic tap holds its target against a stale pump snapshot, clears on confirmation, console clean", async ({
+  page,
+}) => {
+  const problems = [];
+  page.on("console", (msg) => {
+    const t = msg.type();
+    if (t === "error" || t === "warning") problems.push(`${t}: ${msg.text()}`);
+  });
+  page.on("pageerror", (err) => problems.push(`pageerror: ${err.message}`));
+
+  // Disable the WS + answer /api/* 200 non-JSON so ONLY our window.render pushes drive the panel
+  // (never route.abort()/4xx — Chromium logs both as console errors; the beforeEach neutralises SW).
+  await page.addInitScript(DISABLE_WS);
+  await page.route("**/api/**", (route) =>
+    route.fulfill({ status: 200, contentType: "text/plain", body: "offline-fixture" })
+  );
+  await page.goto("/");
+  await page.waitForFunction(() => typeof window.render === "function");
+
+  // Establish server truth: clona f/5.2, biely bod 5600 K.
+  await page.evaluate((agg) => window.render(agg), makeFixture({}));
+  const fnum = page.locator('[data-role="fnum"]');
+  const kval = page.locator('[data-role="kelvin-val"]');
+  await expect(fnum).toHaveText("f/5.2");
+  await expect(kval).toHaveText("5600K");
+
+  // Tap clona + (f/5.2 -> f/8.0) and biely bod + (5600 -> 5700). The optimistic target shows pending.
+  await page.locator('[data-role="aperture-inc"]').click();
+  await page.locator('[data-role="kelvin-inc"]').click();
+  await expect(fnum).toHaveText("f/8.0");
+  await expect(fnum).toHaveClass(/pending/);
+  await expect(kval).toHaveText("5700K");
+  await expect(kval).toHaveClass(/pending/);
+
+  // A STALE pump snapshot (captured BEFORE the camera applied the write) carries the OLD values. The
+  // panel must NOT flip the number down — it holds the target with .pending (issue 1350; the bug this
+  // fixes is the down-then-back flicker, so this render is what was RED before the fix).
+  await page.evaluate((agg) => window.render(agg), makeFixture({ apertureAv: 4.78, kelvin: 5600 }));
+  await expect(fnum).toHaveText("f/8.0");
+  await expect(fnum).toHaveClass(/pending/);
+  await expect(kval).toHaveText("5700K");
+  await expect(kval).toHaveClass(/pending/);
+
+  // The confirming push (the camera applied the write; f/8.0 <- apertureAv 6.0, 5700 K) matches the
+  // held target -> .pending clears and the number is solid.
+  await page.evaluate((agg) => window.render(agg), makeFixture({ apertureAv: 6.0, kelvin: 5700 }));
+  await expect(fnum).toHaveText("f/8.0");
+  await expect(fnum).not.toHaveClass(/pending/);
+  await expect(kval).toHaveText("5700K");
+  await expect(kval).not.toHaveClass(/pending/);
+
+  expect(problems, `console problems: ${problems.join(" | ")}`).toEqual([]);
+});
+
+test("a not-applied push after an optimistic tap surfaces the refusal (clears the hold), console clean", async ({
+  page,
+}) => {
+  const problems = [];
+  page.on("console", (msg) => {
+    const t = msg.type();
+    if (t === "error" || t === "warning") problems.push(`${t}: ${msg.text()}`);
+  });
+  page.on("pageerror", (err) => problems.push(`pageerror: ${err.message}`));
+
+  await page.addInitScript(DISABLE_WS);
+  await page.route("**/api/**", (route) =>
+    route.fulfill({ status: 200, contentType: "text/plain", body: "offline-fixture" })
+  );
+  await page.goto("/");
+  await page.waitForFunction(() => typeof window.render === "function");
+
+  await page.evaluate((agg) => window.render(agg), makeFixture({}));
+  const fnum = page.locator('[data-role="fnum"]');
+  await expect(fnum).toHaveText("f/5.2");
+
+  // Tap clona + -> optimistic pending target f/8.0.
+  await page.locator('[data-role="aperture-inc"]').click();
+  await expect(fnum).toHaveText("f/8.0");
+  await expect(fnum).toHaveClass(/pending/);
+
+  // The relay reports the camera REFUSED the aperture write (issue 1343 notApplied) while the pump
+  // snapshot still carries the OLD value. The pending hold must NOT swallow the refusal: it clears,
+  // the reverted server value shows, and the .not-applied style + title surface immediately.
+  await page.evaluate(
+    (agg) => window.render(agg),
+    makeFixture({ apertureAv: 4.78, notApplied: ["apertureNorm"] })
+  );
+  await expect(fnum).toHaveText("f/5.2");
+  await expect(fnum).not.toHaveClass(/pending/);
+  await expect(fnum).toHaveClass(/not-applied/);
+  await expect(fnum).toHaveAttribute("title", "Kamera tento zápis neprijala");
+
+  expect(problems, `console problems: ${problems.join(" | ")}`).toEqual([]);
+});

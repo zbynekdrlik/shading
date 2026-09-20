@@ -354,5 +354,40 @@ def test_app_js_iso_shutter_step_via_stepchoice_absolute_put_1337():
         ), f"{role} must be a click handler (one tap = one PUT, no repeat)"
 
 
+def test_app_js_confirm_or_timeout_pending_hold_1350():
+    # issue 1350: the issue-1337 optimistic echo is now HELD until the server CONFIRMS it, so a stale
+    # ~2 s pump snapshot no longer overwrites the number with the OLD value (the owner's down-then-back
+    # flicker). A module-scope `pending` Map keyed `${cameraId}:${key}` records each optimistic write's
+    # {target, ts}; updateBlock's shared `reconcileLabel` adopts the pushed value ONLY when it matches
+    # the target (confirmed) or a ~4 s timeout elapsed, else it holds the target + `.pending` (a
+    # non-matching push while pending+unconfirmed is IGNORED for that label).
+    js = _read("app.js")
+    # module-scope pending map + the ~4 s confirm-or-timeout window + the recorder/clearer helpers.
+    assert re.search(r"const pending = new Map\(", js), "module-scope pending Map"
+    assert re.search(r"PENDING_HOLD_MS\s*=\s*4000", js), "~4 s confirm-or-timeout window"
+    assert "function markPending(" in js, "the pending-write recorder"
+    assert "function clearPending(" in js, "the pending-write clearer"
+    # ONE shared reconcile helper (never five copies) that reads + expires the pending entry.
+    assert "function reconcileLabel(" in js, "the shared confirm-or-timeout reconcile helper"
+    rl = _js_fn_body(js, "function reconcileLabel(")
+    assert "pending.get(" in rl, "reconcileLabel reads the pending entry"
+    assert "pending.delete(" in rl, "reconcileLabel expires the pending entry on confirm/timeout/refusal"
+    assert "PENDING_HOLD_MS" in rl, "reconcileLabel honors the ~4 s timeout"
+    # every optimistic set site records its target via markPending.
+    for sig in ("function stepAperture(", "function stepEnum(", "function stepLinear("):
+        assert "markPending(" in _js_fn_body(js, sig), f"{sig} records its optimistic target"
+    # the four slider change handlers (wire) record their target too.
+    assert _js_fn_body(js, "function wire(").count("markPending(") >= 4, "slider change handlers record their target"
+    # updateBlock reconciles all five value labels through the shared helper instead of the old
+    # unconditional overwrite (fnum/iso-val/kelvin-val/tint-val/shutter-val).
+    ub = _js_fn_body(js, "function updateBlock(")
+    assert ub.count("reconcileLabel(") >= 5, "all five value labels reconcile through the shared helper"
+    # issue 1343 compose: a not-applied key clears the hold + shows the refusal immediately.
+    assert "notApplied" in ub, "the pending hold composes with the issue-1343 not-applied surfacing"
+    # issue 1350: a failed PUT drops the optimistic hold so the next push reverts to server truth.
+    sp = _js_fn_body(js, "async function setParam(")
+    assert "clearPending(" in sp, "a failed write clears its pending hold (revert to server truth)"
+
+
 if __name__ == "__main__":
     _run()
