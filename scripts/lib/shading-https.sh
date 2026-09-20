@@ -74,14 +74,16 @@ shading_https_cert_dir() { printf '%s\n' "/etc/letsencrypt/live/${1:-$(shading_h
 # Render the nginx site file for <hostname> proxying to <upstream>, with an OPTIONAL extra-location
 # block appended inside the :443 server (issue 1345 M3b — the second interkom site adds a `/janus`
 # WebSocket proxy).
-#   $1 hostname (server_name + cert paths)   $2 upstream URL (proxy_pass)   $3 extra locations (opt)
+#   $1 hostname (PRIMARY name — server_name-first + cert paths + certbot --cert-name)
+#   $2 upstream URL (proxy_pass)   $3 extra locations (opt)   $4 fronted label   $5 served label
+#   $6 aliases (opt, space-separated extra server_name SANs on the SAME cert — issue 1345 M4)
 # The committed scripts/nginx/shading.newlevel.media.conf is exactly this with the live defaults and
-# NO extra ($3 empty) — the python test asserts BOTH the empty-extra shading render and the interkom
-# render equal their committed files, so nothing drifts. NO secret appears here.
-# nginx runtime variables ($host, $http_upgrade, ...) are emitted literally (escaped \$); only the
-# shell parameters $hostname/$upstream are interpolated. When $3 is empty the output is
-# byte-identical to the pre-M3b single-arg render (the extra block + its leading blank line are
-# emitted only when non-empty).
+# NO extra ($3 empty) / NO aliases ($6 empty) — the python test asserts BOTH the empty-extra shading
+# render and the interkom render equal their committed files, so nothing drifts. NO secret appears
+# here. nginx runtime variables ($host, $http_upgrade, ...) are emitted literally (escaped \$); only
+# the shell parameters $hostname/$upstream/$aliases are interpolated. When $3 AND $6 are empty the
+# output is byte-identical to the pre-M3b single-arg render (the extra block + its leading blank line
+# are emitted only when non-empty; the alias list is appended to server_name only when non-empty).
 shading_https_site_content() {
   local hostname="$1" upstream="$2" extra="${3:-}"
   # $4/$5 label the header for the site (defaults = the shading text, so the shading render stays
@@ -89,6 +91,9 @@ shading_https_site_content() {
   local fronted="${4:-the bkshading PWA panel}"
   local default_served=$'bkshading\n# panel'
   local served="${5:-$default_served}"
+  # $6 (issue 1345 M4): space-separated ALIAS names appended to server_name in BOTH blocks (empty ⇒
+  # byte-identical single-name render). The cert paths + certbot --cert-name stay keyed on $hostname.
+  local aliases="${6:-}"
   local conf_name="${hostname}.conf"
   cat <<EOF
 # scripts/nginx/${conf_name} — LAN-only HTTPS front for ${fronted}
@@ -102,7 +107,7 @@ shading_https_site_content() {
 server {
     listen 80;
     listen [::]:80;
-    server_name ${hostname};
+    server_name ${hostname}${aliases:+ $aliases};
 
     # Plain HTTP -> permanent HTTPS redirect (a trusted-cert secure context is required for
     # PWA install; plain LAN HTTP is an insecure context and offers no install).
@@ -113,7 +118,7 @@ server {
     # nginx 1.24 (Ubuntu 24.04) has NO \`http2 on;\` directive — the http2 flag rides on \`listen\`.
     listen 443 ssl http2;
     listen [::]:443 ssl http2;
-    server_name ${hostname};
+    server_name ${hostname}${aliases:+ $aliases};
 
     ssl_certificate     /etc/letsencrypt/live/${hostname}/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/${hostname}/privkey.pem;
@@ -148,14 +153,27 @@ EOF
 # the Janus WebSocket API. KEEP IN SYNC with scripts/nginx/interkom.newlevel.media.conf (the python
 # test cross-checks equality). ---
 
-# The public DNS name the phone PWA is served at (A record -> the same dev1 LAN IP as shading).
-interkom_https_hostname() { printf '%s\n' interkom.newlevel.media; }
+# The PRIMARY (cert-keyed) DNS name of the interkom front (A record -> the same dev1 LAN IP as
+# shading). This is the name the Let's Encrypt cert is keyed on (--cert-name + the live cert path)
+# and the FIRST name in server_name; the crew production names are ALIASES (below). It is
+# interkom-lx.newlevel.media — the strih-lx notebook's own name and what the live --expand keyed the
+# 3-SAN cert on (issue 1345 M4). Never a bare `interkom` — that is an alias, not the cert primary.
+interkom_https_hostname() { printf '%s\n' interkom-lx.newlevel.media; }
 
-# The upstream the proxy forwards `/` to — the strih-lx intercom hub (its axum bind :8790).
-interkom_https_upstream() { printf '%s\n' http://10.77.9.203:8790; }
+# The extra server_name SANs served by the SAME cert (issue 1345 M4): the crew's production phone
+# names. interkom-pp.newlevel.media is DELIBERATELY EXCLUDED — Poprad stays on VDO.Ninja until its
+# rework (~4.10.2026, owner ruling). Space-separated on one line (fed to the renderer's aliases arg
+# + one certbot `-d` each). Adding a crew name later = append it here.
+interkom_https_aliases() { printf '%s\n' 'interkom.newlevel.media interkom-snv.newlevel.media'; }
 
-# The upstream the `/janus` location forwards to — Janus's WebSocket API on strih-lx (:8188).
-interkom_https_janus_upstream() { printf '%s\n' http://10.77.9.203:8188; }
+# The upstream the proxy forwards `/` to — the strih-lx intercom hub (its axum bind :8790). Uses the
+# router-resolvable strih.lan identity (the notebook took the strih identity; strih.lan -> 10.77.9.202
+# today) so the upstream follows future box swaps without a code change — NEVER the retired 10.77.9.203.
+interkom_https_upstream() { printf '%s\n' http://strih.lan:8790; }
+
+# The upstream the `/janus` location forwards to — Janus's WebSocket API on strih-lx (:8188), via the
+# same resolvable strih.lan identity (never the retired 10.77.9.203).
+interkom_https_janus_upstream() { printf '%s\n' http://strih.lan:8188; }
 
 # The nginx site name (basename under sites-available / sites-enabled) for the interkom front.
 interkom_https_site_name() { printf '%s\n' interkom; }
@@ -193,7 +211,8 @@ interkom_https_site_content() {
     "$(interkom_https_upstream)" \
     "$(interkom_https_janus_location)" \
     "the strih-lx intercom hub + phone PWA (issue 1345)" \
-    "the strih-lx intercom hub"
+    "the strih-lx intercom hub" \
+    "$(interkom_https_aliases)"
 }
 
 # Render the certbot renewal deploy hook (reloads nginx after a cert renewal). Mode 755 at install.
@@ -216,20 +235,36 @@ shading_https_cf_ini_content() {
 }
 
 # Print the certbot argv (one token per line) for a DNS-01 issuance.
-#   $1 hostname   $2 email   $3 credentials-ini path   $4 propagation seconds
-# Single source of truth for the certbot invocation, shared by the installer + the test.
+#   $1 hostname (PRIMARY / --cert-name)   $2 email   $3 credentials-ini path   $4 propagation seconds
+#   $5 aliases (opt, space-separated extra SANs — issue 1345 M4)
+# Single source of truth for the certbot invocation, shared by the installer + the test. When $5 is
+# non-empty each alias gets its own `-d`, plus `--expand` + `--cert-name "$hostname"` so the cert
+# stays keyed on the PRIMARY name (exactly the live --expand); with no aliases the output is
+# byte-identical to the single-name invocation (no --expand / --cert-name — shading is untouched).
 shading_https_certbot_argv() {
-  local hostname="$1" email="$2" ini="$3" prop="$4"
-  printf '%s\n' \
-    certonly \
-    --dns-cloudflare \
-    --dns-cloudflare-credentials "$ini" \
-    --dns-cloudflare-propagation-seconds "$prop" \
-    -d "$hostname" \
-    --non-interactive \
-    --agree-tos \
-    -m "$email" \
+  local hostname="$1" email="$2" ini="$3" prop="$4" aliases="${5:-}"
+  local args=(
+    certonly
+    --dns-cloudflare
+    --dns-cloudflare-credentials "$ini"
+    --dns-cloudflare-propagation-seconds "$prop"
+    -d "$hostname"
+  )
+  local a
+  # shellcheck disable=SC2086  # intentional word-split of the space-separated alias list
+  for a in $aliases; do
+    args+=(-d "$a")
+  done
+  if [ -n "$aliases" ]; then
+    args+=(--expand --cert-name "$hostname")
+  fi
+  args+=(
+    --non-interactive
+    --agree-tos
+    -m "$email"
     --no-eff-email
+  )
+  printf '%s\n' "${args[@]}"
 }
 
 # --- Pure decision helper: the --check verdict classifier ---

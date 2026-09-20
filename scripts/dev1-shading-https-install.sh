@@ -26,12 +26,15 @@ set -euo pipefail
 #   scripts/dev1-shading-https-install.sh [--site shading|interkom] --check
 #   scripts/dev1-shading-https-install.sh [--site shading|interkom] --install
 #                                         [--hostname H] [--upstream URL] [--lan-ip IP]
-#                                         [--email ADDR] [--dry-run]
+#                                         [--alias NAME]... [--email ADDR] [--dry-run]
 #     --site       which front to provision (default shading = the bkshading panel; interkom = the
 #                  strih-lx intercom hub + phone PWA, issue 1345 M3b — adds the /janus WS proxy).
-#                  The per-site host/upstream defaults apply unless --hostname/--upstream override.
-#     --hostname   public DNS name the panel is served at (default per --site)
+#                  The per-site host/upstream/alias defaults apply unless overridden.
+#     --hostname   public DNS name (PRIMARY / cert-keyed) the panel is served at (default per --site)
 #     --upstream   the panel origin the proxy forwards to (default per --site)
+#     --alias NAME extra server_name SAN on the SAME cert (repeatable; issue 1345 M4 — the crew
+#                  production names). Default per --site (interkom = the two crew names; shading =
+#                  none). Any explicit --alias (or SHADING_HTTPS_ALIASES env) REPLACES the default.
 #     --lan-ip     dev1 LAN IP the A record points at (default 10.77.9.200)
 #     --email      Let's Encrypt registration contact (default claude-02@newlevel.media)
 #     --dry-run    rehearse the Cloudflare DNS record step (ensure_record dry_run) — no write
@@ -86,6 +89,11 @@ DRY_RUN=0
 SITE="shading"
 HOST_OVERRIDDEN=0
 UPSTREAM_OVERRIDDEN=0
+# issue 1345 M4: extra server_name SANs on the same cert. Seeded from the SHADING_HTTPS_ALIASES env
+# (space-separated); the FIRST --alias flag clears the seed and starts fresh from flags. When left at
+# the empty default AND no flag/env given, the per-site block below fills in the interkom default.
+ALIASES="${SHADING_HTTPS_ALIASES:-}"
+ALIASES_FROM_FLAG=0
 
 require_val() { # $1 = flag name, $2 = candidate value (may be empty/missing)
   local flag="$1" val="${2:-}"
@@ -134,6 +142,17 @@ while [ "$#" -gt 0 ]; do
       UPSTREAM_OVERRIDDEN=1
       shift 2
       ;;
+    --alias)
+      require_val "$1" "${2:-}"
+      # The first flag clears any env-seeded default; subsequent flags append. An explicit alias set
+      # thus REPLACES the per-site default (same override semantics as --hostname/--upstream).
+      if [ "$ALIASES_FROM_FLAG" = 0 ]; then
+        ALIASES=""
+        ALIASES_FROM_FLAG=1
+      fi
+      ALIASES="${ALIASES:+$ALIASES }$2"
+      shift 2
+      ;;
     --lan-ip)
       require_val "$1" "${2:-}"
       LAN_IP="$2"
@@ -169,6 +188,8 @@ SERVED=""
 if [ "$SITE" = "interkom" ]; then
   if [ "$HOST_OVERRIDDEN" = 0 ]; then SHADING_HOST="$(interkom_https_hostname)"; fi
   if [ "$UPSTREAM_OVERRIDDEN" = 0 ]; then UPSTREAM="$(interkom_https_upstream)"; fi
+  # issue 1345 M4: default the crew production aliases only when none were given (flag or env).
+  if [ "$ALIASES_FROM_FLAG" = 0 ] && [ -z "$ALIASES" ]; then ALIASES="$(interkom_https_aliases)"; fi
   EXTRA_LOCATIONS="$(interkom_https_janus_location)"
   FRONTED="the strih-lx intercom hub + phone PWA (issue 1345)"
   SERVED="the strih-lx intercom hub"
@@ -223,6 +244,18 @@ do_check() {
   echo "shading HTTPS front — check ($SHADING_HOST -> $UPSTREAM):"
   echo "  packages (nginx+certbot): $packages_ok"
   echo "  dns A record            : $dns_ok (resolved '${answer:-<none>}', want $LAN_IP)"
+  # issue 1345 M4: aliases are REPORT-ONLY — a fresh cut-over's alias A records may lag the primary's;
+  # never fold them into the verdict, just report each so a lagging record is visible, not a failure.
+  local alias aip
+  # shellcheck disable=SC2086  # intentional word-split of the space-separated alias list
+  for alias in $ALIASES; do
+    aip="$("$GETENT" hosts "$alias" 2>/dev/null | awk 'NR==1{print $1}' || true)"
+    if [ "$aip" = "$LAN_IP" ]; then
+      echo "  alias A record          : ok ($alias -> $aip; report-only)"
+    else
+      echo "  alias A record          : lagging ($alias -> '${aip:-<none>}', want $LAN_IP; report-only, not a failure)"
+    fi
+  done
   echo "  letsencrypt cert        : $cert_ok ($CERT_DIR/fullchain.pem)"
   echo "  nginx site enabled+valid: $site_ok"
   echo "  curl manifest 200       : $curl_ok (HTTP ${code:-<none>})"
@@ -299,13 +332,13 @@ PY
   local certbot_args=()
   while IFS= read -r line; do
     certbot_args+=("$line")
-  done < <(shading_https_certbot_argv "$SHADING_HOST" "$EMAIL" "$CF_INI" "$PROP")
+  done < <(shading_https_certbot_argv "$SHADING_HOST" "$EMAIL" "$CF_INI" "$PROP" "$ALIASES")
   "$CERTBOT" "${certbot_args[@]}"
 
   echo "[5/6] nginx site -> $SITE_AVAILABLE, enable, remove default, reload"
   install -d -m 755 "$(dirname "$SITE_AVAILABLE")"
   install -d -m 755 "$(dirname "$SITE_ENABLED")"
-  shading_https_site_content "$SHADING_HOST" "$UPSTREAM" "$EXTRA_LOCATIONS" "$FRONTED" "$SERVED" > "$SITE_AVAILABLE"
+  shading_https_site_content "$SHADING_HOST" "$UPSTREAM" "$EXTRA_LOCATIONS" "$FRONTED" "$SERVED" "$ALIASES" > "$SITE_AVAILABLE"
   ln -sfn "$SITE_AVAILABLE" "$SITE_ENABLED"
   # The default nginx site would shadow our server_name-less :80 default — remove its symlink.
   rm -f "$DEFAULT_ENABLED"
