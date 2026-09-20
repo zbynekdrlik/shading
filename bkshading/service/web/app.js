@@ -23,6 +23,41 @@ function fNumberFromAv(av) {
   return av == null ? null : Math.sqrt(Math.pow(2, av));
 }
 
+// issue 1350: per-(camera,control) optimistic-write HOLD, keyed `${cameraId}:${wireKey}`. A tap
+// records the target the operator asked for; updateBlock's reconcileLabel then holds that target
+// (never flips the number to a stale ~2 s pump snapshot) until the server CONFIRMS it (a push whose
+// value matches) OR a ~4 s timeout elapses (write refused/failed -> revert to server truth). Fixes
+// the owner-reported down-then-back flicker. The wire key doubles as the issue-1343 notApplied key.
+const pending = new Map();
+const PENDING_HOLD_MS = 4000; // confirm-or-timeout window (covers the ~2 s pump + camera apply)
+function markPending(cameraId, key, target) {
+  pending.set(`${cameraId}:${key}`, { target, ts: Date.now() });
+}
+function clearPending(cameraId, key) {
+  pending.delete(`${cameraId}:${key}`);
+}
+
+// issue 1350: reconcile ONE value label against a server push, honoring an in-flight optimistic
+// write. `pushedText` is the label text server-truth would show; `refused` is true when the camera
+// rejected this key (issue 1343 notApplied) -> a refused write clears the hold at once so the
+// refusal is never swallowed. Returns true when the hold is STILL active (the caller keeps the
+// target on the associated slider/dataset too), false when reconciled (render server truth).
+function reconcileLabel(cameraId, key, valEl, pushedText, refused) {
+  const pkey = `${cameraId}:${key}`;
+  const pend = pending.get(pkey);
+  if (!pend || refused || pushedText === pend.target || Date.now() - pend.ts >= PENDING_HOLD_MS) {
+    // No hold, OR confirmed (push matches target), OR timed out, OR refused -> adopt server truth.
+    if (pend) pending.delete(pkey);
+    valEl.textContent = pushedText;
+    valEl.classList.remove("pending");
+    return false;
+  }
+  // Pending + unconfirmed: a non-matching push is IGNORED for this label -- hold target + pending.
+  valEl.textContent = pend.target;
+  valEl.classList.add("pending");
+  return true;
+}
+
 async function setParam(id, patch) {
   try {
     await fetch(`/api/cameras/${encodeURIComponent(id)}/params`, {
@@ -31,8 +66,9 @@ async function setParam(id, patch) {
       body: JSON.stringify(patch),
     });
   } catch (e) {
-    // The write failed; the optimistic pending value is reconciled (reverted) by the next server
-    // push (server-truth). Log for diagnosis.
+    // issue 1350: the write failed -> drop the optimistic hold for every key it wrote so the next
+    // server push reconciles (reverts) the label instead of holding a value that will never confirm.
+    for (const key of Object.keys(patch)) clearPending(id, key);
     console.warn("set failed", id, e);
   }
 }
@@ -193,6 +229,7 @@ function stepAperture(el, id, dir) {
   const fnEl = el.querySelector('[data-role="fnum"]');
   fnEl.textContent = "f/" + choices[idx].toFixed(1);
   fnEl.classList.add("pending");
+  markPending(id, "apertureNorm", fnEl.textContent); // issue 1350: hold the target until confirmed
   el.dataset.apertureFnum = String(choices[idx]);
   setParam(id, { apertureNorm: norm });
   refreshStepDisabled(el);
@@ -240,6 +277,7 @@ function stepEnum(el, id, cfg, dir) {
   const valEl = el.querySelector(`[data-role="${cfg.valRole}"]`);
   valEl.textContent = cfg.fmt(value);
   valEl.classList.add("pending");
+  markPending(id, cfg.key, valEl.textContent); // issue 1350: hold the target until confirmed
   setParam(id, { [cfg.key]: value });
   refreshStepDisabled(el);
 }
@@ -260,6 +298,7 @@ function stepLinear(el, id, role, key, amount, dir) {
   if (valEl) {
     valEl.textContent = role === "kelvin" ? next + "K" : String(next);
     valEl.classList.add("pending");
+    markPending(id, key, valEl.textContent); // issue 1350: hold the target until confirmed
   }
   setParam(id, { [key]: next });
   refreshStepDisabled(el);
@@ -279,6 +318,7 @@ function wire(el, id) {
       const idx = Math.min(choices.length - 1, Math.max(0, Math.round(norm * (choices.length - 1))));
       q("fnum").textContent = "f/" + choices[idx].toFixed(1);
       q("fnum").classList.add("pending");
+      markPending(id, "apertureNorm", q("fnum").textContent); // issue 1350: hold until confirmed
       el.dataset.apertureFnum = String(choices[idx]);
     }
     setParam(id, { apertureNorm: norm });
@@ -287,12 +327,14 @@ function wire(el, id) {
     const v = Math.round(Number(e.target.value));
     q("kelvin-val").textContent = v + "K";
     q("kelvin-val").classList.add("pending");
+    markPending(id, "kelvin", q("kelvin-val").textContent); // issue 1350: hold until confirmed
     setParam(id, { kelvin: v });
   });
   q("tint").addEventListener("change", (e) => {
     const v = Math.round(Number(e.target.value));
     q("tint-val").textContent = String(v);
     q("tint-val").classList.add("pending");
+    markPending(id, "tint", q("tint-val").textContent); // issue 1350: hold until confirmed
     setParam(id, { tint: v });
   });
   // issue 1337: ISO/uzávierka index sliders — on release, map the index to the enumerated choice and
@@ -307,6 +349,7 @@ function wire(el, id) {
       const valEl = q(cfg.valRole);
       valEl.textContent = cfg.fmt(value);
       valEl.classList.add("pending");
+      markPending(id, cfg.key, valEl.textContent); // issue 1350: hold until confirmed
       setParam(id, { [cfg.key]: value });
     });
   }
@@ -387,44 +430,48 @@ function updateBlock(el, cam) {
 
   const p = online ? cam.state.params : {};
   const caps = online && cam.state.caps ? cam.state.caps : null;
+  // issue 1343 + 1350: the camera-refused keys. A refused key clears its pending hold at once so the
+  // refusal (styled by flagNotApplied below) is never swallowed by the confirm-or-timeout wait.
+  const notApplied =
+    online && cam.state && Array.isArray(cam.state.notApplied) ? cam.state.notApplied : [];
 
   // Aperture. issue 1337: store the REAL current f-number on the dataset (stepAperture/
   // refreshStepDisabled step from it, not the off-grid slider norm) and reconcile any optimistic
   // pending value from a step with this authoritative push.
   const fn = fNumberFromAv(p.apertureAv);
   const fnumEl = q("fnum");
-  fnumEl.textContent = fn == null ? "f/—" : "f/" + fn.toFixed(1);
-  fnumEl.classList.remove("pending");
-  el.dataset.apertureFnum = fn == null ? "" : String(fn);
+  const apHeld = reconcileLabel(
+    cam.id, "apertureNorm", fnumEl,
+    fn == null ? "f/—" : "f/" + fn.toFixed(1), notApplied.includes("apertureNorm"));
+  // issue 1350: while the write is held, keep the stepper base + slider at the optimistic target too
+  // (a stale push must not corrupt the next step or flick the slider down).
+  if (!apHeld) el.dataset.apertureFnum = fn == null ? "" : String(fn);
   const apEl = q("aperture");
-  if (document.activeElement !== apEl && p.apertureNorm != null) apEl.value = p.apertureNorm;
+  if (document.activeElement !== apEl && !apHeld && p.apertureNorm != null) apEl.value = p.apertureNorm;
 
   // ISO. issue 1337: the aperture-style stepper — store the choices + REAL value on the dataset
   // (stepEnum/refreshStepDisabled step from them), position the index slider (guarded while the
   // operator drags it), and reconcile any optimistic pending value from a step.
   const isoVal = q("iso-val");
-  isoVal.textContent = p.iso == null ? "—" : String(p.iso);
-  isoVal.classList.remove("pending");
+  const isoHeld = reconcileLabel(cam.id, "iso", isoVal, p.iso == null ? "—" : String(p.iso), notApplied.includes("iso"));
   const isoChoices = caps && Array.isArray(caps.isoChoices) ? caps.isoChoices : [];
   el.dataset.isoChoices = JSON.stringify(isoChoices);
-  el.dataset.isoVal = p.iso == null ? "" : String(p.iso);
+  if (!isoHeld) el.dataset.isoVal = p.iso == null ? "" : String(p.iso);
   const isoEl = q("iso");
   if (isoChoices.length >= 2) isoEl.max = isoChoices.length - 1;
-  if (document.activeElement !== isoEl && p.iso != null && isoChoices.length) {
+  if (document.activeElement !== isoEl && !isoHeld && p.iso != null && isoChoices.length) {
     isoEl.value = nearestIndex(isoChoices, p.iso);
   }
 
   // White balance.
   const kVal = q("kelvin-val");
-  kVal.textContent = p.kelvin == null ? "—" : p.kelvin + "K";
-  kVal.classList.remove("pending");
+  const kHeld = reconcileLabel(cam.id, "kelvin", kVal, p.kelvin == null ? "—" : p.kelvin + "K", notApplied.includes("kelvin"));
   const kEl = q("kelvin");
-  if (document.activeElement !== kEl && p.kelvin != null) kEl.value = p.kelvin;
+  if (document.activeElement !== kEl && !kHeld && p.kelvin != null) kEl.value = p.kelvin;
   const tVal = q("tint-val");
-  tVal.textContent = p.tint == null ? "—" : String(p.tint);
-  tVal.classList.remove("pending");
+  const tHeld = reconcileLabel(cam.id, "tint", tVal, p.tint == null ? "—" : String(p.tint), notApplied.includes("tint"));
   const tEl = q("tint");
-  if (document.activeElement !== tEl && p.tint != null) tEl.value = p.tint;
+  if (document.activeElement !== tEl && !tHeld && p.tint != null) tEl.value = p.tint;
 
   // issue 1304: expose the camera's f-number choices for the aperture +/- step (stored on the
   // dataset, read by the step handler — the same pattern as grabFps).
@@ -433,14 +480,13 @@ function updateBlock(el, cam) {
 
   // Shutter. issue 1337: same aperture-style index-slider stepper as ISO.
   const shVal = q("shutter-val");
-  shVal.textContent = p.shutter == null ? "—" : "1/" + p.shutter;
-  shVal.classList.remove("pending");
+  const shHeld = reconcileLabel(cam.id, "shutter", shVal, p.shutter == null ? "—" : "1/" + p.shutter, notApplied.includes("shutter"));
   const shutterChoices = caps && Array.isArray(caps.shutterChoices) ? caps.shutterChoices : [];
   el.dataset.shutterChoices = JSON.stringify(shutterChoices);
-  el.dataset.shutterVal = p.shutter == null ? "" : String(p.shutter);
+  if (!shHeld) el.dataset.shutterVal = p.shutter == null ? "" : String(p.shutter);
   const shEl = q("shutter");
   if (shutterChoices.length >= 2) shEl.max = shutterChoices.length - 1;
-  if (document.activeElement !== shEl && p.shutter != null && shutterChoices.length) {
+  if (document.activeElement !== shEl && !shHeld && p.shutter != null && shutterChoices.length) {
     shEl.value = nearestIndex(shutterChoices, p.shutter);
   }
 
@@ -454,8 +500,6 @@ function updateBlock(el, cam) {
   // the value label AND its +/- stepper — so a silently-refused write (the BMPCC ACKs + ignores an
   // aperture/focus PTP write while ISO applies) is no longer invisible (today the optimistic value
   // just reverts). Runs AFTER refreshStepDisabled so it doesn't fight the disabled-reason titles.
-  const notApplied =
-    online && cam.state && Array.isArray(cam.state.notApplied) ? cam.state.notApplied : [];
   const NA_TITLE = "Kamera tento zápis neprijala";
   const flagNotApplied = (valRole, key, stepperRoles) => {
     const flagged = notApplied.includes(key);

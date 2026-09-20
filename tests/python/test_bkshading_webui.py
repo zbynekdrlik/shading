@@ -280,9 +280,13 @@ def test_app_js_optimistic_pending_echo_1337():
     assert 'classList.add("pending")' in ap, "aperture step shows an optimistic pending value"
     lin = _js_fn_body(js, "function stepLinear(")
     assert 'classList.add("pending")' in lin, "kelvin/tint step shows an optimistic pending value"
-    # updateBlock RECONCILES: it removes the pending class when it renders the authoritative value.
+    # issue 1350: the reconcile-clears-pending step moved into the shared reconcileLabel helper (the
+    # confirm-or-timeout hold replaced the unconditional inline clear). updateBlock still drives it --
+    # it reconciles every value label THROUGH reconcileLabel, which clears .pending on confirm/timeout.
+    rl = _js_fn_body(js, "function reconcileLabel(")
+    assert 'classList.remove("pending")' in rl, "the reconcile clears the pending value on confirm/timeout"
     ub = _js_fn_body(js, "function updateBlock(")
-    assert 'classList.remove("pending")' in ub, "the next push reconciles (clears) the pending value"
+    assert "reconcileLabel(" in ub, "updateBlock reconciles the value labels through the shared helper"
     # the pending state is visibly styled.
     css = _read("style.css")
     assert ".pending" in css, "the pending value is visibly styled"
