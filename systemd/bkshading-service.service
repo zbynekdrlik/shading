@@ -1,0 +1,16 @@
+[Unit]
+Description=bkshading shading-control panel service (issue 808 / issue 1353)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=newlevel
+ExecStart=/opt/bkshading/bkshading --config /etc/bkshading/bkshading.toml
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
