@@ -7,6 +7,25 @@ const { test, expect } = require("@playwright/test");
 
 const STUB = process.env.STUB_BASE_URL || "http://127.0.0.1:8781";
 
+// issue 1343: the panel registers a passthrough service worker (sw.js, issue 1305) that
+// `clients.claim()`s the page on activate; from then on the page's fetches run THROUGH the SW and
+// `page.route()` never sees them — the offline / not-applied tests' /api/* routes silently stopped
+// intercepting after the first poll and the real service answered (CI run 35388393361). Neutralise
+// the registration in EVERY test before app.js runs (a never-settling promise: app.js's `.catch`
+// stays silent, nothing is logged). Not Playwright's `serviceWorkers: "block"` — that logs a
+// "Service Worker registration blocked by Playwright" console WARNING, which trips the zero-console
+// gate every test carries.
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => {
+    if (navigator.serviceWorker) {
+      Object.defineProperty(navigator.serviceWorker, "register", {
+        value: () => new Promise(() => {}),
+        configurable: true,
+      });
+    }
+  });
+});
+
 test("panel +/- step buttons PUT the expected absolute values, console clean", async ({ page }) => {
   const problems = [];
   page.on("console", (msg) => {
@@ -58,6 +77,276 @@ test("panel +/- step buttons PUT the expected absolute values, console clean", a
   expect(recorded.some((b) => b.iso === 800), "ISO + -> 800").toBeTruthy();
   // issue 1337: uzávierka 50 is below the first choice (60), so "+" steps onto the grid at 60.
   expect(recorded.some((b) => b.shutter === 60), "shutter + -> 60").toBeTruthy();
+
+  expect(problems, `console problems: ${problems.join(" | ")}`).toEqual([]);
+});
+
+// issue 1343: disable the browser WebSocket so the panel stays on the (blockable) HTTP-poll
+// fallback — a deterministic offline with no reconnect churn and no console noise. Added as an init
+// script so it runs before app.js.
+const DISABLE_WS = () => {
+  window.WebSocket = function () {
+    this.close = function () {};
+    this.send = function () {};
+    this.addEventListener = function () {};
+    this.removeEventListener = function () {};
+  };
+};
+
+test("offline banner shows when the service is unreachable and clears on reconnect, console clean", async ({
+  page,
+}) => {
+  const problems = [];
+  page.on("console", (msg) => {
+    const t = msg.type();
+    if (t === "error" || t === "warning") problems.push(`${t}: ${msg.text()}`);
+  });
+  page.on("pageerror", (err) => problems.push(`pageerror: ${err.message}`));
+
+  await page.addInitScript(DISABLE_WS);
+  // Make every /api/* fetch answer 200 with a NON-JSON body so the poll's `r.json()` throw takes
+  // the offline path. NOT route.abort() and NOT a 4xx/5xx fulfill: Chromium logs BOTH (a
+  // `net::ERR_FAILED` / "the server responded with a status of 503") as "Failed to load resource"
+  // console errors, which would trip this test's own zero-console assertion (CI run 35388393361).
+  // The service worker registration is neutralised by the beforeEach above — once its
+  // `clients.claim()` took the page over, page.route no longer saw these fetches.
+  await page.route("**/api/**", (route) => route.fulfill({ status: 200, contentType: "text/plain", body: "offline-fixture" }));
+
+  await page.goto("/");
+
+  // The banner reveals ~5 s after the last contact (a fresh page's load-time grace), via the 500 ms
+  // ticker, and carries a live "posledný kontakt pred N s" age counter.
+  const banner = page.locator("#conn-banner");
+  await expect(banner).toBeVisible({ timeout: 9000 });
+  await expect(banner).toContainText(
+    /Bez spojenia so službou \(posledný kontakt pred \d+ s\)/
+  );
+
+  // Unblock the poll -> the next fallback poll (<= 2 s, since the WS is disabled) succeeds and the
+  // banner clears.
+  await page.unroute("**/api/**");
+  await expect(banner).toBeHidden({ timeout: 8000 });
+
+  expect(problems, `console problems: ${problems.join(" | ")}`).toEqual([]);
+});
+
+test("a not-applied write flags the aperture value + stepper, console clean", async ({ page }) => {
+  const problems = [];
+  page.on("console", (msg) => {
+    const t = msg.type();
+    if (t === "error" || t === "warning") problems.push(`${t}: ${msg.text()}`);
+  });
+  page.on("pageerror", (err) => problems.push(`pageerror: ${err.message}`));
+
+  // Disable the WS and make every /api/* poll answer 200 with a non-JSON body (never route.abort()
+  // or a 4xx/5xx fulfill — Chromium logs both as console errors, tripping the zero-console gate) so
+  // nothing overwrites the injected fixture (the beforeEach above keeps the service worker out).
+  await page.addInitScript(DISABLE_WS);
+  await page.route("**/api/**", (route) => route.fulfill({ status: 200, contentType: "text/plain", body: "offline-fixture" }));
+
+  await page.goto("/");
+  await page.waitForFunction(() => typeof window.render === "function");
+
+  // A fixture aggregate whose cam1 relay state carries notApplied:["apertureNorm"] — the camera
+  // ACKed + ignored the aperture write (cam1's BMPCC today).
+  const fixture = {
+    version: "1.7.0-dev.e2e",
+    cameras: [
+      {
+        id: "cam1",
+        label: "Cam 1",
+        transport: "cambox-relay",
+        hasPreview: false,
+        reachable: true,
+        grabFps: null,
+        grabFpsDesync: false,
+        fpsSync: "unknown",
+        state: {
+          online: true,
+          camera: "Blackmagic Design Pocket Cinema Camera 4K",
+          params: {
+            apertureAv: 4.78,
+            apertureNorm: 2.0 / 3.0,
+            iso: 400,
+            kelvin: 5600,
+            tint: 0,
+            shutter: 50,
+            fps100: 6000,
+            sensorFps100: 6000,
+            focusDistance: null,
+          },
+          caps: {
+            isoChoices: [100, 200, 400, 800],
+            fNumberChoices: [2.8, 4.0, 5.2, 8.0],
+            shutterChoices: [60, 100, 125],
+            fpsMin: 5,
+            fpsMax: 60,
+            kelvinMin: 2500,
+            kelvinMax: 10000,
+          },
+          fpsSupported: true,
+          captureFps: null,
+          version: "1.7.0-dev.e2e",
+          notApplied: ["apertureNorm"],
+        },
+      },
+    ],
+  };
+  await page.evaluate((agg) => window.render(agg), fixture);
+
+  // The aperture VALUE label carries the .not-applied style + the explanatory title.
+  const fnum = page.locator('[data-role="fnum"]');
+  await expect(fnum).toHaveClass(/not-applied/);
+  await expect(fnum).toHaveAttribute("title", "Kamera tento zápis neprijala");
+  // The aperture stepper is flagged too.
+  await expect(page.locator('[data-role="aperture-inc"]')).toHaveClass(/not-applied/);
+  // A NON-flagged value (ISO) is not styled.
+  await expect(page.locator('[data-role="iso-val"]')).not.toHaveClass(/not-applied/);
+
+  expect(problems, `console problems: ${problems.join(" | ")}`).toEqual([]);
+});
+
+// issue 1350: build a full aggregate fixture for cam1 with overridable params + notApplied, so the
+// tests can drive render() directly and feed a controlled sequence of server pushes (stale /
+// confirming / refused) without racing the real ~2 s pump. Mirrors the not-applied test's fixture.
+function makeFixture(opts = {}) {
+  const g = (v, d) => (v != null ? v : d);
+  return {
+    version: "1.7.0-dev.e2e",
+    cameras: [
+      {
+        id: "cam1",
+        label: "Cam 1",
+        transport: "cambox-relay",
+        hasPreview: false,
+        reachable: true,
+        grabFps: null,
+        grabFpsDesync: false,
+        fpsSync: "unknown",
+        state: {
+          online: true,
+          camera: "Blackmagic Design Pocket Cinema Camera 4K",
+          params: {
+            apertureAv: g(opts.apertureAv, 4.78), // f/5.2
+            apertureNorm: 2.0 / 3.0,
+            iso: g(opts.iso, 400),
+            kelvin: g(opts.kelvin, 5600),
+            tint: g(opts.tint, 0),
+            shutter: g(opts.shutter, 60),
+            fps100: 6000,
+            sensorFps100: 6000,
+            focusDistance: null,
+          },
+          caps: {
+            isoChoices: [100, 200, 400, 800],
+            fNumberChoices: [2.8, 4.0, 5.2, 8.0],
+            shutterChoices: [60, 100, 125],
+            fpsMin: 5,
+            fpsMax: 60,
+            kelvinMin: 2500,
+            kelvinMax: 10000,
+          },
+          fpsSupported: true,
+          captureFps: null,
+          version: "1.7.0-dev.e2e",
+          notApplied: opts.notApplied || [],
+        },
+      },
+    ],
+  };
+}
+
+test("an optimistic tap holds its target against a stale pump snapshot, clears on confirmation, console clean", async ({
+  page,
+}) => {
+  const problems = [];
+  page.on("console", (msg) => {
+    const t = msg.type();
+    if (t === "error" || t === "warning") problems.push(`${t}: ${msg.text()}`);
+  });
+  page.on("pageerror", (err) => problems.push(`pageerror: ${err.message}`));
+
+  // Disable the WS + answer /api/* 200 non-JSON so ONLY our window.render pushes drive the panel
+  // (never route.abort()/4xx — Chromium logs both as console errors; the beforeEach neutralises SW).
+  await page.addInitScript(DISABLE_WS);
+  await page.route("**/api/**", (route) =>
+    route.fulfill({ status: 200, contentType: "text/plain", body: "offline-fixture" })
+  );
+  await page.goto("/");
+  await page.waitForFunction(() => typeof window.render === "function");
+
+  // Establish server truth: clona f/5.2, biely bod 5600 K.
+  await page.evaluate((agg) => window.render(agg), makeFixture({}));
+  const fnum = page.locator('[data-role="fnum"]');
+  const kval = page.locator('[data-role="kelvin-val"]');
+  await expect(fnum).toHaveText("f/5.2");
+  await expect(kval).toHaveText("5600K");
+
+  // Tap clona + (f/5.2 -> f/8.0) and biely bod + (5600 -> 5700). The optimistic target shows pending.
+  await page.locator('[data-role="aperture-inc"]').click();
+  await page.locator('[data-role="kelvin-inc"]').click();
+  await expect(fnum).toHaveText("f/8.0");
+  await expect(fnum).toHaveClass(/pending/);
+  await expect(kval).toHaveText("5700K");
+  await expect(kval).toHaveClass(/pending/);
+
+  // A STALE pump snapshot (captured BEFORE the camera applied the write) carries the OLD values. The
+  // panel must NOT flip the number down — it holds the target with .pending (issue 1350; the bug this
+  // fixes is the down-then-back flicker, so this render is what was RED before the fix).
+  await page.evaluate((agg) => window.render(agg), makeFixture({ apertureAv: 4.78, kelvin: 5600 }));
+  await expect(fnum).toHaveText("f/8.0");
+  await expect(fnum).toHaveClass(/pending/);
+  await expect(kval).toHaveText("5700K");
+  await expect(kval).toHaveClass(/pending/);
+
+  // The confirming push (the camera applied the write; f/8.0 <- apertureAv 6.0, 5700 K) matches the
+  // held target -> .pending clears and the number is solid.
+  await page.evaluate((agg) => window.render(agg), makeFixture({ apertureAv: 6.0, kelvin: 5700 }));
+  await expect(fnum).toHaveText("f/8.0");
+  await expect(fnum).not.toHaveClass(/pending/);
+  await expect(kval).toHaveText("5700K");
+  await expect(kval).not.toHaveClass(/pending/);
+
+  expect(problems, `console problems: ${problems.join(" | ")}`).toEqual([]);
+});
+
+test("a not-applied push after an optimistic tap surfaces the refusal (clears the hold), console clean", async ({
+  page,
+}) => {
+  const problems = [];
+  page.on("console", (msg) => {
+    const t = msg.type();
+    if (t === "error" || t === "warning") problems.push(`${t}: ${msg.text()}`);
+  });
+  page.on("pageerror", (err) => problems.push(`pageerror: ${err.message}`));
+
+  await page.addInitScript(DISABLE_WS);
+  await page.route("**/api/**", (route) =>
+    route.fulfill({ status: 200, contentType: "text/plain", body: "offline-fixture" })
+  );
+  await page.goto("/");
+  await page.waitForFunction(() => typeof window.render === "function");
+
+  await page.evaluate((agg) => window.render(agg), makeFixture({}));
+  const fnum = page.locator('[data-role="fnum"]');
+  await expect(fnum).toHaveText("f/5.2");
+
+  // Tap clona + -> optimistic pending target f/8.0.
+  await page.locator('[data-role="aperture-inc"]').click();
+  await expect(fnum).toHaveText("f/8.0");
+  await expect(fnum).toHaveClass(/pending/);
+
+  // The relay reports the camera REFUSED the aperture write (issue 1343 notApplied) while the pump
+  // snapshot still carries the OLD value. The pending hold must NOT swallow the refusal: it clears,
+  // the reverted server value shows, and the .not-applied style + title surface immediately.
+  await page.evaluate(
+    (agg) => window.render(agg),
+    makeFixture({ apertureAv: 4.78, notApplied: ["apertureNorm"] })
+  );
+  await expect(fnum).toHaveText("f/5.2");
+  await expect(fnum).not.toHaveClass(/pending/);
+  await expect(fnum).toHaveClass(/not-applied/);
+  await expect(fnum).toHaveAttribute("title", "Kamera tento zápis neprijala");
 
   expect(problems, `console problems: ${problems.join(" | ")}`).toEqual([]);
 });

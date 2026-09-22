@@ -14,7 +14,7 @@ pub mod mapping;
 pub mod read;
 pub mod wire;
 
-pub use read::{params_and_caps, plan_writes, RawConfigs};
+pub use read::{not_applied_keys, params_and_caps, plan_writes, RawConfigs};
 pub use wire::{
     resolve_grab, Aggregate, CameraCaps, CameraView, FpsSync, GrabResolution, RelayState,
     ServerMsg, SetRequest, ShadingParams, Transport,

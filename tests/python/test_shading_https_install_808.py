@@ -485,6 +485,377 @@ def test_missing_option_value_exits_2():
     assert r.returncode == 2, (r.returncode, r.stdout, r.stderr)
 
 
+# ============================================================================================
+# issue 1345 M3b — the SECOND site: interkom.newlevel.media (the phone PWA + the Janus /janus WS
+# proxy). The renderer is GENERALISED to take an extra-location block; the shading site (empty
+# extra) stays byte-identical, and the interkom site adds the `/janus` upgrade-passthrough block.
+# ============================================================================================
+
+INTERKOM_CONF = os.path.join(REPO, "scripts", "nginx", "interkom.newlevel.media.conf")
+# issue 1345 M4: the PRIMARY (cert-keyed) name is interkom-lx.newlevel.media; the crew production
+# names interkom.newlevel.media + interkom-snv.newlevel.media are ALIASES (extra server_name SANs on
+# the SAME cert, expanded live). The upstreams follow the strih identity via the router-resolvable
+# strih.lan (never the retired 10.77.9.203, never a literal .202). interkom-pp stays on VDO.Ninja
+# until the Poprad rework (~4.10.2026) — it must NEVER be an alias.
+INTERKOM_HOST = "interkom-lx.newlevel.media"
+INTERKOM_ALIASES = ["interkom.newlevel.media", "interkom-snv.newlevel.media"]
+INTERKOM_PP = "interkom-pp.newlevel.media"
+INTERKOM_UPSTREAM = "http://strih.lan:8790"
+INTERKOM_JANUS = "http://strih.lan:8188"
+INTERKOM_SITE_NAME = "interkom"
+RETIRED_IPS = ("10.77.9.203", "10.77.9.202")
+
+
+def test_interkom_lib_constants():
+    assert _bash("interkom_https_hostname").strip() == INTERKOM_HOST
+    assert _bash("interkom_https_upstream").strip() == INTERKOM_UPSTREAM
+    assert _bash("interkom_https_janus_upstream").strip() == INTERKOM_JANUS
+    assert _bash("interkom_https_site_name").strip() == INTERKOM_SITE_NAME
+    # issue 1345 M4: the default alias set = the two crew production names, interkom-pp EXCLUDED.
+    assert _bash("interkom_https_aliases").split() == INTERKOM_ALIASES
+    assert INTERKOM_PP not in _bash("interkom_https_aliases")
+
+
+def test_generalised_renderer_empty_extra_is_byte_identical_shading():
+    # DRIFT GUARD (shading side): the generalised renderer with NO extra locations must still
+    # reproduce the committed shading site byte-for-byte — the shading site is untouched.
+    rendered = _bash(
+        'shading_https_site_content "$(shading_https_hostname)" "$(shading_https_upstream)" ""'
+    )
+    with open(CONF, encoding="utf-8") as f:
+        assert f.read() == rendered, "shading site drifted when the renderer gained an extra arg"
+
+
+def test_interkom_committed_conf_equals_lib_render():
+    # DRIFT GUARD (interkom side): the committed interkom nginx site == the lib's interkom render.
+    assert os.path.isfile(INTERKOM_CONF), INTERKOM_CONF
+    rendered = _bash("interkom_https_site_content")
+    with open(INTERKOM_CONF, encoding="utf-8") as f:
+        assert f.read() == rendered, "scripts/nginx/interkom.newlevel.media.conf drifted from the lib"
+
+
+def test_interkom_site_has_janus_upgrade_block():
+    body = _bash("interkom_https_site_content")
+    # issue 1345 M4: server_name (BOTH the :80 and :443 blocks) lists the primary + both crew aliases.
+    expected_sn = "server_name %s;" % " ".join([INTERKOM_HOST] + INTERKOM_ALIASES)
+    assert body.count(expected_sn) == 2, body
+    # the cert paths stay keyed on the PRIMARY name (exactly the live --expand --cert-name).
+    assert "ssl_certificate     /etc/letsencrypt/live/%s/fullchain.pem;" % INTERKOM_HOST in body, body
+    # the hub upstream on `location /` — the strih.lan identity, never the retired .203 / a literal .202.
+    assert "proxy_pass %s;" % INTERKOM_UPSTREAM in body, body
+    # the dedicated /janus location proxying to the Janus WS API with HTTP/1.1 Upgrade passthrough.
+    # It MUST be an EXACT match (`location = /janus`): a prefix `location /janus` also captures the
+    # PWA's vendored `/janus.js` and proxies it to the Janus WS server, which answers 403 to a plain
+    # GET -- the phone page then never loads janus.js (live 19.9.2026 on interkom-lx.newlevel.media).
+    assert re.search(r"(?m)^\s*location\s+=\s+/janus\s*\{", body), "an EXACT-match /janus location is present"
+    assert not re.search(r"(?m)^\s*location\s+/janus\b", body), "no prefix-match /janus location (it would swallow /janus.js)"
+    assert "proxy_pass %s;" % INTERKOM_JANUS in body, body
+    # WS upgrade passthrough must appear for BOTH the hub (/ + /ws) and Janus (/janus)
+    assert body.count("proxy_set_header Upgrade $http_upgrade;") >= 2, body
+    assert body.count("proxy_set_header Connection $http_connection;") >= 2, body
+    assert body.count("proxy_read_timeout 3600s;") >= 2, body
+    # h2 flag rides on listen; never the `http2 on;` directive
+    assert "listen 443 ssl http2;" in body, body
+    assert re.search(r"(?m)^\s*http2 on;", body) is None, "must not use the `http2 on;` directive"
+    assert "return 301 https://$host$request_uri;" in body, body
+
+
+def _interkom_install_env(root, calls):
+    """An install env for the interkom site (dev1 nginx front; the A record still points at dev1)."""
+    apt = _fake_bin(calls, "apt-get")
+    certbot = _fake_bin(calls, "certbot")
+    nginx = _fake_bin(calls, "nginx")
+    systemctl = _fake_bin(calls, "systemctl")
+    airu, rec = _fake_airuleset(root)
+    token_file = os.path.join(root, "cloudflare-newlevel")
+    with open(token_file, "w", encoding="utf-8") as f:
+        f.write(FAKE_CRED + "\n")
+    os.chmod(token_file, 0o600)
+    env = dict(
+        os.environ,
+        SHADING_HTTPS_APT=apt,
+        SHADING_HTTPS_CERTBOT=certbot,
+        SHADING_HTTPS_NGINX=nginx,
+        SHADING_HTTPS_SYSTEMCTL=systemctl,
+        SHADING_HTTPS_PYTHON="python3",
+        SHADING_HTTPS_AIRULESET_DIR=airu,
+        SHADING_HTTPS_CF_TOKEN_FILE=token_file,
+        SHADING_HTTPS_CF_INI=os.path.join(root, "etc", "cloudflare.ini"),
+        SHADING_HTTPS_SITE_AVAILABLE=os.path.join(root, "nginx", "sites-available", INTERKOM_SITE_NAME),
+        SHADING_HTTPS_SITE_ENABLED=os.path.join(root, "nginx", "sites-enabled", INTERKOM_SITE_NAME),
+        SHADING_HTTPS_DEFAULT_ENABLED=os.path.join(root, "nginx", "sites-enabled", "default"),
+        SHADING_HTTPS_DEPLOY_HOOK=os.path.join(root, "etc", "hooks", "nginx-reload.sh"),
+        SHADING_HTTPS_CERT_DIR=os.path.join(root, "etc", "live", INTERKOM_HOST),
+    )
+    return env, rec
+
+
+def test_install_site_interkom_writes_the_interkom_conf():
+    root = tempfile.mkdtemp()
+    try:
+        calls = os.path.join(root, "calls.log")
+        env, rec = _interkom_install_env(root, calls)
+        r = subprocess.run(
+            ["bash", SCRIPT, "--install", "--site", "interkom"],
+            capture_output=True, text=True, env=env,
+        )
+        assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+        # the written site file == committed interkom conf
+        with open(env["SHADING_HTTPS_SITE_AVAILABLE"], encoding="utf-8") as f:
+            site = f.read()
+        with open(INTERKOM_CONF, encoding="utf-8") as f:
+            assert site == f.read(), "installed interkom site != committed interkom conf"
+        assert "location = /janus" in site, "the exact-match /janus block must be in the installed interkom site"
+        # the DNS A record is for the interkom host (still dev1's LAN IP)
+        import json
+        with open(rec, encoding="utf-8") as f:
+            dns = json.load(f)
+        assert dns["name"] == INTERKOM_HOST, dns
+        assert dns["content"] == LAN_IP, dns
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_default_site_is_shading_backward_compatible():
+    # No --site flag ⇒ the existing shading behaviour is UNCHANGED (writes the shading conf).
+    root = tempfile.mkdtemp()
+    try:
+        calls = os.path.join(root, "calls.log")
+        env, rec = _install_env(root, calls)
+        r = subprocess.run(["bash", SCRIPT, "--install"], capture_output=True, text=True, env=env)
+        assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+        with open(env["SHADING_HTTPS_SITE_AVAILABLE"], encoding="utf-8") as f:
+            site = f.read()
+        with open(CONF, encoding="utf-8") as f:
+            assert site == f.read(), "default (no --site) must still write the shading conf"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_interkom_conf_no_secret_no_bluetooth():
+    with open(INTERKOM_CONF, encoding="utf-8") as f:
+        txt = f.read()
+    assert not re.search(r"dns_cloudflare_api_token\s*=\s*[A-Za-z0-9_\-]{20,}", txt)
+    assert "bluetooth" not in txt.lower()
+
+
+# ============================================================================================
+# issue 1345 M4 — the interkom front carries the PRODUCTION hostnames + the strih.lan upstream as
+# GENERATED config (today's live cut-over did it by hand). First-class aliases: the renderer takes
+# an ALIASES arg (server_name HOST ALIASES… in BOTH blocks, empty = byte-identical single-name); the
+# certbot argv builder emits -d per SAN + --expand + --cert-name HOST; the installer gains a
+# repeatable --alias (+ SHADING_HTTPS_ALIASES env) with per-site interkom defaults; --check reports
+# a non-resolving alias without failing; the committed conf is regenerated with the strih.lan
+# upstream and NO retired IP.
+# ============================================================================================
+
+
+def test_interkom_aliases_default_excludes_pp():
+    aliases = _bash("interkom_https_aliases").split()
+    assert aliases == INTERKOM_ALIASES, aliases
+    assert INTERKOM_PP not in aliases
+
+
+def test_renderer_with_aliases_lists_every_name_in_both_server_name_blocks():
+    body = _bash(
+        'shading_https_site_content "primary.example.org" "http://box.lan:1234" "" "" "" '
+        '"a1.example.org a2.example.org"'
+    )
+    sn = "server_name primary.example.org a1.example.org a2.example.org;"
+    # BOTH the :80 redirect block and the :443 proxy block get the full name list.
+    assert body.count(sn) == 2, body
+
+
+def test_renderer_without_aliases_is_byte_identical_single_name():
+    # an EMPTY aliases arg (6th) must be byte-identical to omitting it — the shading site is untouched.
+    with_empty = _bash('shading_https_site_content "h.example.org" "http://u.lan:1" "" "" "" ""')
+    without = _bash('shading_https_site_content "h.example.org" "http://u.lan:1"')
+    assert with_empty == without, "empty aliases arg must be byte-identical to omitting it"
+    assert with_empty.count("server_name h.example.org;") == 2, with_empty
+
+
+def test_interkom_certbot_argv_expands_to_every_san():
+    out = _bash(
+        'shading_https_certbot_argv "%s" "%s" "%s" "30" "%s"'
+        % (INTERKOM_HOST, EMAIL, CF_INI, " ".join(INTERKOM_ALIASES))
+    )
+    lines = out.splitlines()
+    assert lines[0] == "certonly", lines
+    # -d for the PRIMARY and each alias (one token per line, `-d` then the name)
+    for name in [INTERKOM_HOST] + INTERKOM_ALIASES:
+        adj = [
+            i for i, ln in enumerate(lines)
+            if ln == "-d" and i + 1 < len(lines) and lines[i + 1] == name
+        ]
+        assert adj, "certbot argv missing `-d %s`: %s" % (name, lines)
+    # --expand + --cert-name keyed on the PRIMARY (exactly the live expand)
+    assert "--expand" in lines, lines
+    ci = lines.index("--cert-name")
+    assert lines[ci + 1] == INTERKOM_HOST, lines
+
+
+def test_shading_certbot_argv_unchanged_when_no_aliases():
+    # the single-name (shading) certbot invocation stays byte-identical — no --expand / --cert-name.
+    out = _bash('shading_https_certbot_argv "%s" "%s" "%s" "30"' % (HOSTNAME, EMAIL, CF_INI))
+    lines = out.splitlines()
+    assert "--expand" not in lines, lines
+    assert "--cert-name" not in lines, lines
+    assert lines.count("-d") == 1, lines
+
+
+def test_no_retired_ip_in_generated_interkom_config():
+    # the retired .203 (and a literal .202) must NEVER appear in the lib render OR the committed conf;
+    # the upstreams use the router-resolvable strih.lan identity instead.
+    rendered = _bash("interkom_https_site_content")
+    with open(INTERKOM_CONF, encoding="utf-8") as f:
+        committed = f.read()
+    for ip in RETIRED_IPS:
+        assert ip not in rendered, "retired IP %s in interkom render" % ip
+        assert ip not in committed, "retired IP %s in committed interkom conf" % ip
+    assert "proxy_pass http://strih.lan:8790;" in committed, committed
+    assert "proxy_pass http://strih.lan:8188;" in committed, committed
+
+
+def test_committed_interkom_conf_has_all_three_server_names():
+    with open(INTERKOM_CONF, encoding="utf-8") as f:
+        committed = f.read()
+    sn = "server_name %s;" % " ".join([INTERKOM_HOST] + INTERKOM_ALIASES)
+    assert committed.count(sn) == 2, committed
+    assert INTERKOM_PP not in committed, "interkom-pp must not appear (Poprad stays on VDO.Ninja)"
+
+
+def test_check_interkom_tolerates_non_resolving_alias():
+    # issue 1345 M4: a fresh cut-over's alias A records may lag the primary; --check must REPORT a
+    # non-resolving alias, never FAIL on it (the verdict is gated on the primary probes only).
+    root = tempfile.mkdtemp()
+    try:
+        calls = os.path.join(root, "calls.log")
+        nginx = _fake_bin(calls, "nginx")
+        certbot = _fake_bin(calls, "certbot")
+        # getent: primary + the first alias resolve to LAN_IP; the second alias does NOT resolve.
+        getent = _fake_bin(
+            calls, "getent",
+            body_first=(
+                'if [ "$2" = "%s" ]; then :; else echo "%s $2"; fi\n'
+                % (INTERKOM_ALIASES[1], LAN_IP)
+            ),
+        )
+        curl_bin = _fake_bin(calls, "curl", body_first='printf "200"\n')
+        cert_dir = os.path.join(root, "etc", "live", INTERKOM_HOST)
+        os.makedirs(cert_dir, exist_ok=True)
+        with open(os.path.join(cert_dir, "fullchain.pem"), "w") as f:
+            f.write("cert")
+        site_available = os.path.join(root, "nginx", "sites-available", INTERKOM_SITE_NAME)
+        site_enabled = os.path.join(root, "nginx", "sites-enabled", INTERKOM_SITE_NAME)
+        os.makedirs(os.path.dirname(site_available), exist_ok=True)
+        os.makedirs(os.path.dirname(site_enabled), exist_ok=True)
+        with open(site_available, "w") as f:
+            f.write("site")
+        os.symlink(site_available, site_enabled)
+        env = dict(
+            os.environ,
+            SHADING_HTTPS_NGINX=nginx,
+            SHADING_HTTPS_CERTBOT=certbot,
+            SHADING_HTTPS_GETENT=getent,
+            SHADING_HTTPS_CURL=curl_bin,
+            SHADING_HTTPS_CERT_DIR=cert_dir,
+            SHADING_HTTPS_SITE_ENABLED=site_enabled,
+        )
+        r = subprocess.run(
+            ["bash", SCRIPT, "--site", "interkom", "--check"],
+            capture_output=True, text=True, env=env,
+        )
+        assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+        assert "OK" in r.stdout, r.stdout
+        # the non-resolving alias is REPORTED (report-only), not a failure
+        assert INTERKOM_ALIASES[1] in r.stdout, r.stdout
+        assert ("lagging" in r.stdout.lower()) or ("report-only" in r.stdout.lower()), r.stdout
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_install_interkom_certbot_gets_every_san():
+    # the interkom install invokes certbot with -d for the primary AND both crew aliases.
+    root = tempfile.mkdtemp()
+    try:
+        calls = os.path.join(root, "calls.log")
+        env, _rec = _interkom_install_env(root, calls)
+        r = subprocess.run(
+            ["bash", SCRIPT, "--install", "--site", "interkom"],
+            capture_output=True, text=True, env=env,
+        )
+        assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+        with open(calls, encoding="utf-8") as f:
+            log = f.read()
+        for name in [INTERKOM_HOST] + INTERKOM_ALIASES:
+            assert ("-d %s" % name) in log, (name, log)
+        assert "--expand" in log, log
+        assert ("--cert-name %s" % INTERKOM_HOST) in log, log
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_alias_flags_replace_the_per_site_default():
+    # an explicit --alias set REPLACES the interkom crew default (same override semantics as
+    # --hostname/--upstream): certbot gets the flag aliases and NOT the default crew names.
+    root = tempfile.mkdtemp()
+    try:
+        calls = os.path.join(root, "calls.log")
+        env, _rec = _interkom_install_env(root, calls)
+        r = subprocess.run(
+            ["bash", SCRIPT, "--install", "--site", "interkom",
+             "--alias", "one.example.org", "--alias", "two.example.org"],
+            capture_output=True, text=True, env=env,
+        )
+        assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+        with open(calls, encoding="utf-8") as f:
+            log = f.read()
+        assert "-d one.example.org" in log, log
+        assert "-d two.example.org" in log, log
+        # the per-site crew default must NOT leak in when explicit flags were given
+        for name in INTERKOM_ALIASES:
+            assert ("-d %s" % name) not in log, (name, log)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_alias_env_replaces_default_and_first_flag_clears_env():
+    # SHADING_HTTPS_ALIASES env seeds the alias set (replacing the crew default); the FIRST --alias
+    # flag then CLEARS that env seed and starts fresh from flags.
+    root = tempfile.mkdtemp()
+    try:
+        # env only, no flag: the env seed replaces the crew default
+        calls = os.path.join(root, "calls-env.log")
+        env, _rec = _interkom_install_env(root, calls)
+        env["SHADING_HTTPS_ALIASES"] = "env1.example.org env2.example.org"
+        r = subprocess.run(
+            ["bash", SCRIPT, "--install", "--site", "interkom"],
+            capture_output=True, text=True, env=env,
+        )
+        assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+        with open(calls, encoding="utf-8") as f:
+            log = f.read()
+        assert "-d env1.example.org" in log and "-d env2.example.org" in log, log
+        for name in INTERKOM_ALIASES:
+            assert ("-d %s" % name) not in log, (name, log)
+
+        # env + a flag: the flag clears the env seed and wins
+        calls2 = os.path.join(root, "calls-flag.log")
+        env2, _rec2 = _interkom_install_env(root, calls2)
+        env2["SHADING_HTTPS_ALIASES"] = "env1.example.org"
+        r2 = subprocess.run(
+            ["bash", SCRIPT, "--install", "--site", "interkom", "--alias", "flag1.example.org"],
+            capture_output=True, text=True, env=env2,
+        )
+        assert r2.returncode == 0, (r2.returncode, r2.stdout, r2.stderr)
+        with open(calls2, encoding="utf-8") as f:
+            log2 = f.read()
+        assert "-d flag1.example.org" in log2, log2
+        assert "-d env1.example.org" not in log2, log2
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 if __name__ == "__main__":
     for _name, _fn in sorted(globals().items()):
         if _name.startswith("test_") and callable(_fn):

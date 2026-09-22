@@ -6,6 +6,71 @@
 use crate::mapping::*;
 use crate::wire::{CameraCaps, SetRequest, ShadingParams};
 
+/// Compares each key a write burst WROTE (`written`) against the camera's authoritative readback
+/// (`readback`) and returns the WIRE field names whose write the camera did NOT apply (issue 1343).
+///
+/// The relay fills [`crate::wire::RelayState::not_applied`] with this at the burst idle-close (using
+/// the SAME `params_and_caps` readback basis the panel already reconciles against), so a camera that
+/// ACKs a `set-config` and silently ignores it — cam1 today: the BMPCC drops aperture AND focus PTP
+/// writes while ISO applies — surfaces as a per-key `.not-applied` flag instead of the optimistic
+/// value just reverting with no signal.
+///
+/// Per key. APERTURE (`apertureNorm`) is compared via the CHOICE INDEX, not the raw float norm:
+/// the written norm and the readback `aperture_norm` are each mapped onto the SAME f-number choice
+/// grid via [`norm_to_choice_index`], and a mismatch (or a missing readback) flags it. This catches
+/// both a fully-dropped write and the off-grid case (a current f-number like cam1's f/4 that sits
+/// below a 4.5-minimum grid readback-snaps to a different nearest choice than the requested on-grid
+/// one); an empty `fnumber_choices` means "cannot judge" (never a false flag). ISO / SHUTTER /
+/// KELVIN / TINT / FPS are compared BY VALUE against the readback (`fps` written as project fps vs
+/// the readback `fps100 = fps*100`); a `None` readback for a written key flags it (the camera did
+/// not report the value it should now hold).
+///
+/// Only keys PRESENT in `written` are compared — an unwritten key never appears. Pure — no IO, no
+/// camera; exhaustively rustc/Tier-0 testable.
+pub fn not_applied_keys(
+    written: &SetRequest,
+    readback: &ShadingParams,
+    fnumber_choices: &[f64],
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    if let Some(w_norm) = written.aperture_norm {
+        let n = fnumber_choices.len() as i64;
+        if n >= 1 {
+            let w_idx = norm_to_choice_index(w_norm, n);
+            let r_idx = readback.aperture_norm.map(|r| norm_to_choice_index(r, n));
+            if r_idx != Some(w_idx) {
+                out.push("apertureNorm".to_string());
+            }
+        }
+    }
+    if let Some(w) = written.iso {
+        if readback.iso != Some(w) {
+            out.push("iso".to_string());
+        }
+    }
+    if let Some(w) = written.shutter {
+        if readback.shutter != Some(w) {
+            out.push("shutter".to_string());
+        }
+    }
+    if let Some(w) = written.kelvin {
+        if readback.kelvin != Some(w) {
+            out.push("kelvin".to_string());
+        }
+    }
+    if let Some(w) = written.tint {
+        if readback.tint != Some(w) {
+            out.push("tint".to_string());
+        }
+    }
+    if let Some(w) = written.fps {
+        if readback.fps100 != Some(w * 100) {
+            out.push("fps".to_string());
+        }
+    }
+    out
+}
+
 /// The raw `gphoto2 --get-config <key>` text blocks the relay captured this cycle, one
 /// per shading property. Empty strings are tolerated (a property the camera did not
 /// answer degrades to `None`, never a crash).
