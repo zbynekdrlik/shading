@@ -396,6 +396,60 @@ CI / the .sh / the .ps1 cannot drift (`tests/python/test_bkshading_deploy_servic
   provisioning + live NDI-preview verify already noted above.
 
 
+## Service DEPLOY path onto strih (Linux notebook strih-lx) — issue 1353 (the post-M4 sibling of the Windows path)
+
+Post-M4 the notebook IS the strih, so the service is PROVISIONED (not "deployed" ad-hoc) as a systemd
+unit — the `setup-strih.sh` / `verify-strih.sh` / `strih-provision.sh` machinery, not a bespoke
+orchestrator. The `bkshading` **Linux** CI job (`.github/workflows/ci.yml`, "bkshading service + relay
+(issue 808)") uploads `bkshading-service-linux-amd64` (the service binary + `bkshading/service/web/`,
+staged into one flat dir), the artifact NAME single-sourced in `scripts/lib/strih-provision.sh`
+**`strih_bkshading_artifact_name`** (the strih sibling of the Windows `bkshading-windows-amd64` canon).
+Pieces: three pure printers (`strih_bkshading_artifact_name` / `strih_bkshading_unit_text` /
+`strih_bkshading_config_text`), the committed `systemd/bkshading-service.service` (byte-identical to
+the printer — parity-tested), `setup-strih.sh` step **"16c"** (lettered, TOTAL_STEPS stays 17), and
+`verify-strih.sh` item 31. Tests: `tests/strih_provision_pure_functions.rs` (source-and-call + anchors).
+
+- **The panel web assets are EMBEDDED in the binary** (`bkshading/service/src/http.rs`:
+  `include_str!("../web/index.html")`, `include_bytes!("../web/icon-192.png")`, …), so the service is
+  SELF-CONTAINED — the unit + verify depend only on the binary + its `:8770` listener + `/api/state`,
+  never a filesystem `web/`. This is why the Windows canon ships `bkshading.exe` ALONE. The Linux
+  artifact + install still carry `web/` beside the binary (design wording) as a panel-source copy, but
+  do NOT assume it is required at runtime, and do not add a unit dependency on it.
+- **NO cambox relay repoint is needed to migrate the service to the notebook.** The relay is a PASSIVE
+  listener (`ExecStart=/usr/local/bin/bkshading-relay --bind 0.0.0.0:8771`, `--help` = only
+  `--bind`/`--gphoto2`); its `EnvironmentFile=-/etc/bkshading/relay.env` carries ONLY
+  `CAMERA_BOX_CAPTURE_FPS`. There is NO service-host / report-target config anywhere on the relay side
+  — the SERVICE connects OUT to each cambox at `<cambox>.lan:8771` (the SERVICE config's
+  `[[camera]].address`, host-independent). So "the relays report to host X" is imprecise; moving the
+  service host changes nothing on the boxes.
+- **Config seeded ONLY IF absent** (`[ ! -f /etc/bkshading/bkshading.toml ]`, the `projector.json`
+  precedent) from `strih_bkshading_config_text` (pinned from the canonical
+  `bkshading/service/bkshading.example.toml` — the schema the Windows config was itself seeded from,
+  since a live read of `C:\bkshading\bkshading.toml` needs the Windows PC ON). No secret in the config.
+- **`systemctl enable` ONLY — never start from the installer** (the SUPERVISOR deploys the running
+  service; the Windows service is the fallback until the owner accepts). So **`verify-strih.sh` must
+  NOT hard-FAIL an enabled-but-INACTIVE unit** — grade it like the `intercom-hub`/`janus` enable-only
+  items (report-only `note` on inactive; the unit-file ABSENT is a hard FAIL; an ACTIVE unit is
+  asserted HARD). The active check is the same "confirm the LISTENER'S OWNER" rule as Windows: the
+  `:8770` owner (via `ss -tlnp`) must be the `bkshading` binary AND `/api/state` must answer.
+- **GOTCHA — the `ss -tlnp` owner-extraction trailing-quote trap** (`strih_bkshading_listener_owner`):
+  `grep -oE 'users:\(\("[^"]+"'` captures the CLOSING quote too (`users:(("bkshading"`), so a naive
+  `sed -E 's/.*\("//'` leaves `bkshading"` and `[ owner = bkshading ]` is ALWAYS false — a healthy
+  service graded unhealthy (it fails SAFE, never false-green, but the active-health check becomes
+  unpassable). The parse MUST capture-group: `sed -E 's/.*\("([^"]+)".*/\1/'`. It is a pure fn so it
+  has a regression test; any similar `users:((...))` owner parse needs the capture group.
+- **Artifact fetch in step 16c:** a pre-staged dir override `STRIH_LX_BKSHADING_SRC` (the step-4
+  `STRIH_LX_BUNDLE_SRC` precedent) is tried first, else `GH_TOKEN` fetches the artifact via the GitHub
+  **artifacts API** (list `?name=<art>` → `archive_download_url` → curl the zip → `python3 zipfile`
+  extract); a token WITHOUT `actions:read` → empty URL → warn (supervisor pre-stages or places the
+  binary). The install is robust to any zip nesting (`find -type f -name bkshading` / `-type d -name
+  web`). The bundle-state step-9 curl+`GH_TOKEN` is the raw-FILE precedent; a CI artifact needs the
+  artifacts API, not the raw endpoint.
+- **UNVERIFIED (supervisor rig steps):** the LIVE `setup-strih.sh` run on strih-lx (10.77.9.202) +
+  `verify-strih.sh` green + STARTING the service (`systemctl start bkshading-service`) + the owner's
+  panel acceptance on `http://strih.lan:8770/` (development = one camera on cam1) with the PC off.
+
+
 ## E2E harness must PAUSE the relay on the two measurement-critical camboxes (issue 808, live evidence)
 
 The relay is a fleet-standby service — owner directive: it runs on EVERY cambox so any camera can
