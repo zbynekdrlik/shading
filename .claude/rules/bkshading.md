@@ -358,6 +358,12 @@ The code lane ships the provisioning + `--check`; these live-hardware steps are 
 
 ## Service DEPLOY path onto strih (Windows) — issue 808 (repeatable, mirrors the relay canon)
 
+**Retired default (issue 1317 part 3):** the Windows strih PC this section targets is GONE (M4
+cut-over); the service now runs on the Linux strih-lx as a systemd unit (the issue-1353 section
+below). `bkshading-deploy-service.sh` therefore has NO default `--host` (it used to be 10.77.9.202,
+now strih-lx's address) and refuses a linux-genlock fleet address via `obs_fleet_refuse_linux_target`,
+naming `setup-strih.sh` step 16c. It stays usable for an explicit Windows box.
+
 The `bkshading-windows` CI job release-builds + uploads the deployable service as
 `bkshading-windows-amd64` (`target/release/bkshading.exe`). The repeatable deploy of THAT onto strih
 is `scripts/bkshading-deploy-service.sh` (dev1 orchestrator) + `scripts/bkshading-install-service.ps1`
