@@ -58,6 +58,11 @@ def _bash(snippet):
     return out.stdout.strip()
 
 
+# A hypothetical Windows box on a TEST-NET address (RFC 5737) -- the Windows strih PC is RETIRED
+# (issue 1317), so no real rig address is the Windows install target any more.
+WIN_TEST_HOST = "192.0.2.10"
+
+
 def _run_script(args, env=None):
     e = dict(os.environ)
     if env:
@@ -181,27 +186,49 @@ def test_dry_run_is_default_and_touches_nothing():
         with open(fake_bin, "w") as f:
             f.write("MZ")  # a stand-in exe
         env, log = _fake_env(tmp, "deadbeef")
-        r = _run_script(["--host", "10.77.9.202", "--binary", fake_bin], env=env)
+        r = _run_script(["--host", WIN_TEST_HOST, "--binary", fake_bin], env=env)
         assert r.returncode == 0, "dry-run should succeed: %s%s" % (r.stdout, r.stderr)
         out = r.stdout + r.stderr
         assert INSTALL_DIR in out, "dry-run must name the install dir"
         assert TASK_NAME in out, "dry-run must name the task"
         assert PORT in out, "dry-run must name the verify port"
-        assert "10.77.9.202" in out, "dry-run must name the host"
+        assert WIN_TEST_HOST in out, "dry-run must name the host"
         assert re.search(r"dry.?run", out, re.I), "dry-run must say so"
         assert not os.path.exists(log) or open(log).read() == "", \
             "dry-run must make NO ssh/scp call (log must be empty)"
 
 
-def test_missing_host_uses_default_strih_or_is_accepted():
-    # --host defaults to strih (10.77.9.202); a bare dry-run with a --binary must still succeed.
+def test_missing_host_is_refused_no_windows_strih_default_1317():
+    # issue 1317 part 3: the default used to be the Windows strih PC at 10.77.9.202 -- RETIRED at
+    # the M4 cut-over; that address is the Linux strih-lx now. No --host = a usage error, never a
+    # silent aim at the Linux box.
     with tempfile.TemporaryDirectory() as tmp:
         fake_bin = os.path.join(tmp, EXE_NAME)
         open(fake_bin, "w").close()
-        env, _ = _fake_env(tmp, "x")
+        env, log = _fake_env(tmp, "x")
         r = _run_script(["--binary", fake_bin], env=env)
-        assert r.returncode == 0, "default-host dry-run should succeed: %s%s" % (r.stdout, r.stderr)
-        assert "10.77.9.202" in (r.stdout + r.stderr), "default host must be strih"
+        assert r.returncode == 2, "no --host must be a usage error: %s%s" % (r.stdout, r.stderr)
+        assert "--host" in r.stderr and "RETIRED" in r.stderr, r.stderr
+        assert not os.path.exists(log) or open(log).read() == "", "no ssh/scp on a refusal"
+
+
+def test_linux_strih_lx_host_is_refused_even_with_execute_1317():
+    # The Windows Task-Scheduler install must never be aimed at a linux-genlock fleet box: on
+    # strih-lx the service is a systemd unit installed by setup-strih.sh step 16c (issue 1353).
+    with tempfile.TemporaryDirectory() as tmp:
+        fake_bin = os.path.join(tmp, EXE_NAME)
+        open(fake_bin, "w").close()
+        seed = os.path.join(tmp, "seed.toml")
+        open(seed, "w").close()
+        env, log = _fake_env(tmp, "x")
+        for host in ("10.77.9.202", "strih-lx"):
+            for extra in ([], ["--execute"]):
+                r = _run_script(["--host", host, "--binary", fake_bin, "--config-seed", seed] + extra,
+                                env=env)
+                assert r.returncode == 2, "%s must be refused: %s%s" % (host, r.stdout, r.stderr)
+                assert "linux-genlock" in r.stderr and "16c" in r.stderr, r.stderr
+        assert not os.path.exists(log) or open(log).read() == "", \
+            "a refused Linux target must make NO ssh/scp call"
 
 
 # ---------------------------------------------------------------------------------------------
@@ -260,7 +287,7 @@ def test_execute_scps_the_three_files_then_runs_installer():
             f.write("bind = \"0.0.0.0:%s\"\n" % PORT)
         env, log = _fake_env(tmp, _sha256(fake_bin))  # matching sha -> byte-verify passes
         r = _run_script(
-            ["--host", "10.77.9.202", "--binary", fake_bin, "--config-seed", seed, "--execute"],
+            ["--host", WIN_TEST_HOST, "--binary", fake_bin, "--config-seed", seed, "--execute"],
             env=env,
         )
         assert r.returncode == 0, "execute should succeed: %s%s" % (r.stdout, r.stderr)
@@ -293,7 +320,7 @@ def test_execute_passes_port_and_task_to_installer():
         open(seed, "w").close()
         env, log = _fake_env(tmp, _sha256(fake_bin))  # matching sha -> byte-verify passes
         r = _run_script(
-            ["--host", "10.77.9.202", "--binary", fake_bin, "--config-seed", seed, "--execute"],
+            ["--host", WIN_TEST_HOST, "--binary", fake_bin, "--config-seed", seed, "--execute"],
             env=env,
         )
         assert r.returncode == 0
@@ -317,7 +344,7 @@ def test_execute_passes_stagedir_and_ps1_default_is_ssh_safe():
         open(seed, "w").close()
         env, log = _fake_env(tmp, _sha256(fake_bin))  # matching sha -> byte-verify passes
         r = _run_script(
-            ["--host", "10.77.9.202", "--binary", fake_bin, "--config-seed", seed, "--execute"],
+            ["--host", WIN_TEST_HOST, "--binary", fake_bin, "--config-seed", seed, "--execute"],
             env=env,
         )
         assert r.returncode == 0
@@ -349,7 +376,7 @@ def test_execute_byte_verify_sha_mismatch_fails():
         open(seed, "w").close()
         env, log = _fake_env(tmp, "deadbeef_wrong_sha")  # remote sha != local -> mismatch
         r = _run_script(
-            ["--host", "10.77.9.202", "--binary", fake_bin, "--config-seed", seed, "--execute"],
+            ["--host", WIN_TEST_HOST, "--binary", fake_bin, "--config-seed", seed, "--execute"],
             env=env,
         )
         assert r.returncode != 0, "a sha256 mismatch must fail the deploy"

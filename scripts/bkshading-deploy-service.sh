@@ -34,7 +34,10 @@ set -euo pipefail
 # Usage:  scripts/bkshading-deploy-service.sh [--host <ip>] [--user <name>]
 #             [--binary <bkshading.exe> | --run <ci.yml run id>] [--config-seed <path>]
 #             [--install-dir <C:\dir>] [--keepalive-minutes <N>] [--execute]
-#   --host <ip>            strih PC (default 10.77.9.202).
+#   --host <ip>            the Windows box to install on (REQUIRED -- issue 1317 part 3). The Windows
+#                          strih PC this defaulted to is RETIRED; the service runs on the Linux strih-lx
+#                          now, provisioned by setup-strih.sh step 16c as a systemd unit (issue 1353),
+#                          so a linux-genlock fleet address is refused by the fleet class gate.
 #   --user <name>          ssh user (default newlevel); also the C:\Users\<name> staging home.
 #   --binary <path>        deploy an already-downloaded CI service exe (skips gh download).
 #   --run <id>             pin a ci.yml run id to download the bkshading-windows-amd64 artifact from.
@@ -71,7 +74,7 @@ KEEPALIVE_MIN="$(bkshading_service_keepalive_minutes)"
 
 REPO="${REPO:-zbynekdrlik/camera-box}"
 BRANCH="${BRANCH:-main}"
-HOST="10.77.9.202"                 # strih
+HOST=""                            # REQUIRED --host (issue 1317: no Windows strih default)
 USER_NAME="newlevel"
 SSH_PASS="${STRIH_SSH_PW:-newlevel}"
 RUN_ID=""
@@ -108,6 +111,18 @@ while [ "$#" -gt 0 ]; do
     *) echo "unknown argument: $1 (see --help)" >&2; exit 2 ;;
   esac
 done
+
+# issue 1317 part 3: no default box, and never a Windows install aimed at a Linux fleet box.
+# shellcheck source=scripts/lib/obs-fleet.sh
+. "$HERE/lib/obs-fleet.sh"
+if [ -z "$HOST" ]; then
+  echo "ERROR: --host <windows-box> is required -- the Windows strih PC is RETIRED (issue 1317); on strih-lx the service is a systemd unit installed by setup-strih.sh step 16c" >&2
+  exit 2
+fi
+if ! obs_fleet_refuse_linux_target "$HOST" "bkshading-deploy-service.sh"; then
+  echo "       on strih-lx the bkshading service is provisioned by setup-strih.sh step 16c (systemd unit bkshading-service.service, issue 1353)" >&2
+  exit 2
+fi
 
 if [ -n "$RUN_ID" ] && [ -n "$BINARY" ]; then
   echo "ERROR: --run and --binary are mutually exclusive" >&2
