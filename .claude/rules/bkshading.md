@@ -411,7 +411,7 @@ the printer — parity-tested), `setup-strih.sh` step **"16c"** (lettered, TOTAL
 
 - **The panel web assets are EMBEDDED in the binary** (`bkshading/service/src/http.rs`:
   `include_str!("../web/index.html")`, `include_bytes!("../web/icon-192.png")`, …), so the service is
-  SELF-CONTAINED — the unit + verify depend only on the binary + its `:8770` listener + `/api/state`,
+  SELF-CONTAINED — the unit + verify depend only on the binary + its `:8770` listener + `/api/version`,
   never a filesystem `web/`. This is why the Windows canon ships `bkshading.exe` ALONE. The Linux
   artifact + install still carry `web/` beside the binary (design wording) as a panel-source copy, but
   do NOT assume it is required at runtime, and do not add a unit dependency on it.
@@ -431,7 +431,13 @@ the printer — parity-tested), `setup-strih.sh` step **"16c"** (lettered, TOTAL
   NOT hard-FAIL an enabled-but-INACTIVE unit** — grade it like the `intercom-hub`/`janus` enable-only
   items (report-only `note` on inactive; the unit-file ABSENT is a hard FAIL; an ACTIVE unit is
   asserted HARD). The active check is the same "confirm the LISTENER'S OWNER" rule as Windows: the
-  `:8770` owner (via `ss -tlnp`) must be the `bkshading` binary AND `/api/state` must answer.
+  `:8770` owner (via `ss -tlnp`) must be the `bkshading` binary AND `/api/version` must answer.
+- **GOTCHA — `/api/state` is the RELAY's endpoint, not the SERVICE's** (live 23.9.2026): the relay
+  (cambox `:8771`) and the intercom hub (`:8790`) serve `GET /api/state`; the service router
+  (`bkshading/service/src/http.rs`) serves `/api/version`, `/api/cameras`, the panel assets and `/ws`,
+  so `:8770/api/state` is 404. verify item 31 first probed `/api/state` and graded a healthy running
+  service FAIL "silent"; `tests/strih_provision_pure_functions.rs` now parses the router and requires
+  the probed path to be one of its routes. Any new service health probe: pick a route from the router.
 - **GOTCHA — the `ss -tlnp` owner-extraction trailing-quote trap** (`strih_bkshading_listener_owner`):
   `grep -oE 'users:\(\("[^"]+"'` captures the CLOSING quote too (`users:(("bkshading"`), so a naive
   `sed -E 's/.*\("//'` leaves `bkshading"` and `[ owner = bkshading ]` is ALWAYS false — a healthy
