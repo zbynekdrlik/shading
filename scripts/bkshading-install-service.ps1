@@ -230,7 +230,8 @@ else {
 
 # Register the keep-alive scheduled task: at logon PLUS a repetition every N minutes; the action
 # re-runs THIS installer in -KeepAlive -Execute mode (relaunch-if-absent). Two triggers, mirroring
-# install-strih-nic-selfheal.ps1's @($triggerRepeat, $triggerBoot) shape.
+# the retired strih NIC watcher's installer's @($triggerRepeat, $triggerBoot) shape (issue 1199,
+# removed with the Windows strih PC in issue 1317).
 $argLine = ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -KeepAlive -Execute -InstallDir "{1}" -Port {2} -TaskName {3} -ExeName {4} -ConfigName {5}' -f `
   $DeployedPs1, $InstallDir, $Port, $TaskName, $ExeName, $ConfigName)
 $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $argLine
