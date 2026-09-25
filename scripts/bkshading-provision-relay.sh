@@ -39,16 +39,16 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
 # shellcheck source=scripts/lib/bkshading-relay-runtime.sh
 . "$HERE/lib/bkshading-relay-runtime.sh"
+# shellcheck source=scripts/lib/bkshading-relay-provision.sh
+. "$HERE/lib/bkshading-relay-provision.sh" # the ONE install body, shared with setup-device.sh (issue 808)
 
 UNIT_NAME="$(bkshading_relay_unit_name)"
 UNIT_SRC="$REPO/systemd/$UNIT_NAME"
 UNIT_DEST="${BKSHADING_RELAY_UNIT_DEST:-/etc/systemd/system/$UNIT_NAME}"
 ENV_FILE="${BKSHADING_RELAY_ENV_FILE:-$(bkshading_relay_env_path)}"
 RELAY_BIN="${BKSHADING_RELAY_BIN:-$(bkshading_relay_bin_path)}"
-DROPIN_DIR="${BKSHADING_RELAY_DROPIN_DIR:-/etc/systemd/system/camera-box.service.d}"
 GPHOTO2="${BKSHADING_RELAY_GPHOTO2:-gphoto2}"
 SYSTEMCTL="${BKSHADING_RELAY_SYSTEMCTL:-systemctl}"
-APT_PKG="$(bkshading_relay_apt_package)"
 
 MODE="${1:---check}"
 case "$MODE" in
@@ -63,55 +63,15 @@ case "$MODE" in
     ;;
 esac
 
-# Derive the effective capture fps from the box's camera-box.service.d drop-ins (or the appliance
-# default when none set it). Pure logic lives in the sourced helper.
-derive_capture_fps() {
-  local text="" f raw
-  if [ -d "$DROPIN_DIR" ]; then
-    for f in "$DROPIN_DIR"/*.conf; do
-      [ -f "$f" ] || continue
-      text="$text$(cat "$f")"$'\n'
-    done
-  fi
-  raw="$(bkshading_relay_capture_fps_from_dropins "$text")"
-  bkshading_relay_effective_capture_fps "$raw"
-}
-
-install_gphoto2() {
-  if command -v "$GPHOTO2" >/dev/null 2>&1; then
-    echo "  gphoto2 already present: $(command -v "$GPHOTO2")"
-    return 0
-  fi
-  echo "  installing $APT_PKG (the relay's USB-PTP runtime) via apt ..."
-  apt-get update -qq
-  apt-get install -y -qq "$APT_PKG"
-}
-
+# The install body lives in scripts/lib/bkshading-relay-provision.sh (issue 808): setup-device.sh
+# runs the SAME functions on every fresh cambox, so the standalone CLI and the provisioner can never
+# drift. This CLI keeps its historical contract: install + ENABLE (never start/restart).
 do_install() {
   echo "[bkshading-provision-relay] --install (enable-only; takes effect on next reboot)"
-  install_gphoto2
-
-  local fps
-  fps="$(derive_capture_fps)"
-  mkdir -p "$(dirname "$ENV_FILE")"
-  bkshading_relay_env_file_content "$fps" >"$ENV_FILE"
-  chmod 0644 "$ENV_FILE"
-  echo "  wrote $ENV_FILE (CAMERA_BOX_CAPTURE_FPS=$fps, derived from $DROPIN_DIR)"
-
-  mkdir -p "$(dirname "$UNIT_DEST")"
-  install -m 0644 "$UNIT_SRC" "$UNIT_DEST"
-  echo "  installed $UNIT_DEST"
-
-  # ENABLE-ONLY: never start/restart the relay here (provisioning-scripts.md) — reboot / the
-  # post-reboot verify step brings it live.
-  "$SYSTEMCTL" daemon-reload
-  "$SYSTEMCTL" enable "$UNIT_NAME"
-  echo "  enabled $UNIT_NAME (NOT started -- reboot to take effect)"
-
-  if [ ! -x "$RELAY_BIN" ]; then
-    echo "  WARNING: relay binary not present/executable at $RELAY_BIN -- deploy the CI-built" >&2
-    echo "           bkshading-relay there (separate supervisor step) before reboot." >&2
-  fi
+  bkshading_relay_provision_install enabled || {
+    echo "bkshading relay install FAILED (see the lines above)" >&2
+    return 1
+  }
   echo "install done. Verify with: scripts/bkshading-provision-relay.sh --check"
 }
 

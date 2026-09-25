@@ -18,9 +18,13 @@ set -euo pipefail
 # Pure decisions (artifact name, relay bin name, the ENABLE-ONLY invariant, the sha-match verdict)
 # live in scripts/lib/bkshading-deploy-runtime.sh so they are Tier-0 unit-testable without a rig.
 #
-# ENABLE-ONLY (.claude/rules/provisioning-scripts.md + bkshading.md): this NEVER start/restart/
-# `enable --now`s the relay service — reboot (or the supervisor's post-reboot verify) brings it
-# live, so a deploy can never light the relay up mid-event. USB / USB-Ethernet transports only —
+# RELAY STATE (issue 808, 25.9.2026): the deploy reads the relay's state first. An ACTIVE relay is
+# STOPPED before the swap and started again after the ro remount (its PREVIOUS state is restored);
+# a stopped relay (the TEST-mode default, issue 1311) stays stopped — the deploy never STARTS a relay
+# that was not running and never `enable`s it (enable-state is setup-device.sh / rig-mode.sh's job).
+# Swapping under a running relay left the replaced binary deleted-but-open, the final `remount,ro`
+# failed "busy", and the old script swallowed it (cam6/cam7 root stayed read-WRITE); the ro remount
+# now FAILS LOUD (non-zero, naming the holder via `lsof +L1` / `fuser -vm /`). USB / USB-Ethernet transports only —
 # no wireless-pairing transport (owner hard rule). Per approval-scope.md the binary deploy + the ro-root remount it
 # performs are the standing-approved WORK — this script does NOT ask permission and does NOT gate on
 # "is it off-air"; the operator who runs it guards live timing. It does NOT reboot the host.
@@ -42,7 +46,9 @@ set -euo pipefail
 #                     override ONLY, logged loudly — a relay deploy/restart during live production can
 #                     fork-wedge the cambox (gphoto2 PTP on the shared xHCI bus, 2026-09-13 #1229).
 #   -h | --help       show this header.
-# With neither --run nor --binary, the latest successful ci.yml run on $BRANCH is used.
+# With neither --run nor --binary, the newest SUCCESSFUL ci.yml run on $BRANCH that carries the
+# artifact is used — the ONE shared resolver scripts/lib/ci-run-resolve.sh (deploy-fleet.sh uses it
+# too), which logs the chosen run id + date + sha (issue 808: the old query picked a stale run).
 # SBC/handheld example: scripts/bkshading-deploy-relay.sh --host <sbc> --arch arm64 --no-remount
 #
 # Env: SSH_PASS (default newlevel), REPO (default zbynekdrlik/camera-box), BRANCH (default main),
@@ -51,9 +57,10 @@ set -euo pipefail
 #      BKSHADING_DEPLOY_GH, BKSHADING_DEPLOY_SSH, BKSHADING_DEPLOY_SCP, BKSHADING_DEPLOY_SSHPASS_PREFIX,
 #      BKSHADING_DEPLOY_OBS_PHASE2_DIR (dir holding obs_phase2.py for the rig-busy guard).
 #
-# Exit codes: 0 = relay deployed + byte-verified; 1 = a step failed / sha256 mismatch; 2 = bad args.
-# After a successful deploy: run scripts/bkshading-provision-relay.sh --install (if not yet) on the
-# box + reboot to bring the relay live (enable-only).
+# Exit codes: 0 = relay deployed + byte-verified AND the root back read-only AND the relay back in
+# its previous state; 1 = a step failed / sha256 mismatch / the ro remount failed (holder named) /
+# the restore failed; 2 = bad args. A box never provisioned for the relay: run
+# scripts/bkshading-provision-relay.sh --install on it (setup-device.sh does it on a fresh install).
 # ---------------------------------------------------------------------------------------------
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -61,10 +68,14 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/bkshading-deploy-runtime.sh"
 # shellcheck source=scripts/lib/bkshading-relay-runtime.sh
 . "$HERE/lib/bkshading-relay-runtime.sh" # bkshading_relay_bin_path() — the ONE relay install path
+# shellcheck source=scripts/lib/ci-run-resolve.sh
+. "$HERE/lib/ci-run-resolve.sh" # ci_run_latest_success() — the ONE newest-successful-run resolver (shared with deploy-fleet.sh)
 # shellcheck source=scripts/lib/stray-session-check.sh
 . "$HERE/lib/stray-session-check.sh" # stray_session_check_assert() — the ONE shared rig-busy guard
 
 RELAY_DEST="$(bkshading_relay_bin_path)"     # /usr/local/bin/bkshading-relay (one source of truth)
+RELAY_UNIT="$(bkshading_relay_unit_name)"    # bkshading-relay.service (one source of truth)
+RESTORE_ACTION=none                          # issue 808: `start` only when the relay was active before the swap
 # Staging path for the ETXTBSY-safe swap: scp lands here (SAME dir → atomic rename), then `mv -f`
 # replaces the (possibly RUNNING) relay inode. scp'ing directly onto a running exe fails ETXTBSY
 # ("dest open: Failure", 2026-09-13 escalation). $$ is the local PID = a unique per-run stage name.
@@ -157,17 +168,61 @@ fi
 # ssh remount call at all when --no-remount is set, so an SBC deploy never tries to remount its
 # root ro (which would be wrong / fail-busy).
 maybe_remount_rw() { [ "$RO_ROOT" = 1 ] || return 0; ssh_box "$1" "mount -o remount,rw /"; }
-maybe_remount_ro() { [ "$RO_ROOT" = 1 ] || return 0; ssh_box "$1" "mount -o remount,ro / 2>/dev/null; true" || true; }
 
 ssh_box() { "${SSHPASS_PREFIX[@]}" "$SSH_BIN" -o StrictHostKeyChecking=no -o ConnectTimeout=10 "root@$1" "$2"; }
 scp_box() { "${SSHPASS_PREFIX[@]}" "$SCP_BIN" -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$2" "root@$1:$3"; }
 
+# issue 808 (cam6/cam7, 25.9.2026): the ro remount used to be `mount -o remount,ro / 2>/dev/null;
+# true || true` -- a "busy" failure was SWALLOWED, the script printed OK and the box root stayed
+# read-WRITE. Now it is retried (a just-stopped relay can take a moment to release its files) and a
+# final failure FAILS LOUD: it names the holder (`lsof +L1` = deleted-but-still-open files, the real
+# blocker; `fuser -vm /` for the full picture) and returns non-zero, so the caller exits non-zero.
+remount_ro_checked() {
+  [ "$RO_ROOT" = 1 ] || return 0
+  if ssh_box "$1" "for _i in 1 2 3; do mount -o remount,ro / && exit 0; sleep 2; done; exit 1"; then
+    return 0
+  fi
+  local fu lo holders
+  fu="$(ssh_box "$1" "fuser -vm / 2>&1 | head -n 40" 2>/dev/null || true)"
+  lo="$(ssh_box "$1" "lsof +L1 2>/dev/null | head -n 40" 2>/dev/null || true)"
+  holders="$(bkshading_deploy_ro_holders "$lo")"
+  echo "ERROR: mount -o remount,ro / FAILED on $1 -- the box root stays read-WRITE." >&2
+  echo "       holder(s) of deleted-but-open files (lsof +L1): ${holders:-<none reported>}" >&2
+  echo "       fuser -vm / on $1:" >&2
+  printf '%s\n' "${fu:-<no output>}" | sed 's/^/         /' >&2
+  echo "       Fix: stop that holder, then run 'mount -o remount,ro /' on $1 (never leave a cambox root rw)." >&2
+  return 1
+}
+
+# Restore the relay's PREVIOUS state after the swap: start it again ONLY when it was active before
+# (bkshading_deploy_restore_action). A relay that was stopped (TEST mode, issue 1311) stays stopped.
+restore_relay() {
+  [ "$RESTORE_ACTION" = start ] || return 0
+  if ssh_box "$1" "systemctl start $RELAY_UNIT"; then
+    echo "restored: $RELAY_UNIT started again on $1 (it was active before the swap)"
+  else
+    echo "ERROR: could not start $RELAY_UNIT again on $1 (it was active before the swap) -- start it by hand" >&2
+    return 1
+  fi
+}
+
+# finish_box HOST -> the ro remount (checked) THEN the relay restore; non-zero when either failed.
+# Every exit path after the rw remount runs it, so no path leaves the root rw or the relay stopped.
+finish_box() {
+  local rc=0
+  remount_ro_checked "$1" || rc=1
+  restore_relay "$1" || rc=1
+  return "$rc"
+}
+
 # --- resolve the relay binary (a pre-downloaded --binary, or the CI artifact) ---
 if [ -z "$BINARY" ]; then
   if [ -z "$RUN_ID" ]; then
-    RUN_ID="$("$GH" run list --repo "$REPO" --branch "$BRANCH" --workflow ci.yml \
-      --status success --limit 1 --json databaseId --jq '.[0].databaseId' 2>/dev/null || true)"
-    [ -n "$RUN_ID" ] || { echo "ERROR: no successful ci.yml run found on $BRANCH" >&2; exit 1; }
+    # issue 808: the ONE shared resolver (deploy-fleet.sh uses it too) -- the newest SUCCESSFUL
+    # ci.yml run by createdAt that carries $ARTIFACT, decided client-side and logged. The old
+    # server-side-filtered one-shot query picked a 3-week-old run on 25.9.2026.
+    RUN_ID="$(CI_RUN_RESOLVE_GH="$GH" ci_run_latest_success "$REPO" "$BRANCH" ci.yml "$ARTIFACT")" || RUN_ID=""
+    [ -n "$RUN_ID" ] || { echo "ERROR: no successful ci.yml run on $BRANCH carries $ARTIFACT" >&2; exit 1; }
   fi
   DIST="$(mktemp -d)"
   # Clean up the downloaded artifact dir on exit (mirrors deploy-fleet.sh's DIST trap).
@@ -185,10 +240,10 @@ LOCAL_SHA="$(sha256sum "$BINARY" | awk '{print $1}')"
 # --- dry-run: print the plan, touch nothing ---
 if [ "$DRY_RUN" -eq 1 ]; then
   if [ "$RO_ROOT" = 1 ]; then
-    STEPS="rig-busy guard  ->  mount -o remount,rw /  ->  scp (staged $RELAY_STAGE)  ->  chmod +x + atomic mv over running binary  ->  sha256 byte-verify  ->  mount -o remount,ro /"
+    STEPS="rig-busy guard  ->  stop the relay if active  ->  mount -o remount,rw /  ->  scp (staged $RELAY_STAGE)  ->  chmod +x + atomic mv  ->  sha256 byte-verify  ->  mount -o remount,ro / (FAIL LOUD naming the holder if busy)  ->  start the relay again if it was active"
     NEXT="on the box run scripts/bkshading-provision-relay.sh --install (if not yet) + reboot"
   else
-    STEPS="rig-busy guard  ->  scp (staged $RELAY_STAGE)  ->  chmod +x + atomic mv over running binary  ->  sha256 byte-verify   (no remount -- stock rw-root SBC, --no-remount)"
+    STEPS="rig-busy guard  ->  stop the relay if active  ->  scp (staged $RELAY_STAGE)  ->  chmod +x + atomic mv  ->  sha256 byte-verify  ->  start the relay again if it was active   (no remount -- stock rw-root SBC, --no-remount)"
     NEXT="on the SBC run scripts/bkshading-provision-sbc.sh --install (if not yet) + reboot"
   fi
   cat <<PLAN
@@ -198,7 +253,7 @@ DRY-RUN — bkshading relay deploy plan:
   source binary  : $BINARY (sha256 $LOCAL_SHA)
   deploy target  : root@$HOST:$RELAY_DEST
   steps          : $STEPS
-  enable-only    : will NOT start/restart the service (reboot brings it live; provisioning-scripts.md)
+  relay state    : an ACTIVE relay is stopped for the swap and started again after; a stopped relay stays stopped (never started)
   next step      : $NEXT
 PLAN
   exit 0
@@ -223,24 +278,42 @@ if [ "${SSHPASS_PREFIX[0]:-}" = "sshpass" ]; then
 fi
 
 echo "[bkshading-deploy-relay] deploying $BINARY ($ARCH) -> root@$HOST:$RELAY_DEST (staged via $RELAY_STAGE, atomic mv)"
-if ! maybe_remount_rw "$HOST"; then
-  echo "ERROR: remount rw / failed on $HOST" >&2; exit 1
+
+# issue 808 (cam6/cam7, 25.9.2026): swapping the binary under a RUNNING relay left that process
+# holding the replaced, deleted-but-open inode, so the final `remount,ro` failed "busy" and the root
+# stayed read-WRITE. So: read the relay's state FIRST, STOP it when it is active (the rig-busy guard
+# above has already refused a live broadcast), swap, restore ro, and only then start it again --
+# restoring the PREVIOUS state, never starting a relay that was stopped (bkshading_deploy_restore_action).
+WAS_ACTIVE="$(ssh_box "$HOST" "systemctl is-active $RELAY_UNIT 2>/dev/null || true" 2>/dev/null || true)"
+WAS_ACTIVE="$(printf '%s' "$WAS_ACTIVE" | tr -d '[:space:]')"
+RESTORE_ACTION="$(bkshading_deploy_restore_action "$WAS_ACTIVE")"
+echo "relay state before the swap: ${WAS_ACTIVE:-<unreadable>} -> after the swap: $([ "$RESTORE_ACTION" = start ] && echo 'start it again' || echo 'leave it stopped')"
+if [ "$RESTORE_ACTION" = start ]; then
+  if ! ssh_box "$HOST" "systemctl stop $RELAY_UNIT"; then
+    echo "ERROR: could not stop $RELAY_UNIT on $HOST before the swap -- nothing changed on the box" >&2
+    exit 1
+  fi
 fi
-# Stage to a temp path in the SAME directory, then atomic `mv -f` over the (possibly RUNNING) relay
-# binary. scp'ing directly onto a running executable fails ETXTBSY ("dest open: Failure", 2026-09-13);
-# rename(2) swaps the inode while the running process keeps the old one — so ADOPTING the new binary
-# stays a SEPARATE, rig-idle-only restart step (the enable-only invariant below: this never starts
-# the unit). On any failure, clean up the stage file AND always restore the ro root.
+
+if ! maybe_remount_rw "$HOST"; then
+  echo "ERROR: remount rw / failed on $HOST" >&2
+  restore_relay "$HOST" || true
+  exit 1
+fi
+# Stage to a temp path in the SAME directory, then atomic `mv -f` over the relay binary. scp'ing
+# directly onto a running executable fails ETXTBSY ("dest open: Failure", 2026-09-13); the stage +
+# rename(2) also keeps a half-copied file from ever sitting at the real path. On any failure, clean
+# up the stage file, restore the ro root AND the relay's previous state (finish_box).
 if ! scp_box "$HOST" "$BINARY" "$RELAY_STAGE"; then
   echo "ERROR: scp of relay binary to $HOST failed" >&2
   ssh_box "$HOST" "rm -f $RELAY_STAGE 2>/dev/null || true" || true
-  maybe_remount_ro "$HOST"
+  finish_box "$HOST" || true
   exit 1
 fi
 if ! ssh_box "$HOST" "chmod +x $RELAY_STAGE && mv -f $RELAY_STAGE $RELAY_DEST"; then
   echo "ERROR: staging chmod + atomic mv of the relay binary failed on $HOST" >&2
   ssh_box "$HOST" "rm -f $RELAY_STAGE 2>/dev/null || true" || true
-  maybe_remount_ro "$HOST"
+  finish_box "$HOST" || true
   exit 1
 fi
 
@@ -250,25 +323,37 @@ fi
 # it executable — verify that too, else the unit's ExecStart would fail at reboot.
 REMOTE_SHA="$(ssh_box "$HOST" "sha256sum $RELAY_DEST 2>/dev/null | awk '{print \$1}'" || echo "")"
 REMOTE_EXEC="$(ssh_box "$HOST" "test -x $RELAY_DEST && echo yes || echo no" 2>/dev/null || echo no)"
-
-# Always restore the ro root, whatever the verdict (a no-op under --no-remount for a rw-root SBC).
-maybe_remount_ro "$HOST"
-
+VERIFIED=1
 if [ "$(bkshading_deploy_sha_match "$LOCAL_SHA" "$REMOTE_SHA")" != "match" ]; then
   echo "ERROR: sha256 mismatch after deploy (local=$LOCAL_SHA remote=${REMOTE_SHA:-<none>}) — deploy NOT verified" >&2
-  exit 1
-fi
-if [ "$REMOTE_EXEC" != "yes" ]; then
+  VERIFIED=0
+elif [ "$REMOTE_EXEC" != "yes" ]; then
   echo "ERROR: $RELAY_DEST is not executable on $HOST after deploy — deploy NOT verified" >&2
+  VERIFIED=0
+fi
+# A binary that failed the byte-verify is never started: the relay is left STOPPED (loudly) rather
+# than run on unverified bytes -- redeploy, then start it.
+if [ "$VERIFIED" = 0 ] && [ "$RESTORE_ACTION" = start ]; then
+  echo "ERROR: leaving $RELAY_UNIT STOPPED on $HOST -- the swapped binary is not verified; redeploy, then start it" >&2
+  RESTORE_ACTION=none
+fi
+
+# The ro remount (checked, FAIL LOUD naming the holder) + the relay restore -- on every verdict.
+FINISH_RC=0
+finish_box "$HOST" || FINISH_RC=1
+[ "$VERIFIED" = 1 ] || exit 1
+if [ "$FINISH_RC" -ne 0 ]; then
+  echo "ERROR: relay binary swapped + byte-verified on $HOST, but the box was NOT left clean (see above) — deploy FAILED" >&2
   exit 1
 fi
-echo "OK: relay deployed + byte-verified (executable) on $HOST ($RELAY_DEST, sha256 $LOCAL_SHA)"
+echo "OK: relay deployed + byte-verified (executable) on $HOST ($RELAY_DEST, sha256 $LOCAL_SHA)$([ "$RO_ROOT" = 1 ] && echo ', root back to read-only')"
 
-# ENABLE-ONLY: never start/restart the service here. The predicate is the single source of truth
-# (always `no`); if a future change flips it, that is a RED test, not a silent live start.
+# The deploy never STARTS a relay that was not running: the predicate is the single source of truth
+# (always `no`); if a future change flips it, that is a RED test, not a silent live start. An active
+# relay was restored above (its previous state), which is not a start of a stopped service.
 if [ "$(bkshading_deploy_should_start)" = "yes" ]; then
-  echo "WARNING: should_start=yes — refusing to start anyway (enable-only invariant)" >&2
-else
-  echo "enable-only: NOT starting the service. Run scripts/bkshading-provision-relay.sh --install"
-  echo "             (if not yet provisioned) on the box + reboot to bring the relay live."
+  echo "WARNING: should_start=yes — refusing to start a stopped relay anyway (enable-only invariant)" >&2
+elif [ "$RESTORE_ACTION" != start ]; then
+  echo "relay was not running: left stopped. Run scripts/bkshading-provision-relay.sh --install"
+  echo "             (if not yet provisioned) on the box; it comes up at boot / rig-mode.sh event."
 fi

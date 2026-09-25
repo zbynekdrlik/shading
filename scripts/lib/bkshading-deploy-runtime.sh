@@ -58,3 +58,29 @@ bkshading_deploy_sha_match() {  # $1 = local sha, $2 = remote sha
     printf '%s\n' mismatch
   fi
 }
+
+# Restore decision after the binary swap (issue 808, 25.9.2026): the deploy STOPS an active relay
+# before the swap so no process holds the replaced (deleted-but-open) binary -- that open file was
+# what made the final `remount,ro` fail "busy" on cam6/cam7 and leave the root read-WRITE. After the
+# swap it restores the relay's PREVIOUS state: `start` ONLY when it was exactly `active` before;
+# anything else (inactive / failed / activating / unreadable) -> `none`. So a deploy never STARTS a
+# relay that was not running (the TEST-mode disabled relay stays stopped -- issue 1311), and
+# bkshading_deploy_should_start above stays `no`.
+bkshading_deploy_restore_action() {  # $1 = `systemctl is-active` output read before the swap
+  if [ "${1:-}" = "active" ]; then printf '%s\n' start; else printf '%s\n' none; fi
+}
+
+# Name the holders that keep the root from going read-only again (issue 808): `lsof +L1` text ->
+# ONE line `command[pid] path; command[pid] path` (the header row skipped, the `(deleted)` marker
+# dropped). Empty input -> empty output. Pure (awk over the argument), never fails the caller.
+bkshading_deploy_ro_holders() {  # $1 = `lsof +L1` output
+  printf '%s\n' "${1:-}" | awk '
+    NR == 1 && $1 == "COMMAND" { next }
+    NF >= 10 {
+      path = $10
+      for (i = 11; i <= NF; i++) { if ($i == "(deleted)") break; path = path " " $i }
+      out = out (out == "" ? "" : "; ") $1 "[" $2 "] " path
+    }
+    END { if (out != "") print out }
+  ' || true
+}
