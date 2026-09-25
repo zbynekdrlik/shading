@@ -473,6 +473,54 @@ def test_verify_device_has_the_ao_relay_check_before_q():
     assert 'warn "' not in block, "(ao) is a hard gate"
 
 
+def _run_ao(block_out, env_extra):
+    """Execute the REAL (ao) block sliced from verify-device.sh with ssh stubbed to print BLOCK_OUT."""
+    s = _read(VERIFY)
+    block = s[s.find("\n# (ao) "):s.find("\n# (an) ")]
+    prelude = (
+        'ok() { echo "OK $1"; }\nfail() { echo "FAIL $1"; }\n'
+        'ssh_box() { printf "%s\\n" "$AO_BLOCK"; }\n'
+        'ssh_ip() { printf "%s\\n" "$AO_PAINTER"; }\n'
+    )
+    src = 'set -euo pipefail\n. "%s"\n. "%s"\n. "%s"\n%s%s' % (
+        os.path.join(REPO, "scripts", "camera-set.sh"), PROV_LIB,
+        os.path.join(REPO, "scripts", "lib", "rig-mode-state.sh"), prelude, block)
+    e = dict(os.environ, AO_BLOCK=block_out, AO_PAINTER="")
+    e.pop("RIG_MODE", None)
+    e.update(env_extra)
+    return subprocess.run(["bash", "-c", src], capture_output=True, text=True, env=e)
+
+
+def _good_block(enabled):
+    return "BIN_X=yes\nUNIT_SHA=%s\nENV_FPS=60\nGPHOTO2=yes\nENABLED=%s\n" % (_unit_sha(), enabled)
+
+
+def test_ao_block_passes_a_non_roster_box_enabled_in_any_mode():
+    r = _run_ao(_good_block("enabled"), {"CAMERA_NAME": "cam5", "RIG_MODE": "test"})
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.startswith("OK ") and "FAIL" not in r.stdout, r.stdout + r.stderr
+
+
+def test_ao_block_fails_the_source_box_enabled_in_test_mode():
+    r = _run_ao(_good_block("enabled"), {"CAMERA_NAME": "cam2", "RIG_MODE": "test"})
+    assert r.returncode == 0, r.stderr
+    assert "FAIL bkshading relay:" in r.stdout and "disabled" in r.stdout, r.stdout
+
+
+def test_ao_block_fails_a_roster_box_when_the_mode_is_unreadable():
+    # no RIG_MODE and the cam2 painter probe answers nothing -> UNKNOWN -> FAIL for cam2
+    r = _run_ao(_good_block("disabled"), {"CAMERA_NAME": "cam2"})
+    assert r.returncode == 0, r.stderr
+    assert "FAIL bkshading relay:" in r.stdout and "rig mode unreadable" in r.stdout, r.stdout
+
+
+def test_ao_block_reads_test_mode_off_the_cam2_painter():
+    snap = "RIG_MODE_PROBE_OK\nPID_PRESENT|0\nPID_ALIVE|0\nSVC_ENABLED|1\nSVC_ACTIVE|1\n"
+    r = _run_ao(_good_block("disabled"), {"CAMERA_NAME": "cam2", "AO_PAINTER": snap})
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.startswith("OK ") and "'test'" in r.stdout, r.stdout + r.stderr
+
+
 if __name__ == "__main__":
     import sys
 
