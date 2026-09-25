@@ -84,15 +84,26 @@ def test_resolve_lib_parses():
     assert r.returncode == 0, r.stderr
 
 
-def test_newest_success_ids_orders_by_created_at_and_drops_failures():
-    r = _src(RESOLVE_LIB, 'printf "%s" "$J" | ci_run_newest_success_ids', env={"J": json.dumps(RUNS)})
+def test_newest_success_filter_orders_by_created_at_and_drops_failures():
+    # The ONE jq program the resolver hands to gh's built-in --jq (no standalone jq on a cambox).
+    r = _src(RESOLVE_LIB, 'printf "%s" "$J" | jq -r "$(ci_run_newest_success_filter)"',
+             env={"J": json.dumps(RUNS)})
     assert r.returncode == 0, r.stderr
-    assert r.stdout.split() == ["300", "200", "100"], r.stdout
+    rows = [ln.split() for ln in r.stdout.splitlines()]
+    assert [x[0] for x in rows] == ["300", "200", "100"], r.stdout
+    assert rows[0] == ["300", "2026-09-25T17:34:20Z", "ccc"], rows
+
+
+def test_resolver_uses_only_gh_builtin_jq():
+    body = _noncomment(_read(RESOLVE_LIB))
+    assert not re.search(r"(^|[|;&]\s*)jq\b", body, re.M), "no standalone jq: a cambox has gh but no jq"
+    assert "--jq" in body
 
 
 def _fake_gh(tmp, runs, artifacts_by_run, log):
-    """A fake gh: `run list` prints RUNS; `api .../runs/<id>/artifacts` lists that run's artifacts;
-    `run view <id>` prints a headSha; `run download <id> -n <a> --dir <d>` writes <d>/bkshading-relay."""
+    """A fake gh: `run list` prints RUNS through its --jq program (like gh's built-in jq);
+    `api .../runs/<id>/artifacts` lists that run's artifacts; `run view <id>` prints a headSha;
+    `run download <id> -n <a> --dir <d>` writes <d>/bkshading-relay."""
     runs_json = os.path.join(tmp, "runs.json")
     with open(runs_json, "w", encoding="utf-8") as f:
         json.dump(runs, f)
@@ -105,7 +116,10 @@ def _fake_gh(tmp, runs, artifacts_by_run, log):
     body = (
         "#!/usr/bin/env bash\n"
         'printf "GH %s\\n" "$*" >> "__LOG__"\n'
-        'if [ "$1 $2" = "run list" ]; then cat "__RUNS__"; exit 0; fi\n'
+        'if [ "$1 $2" = "run list" ]; then\n'
+        '  q=""; for a in "$@"; do [ "${prev:-}" = "--jq" ] && q="$a"; prev="$a"; done\n'
+        '  if [ -n "$q" ]; then jq -r "$q" "__RUNS__"; else cat "__RUNS__"; fi; exit 0\n'
+        "fi\n"
         'if [ "$1" = "api" ]; then\n'
         '  id="$(printf "%s" "$2" | sed -n "s#.*/runs/\\([0-9]*\\)/artifacts.*#\\1#p")"\n'
         '  [ -f "__ARTS__/$id" ] && cat "__ARTS__/$id"; exit 0\n'
@@ -286,8 +300,9 @@ def test_ro_holder_summary_is_pure():
 
 def test_restore_action_is_pure_and_never_starts_an_inactive_relay():
     lib = os.path.join(REPO, "scripts", "lib", "bkshading-deploy-runtime.sh")
-    for was, want in (("active", "start"), ("inactive", "none"), ("failed", "none"), ("", "none"),
-                      ("activating", "none")):
+    for was, want in (("active", "start"), ("activating", "start"), ("reloading", "start"),
+                      ("inactive", "none"), ("failed", "none"), ("deactivating", "none"),
+                      ("unknown", "none"), ("", "unreadable")):
         r = _src(lib, 'bkshading_deploy_restore_action "$W"', env={"W": was})
         assert r.returncode == 0 and r.stdout.strip() == want, (was, r.stdout)
     # the enable-only invariant stays: a deploy never STARTS a relay that was not running
@@ -336,6 +351,13 @@ def test_expected_enable_state_follows_the_rig_mode():
                  env={"D": dev, "M": mode})
         assert r.returncode == 0, r.stderr
         assert r.stdout.strip() == want, (dev, mode, r.stdout)
+    # an unresolvable source box: the roster itself is unknown -> every box unknown, except EVENT
+    for dev, mode, want in (("cam3", "test", "unknown"), ("cam2", "test", "unknown"),
+                            ("cam3", "unknown", "unknown"), ("cam3", "event", "enabled")):
+        r = _src(PROV_LIB, 'bkshading_relay_expected_enable_state "$D" "$M" "" cam2',
+                 env={"D": dev, "M": mode})
+        assert r.stdout.strip() == want, ("empty source", dev, mode, r.stdout)
+    assert _src(PROV_LIB, "bkshading_relay_roster_painter_box").stdout.strip() == "cam2"
 
 
 def _fake_systemctl(tmp, calls):
@@ -473,6 +495,163 @@ def test_verify_device_has_the_ao_relay_check_before_q():
     assert 'warn "' not in block, "(ao) is a hard gate"
 
 
+# =============================================================================================
+# Review round 1 (issue 808): unreadable/activating state, every restore path, a signal mid-deploy,
+# the holder probe without lsof, and the relay binary fetch.
+# =============================================================================================
+def _deploy_env_custom(tmp, remote_sha, was_active="active", ssh_extra="", scp_body=None):
+    """Like _deploy_env, plus extra ssh `case` arms (checked first) and an optional scp body."""
+    env, log = _deploy_env(tmp, remote_sha, was_active=was_active)
+    ssh = env["BKSHADING_DEPLOY_SSH"]
+    body = _read(ssh).replace('case "$cmd" in\n', 'case "$cmd" in\n' + ssh_extra, 1)
+    _write_exec(ssh, body)
+    if scp_body is not None:
+        _write_exec(env["BKSHADING_DEPLOY_SCP"],
+                    '#!/usr/bin/env bash\nprintf "SCP %s\\n" "$*" >> "' + log + '"\n' + scp_body)
+    return env, log
+
+
+def test_unreadable_relay_state_refuses_before_touching_the_box():
+    with tempfile.TemporaryDirectory() as tmp:
+        b, sha = _bin(tmp)
+        env, log = _deploy_env_custom(tmp, sha, was_active="")
+        r = _run_deploy(["--host", "10.77.9.66", "--binary", b], env)
+        assert r.returncode != 0, "an unreadable relay state must refuse:\n" + r.stdout + r.stderr
+        assert re.search(r"could not read .*state", r.stderr), r.stderr
+        calls = _read(log)
+        assert "remount,rw" not in calls and "SCP" not in calls and "systemctl stop" not in calls, calls
+
+
+def test_activating_relay_is_stopped_and_started_again():
+    with tempfile.TemporaryDirectory() as tmp:
+        b, sha = _bin(tmp)
+        env, log = _deploy_env_custom(tmp, sha, was_active="activating")
+        r = _run_deploy(["--host", "10.77.9.66", "--binary", b], env)
+        assert r.returncode == 0, r.stdout + r.stderr
+        calls = _read(log)
+        assert calls.find("systemctl stop bkshading-relay") < calls.find("SCP ") < calls.find("systemctl start bkshading-relay"), calls
+
+
+def test_scp_failure_restores_ro_root_and_the_active_relay():
+    with tempfile.TemporaryDirectory() as tmp:
+        b, sha = _bin(tmp)
+        env, log = _deploy_env_custom(tmp, sha, was_active="active", scp_body="exit 7\n")
+        r = _run_deploy(["--host", "10.77.9.66", "--binary", b], env)
+        assert r.returncode != 0
+        calls = _read(log)
+        assert calls.find("SCP ") < calls.find("remount,ro /") < calls.find("systemctl start bkshading-relay"), calls
+        assert "mv -f" not in calls, "a failed scp must never move anything over the relay binary"
+
+
+def test_rw_remount_failure_restores_the_active_relay():
+    with tempfile.TemporaryDirectory() as tmp:
+        b, sha = _bin(tmp)
+        env, log = _deploy_env_custom(tmp, sha, was_active="active",
+                                      ssh_extra='  *"mount -o remount,rw"*) exit 32 ;;\n')
+        r = _run_deploy(["--host", "10.77.9.66", "--binary", b], env)
+        assert r.returncode != 0
+        calls = _read(log)
+        assert "SCP" not in calls and "systemctl start bkshading-relay" in calls, calls
+
+
+def test_sha_mismatch_leaves_the_relay_stopped_but_restores_ro():
+    with tempfile.TemporaryDirectory() as tmp:
+        b, _sha = _bin(tmp)
+        env, log = _deploy_env_custom(tmp, "0" * 64, was_active="active")
+        r = _run_deploy(["--host", "10.77.9.66", "--binary", b], env)
+        assert r.returncode != 0 and "mismatch" in r.stderr, r.stderr
+        assert "STOPPED" in r.stderr, "the unverified binary must never be started:\n" + r.stderr
+        calls = _read(log)
+        assert "remount,ro /" in calls, calls
+        assert "systemctl start bkshading-relay" not in calls, calls
+
+
+def test_ssh_failure_during_ro_remount_is_reported_as_ssh_not_busy():
+    with tempfile.TemporaryDirectory() as tmp:
+        b, sha = _bin(tmp)
+        env, log = _deploy_env_custom(tmp, sha, was_active="inactive",
+                                      ssh_extra='  *"remount,ro"*) exit 255 ;;\n')
+        r = _run_deploy(["--host", "10.77.9.66", "--binary", b], env)
+        assert r.returncode != 0
+        assert "ssh to 10.77.9.66 FAILED during the ro remount" in r.stderr, r.stderr
+        assert "lsof +L1" not in _read(log), "an ssh failure is not a busy mount -- no holder hunt"
+
+
+def test_a_signal_mid_scp_still_restores_ro_root_and_the_relay():
+    import signal
+    import time
+
+    with tempfile.TemporaryDirectory() as tmp:
+        b, sha = _bin(tmp)
+        env, log = _deploy_env_custom(tmp, sha, was_active="active", scp_body="sleep 2\nexit 0\n")
+        e = dict(os.environ)
+        e.update(env)
+        p = subprocess.Popen(["bash", DEPLOY, "--host", "10.77.9.66", "--binary", b],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=e)
+        for _ in range(100):
+            if os.path.exists(log) and "SCP " in _read(log):
+                break
+            time.sleep(0.05)
+        p.send_signal(signal.SIGTERM)
+        _out, err = p.communicate(timeout=30)
+        assert p.returncode != 0, err
+        calls = _read(log)
+        assert "mv -f" not in calls, calls
+        assert calls.find("SCP ") < calls.find("remount,ro /") < calls.find("systemctl start bkshading-relay"), \
+            "the EXIT trap must restore the ro root and the relay:\n" + calls
+
+
+def test_holder_probe_names_the_holder_without_lsof():
+    lib = os.path.join(REPO, "scripts", "lib", "bkshading-deploy-runtime.sh")
+    probe = _src(lib, "bkshading_deploy_ro_holder_probe_cmd").stdout
+    assert "lsof +L1" in probe and "/proc/" in probe and "(deleted)" in probe
+    with tempfile.TemporaryDirectory() as tmp:
+        for tool in ("readlink", "cat", "sort", "head"):
+            os.symlink(subprocess.run(["bash", "-c", "command -v " + tool], capture_output=True,
+                                      text=True, check=True).stdout.strip(), os.path.join(tmp, tool))
+        r = subprocess.run(["/bin/bash", "-c", probe], capture_output=True, text=True,
+                           env={"PATH": tmp})
+        assert r.returncode == 0, r.stderr
+        assert r.stdout.startswith("COMMAND PID"), "the /proc fallback emits lsof columns:\n" + r.stdout
+        # whatever it finds parses with the pure holder summary (no crash, one line)
+        s = _src(lib, 'bkshading_deploy_ro_holders "$T"', env={"T": r.stdout})
+        assert s.returncode == 0 and "\n" not in s.stdout.strip()
+
+
+def _fetch(plan, tmp, extra_env=None):
+    e = {"BKSHADING_RELAY_GH": os.path.join(tmp, "fake-gh")}
+    if extra_env:
+        e.update(extra_env)
+    return _src(PROV_LIB, 'bkshading_relay_provision_fetch_binary "$P" "$D" zbynekdrlik/camera-box main',
+                env=dict(e, P=plan, D=os.path.join(tmp, "dl")))
+
+
+def test_fetch_binary_follows_the_plan():
+    with tempfile.TemporaryDirectory() as tmp:
+        glog = os.path.join(tmp, "gh.log")
+        _fake_gh(tmp, RUNS, {300: [ARTIFACT], 200: [ARTIFACT]}, glog)
+        loc = os.path.join(tmp, "staged-relay")
+        with open(loc, "w") as f:
+            f.write("R")
+        r = _fetch("local:" + loc, tmp)
+        assert r.returncode == 0 and r.stdout.strip() == loc, r.stdout + r.stderr
+        r = _fetch("run:200", tmp)
+        assert r.returncode == 0 and r.stdout.strip().endswith("/dl/bkshading-relay"), r.stdout + r.stderr
+        assert re.search(r"run download 200\b", _read(glog))
+        r = _fetch("latest", tmp)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert re.search(r"run download 300\b", _read(glog)), "latest = the newest run carrying it"
+        r = _fetch("none", tmp)
+        assert r.returncode != 0 and "--relay-binary" in r.stdout, r.stdout
+        curl = os.path.join(tmp, "fake-curl")
+        _write_exec(curl, '#!/usr/bin/env bash\nwhile [ $# -gt 0 ]; do [ "$1" = -o ] && printf R > "$2"; shift; done\n')
+        r = _fetch("url:https://h/relay", tmp, {"BKSHADING_RELAY_CURL": curl})
+        assert r.returncode == 0 and r.stdout.strip().endswith("/dl/bkshading-relay"), r.stdout + r.stderr
+        _write_exec(curl, "#!/usr/bin/env bash\nexit 22\n")
+        r = _fetch("url:https://h/relay", tmp, {"BKSHADING_RELAY_CURL": curl})
+        assert r.returncode != 0 and "failed" in r.stdout, r.stdout
+
+
 def _run_ao(block_out, env_extra):
     """Execute the REAL (ao) block sliced from verify-device.sh with ssh stubbed to print BLOCK_OUT."""
     s = _read(VERIFY)
@@ -486,7 +665,7 @@ def _run_ao(block_out, env_extra):
         os.path.join(REPO, "scripts", "camera-set.sh"), PROV_LIB,
         os.path.join(REPO, "scripts", "lib", "rig-mode-state.sh"), prelude, block)
     e = dict(os.environ, AO_BLOCK=block_out, AO_PAINTER="")
-    e.pop("RIG_MODE", None)
+    e.pop("CAMERA_BOX_RIG_MODE", None)
     e.update(env_extra)
     return subprocess.run(["bash", "-c", src], capture_output=True, text=True, env=e)
 
@@ -496,15 +675,45 @@ def _good_block(enabled):
 
 
 def test_ao_block_passes_a_non_roster_box_enabled_in_any_mode():
-    r = _run_ao(_good_block("enabled"), {"CAMERA_NAME": "cam5", "RIG_MODE": "test"})
+    r = _run_ao(_good_block("enabled"), {"CAMERA_NAME": _non_roster_box(), "CAMERA_BOX_RIG_MODE": "test"})
     assert r.returncode == 0, r.stderr
     assert r.stdout.startswith("OK ") and "FAIL" not in r.stdout, r.stdout + r.stderr
 
 
+def _source_box():
+    r = subprocess.run(["bash", "-c", '. "%s"\ncamera_source_box' % os.path.join(REPO, "scripts", "camera-set.sh")],
+                       capture_output=True, text=True, check=True)
+    return r.stdout.strip()
+
+
+def _non_roster_box():
+    # any resolvable cambox that is neither the source box nor cam2
+    src = _source_box()
+    for cam in ("cam3", "cam4", "cam5", "cam6", "cam7", "cam1"):
+        if cam not in (src, "cam2"):
+            return cam
+    raise AssertionError("no non-roster cambox")
+
+
 def test_ao_block_fails_the_source_box_enabled_in_test_mode():
-    r = _run_ao(_good_block("enabled"), {"CAMERA_NAME": "cam2", "RIG_MODE": "test"})
+    src = _source_box()
+    assert src and src != "cam2", src
+    r = _run_ao(_good_block("enabled"), {"CAMERA_NAME": src, "CAMERA_BOX_RIG_MODE": "test"})
     assert r.returncode == 0, r.stderr
     assert "FAIL bkshading relay:" in r.stdout and "disabled" in r.stdout, r.stdout
+
+
+def test_ao_block_fails_the_painter_box_enabled_in_test_mode():
+    r = _run_ao(_good_block("enabled"), {"CAMERA_NAME": "cam2", "CAMERA_BOX_RIG_MODE": "test"})
+    assert "FAIL bkshading relay:" in r.stdout and "disabled" in r.stdout, r.stdout
+
+
+def test_ao_block_reads_event_mode_off_the_cam2_painter():
+    snap = "RIG_MODE_PROBE_OK\nPID_PRESENT|0\nPID_ALIVE|0\nSVC_ENABLED|0\nSVC_ACTIVE|0\n"
+    ok = _run_ao(_good_block("enabled"), {"CAMERA_NAME": "cam2", "AO_PAINTER": snap})
+    assert ok.stdout.startswith("OK ") and "'event'" in ok.stdout, ok.stdout + ok.stderr
+    bad = _run_ao(_good_block("disabled"), {"CAMERA_NAME": "cam2", "AO_PAINTER": snap})
+    assert "FAIL bkshading relay:" in bad.stdout and "enabled" in bad.stdout, bad.stdout
 
 
 def test_ao_block_fails_a_roster_box_when_the_mode_is_unreadable():

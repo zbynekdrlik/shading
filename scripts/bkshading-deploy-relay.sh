@@ -75,7 +75,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 RELAY_DEST="$(bkshading_relay_bin_path)"     # /usr/local/bin/bkshading-relay (one source of truth)
 RELAY_UNIT="$(bkshading_relay_unit_name)"    # bkshading-relay.service (one source of truth)
-RESTORE_ACTION=none                          # issue 808: `start` only when the relay was active before the swap
+RESTORE_ACTION=none                          # issue 808: `start` only when the relay was running before the swap
+BOX_DIRTY=0                                  # issue 808: 1 from the relay stop / rw remount until finish_once ran
+DIST=""                                      # the downloaded artifact dir (cleaned by the EXIT trap)
 # Staging path for the ETXTBSY-safe swap: scp lands here (SAME dir → atomic rename), then `mv -f`
 # replaces the (possibly RUNNING) relay inode. scp'ing directly onto a running exe fails ETXTBSY
 # ("dest open: Failure", 2026-09-13 escalation). $$ is the local PID = a unique per-run stage name.
@@ -179,15 +181,19 @@ scp_box() { "${SSHPASS_PREFIX[@]}" "$SCP_BIN" -o StrictHostKeyChecking=no -o Con
 # blocker; `fuser -vm /` for the full picture) and returns non-zero, so the caller exits non-zero.
 remount_ro_checked() {
   [ "$RO_ROOT" = 1 ] || return 0
-  if ssh_box "$1" "for _i in 1 2 3; do mount -o remount,ro / && exit 0; sleep 2; done; exit 1"; then
-    return 0
+  local rc=0 fu lo holders
+  ssh_box "$1" "for _i in 1 2 3; do mount -o remount,ro / && exit 0; sleep 2; done; exit 1" || rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  if [ "$rc" -eq 255 ]; then
+    echo "ERROR: ssh to $1 FAILED during the ro remount (rc 255) -- the root may still be read-WRITE;" >&2
+    echo "       reach the box and check 'findmnt -no OPTIONS /' (it must say ro) by hand." >&2
+    return 1
   fi
-  local fu lo holders
   fu="$(ssh_box "$1" "fuser -vm / 2>&1 | head -n 40" 2>/dev/null || true)"
-  lo="$(ssh_box "$1" "lsof +L1 2>/dev/null | head -n 40" 2>/dev/null || true)"
+  lo="$(ssh_box "$1" "$(bkshading_deploy_ro_holder_probe_cmd)" 2>/dev/null || true)"
   holders="$(bkshading_deploy_ro_holders "$lo")"
   echo "ERROR: mount -o remount,ro / FAILED on $1 -- the box root stays read-WRITE." >&2
-  echo "       holder(s) of deleted-but-open files (lsof +L1): ${holders:-<none reported>}" >&2
+  echo "       holder(s) of deleted-but-open files (lsof +L1 / /proc fd scan): ${holders:-<none reported>}" >&2
   echo "       fuser -vm / on $1:" >&2
   printf '%s\n' "${fu:-<no output>}" | sed 's/^/         /' >&2
   echo "       Fix: stop that holder, then run 'mount -o remount,ro /' on $1 (never leave a cambox root rw)." >&2
@@ -207,13 +213,33 @@ restore_relay() {
 }
 
 # finish_box HOST -> the ro remount (checked) THEN the relay restore; non-zero when either failed.
-# Every exit path after the rw remount runs it, so no path leaves the root rw or the relay stopped.
 finish_box() {
   local rc=0
   remount_ro_checked "$1" || rc=1
   restore_relay "$1" || rc=1
   return "$rc"
 }
+
+# finish_once -> finish_box for $HOST exactly once, and only after the box was touched (BOX_DIRTY=1
+# from the relay stop / rw remount on). Every explicit exit path calls it, and the EXIT trap below
+# calls it too, so a Ctrl-C / SIGTERM mid-scp still restores the ro root and the relay's state.
+finish_once() {
+  [ "$BOX_DIRTY" = 1 ] || return 0
+  BOX_DIRTY=0
+  finish_box "$HOST"
+}
+
+deploy_on_exit() {
+  local rc=$?
+  if [ "$BOX_DIRTY" = 1 ]; then
+    echo "ERROR: deploy interrupted/aborted after the box was touched -- restoring the ro root + the relay state" >&2
+    finish_once || true
+  fi
+  [ -n "$DIST" ] && rm -rf "$DIST"
+  return "$rc"
+}
+trap deploy_on_exit EXIT
+trap 'exit 130' INT TERM HUP
 
 # --- resolve the relay binary (a pre-downloaded --binary, or the CI artifact) ---
 if [ -z "$BINARY" ]; then
@@ -224,10 +250,7 @@ if [ -z "$BINARY" ]; then
     RUN_ID="$(CI_RUN_RESOLVE_GH="$GH" ci_run_latest_success "$REPO" "$BRANCH" ci.yml "$ARTIFACT")" || RUN_ID=""
     [ -n "$RUN_ID" ] || { echo "ERROR: no successful ci.yml run on $BRANCH carries $ARTIFACT" >&2; exit 1; }
   fi
-  DIST="$(mktemp -d)"
-  # Clean up the downloaded artifact dir on exit (mirrors deploy-fleet.sh's DIST trap).
-  # shellcheck disable=SC2064  # expand DIST now so the trap has the concrete path.
-  trap "rm -rf '$DIST'" EXIT
+  DIST="$(mktemp -d)"   # removed by the deploy_on_exit trap (mirrors deploy-fleet.sh's DIST cleanup)
   echo "Downloading $ARTIFACT from ci.yml run $RUN_ID ($REPO) ..."
   "$GH" run download "$RUN_ID" --repo "$REPO" -n "$ARTIFACT" --dir "$DIST"
   BINARY="$DIST/$(bkshading_deploy_relay_artifact_bin)"
@@ -284,36 +307,44 @@ echo "[bkshading-deploy-relay] deploying $BINARY ($ARCH) -> root@$HOST:$RELAY_DE
 # stayed read-WRITE. So: read the relay's state FIRST, STOP it when it is active (the rig-busy guard
 # above has already refused a live broadcast), swap, restore ro, and only then start it again --
 # restoring the PREVIOUS state, never starting a relay that was stopped (bkshading_deploy_restore_action).
-WAS_ACTIVE="$(ssh_box "$HOST" "systemctl is-active $RELAY_UNIT 2>/dev/null || true" 2>/dev/null || true)"
+WAS_RC=0
+WAS_ACTIVE="$(ssh_box "$HOST" "systemctl is-active $RELAY_UNIT 2>/dev/null || true" 2>/dev/null)" || WAS_RC=$?
 WAS_ACTIVE="$(printf '%s' "$WAS_ACTIVE" | tr -d '[:space:]')"
 RESTORE_ACTION="$(bkshading_deploy_restore_action "$WAS_ACTIVE")"
-echo "relay state before the swap: ${WAS_ACTIVE:-<unreadable>} -> after the swap: $([ "$RESTORE_ACTION" = start ] && echo 'start it again' || echo 'leave it stopped')"
+if [ "$WAS_RC" -ne 0 ] || [ "$RESTORE_ACTION" = unreadable ]; then
+  # Never guess "not running" from a failed read: the relay could be live on the old inode.
+  echo "ERROR: could not read $RELAY_UNIT's state on $HOST (ssh rc=$WAS_RC, is-active='${WAS_ACTIVE}') -- nothing changed on the box" >&2
+  exit 1
+fi
+echo "relay state before the swap: $WAS_ACTIVE -> after the swap: $([ "$RESTORE_ACTION" = start ] && echo 'start it again' || echo 'leave it stopped')"
+BOX_DIRTY=1
 if [ "$RESTORE_ACTION" = start ]; then
   if ! ssh_box "$HOST" "systemctl stop $RELAY_UNIT"; then
-    echo "ERROR: could not stop $RELAY_UNIT on $HOST before the swap -- nothing changed on the box" >&2
+    echo "ERROR: could not stop $RELAY_UNIT on $HOST before the swap -- restoring its state" >&2
+    finish_once || true
     exit 1
   fi
 fi
 
 if ! maybe_remount_rw "$HOST"; then
   echo "ERROR: remount rw / failed on $HOST" >&2
-  restore_relay "$HOST" || true
+  finish_once || true
   exit 1
 fi
 # Stage to a temp path in the SAME directory, then atomic `mv -f` over the relay binary. scp'ing
 # directly onto a running executable fails ETXTBSY ("dest open: Failure", 2026-09-13); the stage +
 # rename(2) also keeps a half-copied file from ever sitting at the real path. On any failure, clean
-# up the stage file, restore the ro root AND the relay's previous state (finish_box).
+# up the stage file, restore the ro root AND the relay's previous state (finish_once).
 if ! scp_box "$HOST" "$BINARY" "$RELAY_STAGE"; then
   echo "ERROR: scp of relay binary to $HOST failed" >&2
   ssh_box "$HOST" "rm -f $RELAY_STAGE 2>/dev/null || true" || true
-  finish_box "$HOST" || true
+  finish_once || true
   exit 1
 fi
 if ! ssh_box "$HOST" "chmod +x $RELAY_STAGE && mv -f $RELAY_STAGE $RELAY_DEST"; then
   echo "ERROR: staging chmod + atomic mv of the relay binary failed on $HOST" >&2
   ssh_box "$HOST" "rm -f $RELAY_STAGE 2>/dev/null || true" || true
-  finish_box "$HOST" || true
+  finish_once || true
   exit 1
 fi
 
@@ -340,7 +371,7 @@ fi
 
 # The ro remount (checked, FAIL LOUD naming the holder) + the relay restore -- on every verdict.
 FINISH_RC=0
-finish_box "$HOST" || FINISH_RC=1
+finish_once || FINISH_RC=1
 [ "$VERIFIED" = 1 ] || exit 1
 if [ "$FINISH_RC" -ne 0 ]; then
   echo "ERROR: relay binary swapped + byte-verified on $HOST, but the box was NOT left clean (see above) — deploy FAILED" >&2

@@ -62,12 +62,42 @@ bkshading_deploy_sha_match() {  # $1 = local sha, $2 = remote sha
 # Restore decision after the binary swap (issue 808, 25.9.2026): the deploy STOPS an active relay
 # before the swap so no process holds the replaced (deleted-but-open) binary -- that open file was
 # what made the final `remount,ro` fail "busy" on cam6/cam7 and leave the root read-WRITE. After the
-# swap it restores the relay's PREVIOUS state: `start` ONLY when it was exactly `active` before;
-# anything else (inactive / failed / activating / unreadable) -> `none`. So a deploy never STARTS a
+# swap it restores the relay's PREVIOUS state: `start` when it was running or about to run --
+# `active`, `reloading`, or `activating` (the unit is Restart=on-failure, so `activating
+# (auto-restart)` is a real state: left alone, systemd would relaunch the old inode mid-swap).
+# Everything else (inactive / failed / deactivating / unknown) -> `none`, so a deploy never STARTS a
 # relay that was not running (the TEST-mode disabled relay stays stopped -- issue 1311), and
-# bkshading_deploy_should_start above stays `no`.
+# bkshading_deploy_should_start above stays `no`. An EMPTY read is `unreadable`: the caller must
+# refuse before touching the box (an ssh failure must never be taken for "not running").
 bkshading_deploy_restore_action() {  # $1 = `systemctl is-active` output read before the swap
-  if [ "${1:-}" = "active" ]; then printf '%s\n' start; else printf '%s\n' none; fi
+  case "${1:-}" in
+    active | activating | reloading) printf '%s\n' start ;;
+    '') printf '%s\n' unreadable ;;
+    *) printf '%s\n' none ;;
+  esac
+}
+
+# The REMOTE command that lists the holders of deleted-but-open files on the box, in `lsof +L1`
+# columns. A cambox does not provision lsof (psmisc/fuser only), so without it the same lines are
+# built from /proc/<pid>/fd links ending ` (deleted)` -- the holder is still named. Emit as the WHOLE
+# ssh command (single-quoted heredoc: nothing expands locally).
+bkshading_deploy_ro_holder_probe_cmd() {
+  cat <<'PROBE'
+if command -v lsof >/dev/null 2>&1; then
+  lsof +L1 2>/dev/null | head -n 40
+else
+  echo "COMMAND PID USER FD TYPE DEVICE SIZE/OFF NLINK NODE NAME"
+  for l in /proc/[0-9]*/fd/*; do
+    t="$(readlink "$l" 2>/dev/null)" || continue
+    case "$t" in
+      *" (deleted)")
+        p="${l#/proc/}"; p="${p%%/*}"
+        c="$(cat "/proc/$p/comm" 2>/dev/null)"
+        echo "${c:-?} $p - fd - - - 0 - $t" ;;
+    esac
+  done | sort -u | head -n 40
+fi
+PROBE
 }
 
 # Name the holders that keep the root from going read-only again (issue 808): `lsof +L1` text ->

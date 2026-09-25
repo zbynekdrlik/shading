@@ -16,13 +16,17 @@
 #   - pure decisions: the rig-mode enable-state, the relay binary source plan, the (ao) verdict, and
 #     the read-only remote gather snippet verify-device.sh runs over ssh.
 #
-# Source-only: function definitions + ONE sibling-lib source (the pure constants). No side effects.
+# Source-only: function definitions + three sibling-lib sources (pure constants + the run resolver). No side effects.
 # Overridable targets (Tier-0 tests point them at a temp root -- no root/apt/systemd needed):
 #   BKSHADING_RELAY_UNIT_DEST, BKSHADING_RELAY_ENV_FILE, BKSHADING_RELAY_BIN,
 #   BKSHADING_RELAY_DROPIN_DIR, BKSHADING_RELAY_GPHOTO2, BKSHADING_RELAY_SYSTEMCTL
 _BKRP_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/bkshading-relay-runtime.sh
 . "$_BKRP_HERE/bkshading-relay-runtime.sh"
+# shellcheck source=scripts/lib/ci-run-resolve.sh
+. "$_BKRP_HERE/ci-run-resolve.sh"  # ci_run_latest_success -- the `latest` relay-binary plan
+# shellcheck source=scripts/lib/bkshading-deploy-runtime.sh
+. "$_BKRP_HERE/bkshading-deploy-runtime.sh"  # the relay CI artifact + the binary name inside it
 
 # --- targets (resolved per call, so an env override set after sourcing still applies) -------------
 _bkrp_init() {
@@ -129,6 +133,8 @@ bkshading_relay_provision_install() {
 #   #1309 passive rule -- a shading camera shares the boot stick's USB hub): the source box + the
 #   painter box (cam2). TEST -> roster disabled, every other box enabled; EVENT -> all enabled; an
 #   unknown mode -> the roster is `unknown` (the caller fails loud), every other box enabled.
+#   An EMPTY source box outside EVENT means the roster itself is unknown, so EVERY box is `unknown`
+#   (setup-device then installs disabled + records it, verify fails) -- ONE table for both scripts.
 #   Case-insensitive box names (setup-device.sh passes CAM1, camera-set.sh says cam1).
 bkshading_relay_expected_enable_state() {
   local dev src painter mode="${2:-}"
@@ -136,14 +142,19 @@ bkshading_relay_expected_enable_state() {
   src="$(printf '%s' "${3:-}" | tr '[:upper:]' '[:lower:]')"
   painter="$(printf '%s' "${4:-}" | tr '[:upper:]' '[:lower:]')"
   mode="$(printf '%s' "$mode" | tr '[:upper:]' '[:lower:]')"
+  if [ "$mode" = event ]; then printf '%s\n' enabled; return 0; fi
+  if [ -z "$src" ]; then printf '%s\n' unknown; return 0; fi
   local roster=0
   if [ -n "$dev" ] && { [ "$dev" = "$src" ] || [ "$dev" = "$painter" ]; }; then roster=1; fi
   case "$mode" in
-    event) printf '%s\n' enabled ;;
     test) if [ "$roster" = 1 ]; then printf '%s\n' disabled; else printf '%s\n' enabled; fi ;;
     *) if [ "$roster" = 1 ]; then printf '%s\n' unknown; else printf '%s\n' enabled; fi ;;
   esac
 }
+
+# bkshading_relay_roster_painter_box -> the painter box that is always in the TEST relay roster
+# (cam2 -- the SAME box rig-mode.sh passes as `cam2=$PAINTER_IP` and cam2_is_painter_box pins).
+bkshading_relay_roster_painter_box() { printf '%s\n' cam2; }
 
 # bkshading_relay_provision_binary_plan RELAY_ARG RUN_ID GH_AVAILABLE(yes|no)
 #   -> local:<path> | url:<url> | run:<id> | latest | none
@@ -169,6 +180,55 @@ bkshading_relay_provision_binary_plan() {
     return 0
   fi
   printf '%s\n' none
+}
+
+# bkshading_relay_provision_fetch_binary PLAN DEST_DIR REPO BRANCH
+#   Carry out a bkshading_relay_provision_binary_plan: stdout = the local path of the relay binary,
+#   rc 0; or stdout = ONE line saying why there is none, rc 1 (the caller records it -- it never
+#   aborts the provisioner). Progress goes to stderr. gh / curl are overridable for Tier-0 tests
+#   (BKSHADING_RELAY_GH, BKSHADING_RELAY_CURL); the `latest` plan uses the ONE shared resolver.
+bkshading_relay_provision_fetch_binary() {
+  local plan="${1:-none}" dir="${2:-}" repo="${3:-}" branch="${4:-}" run art bin
+  local gh="${BKSHADING_RELAY_GH:-gh}" curl="${BKSHADING_RELAY_CURL:-curl}"
+  art="$(bkshading_deploy_artifact_name)"
+  bin="$(bkshading_deploy_relay_artifact_bin)"
+  [ -n "$dir" ] && mkdir -p "$dir" || { echo "no download dir for the relay binary"; return 1; }
+  case "$plan" in
+    local:*)
+      echo "  relay binary: local ${plan#local:}" >&2
+      printf '%s\n' "${plan#local:}"
+      ;;
+    url:*)
+      echo "  relay binary: downloading ${plan#url:}" >&2
+      if "$curl" -fsSL "${plan#url:}" -o "$dir/$bin" && [ -s "$dir/$bin" ]; then
+        printf '%s\n' "$dir/$bin"
+      else
+        echo "download of the relay binary from ${plan#url:} failed"
+        return 1
+      fi
+      ;;
+    run:* | latest)
+      run="${plan#run:}"
+      if [ "$plan" = latest ]; then
+        run="$(CI_RUN_RESOLVE_GH="$gh" ci_run_latest_success "$repo" "$branch" ci.yml "$art")" || run=""
+      fi
+      if [ -z "$run" ]; then
+        echo "no successful ci.yml run on '$branch' carries $art"
+        return 1
+      fi
+      if "$gh" run download "$run" --repo "$repo" -n "$art" --dir "$dir" >/dev/null 2>&1 && [ -s "$dir/$bin" ]; then
+        echo "  relay binary: $art from ci.yml run $run" >&2
+        printf '%s\n' "$dir/$bin"
+      else
+        echo "gh run download of $art from ci.yml run $run failed"
+        return 1
+      fi
+      ;;
+    *)
+      echo "no relay binary source -- this box has no gh/GH_TOKEN and no usable --relay-binary. STAGE IT FROM dev1: gh run download <ci.yml run> -n $art --dir /tmp && scp /tmp/$bin root@<box>:/tmp/ , then re-run with --relay-binary /tmp/$bin"
+      return 1
+      ;;
+  esac
 }
 
 # bkshading_relay_provision_gather_remote_snippet -> REMOTE sh text (read-only) that prints the five
