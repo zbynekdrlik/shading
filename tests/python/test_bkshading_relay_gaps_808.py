@@ -462,7 +462,7 @@ def test_verify_device_has_the_ao_relay_check_before_q():
     header = s[: s.find("set -euo pipefail")]
     assert "(ao)" in header, "document (ao) in the header Checks list"
     usage = s[s.find("usage()"):]
-    assert "(ao)" in usage[: usage.find("EOF")], "document (ao) in usage()"
+    assert "(ao)" in usage[: usage.find("\nEOF")], "document (ao) in usage()"
     i_ao = s.find("\n# (ao) ")
     i_q = s.find("\n# (q) .bak cruft drift")
     assert 0 <= i_ao < i_q, "(ao) must sit before (q), which stays last"
