@@ -762,6 +762,12 @@ from the relay's issue-1229 read-floor cache (never a direct gphoto2 call). It i
   byte-identical, so the #675 anchor sweep is trivially clean. Keep the classifier's decision the
   single source of truth for a WARN's named parameter (pass the STATUS into the message, don't
   re-derive the missing set from the values in two places).
+- **Its ENFORCING sibling (issue 1371) is a different step: do not merge them.** This preflight
+  runs BEFORE the relay pause and only WARNS from `/api/state`. `scripts/lib/camera-test-settings.sh`
+  runs AFTER the pause, talks gphoto2 directly (the relay is stopped), SETS `iso` + `d002` to
+  `scripts/camera-test-baseline.json`, and aborts on a read-back MISMATCH. It uses the relay's own
+  key names, pinned by pytest against `CORE_CONFIG_KEYS` + `plan_writes`, so renaming a relay key
+  breaks that test first. See `.claude/rules/camera-test-settings.md`.
 
 ## NEVER deploy OR restart a cambox relay during production — the deploy tool is now rig-busy gated (2026-09-13 escalation, issue 1229)
 
