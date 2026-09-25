@@ -79,23 +79,30 @@ bkshading_deploy_restore_action() {  # $1 = `systemctl is-active` output read be
 
 # The REMOTE command that lists the holders of deleted-but-open files on the box, in `lsof +L1`
 # columns. A cambox does not provision lsof (psmisc/fuser only), so without it the same lines are
-# built from /proc/<pid>/fd links ending ` (deleted)` -- the holder is still named. Emit as the WHOLE
-# ssh command (single-quoted heredoc: nothing expands locally).
-bkshading_deploy_ro_holder_probe_cmd() {
-  cat <<'PROBE'
+# built from /proc. Three places can hold a deleted file there, and the 25.9.2026 incident was the
+# first one: a running binary that was replaced is held through its EXECUTABLE (`/proc/<pid>/exe`,
+# lsof `txt`), a library through a MAPPING (`/proc/<pid>/maps`, lsof `mem`), and an open file
+# through an fd (`/proc/<pid>/fd/*`). PROC_ROOT (default /proc) lets a test plant a fake tree.
+# Emit as the WHOLE ssh command (the body is a quoted heredoc: nothing expands locally except the
+# one __PROC__ placeholder).
+bkshading_deploy_ro_holder_probe_cmd() {  # $1 = PROC_ROOT (default /proc)
+  local root="${1:-/proc}"
+  cat <<'PROBE' | sed "s#__PROC__#$root#g"
 if command -v lsof >/dev/null 2>&1; then
   lsof +L1 2>/dev/null | head -n 40
 else
   echo "COMMAND PID USER FD TYPE DEVICE SIZE/OFF NLINK NODE NAME"
-  for l in /proc/[0-9]*/fd/*; do
-    t="$(readlink "$l" 2>/dev/null)" || continue
-    case "$t" in
-      *" (deleted)")
-        p="${l#/proc/}"; p="${p%%/*}"
-        c="$(cat "/proc/$p/comm" 2>/dev/null)"
-        echo "${c:-?} $p - fd - - - 0 - $t" ;;
-    esac
-  done | sort -u | head -n 40
+  for d in __PROC__/[0-9]*; do
+    p="${d##*/}"
+    c="$(cat "$d/comm" 2>/dev/null)"
+    t="$(readlink "$d/exe" 2>/dev/null)" && case "$t" in *" (deleted)") echo "${c:-?} $p - txt - - - 0 - $t" ;; esac
+    awk '/ \(deleted\)$/ { $1=$2=$3=$4=$5=""; sub(/^ +/, ""); print }' "$d/maps" 2>/dev/null | sort -u |
+      while IFS= read -r t; do echo "${c:-?} $p - mem - - - 0 - $t"; done
+    for l in "$d"/fd/*; do
+      t="$(readlink "$l" 2>/dev/null)" || continue
+      case "$t" in *" (deleted)") echo "${c:-?} $p - fd - - - 0 - $t" ;; esac
+    done
+  done 2>/dev/null | sort -u | head -n 40
 fi
 PROBE
 }
@@ -109,7 +116,9 @@ bkshading_deploy_ro_holders() {  # $1 = `lsof +L1` output
     NF >= 10 {
       path = $10
       for (i = 11; i <= NF; i++) { if ($i == "(deleted)") break; path = path " " $i }
-      out = out (out == "" ? "" : "; ") $1 "[" $2 "] " path
+      key = $1 "[" $2 "] " path
+      if (seen[key]++) next
+      out = out (out == "" ? "" : "; ") key
     }
     END { if (out != "") print out }
   ' || true

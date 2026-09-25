@@ -41,7 +41,8 @@ set -euo pipefail
 #                     (remounting it ro is wrong).
 #   --run <id>        pin a specific GitHub Actions ci.yml run id to download the artifact from.
 #   --binary <path>   deploy an already-downloaded CI relay binary (skips gh download).
-#   --dry-run         print the plan and touch nothing (no gh/ssh/scp).
+#   --dry-run         print the plan and touch no box (no ssh/scp; without --binary it still
+#                     downloads the CI artifact read-only, to show its sha256).
 #   --force-live      BYPASS the rig-busy guard and deploy even while a broadcast is live. Supervisor
 #                     override ONLY, logged loudly — a relay deploy/restart during live production can
 #                     fork-wedge the cambox (gphoto2 PTP on the shared xHCI bus, 2026-09-13 #1229).
@@ -171,7 +172,7 @@ fi
 # root ro (which would be wrong / fail-busy).
 maybe_remount_rw() { [ "$RO_ROOT" = 1 ] || return 0; ssh_box "$1" "mount -o remount,rw /"; }
 
-ssh_box() { "${SSHPASS_PREFIX[@]}" "$SSH_BIN" -o StrictHostKeyChecking=no -o ConnectTimeout=10 "root@$1" "$2"; }
+ssh_box() { "${SSHPASS_PREFIX[@]}" "$SSH_BIN" -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 "root@$1" "$2"; }
 scp_box() { "${SSHPASS_PREFIX[@]}" "$SCP_BIN" -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$2" "root@$1:$3"; }
 
 # issue 808 (cam6/cam7, 25.9.2026): the ro remount used to be `mount -o remount,ro / 2>/dev/null;
@@ -184,8 +185,9 @@ remount_ro_checked() {
   local rc=0 fu lo holders
   ssh_box "$1" "for _i in 1 2 3; do mount -o remount,ro / && exit 0; sleep 2; done; exit 1" || rc=$?
   [ "$rc" -eq 0 ] && return 0
-  if [ "$rc" -eq 255 ]; then
-    echo "ERROR: ssh to $1 FAILED during the ro remount (rc 255) -- the root may still be read-WRITE;" >&2
+  if [ "$rc" -ne 1 ]; then
+    # The remote loop exits only 0 or 1, so any other rc is the transport (ssh 255, sshpass 5/6).
+    echo "ERROR: ssh to $1 FAILED during the ro remount (rc $rc) -- the root may still be read-WRITE;" >&2
     echo "       reach the box and check 'findmnt -no OPTIONS /' (it must say ro) by hand." >&2
     return 1
   fi
@@ -223,23 +225,39 @@ finish_box() {
 # finish_once -> finish_box for $HOST exactly once, and only after the box was touched (BOX_DIRTY=1
 # from the relay stop / rw remount on). Every explicit exit path calls it, and the EXIT trap below
 # calls it too, so a Ctrl-C / SIGTERM mid-scp still restores the ro root and the relay's state.
+# BOX_DIRTY clears only AFTER finish_box returned; FINISHING marks a restore in progress, so a signal
+# landing INSIDE the restore is reported loudly by the EXIT trap instead of being mistaken for "done".
+FINISHING=0
 finish_once() {
+  local rc=0
   [ "$BOX_DIRTY" = 1 ] || return 0
+  [ "$FINISHING" = 0 ] || return 1
+  FINISHING=1
+  finish_box "$HOST" || rc=1
   BOX_DIRTY=0
-  finish_box "$HOST"
+  FINISHING=0
+  return "$rc"
 }
 
+# The EXIT trap must survive a dead terminal (a HUP'd ssh session: every write to stderr fails) and a
+# second signal: errexit off, signals ignored, every message write guarded.
 deploy_on_exit() {
   local rc=$?
-  if [ "$BOX_DIRTY" = 1 ]; then
-    echo "ERROR: deploy interrupted/aborted after the box was touched -- restoring the ro root + the relay state" >&2
-    finish_once || true
+  set +e
+  trap '' INT TERM HUP PIPE
+  if [ "$FINISHING" = 1 ]; then
+    echo "ERROR: the ro-root/relay restore on $HOST was INTERRUPTED -- check by hand: 'findmnt -no OPTIONS /' must say ro, 'systemctl is-active $RELAY_UNIT' must match its state before the deploy (${WAS_ACTIVE:-unknown})" >&2 2>/dev/null
+  elif [ "$BOX_DIRTY" = 1 ]; then
+    echo "ERROR: deploy interrupted/aborted after the box was touched -- restoring the ro root + the relay state" >&2 2>/dev/null
+    finish_once
   fi
   [ -n "$DIST" ] && rm -rf "$DIST"
   return "$rc"
 }
 trap deploy_on_exit EXIT
-trap 'exit 130' INT TERM HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 # --- resolve the relay binary (a pre-downloaded --binary, or the CI artifact) ---
 if [ -z "$BINARY" ]; then

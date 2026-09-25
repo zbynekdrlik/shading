@@ -216,11 +216,12 @@ bkshading_relay_provision_fetch_binary() {
         echo "no successful ci.yml run on '$branch' carries $art"
         return 1
       fi
-      if "$gh" run download "$run" --repo "$repo" -n "$art" --dir "$dir" >/dev/null 2>&1 && [ -s "$dir/$bin" ]; then
+      local gh_err=""
+      if gh_err="$("$gh" run download "$run" --repo "$repo" -n "$art" --dir "$dir" 2>&1 >/dev/null)" && [ -s "$dir/$bin" ]; then
         echo "  relay binary: $art from ci.yml run $run" >&2
         printf '%s\n' "$dir/$bin"
       else
-        echo "gh run download of $art from ci.yml run $run failed"
+        echo "gh run download of $art from ci.yml run $run failed (${gh_err##*$'\n'})"
         return 1
       fi
       ;;
@@ -277,7 +278,7 @@ bkshading_relay_provision_verdict() {
     enabled | disabled)
       [ "$v" = "$want" ] || out="${out}FAIL: relay unit is-enabled='${v:-<none>}' but the rig mode wants it $want (TEST = the source box + cam2 disabled, issue 1311)"$'\n' ;;
     *)
-      out="${out}FAIL: rig mode unreadable for this relay-roster box -- cannot grade the enable-state (set RIG_MODE=test|event)"$'\n' ;;
+      out="${out}FAIL: rig mode unreadable for this relay-roster box -- cannot grade the enable-state (set CAMERA_BOX_RIG_MODE=test|event)"$'\n' ;;
   esac
   if [ -z "$out" ]; then printf '%s\n' ok; else printf '%s' "$out"; fi
 }

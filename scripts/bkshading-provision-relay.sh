@@ -24,9 +24,15 @@ set -euo pipefail
 # The relay BINARY deploy (the CI-built bkshading-relay -> /usr/local/bin) is a SEPARATE supervisor
 # step; --check treats a missing binary as a failure (the unit needs it), --install only warns.
 #
-# Usage:  scripts/bkshading-provision-relay.sh [--check|--install]
-#   --check    (default) verify gphoto2 + unit + env + enabled + binary; 0 if all OK, 1 + remediation
-#   --install  install gphoto2 (if missing), derive+write the env, install+enable the unit
+# Usage:  scripts/bkshading-provision-relay.sh [--check|--install] [--rig-mode test|event]
+#   --check    (default) verify gphoto2 + unit + env + binary + the rig mode's enable-state;
+#              0 if all OK, 1 + remediation
+#   --install  install gphoto2 (if missing), derive+write the env, install the unit and enable OR
+#              disable it per the rig mode (never start)
+#   --rig-mode test|event  (default $CAMERA_BOX_RIG_MODE, else test) -- issue 808: the SAME
+#              enable-state table setup-device.sh uses (bkshading_relay_expected_enable_state): in
+#              TEST the relay roster (the source box + cam2, issue 1311) is installed DISABLED; the
+#              box is named by its hostname (override: BKSHADING_RELAY_DEVICE_NAME).
 #
 # Exit codes: 0 = OK; 1 = not fully provisioned + remediation printed; 2 = bad argument.
 #
@@ -41,6 +47,8 @@ REPO="$(cd "$HERE/.." && pwd)"
 . "$HERE/lib/bkshading-relay-runtime.sh"
 # shellcheck source=scripts/lib/bkshading-relay-provision.sh
 . "$HERE/lib/bkshading-relay-provision.sh" # the ONE install body, shared with setup-device.sh (issue 808)
+# shellcheck source=scripts/camera-set.sh
+. "$HERE/camera-set.sh" # camera_source_box -- the TEST relay roster's source box
 
 UNIT_NAME="$(bkshading_relay_unit_name)"
 UNIT_SRC="$REPO/systemd/$UNIT_NAME"
@@ -50,25 +58,44 @@ RELAY_BIN="${BKSHADING_RELAY_BIN:-$(bkshading_relay_bin_path)}"
 GPHOTO2="${BKSHADING_RELAY_GPHOTO2:-gphoto2}"
 SYSTEMCTL="${BKSHADING_RELAY_SYSTEMCTL:-systemctl}"
 
-MODE="${1:---check}"
-case "$MODE" in
-  --check | --install) ;;
-  -h | --help)
-    grep -E '^# ' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
-    exit 0
-    ;;
-  *)
-    echo "unknown argument: $MODE (use --check or --install)" >&2
-    exit 2
-    ;;
+MODE="--check"
+RIG_MODE_ARG="${CAMERA_BOX_RIG_MODE:-test}"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --check | --install) MODE="$1"; shift ;;
+    --rig-mode)
+      [ "$#" -ge 2 ] || { echo "--rig-mode needs test or event" >&2; exit 2; }
+      RIG_MODE_ARG="$2"; shift 2 ;;
+    -h | --help)
+      grep -E '^# ' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
+    *)
+      echo "unknown argument: $1 (use --check or --install [--rig-mode test|event])" >&2
+      exit 2
+      ;;
+  esac
+done
+case "$RIG_MODE_ARG" in
+  test | event) ;;
+  *) echo "--rig-mode must be test or event (got '$RIG_MODE_ARG')" >&2; exit 2 ;;
 esac
+
+# The enable-state this box must carry in this rig mode -- the ONE table (issue 808). An
+# unresolvable roster (no source box) takes the passive direction: installed disabled.
+DEVICE="${BKSHADING_RELAY_DEVICE_NAME:-$(hostname 2>/dev/null || true)}"
+WANT_STATE="$(bkshading_relay_expected_enable_state "$DEVICE" "$RIG_MODE_ARG" "$(camera_source_box 2>/dev/null || true)" "$(bkshading_relay_roster_painter_box)")"
+if [ "$WANT_STATE" = unknown ]; then
+  echo "WARNING: could not resolve the rig source box -- the relay is kept DISABLED (the passive TEST direction)" >&2
+  WANT_STATE=disabled
+fi
 
 # The install body lives in scripts/lib/bkshading-relay-provision.sh (issue 808): setup-device.sh
 # runs the SAME functions on every fresh cambox, so the standalone CLI and the provisioner can never
-# drift. This CLI keeps its historical contract: install + ENABLE (never start/restart).
+# drift. It never starts/restarts the relay; the enable-state follows the rig mode (WANT_STATE).
 do_install() {
-  echo "[bkshading-provision-relay] --install (enable-only; takes effect on next reboot)"
-  bkshading_relay_provision_install enabled || {
+  echo "[bkshading-provision-relay] --install (never started; unit ${WANT_STATE} for ${DEVICE:-this box} in rig mode ${RIG_MODE_ARG})"
+  bkshading_relay_provision_install "$WANT_STATE" || {
     echo "bkshading relay install FAILED (see the lines above)" >&2
     return 1
   }
@@ -112,19 +139,20 @@ do_check() {
     echo "FAIL: gphoto2 not installed (the relay's USB-PTP transport)" >&2
     rc=1
   fi
-  # (5) unit enabled (reboot-survival; live runtime state is the post-reboot rig verify).
+  # (5) the unit's enable-state matches the rig mode (reboot-survival; the live runtime state is the
+  #     post-reboot rig verify).
   en="$("$SYSTEMCTL" is-enabled "$UNIT_NAME" 2>/dev/null || true)"
-  if [ "$en" = "enabled" ]; then
-    echo "OK: unit enabled"
+  if [ "$en" = "$WANT_STATE" ]; then
+    echo "OK: unit $en (rig mode $RIG_MODE_ARG)"
   else
-    echo "FAIL: unit not enabled (is-enabled=${en:-<none>})" >&2
+    echo "FAIL: unit is-enabled=${en:-<none>} but rig mode $RIG_MODE_ARG wants it $WANT_STATE" >&2
     rc=1
   fi
 
   if [ "$rc" -ne 0 ]; then
     cat >&2 <<MSG
 bkshading relay NOT fully provisioned on this box. Fix:
-  scripts/bkshading-provision-relay.sh --install   # gphoto2 + unit + derived env; enable (defer to reboot)
+  scripts/bkshading-provision-relay.sh --install [--rig-mode test|event]   # gphoto2 + unit + env; never started
 Then deploy the CI-built bkshading-relay binary to $RELAY_BIN and reboot.
 MSG
   else

@@ -204,7 +204,7 @@ def _deploy_env(tmp, remote_sha, was_active="active", ro_fails=False):
         '  *"is-active"*) printf "__WAS__\\n" ;;\n'
         '  *sha256sum*) printf "__SHA__\\n" ;;\n'
         '  *"test -x"*) printf "yes\\n" ;;\n'
-        '  *"remount,ro"*) [ "__ROFAIL__" = 1 ] && { echo "mount: /: mount point is busy." >&2; exit 32; } ;;\n'
+        '  *"remount,ro"*) [ "__ROFAIL__" = 1 ] && { echo "mount: /: mount point is busy." >&2; exit 1; } ;;\n'
         '  *"lsof +L1"*) printf "COMMAND PID USER FD TYPE DEVICE SIZE/OFF NLINK NODE NAME\\n'
         'bkshading 4242 root txt REG 8,2 9000 0 1234 /usr/local/bin/bkshading-relay (deleted)\\n" ;;\n'
         "esac\n"
@@ -650,6 +650,159 @@ def test_fetch_binary_follows_the_plan():
         _write_exec(curl, "#!/usr/bin/env bash\nexit 22\n")
         r = _fetch("url:https://h/relay", tmp, {"BKSHADING_RELAY_CURL": curl})
         assert r.returncode != 0 and "failed" in r.stdout, r.stdout
+
+
+# =============================================================================================
+# Review round 2 (issue 808): a dead terminal, a signal inside the restore, the exe-held holder,
+# an unreadable artifact list, and the standalone install CLI following the rig mode.
+# =============================================================================================
+def _deploy_popen(tmp, env, b, stderr):
+    e = dict(os.environ)
+    e.update(env)
+    return subprocess.Popen(["bash", DEPLOY, "--host", "10.77.9.66", "--binary", b],
+                            stdout=subprocess.DEVNULL, stderr=stderr, env=e)
+
+
+def _wait_for(log, needle, tries=200):
+    import time
+    for _ in range(tries):
+        if os.path.exists(log) and needle in _read(log):
+            return
+        time.sleep(0.05)
+    raise AssertionError("never saw %r in %s" % (needle, log))
+
+
+def test_hup_with_a_dead_terminal_still_restores_the_box():
+    import signal
+    with tempfile.TemporaryDirectory() as tmp:
+        b, sha = _bin(tmp)
+        env, log = _deploy_env_custom(tmp, sha, was_active="active", scp_body="sleep 2\nexit 0\n")
+        with open("/dev/full", "w") as full:
+            p = _deploy_popen(tmp, env, b, stderr=full)
+            _wait_for(log, "SCP ")
+            p.send_signal(signal.SIGHUP)
+            p.wait(timeout=30)
+        assert p.returncode != 0
+        calls = _read(log)
+        assert calls.find("SCP ") < calls.find("remount,ro /") < calls.find("systemctl start bkshading-relay"), \
+            "a HUP with every stderr write failing must still restore the ro root + the relay:\n" + calls
+
+
+def test_a_signal_inside_the_restore_is_reported_loudly():
+    import signal
+    with tempfile.TemporaryDirectory() as tmp:
+        b, sha = _bin(tmp)
+        env, log = _deploy_env_custom(tmp, sha, was_active="active",
+                                      ssh_extra='  *"remount,ro"*) sleep 2; exit 0 ;;\n')
+        p = _deploy_popen(tmp, env, b, stderr=subprocess.PIPE)
+        _wait_for(log, "remount,ro")
+        p.send_signal(signal.SIGTERM)
+        _out, err = p.communicate(timeout=30)
+        assert p.returncode != 0
+        assert b"INTERRUPTED" in err and b"findmnt -no OPTIONS /" in err, err
+
+
+def test_ssh_transport_rc_other_than_1_is_not_a_busy_mount():
+    with tempfile.TemporaryDirectory() as tmp:
+        b, sha = _bin(tmp)
+        env, log = _deploy_env_custom(tmp, sha, was_active="inactive",
+                                      ssh_extra='  *"remount,ro"*) exit 5 ;;\n')
+        r = _run_deploy(["--host", "10.77.9.66", "--binary", b], env)
+        assert r.returncode != 0 and "FAILED during the ro remount (rc 5)" in r.stderr, r.stderr
+        assert "lsof +L1" not in _read(log)
+
+
+def test_holder_probe_names_an_exe_held_binary_from_a_fake_proc_tree():
+    lib = os.path.join(REPO, "scripts", "lib", "bkshading-deploy-runtime.sh")
+    with tempfile.TemporaryDirectory() as tmp:
+        proc = os.path.join(tmp, "proc")
+        pid = os.path.join(proc, "4242")
+        os.makedirs(os.path.join(pid, "fd"))
+        with open(os.path.join(pid, "comm"), "w") as f:
+            f.write("bkshading-relay\n")
+        os.symlink("/usr/local/bin/bkshading-relay (deleted)", os.path.join(pid, "exe"))
+        with open(os.path.join(pid, "maps"), "w") as f:
+            f.write("7f00-7f01 r-xp 00000000 08:02 1234 /usr/lib/libold.so (deleted)\n"
+                    "7f02-7f03 r--p 00000000 08:02 99 /usr/lib/libfine.so\n")
+        os.symlink("/var/log/x (deleted)", os.path.join(pid, "fd", "3"))
+        bindir = os.path.join(tmp, "bin")
+        os.makedirs(bindir)
+        for tool in ("readlink", "cat", "sort", "head", "awk", "sed"):
+            os.symlink(subprocess.run(["bash", "-c", "command -v " + tool], capture_output=True,
+                                      text=True, check=True).stdout.strip(), os.path.join(bindir, tool))
+        probe = _src(lib, 'bkshading_deploy_ro_holder_probe_cmd "$R"', env={"R": proc}).stdout
+        r = subprocess.run(["/bin/bash", "-c", probe], capture_output=True, text=True, env={"PATH": bindir})
+        assert r.returncode == 0, r.stderr
+        s = _src(lib, 'bkshading_deploy_ro_holders "$T"', env={"T": r.stdout}).stdout.strip()
+        assert "bkshading-relay[4242] /usr/local/bin/bkshading-relay" in s, (s, r.stdout)
+        assert "/usr/lib/libold.so" in s and "/var/log/x" in s, s
+        assert "libfine" not in s, s
+
+
+def test_an_unreadable_artifact_list_stops_the_resolver():
+    with tempfile.TemporaryDirectory() as tmp:
+        log = os.path.join(tmp, "gh.log")
+        gh = _fake_gh(tmp, RUNS, {300: [ARTIFACT], 200: [ARTIFACT], 100: [ARTIFACT]}, log)
+        body = _read(gh).replace('if [ "$1" = "api" ]; then\n',
+                                 'if [ "$1" = "api" ]; then\n  case "$2" in *runs/300/*) exit 1 ;; esac\n', 1)
+        _write_exec(gh, body)
+        r = _src(RESOLVE_LIB, "ci_run_latest_success zbynekdrlik/camera-box main ci.yml %s" % ARTIFACT,
+                 env={"CI_RUN_RESOLVE_GH": gh})
+        assert r.returncode != 0 and r.stdout.strip() == "", \
+            "one failed artifact lookup must never fall back to an older run: %r" % r.stdout
+        assert "UNREADABLE" in r.stderr, r.stderr
+
+
+def test_fetch_reports_the_gh_error():
+    with tempfile.TemporaryDirectory() as tmp:
+        gh = os.path.join(tmp, "fake-gh")
+        _write_exec(gh, '#!/usr/bin/env bash\necho "HTTP 404: artifact not found" >&2\nexit 1\n')
+        r = _fetch("run:77", tmp)
+        assert r.returncode != 0 and "HTTP 404: artifact not found" in r.stdout, r.stdout
+
+
+def _provision_cli(tmp, args, device):
+    env, calls = _prov_env(tmp)
+    env["BKSHADING_RELAY_DEVICE_NAME"] = device
+    e = dict(os.environ)
+    e.pop("CAMERA_BOX_RIG_MODE", None)
+    e.update(env)
+    r = subprocess.run(["bash", PROVISION] + args, capture_output=True, text=True, env=e)
+    return r, calls
+
+
+def test_install_cli_follows_the_rig_mode():
+    src = _source_box()
+    with tempfile.TemporaryDirectory() as tmp:
+        r, calls = _provision_cli(tmp, ["--install"], src)
+        assert r.returncode == 0, r.stdout + r.stderr
+        log = _read(calls)
+        assert re.search(r"^disable bkshading-relay.service$", log, re.M), "TEST source box: disabled\n" + log
+        assert not re.search(r"^enable ", log, re.M), log
+    with tempfile.TemporaryDirectory() as tmp:
+        r, calls = _provision_cli(tmp, ["--install", "--rig-mode", "event"], src)
+        assert r.returncode == 0 and re.search(r"^enable bkshading-relay.service$", _read(calls), re.M), r.stderr
+    with tempfile.TemporaryDirectory() as tmp:
+        r, calls = _provision_cli(tmp, ["--install"], _non_roster_box())
+        assert r.returncode == 0 and re.search(r"^enable bkshading-relay.service$", _read(calls), re.M), r.stderr
+    with tempfile.TemporaryDirectory() as tmp:
+        r, _calls = _provision_cli(tmp, ["--install", "--rig-mode", "live"], src)
+        assert r.returncode == 2, r.returncode
+
+
+def test_check_cli_fails_an_enabled_source_box_in_test_mode():
+    src = _source_box()
+    with tempfile.TemporaryDirectory() as tmp:
+        r, _calls = _provision_cli(tmp, ["--install", "--rig-mode", "event"], src)
+        assert r.returncode == 0, r.stderr
+        os.makedirs(os.path.join(tmp, "bin"), exist_ok=True)
+        with open(os.path.join(tmp, "bin", "bkshading-relay"), "w") as f:
+            f.write("R")
+        os.chmod(os.path.join(tmp, "bin", "bkshading-relay"), 0o755)
+        ok, _ = _provision_cli(tmp, ["--check", "--rig-mode", "event"], src)
+        assert ok.returncode == 0, ok.stdout + ok.stderr
+        bad, _ = _provision_cli(tmp, ["--check"], src)
+        assert bad.returncode != 0 and "wants it disabled" in bad.stderr, bad.stderr
 
 
 def _run_ao(block_out, env_extra):

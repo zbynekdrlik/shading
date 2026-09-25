@@ -815,8 +815,11 @@ the root stayed read-WRITE (cam6/cam7).
 
 - **ONE install body:** `scripts/lib/bkshading-relay-provision.sh` (gphoto2 + env derived from the
   camera-box drop-ins + unit + optional binary + `enable` OR `disable`, literal is-enabled
-  read-back, never a start). Both `bkshading-provision-relay.sh` (CLI, always `enabled`) and
-  `setup-device.sh` `[bkshading-relay]` source it. Never copy the body back into a script.
+  read-back, never a start). Both `bkshading-provision-relay.sh` (CLI) and `setup-device.sh`
+  `[bkshading-relay]` source it. Never copy the body back into a script. The CLI takes
+  `--rig-mode test|event` too (hostname = the box, `BKSHADING_RELAY_DEVICE_NAME` overrides), so a
+  manual `--install` on the source box or cam2 in TEST installs it DISABLED, and `--check` grades
+  the same enable-state.
 - **setup-device enable-state follows `--rig-mode` (default `test`):** TEST = the relay roster (the
   source box from `camera_source_box` + cam2, the SAME two boxes `rig-mode.sh` stops+disables)
   installed DISABLED, every other box enabled; EVENT = enabled. The default is `test` because it is
@@ -846,18 +849,28 @@ the root stayed read-WRITE (cam6/cam7).
   remount. A byte-verify failure leaves it stopped, loudly, never running unverified bytes.
   `bkshading_deploy_should_start` stays `no`.
 - **Every exit after the box is touched restores it:** `finish_once` (ro remount + relay restore,
-  exactly once) runs on each explicit failure path AND from an EXIT trap (`INT/TERM/HUP` -> `exit
-  130`), so a Ctrl-C mid-scp still leaves the root ro and the relay in its previous state.
+  exactly once; `BOX_DIRTY` clears only AFTER it returned) runs on each explicit failure path AND
+  from an EXIT trap (INT/TERM/HUP -> exit 130/143/129), so a Ctrl-C mid-scp still leaves the root ro
+  and the relay in its previous state. The trap turns errexit off, ignores further signals and
+  guards every write (`echo ... >&2 2>/dev/null` -- NOT `{ echo >&2; } 2>/dev/null`, which silences
+  it), so a HUP'd terminal whose stderr writes all fail still restores. A signal INSIDE the restore
+  (`FINISHING=1`) prints a loud "restore INTERRUPTED -- check findmnt / is-active" instead of
+  silently skipping. `ssh_box` carries ServerAliveInterval so a dead connection cannot postpone the
+  restore forever.
 - **The ro remount is checked:** retried 3x, then FAIL LOUD with the holder named (the pure
   `bkshading_deploy_ro_holders` over `bkshading_deploy_ro_holder_probe_cmd`: `lsof +L1`, or -- a
-  cambox has no lsof -- the same columns built from `/proc/*/fd` links ending ` (deleted)`) plus
-  `fuser -vm /`, and exit non-zero. An ssh rc 255 there is reported as an ssh failure, not a busy
-  mount. The relay restore still runs on that path.
+  cambox has no lsof -- the same columns built from /proc) plus `fuser -vm /`, and exit non-zero.
+  The /proc fallback must scan `/proc/<pid>/exe` (a replaced RUNNING binary -- the 25.9. incident --
+  is held there, lsof `txt`) and `/proc/<pid>/maps` (`mem`), not only `fd/*`; its PROC_ROOT argument
+  lets a test plant a fake tree. The remote loop exits only 0 or 1, so any other rc (ssh 255,
+  sshpass 5/6) is reported as an ssh failure, not a busy mount. The relay restore still runs.
 - **Run resolution is ONE shared resolver:** `scripts/lib/ci-run-resolve.sh`
   `ci_run_latest_success REPO BRANCH WORKFLOW ARTIFACT [LIMIT=100]`, used by the relay deploy,
   `deploy-fleet.sh` and the setup-device relay `latest` plan. It lists runs WITHOUT the server-side
   `--status` filter, takes success newest first by createdAt client-side, requires the artifact
-  present + non-expired, and logs id + date + sha. Every JSON step goes through gh's BUILT-IN `--jq`
+  present + non-expired, and logs id + date + sha. An UNREADABLE artifact list (gh/api failure,
+  `ci_run_has_artifact` rc 2) STOPS the resolver -- moving on to an older run there would be the
+  stale pick again. Every JSON step goes through gh's BUILT-IN `--jq`
   (`ci_run_newest_success_filter` is the one program): a cambox has gh but no jq. setup-device STEP
   3's own camera-box query is NOT migrated -- its `--status success` / `// empty` shape is pinned by
   `tests/setup_device_fleet_binary_ndi.rs` + `setup_device_provisioning_defects_1066.rs`, and the
