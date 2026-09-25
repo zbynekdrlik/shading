@@ -249,7 +249,11 @@ deploy_on_exit() {
   local rc=$?
   set +e
   trap '' INT TERM HUP PIPE
-  command -v setsid >/dev/null 2>&1 && RESTORE_SESSION=(setsid -w)
+  if command -v setsid >/dev/null 2>&1; then
+    RESTORE_SESSION=(setsid -w)
+  else
+    echo "WARNING: setsid not found -- a second Ctrl-C can still interrupt the restore on $HOST" >&2 2>/dev/null
+  fi
   if [ "$FINISHING" = 1 ]; then
     # The restore itself was interrupted. finish_box is safe to repeat (remount,ro on an ro root and
     # start on an active unit are no-ops), so run it again -- now signal-proof -- and only ask for a
@@ -294,7 +298,7 @@ LOCAL_SHA="$(sha256sum "$BINARY" | awk '{print $1}')"
 if [ "$DRY_RUN" -eq 1 ]; then
   if [ "$RO_ROOT" = 1 ]; then
     STEPS="rig-busy guard  ->  stop the relay if active  ->  mount -o remount,rw /  ->  scp (staged $RELAY_STAGE)  ->  chmod +x + atomic mv  ->  sha256 byte-verify  ->  mount -o remount,ro / (FAIL LOUD naming the holder if busy)  ->  start the relay again if it was active"
-    NEXT="on the box run scripts/bkshading-provision-relay.sh --install (if not yet) + reboot"
+    NEXT="on the box run scripts/bkshading-provision-relay.sh --install --rig-mode <test|event> (if not yet) + reboot"
   else
     STEPS="rig-busy guard  ->  stop the relay if active  ->  scp (staged $RELAY_STAGE)  ->  chmod +x + atomic mv  ->  sha256 byte-verify  ->  start the relay again if it was active   (no remount -- stock rw-root SBC, --no-remount)"
     NEXT="on the SBC run scripts/bkshading-provision-sbc.sh --install (if not yet) + reboot"
@@ -415,6 +419,6 @@ echo "OK: relay deployed + byte-verified (executable) on $HOST ($RELAY_DEST, sha
 if [ "$(bkshading_deploy_should_start)" = "yes" ]; then
   echo "WARNING: should_start=yes — refusing to start a stopped relay anyway (enable-only invariant)" >&2
 elif [ "$RESTORE_ACTION" != start ]; then
-  echo "relay was not running: left stopped. Run scripts/bkshading-provision-relay.sh --install"
+  echo "relay was not running: left stopped. Run scripts/bkshading-provision-relay.sh --install --rig-mode <test|event>"
   echo "             (if not yet provisioned) on the box; it comes up at boot / rig-mode.sh event."
 fi

@@ -862,6 +862,8 @@ the root stayed read-WRITE (cam6/cam7).
   handlers and forwards SIGINT to ssh, so the trap runs the re-run's ssh under `setsid -w`
   (`RESTORE_SESSION`), out of the terminal's process group. The test for it needs a fake sshpass
   that handles + forwards SIGINT -- with an empty prefix, the inherited SIG_IGN hides the bug.
+  Consequence: the re-run restore can only be stopped with SIGKILL. That is bounded (ConnectTimeout
+  10, ServerAlive ~30 s, the 3x2 s remount loop; the Type=simple unit's `start` returns at once).
   `ssh_box`/`scp_box` carry ServerAliveInterval so a dead connection cannot postpone the restore.
 - **The ro remount is checked:** retried 3x, then FAIL LOUD with the holder named (the pure
   `bkshading_deploy_ro_holders` over `bkshading_deploy_ro_holder_probe_cmd`: `lsof +L1`, or -- a

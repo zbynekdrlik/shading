@@ -201,7 +201,7 @@ scripts/bkshading-provision-sbc.sh --check     # verify gphoto2 + unit enabled +
 ## Running (once built on CI)
 
 ```
-scripts/bkshading-provision-relay.sh --install  # on the cambox/SBC: gphoto2 + unit + env; enable
+scripts/bkshading-provision-relay.sh --install --rig-mode test  # on the cambox: gphoto2 + unit + env; enable-state per rig mode (setup-device.sh does this on a fresh install)
 bkshading-relay --bind 0.0.0.0:8771            # what the unit runs (needs gphoto2 installed)
 bkshading --config bkshading/service/bkshading.example.toml   # on the strih PC
 ```

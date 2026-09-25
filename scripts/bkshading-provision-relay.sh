@@ -87,8 +87,11 @@ if [ -z "$RIG_MODE_ARG" ]; then
   if [ "$(bkshading_relay_expected_enable_state "$DEVICE" test "$SOURCE_BOX" "$PAINTER_BOX")" = \
        "$(bkshading_relay_expected_enable_state "$DEVICE" event "$SOURCE_BOX" "$PAINTER_BOX")" ]; then
     RIG_MODE_ARG=event   # not a roster box: the same state in both modes
+  elif [ -z "$SOURCE_BOX" ]; then
+    echo "ERROR: the TEST relay roster could not be resolved (no source box from camera_source_box): pass --rig-mode test|event (or CAMERA_BOX_RIG_MODE)" >&2
+    exit 2
   else
-    echo "ERROR: ${DEVICE:-this box} is in the TEST relay roster (source box ${SOURCE_BOX:-?} + $PAINTER_BOX): pass --rig-mode test|event (or CAMERA_BOX_RIG_MODE)" >&2
+    echo "ERROR: ${DEVICE:-this box} is in the TEST relay roster (source box $SOURCE_BOX + $PAINTER_BOX): pass --rig-mode test|event (or CAMERA_BOX_RIG_MODE)" >&2
     exit 2
   fi
 fi
@@ -111,7 +114,7 @@ do_install() {
     echo "bkshading relay install FAILED (see the lines above)" >&2
     return 1
   }
-  echo "install done. Verify with: scripts/bkshading-provision-relay.sh --check"
+  echo "install done. Verify with: scripts/bkshading-provision-relay.sh --check --rig-mode $RIG_MODE_ARG"
 }
 
 do_check() {

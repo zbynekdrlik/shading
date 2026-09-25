@@ -92,7 +92,7 @@ bkshading_deploy_ro_holder_probe_cmd() {  # $1 = PROC_ROOT (default /proc)
   body="$(cat <<'PROBE'
 
 if command -v lsof >/dev/null 2>&1; then
-  lsof +L1 2>/dev/null | head -n 40
+  lsof +L1 2>/dev/null | grep -vE ' (/memfd:|/dev/shm/|/SYSV)' | head -n 40
 else
   echo "COMMAND PID USER FD TYPE DEVICE SIZE/OFF NLINK NODE NAME"
   for d in "__PROC__/"[0-9]*; do
@@ -109,7 +109,7 @@ else
 fi
 PROBE
 )"
-  printf '%s\n' "${body//__PROC__/$root}"
+  printf '%s\n' "${body//__PROC__/"$root"}"   # quoted: bash 5.2 patsub_replacement expands a bare &
 }
 
 # Name the holders that keep the root from going read-only again (issue 808): `lsof +L1` text ->
