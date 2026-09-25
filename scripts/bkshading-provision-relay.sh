@@ -29,10 +29,12 @@ set -euo pipefail
 #              0 if all OK, 1 + remediation
 #   --install  install gphoto2 (if missing), derive+write the env, install the unit and enable OR
 #              disable it per the rig mode (never start)
-#   --rig-mode test|event  (default $CAMERA_BOX_RIG_MODE, else test) -- issue 808: the SAME
-#              enable-state table setup-device.sh uses (bkshading_relay_expected_enable_state): in
-#              TEST the relay roster (the source box + cam2, issue 1311) is installed DISABLED; the
-#              box is named by its hostname (override: BKSHADING_RELAY_DEVICE_NAME).
+#   --rig-mode test|event  (default $CAMERA_BOX_RIG_MODE) -- issue 808: the SAME enable-state
+#              table setup-device.sh uses (bkshading_relay_expected_enable_state): in TEST the relay
+#              roster (the source box + cam2, issue 1311) is installed DISABLED. On a roster box the
+#              mode MUST be given (the answer differs per mode, and guessing it wrong would re-arm
+#              or kill the relay); any other box is enabled in both modes. The box is named by its
+#              hostname (override: BKSHADING_RELAY_DEVICE_NAME).
 #
 # Exit codes: 0 = OK; 1 = not fully provisioned + remediation printed; 2 = bad argument.
 #
@@ -59,7 +61,7 @@ GPHOTO2="${BKSHADING_RELAY_GPHOTO2:-gphoto2}"
 SYSTEMCTL="${BKSHADING_RELAY_SYSTEMCTL:-systemctl}"
 
 MODE="--check"
-RIG_MODE_ARG="${CAMERA_BOX_RIG_MODE:-test}"
+RIG_MODE_ARG="${CAMERA_BOX_RIG_MODE:-}"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --check | --install) MODE="$1"; shift ;;
@@ -76,15 +78,25 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+# The enable-state this box must carry in this rig mode -- the ONE table (issue 808). An
+# unresolvable roster (no source box) takes the passive direction: installed disabled.
+DEVICE="${BKSHADING_RELAY_DEVICE_NAME:-$(hostname 2>/dev/null || true)}"
+SOURCE_BOX="$(camera_source_box 2>/dev/null || true)"
+PAINTER_BOX="$(bkshading_relay_roster_painter_box)"
+if [ -z "$RIG_MODE_ARG" ]; then
+  if [ "$(bkshading_relay_expected_enable_state "$DEVICE" test "$SOURCE_BOX" "$PAINTER_BOX")" = \
+       "$(bkshading_relay_expected_enable_state "$DEVICE" event "$SOURCE_BOX" "$PAINTER_BOX")" ]; then
+    RIG_MODE_ARG=event   # not a roster box: the same state in both modes
+  else
+    echo "ERROR: ${DEVICE:-this box} is in the TEST relay roster (source box ${SOURCE_BOX:-?} + $PAINTER_BOX): pass --rig-mode test|event (or CAMERA_BOX_RIG_MODE)" >&2
+    exit 2
+  fi
+fi
 case "$RIG_MODE_ARG" in
   test | event) ;;
   *) echo "--rig-mode must be test or event (got '$RIG_MODE_ARG')" >&2; exit 2 ;;
 esac
-
-# The enable-state this box must carry in this rig mode -- the ONE table (issue 808). An
-# unresolvable roster (no source box) takes the passive direction: installed disabled.
-DEVICE="${BKSHADING_RELAY_DEVICE_NAME:-$(hostname 2>/dev/null || true)}"
-WANT_STATE="$(bkshading_relay_expected_enable_state "$DEVICE" "$RIG_MODE_ARG" "$(camera_source_box 2>/dev/null || true)" "$(bkshading_relay_roster_painter_box)")"
+WANT_STATE="$(bkshading_relay_expected_enable_state "$DEVICE" "$RIG_MODE_ARG" "$SOURCE_BOX" "$PAINTER_BOX")"
 if [ "$WANT_STATE" = unknown ]; then
   echo "WARNING: could not resolve the rig source box -- the relay is kept DISABLED (the passive TEST direction)" >&2
   WANT_STATE=disabled

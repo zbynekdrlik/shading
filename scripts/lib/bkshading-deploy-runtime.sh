@@ -82,19 +82,22 @@ bkshading_deploy_restore_action() {  # $1 = `systemctl is-active` output read be
 # built from /proc. Three places can hold a deleted file there, and the 25.9.2026 incident was the
 # first one: a running binary that was replaced is held through its EXECUTABLE (`/proc/<pid>/exe`,
 # lsof `txt`), a library through a MAPPING (`/proc/<pid>/maps`, lsof `mem`), and an open file
-# through an fd (`/proc/<pid>/fd/*`). PROC_ROOT (default /proc) lets a test plant a fake tree.
-# Emit as the WHOLE ssh command (the body is a quoted heredoc: nothing expands locally except the
-# one __PROC__ placeholder).
+# through an fd (`/proc/<pid>/fd/*`). Anonymous memory that always reads `(deleted)` but never
+# holds `/` (`/memfd:*`, `/dev/shm/*`, `/SYSV*`) is left out, so it cannot crowd the real holder
+# out of the 40-line cap; a process name with spaces has them turned into `_` so the columns hold.
+# PROC_ROOT (default /proc) lets a test plant a fake tree. Emit as the WHOLE ssh command (the body is
+# a quoted heredoc: nothing expands locally except the one __PROC__ placeholder).
 bkshading_deploy_ro_holder_probe_cmd() {  # $1 = PROC_ROOT (default /proc)
-  local root="${1:-/proc}"
-  cat <<'PROBE' | sed "s#__PROC__#$root#g"
+  local root="${1:-/proc}" body
+  body="$(cat <<'PROBE'
+
 if command -v lsof >/dev/null 2>&1; then
   lsof +L1 2>/dev/null | head -n 40
 else
   echo "COMMAND PID USER FD TYPE DEVICE SIZE/OFF NLINK NODE NAME"
-  for d in __PROC__/[0-9]*; do
+  for d in "__PROC__/"[0-9]*; do
     p="${d##*/}"
-    c="$(cat "$d/comm" 2>/dev/null)"
+    c="$(tr ' ' _ <"$d/comm" 2>/dev/null)"
     t="$(readlink "$d/exe" 2>/dev/null)" && case "$t" in *" (deleted)") echo "${c:-?} $p - txt - - - 0 - $t" ;; esac
     awk '/ \(deleted\)$/ { $1=$2=$3=$4=$5=""; sub(/^ +/, ""); print }' "$d/maps" 2>/dev/null | sort -u |
       while IFS= read -r t; do echo "${c:-?} $p - mem - - - 0 - $t"; done
@@ -102,9 +105,11 @@ else
       t="$(readlink "$l" 2>/dev/null)" || continue
       case "$t" in *" (deleted)") echo "${c:-?} $p - fd - - - 0 - $t" ;; esac
     done
-  done 2>/dev/null | sort -u | head -n 40
+  done 2>/dev/null | grep -vE ' (/memfd:|/dev/shm/|/SYSV)' | sort -u | head -n 40
 fi
 PROBE
+)"
+  printf '%s\n' "${body//__PROC__/$root}"
 }
 
 # Name the holders that keep the root from going read-only again (issue 808): `lsof +L1` text ->

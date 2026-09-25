@@ -172,8 +172,12 @@ fi
 # root ro (which would be wrong / fail-busy).
 maybe_remount_rw() { [ "$RO_ROOT" = 1 ] || return 0; ssh_box "$1" "mount -o remount,rw /"; }
 
-ssh_box() { "${SSHPASS_PREFIX[@]}" "$SSH_BIN" -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 "root@$1" "$2"; }
-scp_box() { "${SSHPASS_PREFIX[@]}" "$SCP_BIN" -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$2" "root@$1:$3"; }
+# RESTORE_SESSION is empty on the normal path and `setsid -w` inside the EXIT trap: the trap's restore
+# then runs in its own session, so a second Ctrl-C from the terminal cannot reach it (sshpass forwards
+# SIGINT to its ssh child even when this shell ignores it).
+RESTORE_SESSION=()
+ssh_box() { "${RESTORE_SESSION[@]}" "${SSHPASS_PREFIX[@]}" "$SSH_BIN" -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 "root@$1" "$2"; }
+scp_box() { "${SSHPASS_PREFIX[@]}" "$SCP_BIN" -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 "$2" "root@$1:$3"; }
 
 # issue 808 (cam6/cam7, 25.9.2026): the ro remount used to be `mount -o remount,ro / 2>/dev/null;
 # true || true` -- a "busy" failure was SWALLOWED, the script printed OK and the box root stayed
@@ -245,8 +249,16 @@ deploy_on_exit() {
   local rc=$?
   set +e
   trap '' INT TERM HUP PIPE
+  command -v setsid >/dev/null 2>&1 && RESTORE_SESSION=(setsid -w)
   if [ "$FINISHING" = 1 ]; then
-    echo "ERROR: the ro-root/relay restore on $HOST was INTERRUPTED -- check by hand: 'findmnt -no OPTIONS /' must say ro, 'systemctl is-active $RELAY_UNIT' must match its state before the deploy (${WAS_ACTIVE:-unknown})" >&2 2>/dev/null
+    # The restore itself was interrupted. finish_box is safe to repeat (remount,ro on an ro root and
+    # start on an active unit are no-ops), so run it again -- now signal-proof -- and only ask for a
+    # hand check if that fails too.
+    echo "WARNING: the ro-root/relay restore on $HOST was interrupted -- running it again" >&2 2>/dev/null
+    FINISHING=0
+    if ! finish_once; then
+      echo "ERROR: the ro-root/relay restore on $HOST FAILED after an interruption -- check by hand: 'findmnt -no OPTIONS /' must say ro, 'systemctl is-active $RELAY_UNIT' must match its state before the deploy (${WAS_ACTIVE:-unknown})" >&2 2>/dev/null
+    fi
   elif [ "$BOX_DIRTY" = 1 ]; then
     echo "ERROR: deploy interrupted/aborted after the box was touched -- restoring the ro root + the relay state" >&2 2>/dev/null
     finish_once

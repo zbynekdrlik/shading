@@ -26,6 +26,7 @@ import os
 import re
 import stat
 import subprocess
+import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -606,7 +607,7 @@ def test_holder_probe_names_the_holder_without_lsof():
     probe = _src(lib, "bkshading_deploy_ro_holder_probe_cmd").stdout
     assert "lsof +L1" in probe and "/proc/" in probe and "(deleted)" in probe
     with tempfile.TemporaryDirectory() as tmp:
-        for tool in ("readlink", "cat", "sort", "head"):
+        for tool in ("readlink", "cat", "sort", "head", "tr", "grep", "awk"):
             os.symlink(subprocess.run(["bash", "-c", "command -v " + tool], capture_output=True,
                                       text=True, check=True).stdout.strip(), os.path.join(tmp, tool))
         r = subprocess.run(["/bin/bash", "-c", probe], capture_output=True, text=True,
@@ -688,7 +689,7 @@ def test_hup_with_a_dead_terminal_still_restores_the_box():
             "a HUP with every stderr write failing must still restore the ro root + the relay:\n" + calls
 
 
-def test_a_signal_inside_the_restore_is_reported_loudly():
+def test_a_signal_inside_the_restore_runs_the_restore_again():
     import signal
     with tempfile.TemporaryDirectory() as tmp:
         b, sha = _bin(tmp)
@@ -699,7 +700,50 @@ def test_a_signal_inside_the_restore_is_reported_loudly():
         p.send_signal(signal.SIGTERM)
         _out, err = p.communicate(timeout=30)
         assert p.returncode != 0
-        assert b"INTERRUPTED" in err and b"findmnt -no OPTIONS /" in err, err
+        assert b"interrupted -- running it again" in err, err
+        calls = _read(log)
+        assert calls.rfind("remount,ro /") < calls.rfind("systemctl start bkshading-relay"), \
+            "the re-run restore must start the relay that was active before:\n" + calls
+
+
+def test_a_second_ctrl_c_cannot_kill_the_rerun_restore():
+    # Ctrl-C from a terminal hits the whole process group; sshpass forwards it to ssh even when the
+    # deploy shell ignores it. The trap's re-run restore therefore runs in its own session (setsid).
+    import signal
+    with tempfile.TemporaryDirectory() as tmp:
+        b, sha = _bin(tmp)
+        done_log = os.path.join(tmp, "ro-done.log")
+        env, log = _deploy_env_custom(tmp, sha, was_active="active",
+                                      ssh_extra='  *"remount,ro"*) sleep 2; echo RO-DONE >> "%s"; exit 0 ;;\n' % done_log)
+        # A stand-in for the real sshpass: it handles SIGINT itself (so the deploy's SIG_IGN is NOT
+        # inherited by ssh) and forwards it, exactly the behaviour that let a second Ctrl-C through.
+        fake_sshpass = os.path.join(tmp, "fake-sshpass")
+        _write_exec(fake_sshpass,
+                    "#!%s\nimport signal, subprocess, sys\n"
+                    "p = subprocess.Popen(sys.argv[1:], preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))\n"
+                    "signal.signal(signal.SIGINT, lambda s, f: p.send_signal(s))\n"
+                    "rc = p.wait()\nsys.exit(128 - rc if rc < 0 else rc)\n" % sys.executable)
+        env["BKSHADING_DEPLOY_SSHPASS_PREFIX"] = fake_sshpass
+        e = dict(os.environ)
+        e.update(env)
+        p = subprocess.Popen(["bash", DEPLOY, "--host", "10.77.9.66", "--binary", b],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=e,
+                             start_new_session=True)
+        _wait_for(log, "remount,ro")
+        os.killpg(p.pid, signal.SIGINT)          # the first Ctrl-C: kills the normal-path remount
+        import time
+        for _ in range(200):                     # wait for the trap's re-run remount
+            if _read(log).count("remount,ro /") >= 2:
+                break
+            time.sleep(0.05)
+        os.killpg(p.pid, signal.SIGINT)          # the second Ctrl-C: must not reach the re-run
+        _out, err = p.communicate(timeout=30)
+        calls = _read(log)
+        assert calls.count("remount,ro /") >= 2, calls
+        # the first remount was killed by Ctrl-C; the re-run one must COMPLETE despite the second
+        assert os.path.exists(done_log) and "RO-DONE" in _read(done_log), \
+            "a second Ctrl-C killed the re-run ro remount:\n" + calls + err.decode()
+        assert calls.rfind("remount,ro /") < calls.rfind("systemctl start bkshading-relay"), calls
 
 
 def test_ssh_transport_rc_other_than_1_is_not_a_busy_mount():
@@ -720,6 +764,13 @@ def test_holder_probe_names_an_exe_held_binary_from_a_fake_proc_tree():
         os.makedirs(os.path.join(pid, "fd"))
         with open(os.path.join(pid, "comm"), "w") as f:
             f.write("bkshading-relay\n")
+        # noise that always reads (deleted) but never holds / -- must not crowd the holder out
+        other = os.path.join(proc, "77")
+        os.makedirs(os.path.join(other, "fd"))
+        with open(os.path.join(other, "comm"), "w") as f:
+            f.write("npm exec x\n")
+        os.symlink("/memfd:doublemapper (deleted)", os.path.join(other, "fd", "9"))
+        os.symlink("/opt/old tool (deleted)", os.path.join(other, "exe"))
         os.symlink("/usr/local/bin/bkshading-relay (deleted)", os.path.join(pid, "exe"))
         with open(os.path.join(pid, "maps"), "w") as f:
             f.write("7f00-7f01 r-xp 00000000 08:02 1234 /usr/lib/libold.so (deleted)\n"
@@ -727,7 +778,7 @@ def test_holder_probe_names_an_exe_held_binary_from_a_fake_proc_tree():
         os.symlink("/var/log/x (deleted)", os.path.join(pid, "fd", "3"))
         bindir = os.path.join(tmp, "bin")
         os.makedirs(bindir)
-        for tool in ("readlink", "cat", "sort", "head", "awk", "sed"):
+        for tool in ("readlink", "cat", "sort", "head", "awk", "tr", "grep"):
             os.symlink(subprocess.run(["bash", "-c", "command -v " + tool], capture_output=True,
                                       text=True, check=True).stdout.strip(), os.path.join(bindir, tool))
         probe = _src(lib, 'bkshading_deploy_ro_holder_probe_cmd "$R"', env={"R": proc}).stdout
@@ -736,7 +787,8 @@ def test_holder_probe_names_an_exe_held_binary_from_a_fake_proc_tree():
         s = _src(lib, 'bkshading_deploy_ro_holders "$T"', env={"T": r.stdout}).stdout.strip()
         assert "bkshading-relay[4242] /usr/local/bin/bkshading-relay" in s, (s, r.stdout)
         assert "/usr/lib/libold.so" in s and "/var/log/x" in s, s
-        assert "libfine" not in s, s
+        assert "libfine" not in s and "memfd" not in s, s
+        assert "npm_exec_x[77] /opt/old tool" in s, "a spaced process name must keep the columns: %s" % s
 
 
 def test_an_unreadable_artifact_list_stops_the_resolver():
@@ -744,13 +796,13 @@ def test_an_unreadable_artifact_list_stops_the_resolver():
         log = os.path.join(tmp, "gh.log")
         gh = _fake_gh(tmp, RUNS, {300: [ARTIFACT], 200: [ARTIFACT], 100: [ARTIFACT]}, log)
         body = _read(gh).replace('if [ "$1" = "api" ]; then\n',
-                                 'if [ "$1" = "api" ]; then\n  case "$2" in *runs/300/*) exit 1 ;; esac\n', 1)
+                                 'if [ "$1" = "api" ]; then\n  case "$2" in *runs/300/*) echo "HTTP 502: Bad Gateway" >&2; exit 1 ;; esac\n', 1)
         _write_exec(gh, body)
         r = _src(RESOLVE_LIB, "ci_run_latest_success zbynekdrlik/camera-box main ci.yml %s" % ARTIFACT,
                  env={"CI_RUN_RESOLVE_GH": gh})
         assert r.returncode != 0 and r.stdout.strip() == "", \
             "one failed artifact lookup must never fall back to an older run: %r" % r.stdout
-        assert "UNREADABLE" in r.stderr, r.stderr
+        assert "UNREADABLE" in r.stderr and "HTTP 502: Bad Gateway" in r.stderr, r.stderr
 
 
 def test_fetch_reports_the_gh_error():
@@ -774,7 +826,12 @@ def _provision_cli(tmp, args, device):
 def test_install_cli_follows_the_rig_mode():
     src = _source_box()
     with tempfile.TemporaryDirectory() as tmp:
+        # a roster box with no mode given: refuse -- guessing would re-arm or kill its relay
         r, calls = _provision_cli(tmp, ["--install"], src)
+        assert r.returncode == 2 and "--rig-mode" in r.stderr, r.stdout + r.stderr
+        assert not os.path.exists(calls), "nothing may be installed without a mode"
+    with tempfile.TemporaryDirectory() as tmp:
+        r, calls = _provision_cli(tmp, ["--install", "--rig-mode", "test"], src)
         assert r.returncode == 0, r.stdout + r.stderr
         log = _read(calls)
         assert re.search(r"^disable bkshading-relay.service$", log, re.M), "TEST source box: disabled\n" + log
@@ -801,7 +858,7 @@ def test_check_cli_fails_an_enabled_source_box_in_test_mode():
         os.chmod(os.path.join(tmp, "bin", "bkshading-relay"), 0o755)
         ok, _ = _provision_cli(tmp, ["--check", "--rig-mode", "event"], src)
         assert ok.returncode == 0, ok.stdout + ok.stderr
-        bad, _ = _provision_cli(tmp, ["--check"], src)
+        bad, _ = _provision_cli(tmp, ["--check", "--rig-mode", "test"], src)
         assert bad.returncode != 0 and "wants it disabled" in bad.stderr, bad.stderr
 
 

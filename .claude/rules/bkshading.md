@@ -817,9 +817,11 @@ the root stayed read-WRITE (cam6/cam7).
   camera-box drop-ins + unit + optional binary + `enable` OR `disable`, literal is-enabled
   read-back, never a start). Both `bkshading-provision-relay.sh` (CLI) and `setup-device.sh`
   `[bkshading-relay]` source it. Never copy the body back into a script. The CLI takes
-  `--rig-mode test|event` too (hostname = the box, `BKSHADING_RELAY_DEVICE_NAME` overrides), so a
-  manual `--install` on the source box or cam2 in TEST installs it DISABLED, and `--check` grades
-  the same enable-state.
+  `--rig-mode test|event` too (hostname = the box, `BKSHADING_RELAY_DEVICE_NAME` overrides) and
+  `--check` grades the same enable-state. On a ROSTER box (source box / cam2) the CLI REFUSES
+  (exit 2) without `--rig-mode` or `CAMERA_BOX_RIG_MODE` -- the answer differs per mode, and a
+  guessed `test` during an event would disable the broadcast relay; any other box is `enabled` in
+  both modes, so no mode is needed there.
 - **setup-device enable-state follows `--rig-mode` (default `test`):** TEST = the relay roster (the
   source box from `camera_source_box` + cam2, the SAME two boxes `rig-mode.sh` stops+disables)
   installed DISABLED, every other box enabled; EVENT = enabled. The default is `test` because it is
@@ -854,15 +856,22 @@ the root stayed read-WRITE (cam6/cam7).
   and the relay in its previous state. The trap turns errexit off, ignores further signals and
   guards every write (`echo ... >&2 2>/dev/null` -- NOT `{ echo >&2; } 2>/dev/null`, which silences
   it), so a HUP'd terminal whose stderr writes all fail still restores. A signal INSIDE the restore
-  (`FINISHING=1`) prints a loud "restore INTERRUPTED -- check findmnt / is-active" instead of
-  silently skipping. `ssh_box` carries ServerAliveInterval so a dead connection cannot postpone the
-  restore forever.
+  (`FINISHING=1`) RE-RUNS it (finish_box is idempotent: remount,ro on an ro root and start on an
+  active unit are no-ops) and asks for a hand check (`findmnt` / `is-active`) only if the re-run
+  fails too. `trap ''` alone does NOT make that re-run Ctrl-C-proof: sshpass installs its own
+  handlers and forwards SIGINT to ssh, so the trap runs the re-run's ssh under `setsid -w`
+  (`RESTORE_SESSION`), out of the terminal's process group. The test for it needs a fake sshpass
+  that handles + forwards SIGINT -- with an empty prefix, the inherited SIG_IGN hides the bug.
+  `ssh_box`/`scp_box` carry ServerAliveInterval so a dead connection cannot postpone the restore.
 - **The ro remount is checked:** retried 3x, then FAIL LOUD with the holder named (the pure
   `bkshading_deploy_ro_holders` over `bkshading_deploy_ro_holder_probe_cmd`: `lsof +L1`, or -- a
   cambox has no lsof -- the same columns built from /proc) plus `fuser -vm /`, and exit non-zero.
   The /proc fallback must scan `/proc/<pid>/exe` (a replaced RUNNING binary -- the 25.9. incident --
   is held there, lsof `txt`) and `/proc/<pid>/maps` (`mem`), not only `fd/*`; its PROC_ROOT argument
-  lets a test plant a fake tree. The remote loop exits only 0 or 1, so any other rc (ssh 255,
+  lets a test plant a fake tree (substituted with bash `${body//__PROC__/$root}`, never sed). It
+  drops `/memfd:`, `/dev/shm/`, `/SYSV` noise (always "(deleted)", never holds /) so it cannot crowd
+  the real holder out of the 40-line cap, and turns spaces in a process name into `_` so the lsof
+  columns hold. The remote loop exits only 0 or 1, so any other rc (ssh 255,
   sshpass 5/6) is reported as an ssh failure, not a busy mount. The relay restore still runs.
 - **Run resolution is ONE shared resolver:** `scripts/lib/ci-run-resolve.sh`
   `ci_run_latest_success REPO BRANCH WORKFLOW ARTIFACT [LIMIT=100]`, used by the relay deploy,
