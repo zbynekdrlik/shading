@@ -795,16 +795,99 @@ capture drop — it cascades into stuck D-state gphoto2 processes and fork-exhau
   deploy including a handheld SBC (`--arch arm64`), which shares no xHCI bus with the rig — this is
   a deliberate conservative default (a handheld camera may itself be in use during a broadcast);
   pass `--force-live` for a genuinely off-rig handheld deploy.
-- **The RESTART that adopts a freshly-deployed binary is a SEPARATE, rig-idle-ONLY supervisor
-  step — never part of the deploy.** The deploy stays ENABLE-ONLY (it never starts/restarts the
-  unit; provisioning-scripts.md), and now uses an ETXTBSY-safe swap: scp lands on a staging path
-  in the SAME directory (`<dest>.deploy.<pid>`) then atomic `mv -f` over the (possibly running)
-  binary — scp directly onto a running executable fails `ETXTBSY` ("dest open: Failure"), and
-  `rename(2)` swaps the inode while the running process keeps the old one. So the new bytes are on
-  disk but NOT live until a deliberate restart, and that restart (adopting the new binary, or the
-  interim manual pause/resume) is itself subject to the same rig-idle discipline — do it only when
-  the rig is idle, never during a broadcast. (The relay `Restart=on-failure` lifecycle is issue
-  1228, unchanged here — this deploy touches no systemd unit.)
+- **SUPERSEDED 25.9.2026 (issue 808, see the section below): the deploy now STOPS an active relay
+  before the swap and starts it again after, restoring its previous state.** It used to leave the
+  running relay on the old (deleted-but-open) inode, which made the final `remount,ro` fail
+  "busy" and left cam6/cam7 read-WRITE. The ETXTBSY-safe stage + atomic `mv -f`
+  (`<dest>.deploy.<pid>`) stays. The deploy never STARTS a relay that was stopped, and it is still
+  rig-busy gated, so the stop/start only happens on an idle rig. (The relay `Restart=on-failure`
+  lifecycle is issue 1228, unchanged — this deploy touches no systemd unit.)
+
+
+## Every cambox gets the relay from setup-device; the relay deploy stops, restores and fails loud (issue 808, 25.9.2026)
+
+**The finding:** the 24.9 M.2 re-provisioning of cam1-4 left NO relay on them (no unit, no binary,
+no gphoto2). Only the separate `bkshading-provision-relay.sh` installed it, and `verify-device.sh`
+`(am)` grades a missing relay `na`, so nothing noticed. Separately, `bkshading-deploy-relay.sh`
+swapped the binary under a RUNNING relay: the process kept the deleted-but-open inode, the final
+`remount,ro` failed "busy", the script swallowed it (`2>/dev/null; true || true`), printed OK, and
+the root stayed read-WRITE (cam6/cam7).
+
+- **ONE install body:** `scripts/lib/bkshading-relay-provision.sh` (gphoto2 + env derived from the
+  camera-box drop-ins + unit + optional binary + `enable` OR `disable`, literal is-enabled
+  read-back, never a start). Both `bkshading-provision-relay.sh` (CLI) and `setup-device.sh`
+  `[bkshading-relay]` source it. Never copy the body back into a script. The CLI takes
+  `--rig-mode test|event` too (hostname = the box, `BKSHADING_RELAY_DEVICE_NAME` overrides) and
+  `--check` grades the same enable-state. On a ROSTER box (source box / cam2) the CLI REFUSES
+  (exit 2) without `--rig-mode` or `CAMERA_BOX_RIG_MODE` -- the answer differs per mode, and a
+  guessed `test` during an event would disable the broadcast relay; any other box is `enabled` in
+  both modes, so no mode is needed there.
+- **setup-device enable-state follows `--rig-mode` (default `test`):** TEST = the relay roster (the
+  source box from `camera_source_box` + cam2, the SAME two boxes `rig-mode.sh` stops+disables)
+  installed DISABLED, every other box enabled; EVENT = enabled. The default is `test` because it is
+  the development steady state AND the passive issue-1311 direction; `rig-mode.sh event` enables +
+  starts it. The pure decision is `bkshading_relay_expected_enable_state` (ONE table for setup and
+  verify; an unresolvable source box outside EVENT = `unknown` for every box -> setup installs
+  disabled + records it, verify fails). The painter box comes from `bkshading_relay_roster_painter_box`.
+  A re-provision in TEST only DISABLES a running relay, never stops it: a stop is itself a PTP power
+  change, and `rig-mode.sh test` owns the relay lifecycle.
+- **The relay binary on a gh-less cambox:** `setup-device.sh --relay-binary <path|url>` (the
+  `--probe-binary` idiom; `bkshading_relay_provision_binary_plan` decides, the lib's
+  `bkshading_relay_provision_fetch_binary` carries it out). With gh + GH_TOKEN it downloads
+  `bkshading-linux-amd64` from the SAME ci.yml run STEP 3 used, else the newest one carrying it.
+  No source = a RECORDED `RELAY_PROBLEM` (the unit/env/gphoto2 still go in), and STEP 19 refuses
+  Setup Complete — never an abort before the ro fstab.
+- **verify-device `(ao)`** grades binary + byte-matching unit + env + gphoto2 + the mode's
+  enable-state. The mode is `CAMERA_BOX_RIG_MODE=test|event` (the SAME env setup-device reads), else read off cam2's painter state
+  (`rig_mode_state_probe_remote_snippet`); only a roster box needs it, and an unreadable mode FAILs
+  for one. It sits after `(am)` and BEFORE `(an)`: the `(an)` block is sliced to `(q)` and EXECUTED
+  by `tests/python/test_ndi_discovery_1342.py`, so a new block between `(an)` and `(q)` runs inside
+  that test and fails it.
+- **The deploy's relay state:** read `systemctl is-active` first. An unreadable read (ssh failure /
+  empty) REFUSES before touching the box -- never taken for "not running".
+  `bkshading_deploy_restore_action` = `start` for `active|activating|reloading` (the unit is
+  Restart=on-failure, so `activating (auto-restart)` would otherwise relaunch the old inode mid-swap),
+  `none` otherwise. A running relay is stopped BEFORE the rw remount and started AFTER the ro
+  remount. A byte-verify failure leaves it stopped, loudly, never running unverified bytes.
+  `bkshading_deploy_should_start` stays `no`.
+- **Every exit after the box is touched restores it:** `finish_once` (ro remount + relay restore,
+  exactly once; `BOX_DIRTY` clears only AFTER it returned) runs on each explicit failure path AND
+  from an EXIT trap (INT/TERM/HUP -> exit 130/143/129), so a Ctrl-C mid-scp still leaves the root ro
+  and the relay in its previous state. The trap turns errexit off, ignores further signals and
+  guards every write (`echo ... >&2 2>/dev/null` -- NOT `{ echo >&2; } 2>/dev/null`, which silences
+  it), so a HUP'd terminal whose stderr writes all fail still restores. A signal INSIDE the restore
+  (`FINISHING=1`) RE-RUNS it (finish_box is idempotent: remount,ro on an ro root and start on an
+  active unit are no-ops) and asks for a hand check (`findmnt` / `is-active`) only if the re-run
+  fails too. `trap ''` alone does NOT make that re-run Ctrl-C-proof: sshpass installs its own
+  handlers and forwards SIGINT to ssh, so the trap runs the re-run's ssh under `setsid -w`
+  (`RESTORE_SESSION`), out of the terminal's process group. The test for it needs a fake sshpass
+  that handles + forwards SIGINT -- with an empty prefix, the inherited SIG_IGN hides the bug.
+  Consequence: the re-run restore can only be stopped with SIGKILL. That is bounded (ConnectTimeout
+  10, ServerAlive ~30 s, the 3x2 s remount loop; the Type=simple unit's `start` returns at once).
+  `ssh_box`/`scp_box` carry ServerAliveInterval so a dead connection cannot postpone the restore.
+- **The ro remount is checked:** retried 3x, then FAIL LOUD with the holder named (the pure
+  `bkshading_deploy_ro_holders` over `bkshading_deploy_ro_holder_probe_cmd`: `lsof +L1`, or -- a
+  cambox has no lsof -- the same columns built from /proc) plus `fuser -vm /`, and exit non-zero.
+  The /proc fallback must scan `/proc/<pid>/exe` (a replaced RUNNING binary -- the 25.9. incident --
+  is held there, lsof `txt`) and `/proc/<pid>/maps` (`mem`), not only `fd/*`; its PROC_ROOT argument
+  lets a test plant a fake tree (substituted with bash `${body//__PROC__/$root}`, never sed). It
+  drops `/memfd:`, `/dev/shm/`, `/SYSV` noise (always "(deleted)", never holds /) so it cannot crowd
+  the real holder out of the 40-line cap, and turns spaces in a process name into `_` so the lsof
+  columns hold. The remote loop exits only 0 or 1, so any other rc (ssh 255,
+  sshpass 5/6) is reported as an ssh failure, not a busy mount. The relay restore still runs.
+- **Run resolution is ONE shared resolver:** `scripts/lib/ci-run-resolve.sh`
+  `ci_run_latest_success REPO BRANCH WORKFLOW ARTIFACT [LIMIT=100]`, used by the relay deploy,
+  `deploy-fleet.sh` and the setup-device relay `latest` plan. It lists runs WITHOUT the server-side
+  `--status` filter, takes success newest first by createdAt client-side, requires the artifact
+  present + non-expired, and logs id + date + sha. An UNREADABLE artifact list (gh/api failure,
+  `ci_run_has_artifact` rc 2) STOPS the resolver -- moving on to an older run there would be the
+  stale pick again. Every JSON step goes through gh's BUILT-IN `--jq`
+  (`ci_run_newest_success_filter` is the one program): a cambox has gh but no jq. setup-device STEP
+  3's own camera-box query is NOT migrated -- its `--status success` / `// empty` shape is pinned by
+  `tests/setup_device_fleet_binary_ndi.rs` + `setup_device_provisioning_defects_1066.rs`, and the
+  relay deliberately follows the SAME run STEP 3 picked. The old `--status success --limit 1` picked the 4.9. run 33857572305 on 25.9. The query
+  returned the newest run again when re-checked the same day, so the root of that stale answer is
+  unknown; the client-side pick + the log make any future wrong pick visible and harmless.
 
 
 ## Panel +/- step buttons — aperture is a CHOICE step, K/tint are linear (issue 1304)

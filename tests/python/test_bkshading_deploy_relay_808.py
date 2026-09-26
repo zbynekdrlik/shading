@@ -224,6 +224,9 @@ def _fake_deploy_env(tmp, remote_sha):
         'printf "SSH %s\\n" "$*" >> "__LOG__"\n'
         'cmd="${!#}"\n'
         "case \"$cmd\" in\n"
+        # issue 808: the deploy reads the relay state first and refuses on an unreadable read, so
+        # the fake box answers it like a real one whose relay is stopped.
+        '  *"is-active"*) printf "inactive\\n" ;;\n'
         '  *sha256sum*) printf "__SHA__\\n" ;;\n'
         '  *"test -x"*) printf "yes\\n" ;;\n'
         "  *) : ;;\n"
