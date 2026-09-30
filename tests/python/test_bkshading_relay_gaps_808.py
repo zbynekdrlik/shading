@@ -101,13 +101,21 @@ def test_resolver_uses_only_gh_builtin_jq():
     assert "--jq" in body
 
 
-def _fake_gh(tmp, runs, artifacts_by_run, log):
-    """A fake gh: `run list` prints RUNS through its --jq program (like gh's built-in jq);
+def _fake_gh(tmp, runs, artifacts_by_run, log, head=None):
+    """A fake gh: `run list` prints RUNS through its --jq program (like gh's built-in jq), filtered
+    by `--commit <sha>` when given; `api .../branches/<b>` answers the branch HEAD (#1394: the
+    resolver anchors on it -- by default the headSha of the newest run by createdAt, here the failed
+    run 400, so these issue-808 cases keep resolving through the older-success walk);
     `api .../runs/<id>/artifacts` lists that run's artifacts; `run view <id>` prints a headSha;
     `run download <id> -n <a> --dir <d>` writes <d>/bkshading-relay."""
     runs_json = os.path.join(tmp, "runs.json")
     with open(runs_json, "w", encoding="utf-8") as f:
         json.dump(runs, f)
+    if head is None:
+        head = max(runs, key=lambda x: x["createdAt"])["headSha"] if runs else "0" * 40
+    branch_json = os.path.join(tmp, "branch.json")
+    with open(branch_json, "w", encoding="utf-8") as f:
+        json.dump({"commit": {"sha": head}}, f)
     arts = os.path.join(tmp, "arts")
     os.makedirs(arts, exist_ok=True)
     for rid, names in artifacts_by_run.items():
@@ -118,10 +126,13 @@ def _fake_gh(tmp, runs, artifacts_by_run, log):
         "#!/usr/bin/env bash\n"
         'printf "GH %s\\n" "$*" >> "__LOG__"\n'
         'if [ "$1 $2" = "run list" ]; then\n'
-        '  q=""; for a in "$@"; do [ "${prev:-}" = "--jq" ] && q="$a"; prev="$a"; done\n'
-        '  if [ -n "$q" ]; then jq -r "$q" "__RUNS__"; else cat "__RUNS__"; fi; exit 0\n'
+        '  q=""; c=""; for a in "$@"; do [ "${prev:-}" = "--jq" ] && q="$a"; [ "${prev:-}" = "--commit" ] && c="$a"; prev="$a"; done\n'
+        '  src="__RUNS__"\n'
+        '  if [ -n "$c" ]; then src="__RUNS__.commit"; jq --arg c "$c" "[.[] | select(.headSha == \\$c)]" "__RUNS__" > "$src"; fi\n'
+        '  if [ -n "$q" ]; then jq -r "$q" "$src"; else cat "$src"; fi; exit 0\n'
         "fi\n"
         'if [ "$1" = "api" ]; then\n'
+        '  case "$2" in */branches/*) q=""; for a in "$@"; do [ "${prev:-}" = "--jq" ] && q="$a"; prev="$a"; done; jq -r "$q" "__BRANCH__"; exit 0 ;; esac\n'
         '  id="$(printf "%s" "$2" | sed -n "s#.*/runs/\\([0-9]*\\)/artifacts.*#\\1#p")"\n'
         '  [ -f "__ARTS__/$id" ] && cat "__ARTS__/$id"; exit 0\n'
         "fi\n"
@@ -132,6 +143,7 @@ def _fake_gh(tmp, runs, artifacts_by_run, log):
         "fi\n"
         "exit 0\n"
     ).replace("__LOG__", log).replace("__RUNS__", runs_json).replace("__ARTS__", arts)
+    body = body.replace("__BRANCH__", branch_json)
     _write_exec(gh, body)
     return gh
 
