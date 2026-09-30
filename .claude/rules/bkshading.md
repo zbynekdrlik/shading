@@ -3,6 +3,7 @@ paths:
   - "bkshading/**"
   - "scripts/bkshading-*"
   - "scripts/lib/bkshading-*"
+  - "scripts/lib/ci-run-resolve.sh"
   - "systemd/bkshading-*"
 ---
 
@@ -877,18 +878,42 @@ the root stayed read-WRITE (cam6/cam7).
   sshpass 5/6) is reported as an ssh failure, not a busy mount. The relay restore still runs.
 - **Run resolution is ONE shared resolver:** `scripts/lib/ci-run-resolve.sh`
   `ci_run_latest_success REPO BRANCH WORKFLOW ARTIFACT [LIMIT=100]`, used by the relay deploy,
-  `deploy-fleet.sh` and the setup-device relay `latest` plan. It lists runs WITHOUT the server-side
-  `--status` filter, takes success newest first by createdAt client-side, requires the artifact
-  present + non-expired, and logs id + date + sha. An UNREADABLE artifact list (gh/api failure,
-  `ci_run_has_artifact` rc 2) STOPS the resolver -- moving on to an older run there would be the
-  stale pick again. Every JSON step goes through gh's BUILT-IN `--jq`
-  (`ci_run_newest_success_filter` is the one program): a cambox has gh but no jq. setup-device STEP
-  3's own camera-box query is NOT migrated -- its `--status success` / `// empty` shape is pinned by
-  `tests/setup_device_fleet_binary_ndi.rs` + `setup_device_provisioning_defects_1066.rs`, and the
-  relay deliberately follows the SAME run STEP 3 picked. The old `--status success --limit 1` picked the 4.9. run 33857572305 on 25.9. The query
-  returned the newest run again when re-checked the same day, so the root of that stale answer is
-  unknown; the client-side pick + the log make any future wrong pick visible and harmless.
-
+  `deploy-fleet.sh`, the setup-device relay `latest` plan and (since #1394) setup-device STEP 3 /
+  STEP 3b's camera-box + probe-tools lookups. The relay still follows the SAME run STEP 3 picked.
+  - **It anchors on the branch HEAD (#1394).** The 30.9.2026 recurrence: a relay deploy to
+    cam4-cam7 got the 4.9. run 33857572305 while the main head 1f7e6569b had its own success run
+    36687519583. The filtered runs listing itself was STALE (newest success 15.9., artifact
+    expired), and the same query read correctly a minute later, so no client-side sort can fix it:
+    the run is absent from the payload. The resolver reads the head sha from the branch REF
+    (`gh api repos/R/branches/B --jq .commit.sha`, strongly consistent), then the head commit's own
+    runs (`gh run list --commit <head>`); a success carrying the artifact is the pick, logged
+    `head-anchored`. The branch listing is read ONLY when that lookup has no run for the head (the
+    stale check) or the head's run is not usable (the fallback), so a listing hiccup never refuses
+    a build already known good.
+  - **No run for the head in the head lookup NOR the branch listing = a stale listing.** It
+    re-reads both `CI_RUN_RESOLVE_RETRIES` times (default 3, `CI_RUN_RESOLVE_RETRY_S` 10 s between,
+    the sleep injectable via `CI_RUN_RESOLVE_SLEEP`), then fails loud naming the head, "stale GitHub
+    listing" and `pass --run <id>`. ci.yml runs on every push to dev and main, so a head with no run
+    anywhere is a stale listing or a run seconds from being created -- never a reason to deploy an
+    older build silently.
+  - **The head's run queued / in progress / failed / without the artifact:** the older-success walk
+    (success newest first by createdAt, client-side, NO server-side `--status` filter, artifact
+    present + non-expired), with ONE loud `FALLING BACK` line naming the head's state and the
+    fallback run's id, date and sha.
+  - **Fail loud, never a fallback:** a gh error on the head read (or a head that is not a 40-hex
+    sha), on the head's run lookup, on the listing, or an UNREADABLE artifact list
+    (`ci_run_has_artifact` rc 2).
+  - Every JSON step goes through gh's BUILT-IN `--jq` (`ci_run_newest_success_filter`,
+    `ci_run_rows_of_sha_filter`, `ci_run_listing_filter`): a cambox has gh but no jq.
+  - Tests: `tests/python/test_ci_run_resolve_1394.py` (a fake gh that replays listing SNAPSHOTS, so a
+    stale-then-fresh listing is a real case, plus a fake sleep; it also runs setup-device's own call
+    lines against the fake gh on PATH) and the issue-808 cases in
+    `tests/python/test_bkshading_relay_gaps_808.py`. A fake gh for this lib must answer the branch
+    head with a full 40-hex sha and filter `run list --commit`.
+  - setup-device's old inline `gh run list --status success --limit 1 -q '.[0].databaseId // empty'`
+    was pinned by `tests/setup_device_fleet_binary_ndi.rs` + `setup_device_provisioning_defects_1066.rs`;
+    those tests now pin the lib call and the ABSENCE of `--status success`. The `no successful CI run
+    found on branch` fail wording stays (`setup_device_provisioner_hardening.rs` pins it).
 
 ## Panel +/- step buttons — aperture is a CHOICE step, K/tint are linear (issue 1304)
 
