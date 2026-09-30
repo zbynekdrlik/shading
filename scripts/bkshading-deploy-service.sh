@@ -62,6 +62,8 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/bkshading-deploy-service-runtime.sh
 . "$HERE/lib/bkshading-deploy-service-runtime.sh"
+# shellcheck source=scripts/lib/ci-run-resolve.sh
+. "$HERE/lib/ci-run-resolve.sh" # ci_run_latest_success -- the ONE head-anchored CI run resolver (#1394)
 
 ARTIFACT="${ARTIFACT:-$(bkshading_service_artifact_name)}"
 EXE_NAME="$(bkshading_service_exe_name)"
@@ -184,9 +186,10 @@ fi
 # Resolve the service exe (a pre-downloaded --binary, or the CI artifact).
 if [ -z "$BINARY" ]; then
   if [ -z "$RUN_ID" ]; then
-    RUN_ID="$("$GH" run list --repo "$REPO" --branch "$BRANCH" --workflow ci.yml \
-      --status success --limit 1 --json databaseId --jq '.[0].databaseId' 2>/dev/null || true)"
-    [ -n "$RUN_ID" ] || { echo "ERROR: no successful ci.yml run found on $BRANCH" >&2; exit 1; }
+    # #1394: the ONE shared resolver -- the branch head's own ci.yml run, a loud fallback, or a loud
+    # refusal of a stale runs listing (never the old one-shot `--status success --limit 1` pick).
+    RUN_ID="$(CI_RUN_RESOLVE_GH="$GH" ci_run_latest_success "$REPO" "$BRANCH" ci.yml "$ARTIFACT")" || RUN_ID=""
+    [ -n "$RUN_ID" ] || { echo "ERROR: no usable ci.yml run on $BRANCH carries $ARTIFACT (the ci-run-resolve line above names why)" >&2; exit 1; }
   fi
   DIST="$(mktemp -d)"
   # shellcheck disable=SC2064  # expand DIST now so the trap has the concrete path.

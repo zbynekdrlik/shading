@@ -278,11 +278,11 @@ trap 'exit 129' HUP
 # --- resolve the relay binary (a pre-downloaded --binary, or the CI artifact) ---
 if [ -z "$BINARY" ]; then
   if [ -z "$RUN_ID" ]; then
-    # issue 808: the ONE shared resolver (deploy-fleet.sh uses it too) -- the newest SUCCESSFUL
-    # ci.yml run by createdAt that carries $ARTIFACT, decided client-side and logged. The old
-    # server-side-filtered one-shot query picked a 3-week-old run on 25.9.2026.
+    # issue 808 + #1394: the ONE shared resolver (deploy-fleet.sh uses it too) -- the branch head's
+    # own ci.yml run carrying $ARTIFACT, else a loud fallback to the newest older one, else a loud
+    # refusal of a stale runs listing. A stale listing picked a 3-week-old run on 25.9. and 30.9.2026.
     RUN_ID="$(CI_RUN_RESOLVE_GH="$GH" ci_run_latest_success "$REPO" "$BRANCH" ci.yml "$ARTIFACT")" || RUN_ID=""
-    [ -n "$RUN_ID" ] || { echo "ERROR: no successful ci.yml run on $BRANCH carries $ARTIFACT" >&2; exit 1; }
+    [ -n "$RUN_ID" ] || { echo "ERROR: no usable ci.yml run on $BRANCH carries $ARTIFACT (the ci-run-resolve line above names why)" >&2; exit 1; }
   fi
   DIST="$(mktemp -d)"   # removed by the deploy_on_exit trap (mirrors deploy-fleet.sh's DIST cleanup)
   echo "Downloading $ARTIFACT from ci.yml run $RUN_ID ($REPO) ..."
