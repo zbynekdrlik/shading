@@ -48,7 +48,10 @@ set -euo pipefail
 #   --keepalive-minutes N  keep-alive task repetition cadence (default from the lib).
 #   --execute              perform the real deploy (scp + run installer). Default = DRY-RUN.
 #   -h | --help            show this header.
-# With neither --run nor --binary, the latest successful ci.yml run on $BRANCH is used (--execute only).
+# With neither --run nor --binary, the ci.yml run of the $BRANCH head is used (--execute only), via
+# the shared head-anchored resolver scripts/lib/ci-run-resolve.sh (#1394): a loud fallback to the
+# newest older successful run while the head's run is in flight or failed, a refusal on a stale
+# runs listing (pass --run <id>).
 #
 # Env: STRIH_SSH_PW (default newlevel), REPO (default zbynekdrlik/camera-box), BRANCH (default main).
 #      Test overrides (inject fakes): BKSHADING_SVC_GH, BKSHADING_SVC_SSH, BKSHADING_SVC_SCP,
@@ -161,7 +164,7 @@ installer_cmd() {  # $1 = "-Execute" or ""
 # --- DRY-RUN: print the plan, touch NOTHING remote ---
 if [ "$EXECUTE" -eq 0 ]; then
   BIN_DESC="$BINARY"
-  [ -n "$BIN_DESC" ] || BIN_DESC="(will download $ARTIFACT from ci.yml run ${RUN_ID:-<latest success on $BRANCH>})"
+  [ -n "$BIN_DESC" ] || BIN_DESC="(will download $ARTIFACT from ci.yml run ${RUN_ID:-<the $BRANCH head run, resolved on --execute>})"
   cat <<PLAN
 DRY-RUN — bkshading service deploy plan (touches nothing; re-run with --execute to deploy):
   host           : $HOST  (user $USER_NAME)

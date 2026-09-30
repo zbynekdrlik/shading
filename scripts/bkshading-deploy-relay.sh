@@ -47,9 +47,11 @@ set -euo pipefail
 #                     override ONLY, logged loudly — a relay deploy/restart during live production can
 #                     fork-wedge the cambox (gphoto2 PTP on the shared xHCI bus, 2026-09-13 #1229).
 #   -h | --help       show this header.
-# With neither --run nor --binary, the newest SUCCESSFUL ci.yml run on $BRANCH that carries the
-# artifact is used — the ONE shared resolver scripts/lib/ci-run-resolve.sh (deploy-fleet.sh uses it
-# too), which logs the chosen run id + date + sha (issue 808: the old query picked a stale run).
+# With neither --run nor --binary, the ci.yml run of the $BRANCH head that carries the artifact is
+# used — the ONE shared resolver scripts/lib/ci-run-resolve.sh (deploy-fleet.sh uses it too). It
+# logs the chosen run id + date + sha; while the head's own run is in flight or failed it falls back
+# LOUDLY to the newest older successful run, and it REFUSES a stale runs listing (pass --run <id>).
+# (issue 808 + #1394: the old query picked a 3-week-old run twice.)
 # SBC/handheld example: scripts/bkshading-deploy-relay.sh --host <sbc> --arch arm64 --no-remount
 #
 # Env: SSH_PASS (default newlevel), REPO (default zbynekdrlik/camera-box), BRANCH (default main),
