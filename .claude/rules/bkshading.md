@@ -879,7 +879,13 @@ the root stayed read-WRITE (cam6/cam7).
 - **Run resolution is ONE shared resolver:** `scripts/lib/ci-run-resolve.sh`
   `ci_run_latest_success REPO BRANCH WORKFLOW ARTIFACT [LIMIT=100]`, used by the relay deploy,
   `deploy-fleet.sh`, the setup-device relay `latest` plan and (since #1394) setup-device STEP 3 /
-  STEP 3b's camera-box + probe-tools lookups. The relay still follows the SAME run STEP 3 picked.
+  STEP 3b's camera-box + probe-tools lookups and the strih service deploy
+  (`bkshading-deploy-service.sh`). The relay still follows the SAME run STEP 3 picked.
+  - **Contract: the workflow runs on EVERY push of the branch** (no `paths:` filter). ci.yml does.
+    A path-filtered workflow (linux-genlock.yml) leaves most heads with no run, which the resolver
+    reads as a stale listing and refuses -- so `setup-imag.sh`'s linux-genlock lookup keeps its own
+    query, and the parity-align libs stay commit-scoped (`--commit <sha>`). Never point this
+    resolver at a path-filtered workflow.
   - **It anchors on the branch HEAD (#1394).** The 30.9.2026 recurrence: a relay deploy to
     cam4-cam7 got the 4.9. run 33857572305 while the main head 1f7e6569b had its own success run
     36687519583. The filtered runs listing itself was STALE (newest success 15.9., artifact
@@ -900,6 +906,10 @@ the root stayed read-WRITE (cam6/cam7).
     (success newest first by createdAt, client-side, NO server-side `--status` filter, artifact
     present + non-expired), with ONE loud `FALLING BACK` line naming the head's state and the
     fallback run's id, date and sha.
+  - **The walk only uses a listing read that itself holds a run of the head** (review round 1). A
+    listing without one is the stale set even when the head lookup already shows the head's run in
+    flight -- walking it redeployed the 4.9. run in the review's replay. It is re-read within the
+    same retry budget, then refused; a listing from an earlier read is never walked.
   - **Fail loud, never a fallback:** a gh error on the head read (or a head that is not a 40-hex
     sha), on the head's run lookup, on the listing, or an UNREADABLE artifact list
     (`ci_run_has_artifact` rc 2).
@@ -909,7 +919,8 @@ the root stayed read-WRITE (cam6/cam7).
     stale-then-fresh listing is a real case, plus a fake sleep; it also runs setup-device's own call
     lines against the fake gh on PATH) and the issue-808 cases in
     `tests/python/test_bkshading_relay_gaps_808.py`. A fake gh for this lib must answer the branch
-    head with a full 40-hex sha and filter `run list --commit`.
+    head with a full 40-hex sha and filter `run list --commit`. `CI_RUN_RESOLVE_RETRIES` is read as
+    decimal (`08` is a count, never octal).
   - setup-device's old inline `gh run list --status success --limit 1 -q '.[0].databaseId // empty'`
     was pinned by `tests/setup_device_fleet_binary_ndi.rs` + `setup_device_provisioning_defects_1066.rs`;
     those tests now pin the lib call and the ABSENCE of `--status success`. The `no successful CI run
