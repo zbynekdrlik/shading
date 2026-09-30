@@ -48,7 +48,10 @@ set -euo pipefail
 #   --keepalive-minutes N  keep-alive task repetition cadence (default from the lib).
 #   --execute              perform the real deploy (scp + run installer). Default = DRY-RUN.
 #   -h | --help            show this header.
-# With neither --run nor --binary, the latest successful ci.yml run on $BRANCH is used (--execute only).
+# With neither --run nor --binary, the ci.yml run of the $BRANCH head is used (--execute only), via
+# the shared head-anchored resolver scripts/lib/ci-run-resolve.sh (#1394): a loud fallback to the
+# newest older successful run while the head's run is in flight or failed, a refusal on a stale
+# runs listing (pass --run <id>).
 #
 # Env: STRIH_SSH_PW (default newlevel), REPO (default zbynekdrlik/camera-box), BRANCH (default main).
 #      Test overrides (inject fakes): BKSHADING_SVC_GH, BKSHADING_SVC_SSH, BKSHADING_SVC_SCP,
@@ -62,6 +65,8 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/bkshading-deploy-service-runtime.sh
 . "$HERE/lib/bkshading-deploy-service-runtime.sh"
+# shellcheck source=scripts/lib/ci-run-resolve.sh
+. "$HERE/lib/ci-run-resolve.sh" # ci_run_latest_success -- the ONE head-anchored CI run resolver (#1394)
 
 ARTIFACT="${ARTIFACT:-$(bkshading_service_artifact_name)}"
 EXE_NAME="$(bkshading_service_exe_name)"
@@ -159,7 +164,7 @@ installer_cmd() {  # $1 = "-Execute" or ""
 # --- DRY-RUN: print the plan, touch NOTHING remote ---
 if [ "$EXECUTE" -eq 0 ]; then
   BIN_DESC="$BINARY"
-  [ -n "$BIN_DESC" ] || BIN_DESC="(will download $ARTIFACT from ci.yml run ${RUN_ID:-<latest success on $BRANCH>})"
+  [ -n "$BIN_DESC" ] || BIN_DESC="(will download $ARTIFACT from ci.yml run ${RUN_ID:-<the $BRANCH head run, resolved on --execute>})"
   cat <<PLAN
 DRY-RUN — bkshading service deploy plan (touches nothing; re-run with --execute to deploy):
   host           : $HOST  (user $USER_NAME)
@@ -184,9 +189,10 @@ fi
 # Resolve the service exe (a pre-downloaded --binary, or the CI artifact).
 if [ -z "$BINARY" ]; then
   if [ -z "$RUN_ID" ]; then
-    RUN_ID="$("$GH" run list --repo "$REPO" --branch "$BRANCH" --workflow ci.yml \
-      --status success --limit 1 --json databaseId --jq '.[0].databaseId' 2>/dev/null || true)"
-    [ -n "$RUN_ID" ] || { echo "ERROR: no successful ci.yml run found on $BRANCH" >&2; exit 1; }
+    # #1394: the ONE shared resolver -- the branch head's own ci.yml run, a loud fallback, or a loud
+    # refusal of a stale runs listing (never the old one-shot `--status success --limit 1` pick).
+    RUN_ID="$(CI_RUN_RESOLVE_GH="$GH" ci_run_latest_success "$REPO" "$BRANCH" ci.yml "$ARTIFACT")" || RUN_ID=""
+    [ -n "$RUN_ID" ] || { echo "ERROR: no usable ci.yml run on $BRANCH carries $ARTIFACT (the ci-run-resolve line above names why)" >&2; exit 1; }
   fi
   DIST="$(mktemp -d)"
   # shellcheck disable=SC2064  # expand DIST now so the trap has the concrete path.
