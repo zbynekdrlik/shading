@@ -71,11 +71,12 @@ def _noncomment(text):
 # Shared CI run resolver (scripts/lib/ci-run-resolve.sh) -- ONE resolver, deploy-fleet + relay
 # =============================================================================================
 RUNS = [
-    # deliberately OUT of createdAt order, with a failure newer than every success
-    {"databaseId": 100, "createdAt": "2026-09-04T09:17:04Z", "conclusion": "success", "headSha": "aaa"},
-    {"databaseId": 300, "createdAt": "2026-09-25T17:34:20Z", "conclusion": "success", "headSha": "ccc"},
-    {"databaseId": 400, "createdAt": "2026-09-25T19:00:00Z", "conclusion": "failure", "headSha": "ddd"},
-    {"databaseId": 200, "createdAt": "2026-09-25T07:08:01Z", "conclusion": "success", "headSha": "bbb"},
+    # deliberately OUT of createdAt order, with a failure newer than every success; full 40-hex
+    # shas, because the resolver reads a real commit sha off the branch head (#1394)
+    {"databaseId": 100, "createdAt": "2026-09-04T09:17:04Z", "conclusion": "success", "headSha": "a" * 40},
+    {"databaseId": 300, "createdAt": "2026-09-25T17:34:20Z", "conclusion": "success", "headSha": "c" * 40},
+    {"databaseId": 400, "createdAt": "2026-09-25T19:00:00Z", "conclusion": "failure", "headSha": "d" * 40},
+    {"databaseId": 200, "createdAt": "2026-09-25T07:08:01Z", "conclusion": "success", "headSha": "b" * 40},
 ]
 
 
@@ -92,7 +93,7 @@ def test_newest_success_filter_orders_by_created_at_and_drops_failures():
     assert r.returncode == 0, r.stderr
     rows = [ln.split() for ln in r.stdout.splitlines()]
     assert [x[0] for x in rows] == ["300", "200", "100"], r.stdout
-    assert rows[0] == ["300", "2026-09-25T17:34:20Z", "ccc"], rows
+    assert rows[0] == ["300", "2026-09-25T17:34:20Z", "c" * 40], rows
 
 
 def test_resolver_uses_only_gh_builtin_jq():
