@@ -515,14 +515,28 @@ def test_install_keeps_the_logrotate_state_off_the_read_only_root():
     assert lines == ["[Service]", "ExecStartPre=", "ExecStartPost=", "ExecStart=",
                      "ExecStart=/usr/sbin/logrotate --state /run/logrotate.status /etc/logrotate.conf"], lines
     rel = _lib_call("bkshading_sbc_logrotate_dropin_path").strip()
-    assert rel == "logrotate.service.d/99-bkshading-ro-root.conf"
+    # zz- sorts after every letter-named drop-in, so an Armbian override.conf can never re-add the
+    # ramlog steps or the old ExecStart after it (drop-ins of all dirs apply in filename order)
+    assert rel == "logrotate.service.d/zz-bkshading-ro-root.conf"
     for net in ({"wlan0": "up", "eth0": "up"}, {"eth0": "up"}):
         root = tempfile.mkdtemp()
         try:
-            r, _c, _b = _run_provision("--install", root, net_ifaces=net)
+            # the first cut wrote 99-bkshading-ro-root.conf (handheld-1): a re-run removes it
+            legacy = os.path.join(_sbc_paths(root)["unit_dir"], "logrotate.service.d",
+                                  "99-bkshading-ro-root.conf")
+            os.makedirs(os.path.dirname(legacy))
+            with open(legacy, "w", encoding="utf-8") as f:
+                f.write("[Service]\n")
+            r, calls, _b = _run_provision("--install", root, net_ifaces=net)
             assert r.returncode == 0, (net, r.stdout, r.stderr)
             dropin = os.path.join(_sbc_paths(root)["unit_dir"], rel)
             assert _read(dropin) == content, (net, _read(dropin))
+            assert not os.path.exists(legacy), "the first cut's drop-in name is gone"
+            # the drop-in takes effect at once on a running board: a daemon-reload after the masks
+            # and the drop-in (they are written in that order, at the end of the read-only root step)
+            log = _read(calls).splitlines()
+            last_mask = max(i for i, ln in enumerate(log) if ln.startswith("mask "))
+            assert "daemon-reload" in log[last_mask + 1:], log
             r2, _c2, _b2 = _run_provision("--check", root, net_ifaces=net)
             assert r2.returncode == 0, (net, r2.stdout, r2.stderr)
             assert "OK: logrotate keeps its state in /run" in r2.stdout, (net, r2.stdout)
@@ -530,7 +544,7 @@ def test_install_keeps_the_logrotate_state_off_the_read_only_root():
                 f.write("[Service]\n")
             r3, _c3, _b3 = _run_provision("--check", root, net_ifaces=net)
             assert r3.returncode == 1, (net, r3.stdout, r3.stderr)
-            assert re.search(r"FAIL: .*99-bkshading-ro-root\.conf.*re-run --install", r3.stderr), (net, r3.stderr)
+            assert re.search(r"FAIL: .*zz-bkshading-ro-root\.conf.*re-run --install", r3.stderr), (net, r3.stderr)
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
