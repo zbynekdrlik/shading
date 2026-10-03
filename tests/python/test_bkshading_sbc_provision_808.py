@@ -1589,6 +1589,44 @@ def test_heal_finishes_the_reload_when_the_pass_is_killed_in_the_middle():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_heal_service_timeouts_cover_the_longest_pass():
+    # Every bounded step of the longest pass (a driver reload), from the lib's constants. The unit's
+    # TimeoutStartSec must cover it and its comment must state the same figures (it said "up to
+    # 15 s settle" while the settled after-read alone takes up to 23 s).
+    def const(fn):
+        return int(_lib_call(fn).strip())
+    tool = const("bkshading_sbc_wifi_tool_timeout_s")
+    sysctl = const("bkshading_sbc_wifi_heal_systemctl_timeout_s")
+    iface_wait = const("bkshading_sbc_wifi_heal_iface_wait_s")
+    settle = const("bkshading_sbc_wifi_heal_settle_s")
+    snapshot = 2 * tool                    # wpa_cli status + signal_poll
+    # the last read starts just inside the settle bound, after a 1 s sleep, + 1 s of SECONDS rounding
+    settled = settle + 1 + snapshot + 1
+    reload_pass = (snapshot                # the "before" read
+                   + tool                  # systemctl is-active (the supplicant does not answer)
+                   + tool                  # the journal count read
+                   + sysctl                # systemctl stop
+                   + tool                  # the journal cursor to the end
+                   + 2 * sysctl            # modprobe -r, modprobe
+                   + iface_wait            # wlan0 comes back
+                   + sysctl                # systemctl start
+                   + settled)
+    assert reload_pass <= int(_unit_value(HEAL_SERVICE, "TimeoutStartSec")), reload_pass
+    unit = _read(HEAL_SERVICE)
+    assert "= %d s" % reload_pass in unit, "the unit comment must state the computed bound"
+    assert "up to %d s" % settled in unit, "the unit comment must state the settled after-read bound"
+    # a pass ended mid-reload runs the trap (load + wlan0 wait + start) inside TimeoutStopSec
+    assert 2 * sysctl + iface_wait <= int(_unit_value(HEAL_SERVICE, "TimeoutStopSec"))
+    # the script takes the bounds from the lib, and the reload makes exactly the calls counted above
+    script = _read(HEAL_SCRIPT)
+    assert 'SYSTEMCTL_TIMEOUT_S="$(bkshading_sbc_wifi_heal_systemctl_timeout_s)"' in script
+    assert 'IFACE_WAIT_S="$(bkshading_sbc_wifi_heal_iface_wait_s)"' in script
+    reload_case = script.split("\n  reload-driver)\n", 1)[1].split("\nesac\n", 1)[0]
+    assert reload_case.count('timeout "$SYSTEMCTL_TIMEOUT_S"') == 3, "stop, modprobe -r, start"
+    load_fn = script.split("\nload_driver() {\n", 1)[1].split("\n}\n", 1)[0]
+    assert load_fn.count('timeout "$SYSTEMCTL_TIMEOUT_S"') == 1 and "wait_for_iface" in load_fn
+
+
 def test_heal_refused_count_ignores_other_supplicant_lines():
     text = "\n".join([
         "wlan0: CTRL-EVENT-SCAN-STARTED",
