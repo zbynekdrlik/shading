@@ -1047,8 +1047,9 @@ def test_netplan_reader_reads_the_armbian_preset_bit_exact():
     try:
         rc, pairs, err = _reader(d)
         assert rc == 0, err
+        # dhcp = the DHCP= netplan itself generates for this YAML (dhcp4 + dhcp6 -> yes)
         assert pairs == [("file", os.path.join(d, WIFI_YAML_NAME)), ("country", "SK"),
-                         ("ssid", WIFI_SSID), ("pass", WIFI_PASS)], pairs
+                         ("dhcp", "yes"), ("ssid", WIFI_SSID), ("pass", WIFI_PASS)], pairs
         assert WIFI_PASS not in err
     finally:
         shutil.rmtree(d, ignore_errors=True)
