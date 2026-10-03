@@ -506,6 +506,11 @@ if name == "systemctl":
         st.update(st.get("on_start", {}))
         save()
         sys.exit(int(st.get("start_rc", 0)))
+    if args[:1] == ["is-active"]:
+        # the supplicant unit's word: `unit_word` when the test sets one, else active/inactive
+        word = st.get("unit_word") or ("active" if st.get("wpa_active", True) else "inactive")
+        print(word)
+        sys.exit(0 if word == "active" else 3)
     if args[:1] == ["is-enabled"]:
         print("enabled")
     sys.exit(0)
@@ -1211,6 +1216,9 @@ def test_heal_restarts_a_hung_supplicant_through_the_reload_path():
         assert "systemctl stop wpa_supplicant@wlan0.service" in tools, tools
         assert "systemctl start wpa_supplicant@wlan0.service" in tools, tools
         assert "reload the WiFi driver sprdwl_ng" in r.stdout, r.stdout
+        # the unit read `active`: a running supplicant that does not answer is hung, so it takes
+        # the reload path (a STOPPED unit is only started, see the issue-808 review tests)
+        assert "systemctl is-active wpa_supplicant@wlan0.service" in tools, tools
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1392,6 +1400,52 @@ def test_heal_reports_a_failed_driver_reload():
         assert _get_state(env)["wpa_active"] is True, "the supplicant must not be left stopped"
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_heal_stuck_decision_reads_the_supplicant_unit_state():
+    # "?" (no wpa_cli answer) is either a STOPPED unit or a HUNG one. Live 3.10.2026 the
+    # supervisor's `systemctl stop` read as hung and cost a driver reload; a stopped unit only
+    # needs a start. The unit word is read only when wpa_cli does not answer.
+    table = [
+        # prev stuck, wpa_state, refused lines, `systemctl is-active` word -> action stuck
+        ("0", "?", "0", "inactive", "start 0"),       # stopped: start it, no reload
+        ("2", "?", "0", "failed", "start 0"),         # given up: start it, no reload
+        ("0", "?", "0", "active", "none 1"),          # running but silent = hung
+        ("2", "?", "0", "active", "reload-driver 0"),
+        ("1", "?", "0", "activating", "none 2"),      # systemd mid auto-restart: still counted
+        ("1", "?", "0", "", "none 2"),                # an unreadable word: never a start
+        ("2", "DISCONNECTED", "1", "inactive", "reload-driver 0"),  # answered: the word is moot
+        ("1", "COMPLETED", "0", "inactive", "none 0"),
+    ]
+    for prev, state, failed, word, want in table:
+        got = _lib_call('bkshading_sbc_wifi_heal_stuck_decide "$A" "$B" "$C" "$D"',
+                        env={"A": prev, "B": state, "C": failed, "D": word}).strip()
+        assert got == want, (prev, state, failed, word, got, want)
+
+
+def test_heal_starts_a_stopped_supplicant_without_a_driver_reload():
+    for word in ("inactive", "failed"):
+        tmp = tempfile.mkdtemp()
+        try:
+            env = _heal_env(tmp, _net_state(wpa_active=False, unit_word=word,
+                                            on_start={"unit_word": None}),
+                            extra_tools=("journalctl", "modprobe"), driver_module="sprdwl_ng")
+            r = _heal_pass(env)
+            assert r.returncode == 0, (word, r.stdout, r.stderr)
+            tools = _heal_tools(env)
+            assert "systemctl is-active wpa_supplicant@wlan0.service" in tools, tools
+            acts = [t for t in tools
+                    if t.startswith(("systemctl stop", "systemctl start", "modprobe"))]
+            assert acts == ["systemctl start wpa_supplicant@wlan0.service"], (word, acts)
+            assert re.search(
+                r"start wpa_supplicant@wlan0\.service on wlan0 \(it was %s; no driver reload\); "
+                r"after bssid=%s signal=-63 dBm wpa_state=COMPLETED; result=ok"
+                % (word, re.escape(GOOD_BSSID)), r.stdout), r.stdout
+            assert _stuck(env) == "0", "a start is no stuck pass"
+            r2 = _heal_pass(env)
+            assert "answers again" in r2.stdout and "the last action: start" in r2.stdout, r2.stdout
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 def test_heal_refused_count_ignores_other_supplicant_lines():
