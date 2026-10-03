@@ -149,10 +149,14 @@ the relay/cloudflared provisioning canon but with two deliberate deltas + one go
     conf; a YAML that also configures other interfaces, a static address, an open/enterprise
     network or any key it would lose; two files defining wlan0; a wlan0 in `/run/netplan` or
     `/lib/netplan` that no `/etc/netplan` file of the same name shadows (netplan reads all three, the
-    migration moves only `/etc` files); a YAML present again while its `.bak` exists; a YAML next to
-    an existing conf that migrates to a DIFFERENT conf (both named; an IDENTICAL one — a re-run after
-    an install that never got to the move — is finished); wpa_cli/ip/ping missing. A re-run keeps an
-    existing conf. A wired box skips all of it.
+    migration moves only `/etc` files); ANY `/run` or `/lib` file under the migrated file's own name
+    (the shadowing is judged AFTER the move: once the `/etc` file is `.bak`, that file goes live —
+    re-review finding, reproduced); a YAML present again while its `.bak` exists; a YAML next to an
+    existing conf with a DIFFERENT WiFi (both named; the SAME WiFi — a re-run after an install that
+    never got to the move — is finished). "Same" = `bkshading_sbc_wpa_conf_identity`: country +
+    SSIDs + PSKs only, never the whole text, so a changed comment or lib constant is no difference;
+    wpa_cli/ip/ping missing (the remediation names the remount for a read-only root). A re-run
+    keeps an existing conf. A wired box skips all of it.
 - **The heal** (`bkshading-wifi-heal.timer`, 20 s; `AccuracySec=1s` — the default 1 min would
   stretch the cadence): pings the DHCP default gateway read from `ip -4 route show default dev
   wlan0` (never a hard-coded address) with `-I wlan0`; a pass misses only when all 3 pings are lost.
@@ -174,14 +178,20 @@ the relay/cloudflared provisioning canon but with two deliberate deltas + one go
   - **The after-read waits for the NEW association.** `wpa_cli reassociate` returns at once, and
     while the supplicant scans it stays COMPLETED on the OLD BSSID, so an immediate read repeats
     "before" even when the roam succeeds. A COMPLETED read counts only after the state left
-    COMPLETED, or the BSSID moved, or 5 s passed (`bkshading_sbc_wifi_heal_min_settle_s`), never past
-    15 s. The test stub keeps the old BSSID for N status reads to prove it.
+    COMPLETED or the BSSID moved; otherwise the heal waits the whole 15 s settle bound (a full
+    2.4 + 5 GHz scan with passive DFS channels takes ~3-8 s, so no short fixed minimum is safe). The
+    test stub keeps the old BSSID for N status reads (2 and 7) to prove it.
   - One journal line per action names the BSSID + signal before and after; the first miss, and the
     first answer after misses or an action (naming that action, from `/run/.../last-action`), are
-    one line each. No reboot, no ifdown.
+    one line each; a supplicant that does not answer (`?`) is logged as such, never as "working".
+    No reboot, no ifdown.
 - **`--check` rows (wl* boards only, skipped on a wired box):** `wpa_supplicant@wlan0` and
   `systemd-networkd` enabled; the conf is mode 0600 and carries the exact bgscan line (the conf
-  holds the PSK: read line by line, never printed); netplan defines no wlan0 any more; the heal
+  holds the PSK: read line by line, never printed); its `ctrl_interface`/`key_mgmt`/`ieee80211w`
+  match the lib (`bkshading_sbc_wpa_conf_setting_lines` — a kept conf is never rewritten, so a later
+  constant change such as the SAE ruling shows here as drift); netplan defines no wlan0 any more
+  (read with the reader's `--names-only` mode, which prints file names only — `--check` never loads
+  a passphrase); the heal
   (script, both libs, units, the restart drop-in) installed byte-identical to this checkout + its
   timer enabled; wpa_cli/ip/ping present; the gateway answers a ping — the FAIL names the BSSID,
   signal and wpa_state, and a missing tool or a no-verdict ping is named as such, never as a dead
