@@ -25,7 +25,9 @@ shadowing the same name in a later one. The migration moves aside a file in <net
 /etc one) only, so a WiFi for the interface in an <other-dir> (/run, /lib) that is not shadowed is
 refused: it would survive the takeover and run a second supplicant on the interface.
 
-Usage: bkshading_sbc_netplan_wifi.py <netplan-dir> <iface> [<other-dir> ...]
+Usage: bkshading_sbc_netplan_wifi.py [--names-only] <netplan-dir> <iface> [<other-dir> ...]
+  --names-only  (for --check) print only `file <path>` for every YAML netplan reads now that
+                defines the interface -- never a passphrase; exit 0 = some, 3 = none, 2 = unreadable.
 """
 import glob
 import os
@@ -108,16 +110,26 @@ def extract(netplan_dir, iface, other_dirs=()):
 
     Returns {"file", "country", "dhcp", "aps": [(ssid, passphrase), ...]}. Raises Unsupported on a
     shape the migration cannot carry over whole, or on a WiFi for iface in an other_dirs file that
-    no earlier directory shadows (the migration cannot move it aside)."""
-    seen = _yaml_names(netplan_dir)
+    no earlier directory shadows (the migration cannot move it aside).
+
+    The shadowing is judged as it will be AFTER the move: the migrated /etc file hides a same-name
+    file in an other_dirs directory only until it is moved aside, so any such file (whatever it
+    defines) would go live and is refused."""
+    found = find_wifi_yamls(netplan_dir, iface)
+    moved = {os.path.basename(p) for p, _ in found}
+    seen = _yaml_names(netplan_dir) - moved
     for other in other_dirs:
+        unhidden = sorted(os.path.join(other, n) for n in moved if os.path.exists(os.path.join(other, n)))
+        if unhidden:
+            raise Unsupported("moving the %s WiFi YAML aside would un-hide %s, which netplan would then "
+                              "read -- remove it or give it another name first"
+                              % (netplan_dir, ", ".join(unhidden)))
         outside = find_wifi_yamls(other, iface, skip_names=seen)
         if outside:
             raise Unsupported("%s defines wifis.%s outside %s, and the migration cannot move it aside "
                               "-- move it into %s (or remove it) first"
                               % (", ".join(p for p, _ in outside), iface, netplan_dir, netplan_dir))
         seen |= _yaml_names(other)
-    found = find_wifi_yamls(netplan_dir, iface)
     if not found:
         return None
     if len(found) > 1:
@@ -153,13 +165,42 @@ def extract(netplan_dir, iface, other_dirs=()):
     }
 
 
+def defining_files(netplan_dir, iface, other_dirs=()):
+    """Every netplan YAML netplan reads NOW that defines iface (the shadowing as it is today): the
+    --check view, which needs no shape check and never touches a passphrase."""
+    files = [p for p, _ in find_wifi_yamls(netplan_dir, iface)]
+    seen = _yaml_names(netplan_dir)
+    for other in other_dirs:
+        files += [p for p, _ in find_wifi_yamls(other, iface, skip_names=seen)]
+        seen |= _yaml_names(other)
+    return files
+
+
 def _emit(tag, value):
     sys.stdout.write(tag + "\0" + value + "\0")
 
 
+USAGE = "usage: bkshading_sbc_netplan_wifi.py [--names-only] <netplan-dir> <iface> [<other-dir> ...]\n"
+
+
 def main(argv):
+    args = argv[1:]
+    if args[:1] == ["--names-only"]:
+        # --check: only WHICH files still define the interface -- no pass field, ever.
+        if len(args) < 3:
+            sys.stderr.write(USAGE)
+            return 2
+        try:
+            files = defining_files(args[1], args[2], args[3:])
+        except Unsupported as e:
+            sys.stderr.write("ERROR: the netplan YAML cannot be read: %s\n" % e)
+            return 2
+        for path in files:
+            _emit("file", path)
+        sys.stdout.flush()
+        return 0 if files else 3
     if len(argv) < 3:
-        sys.stderr.write("usage: bkshading_sbc_netplan_wifi.py <netplan-dir> <iface> [<other-dir> ...]\n")
+        sys.stderr.write(USAGE)
         return 2
     try:
         found = extract(argv[1], argv[2], argv[3:])

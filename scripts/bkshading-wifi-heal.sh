@@ -43,8 +43,6 @@ WPA_UNIT="$(bkshading_sbc_wpa_unit)"
 STATE_DIR="${BKSHADING_WIFI_HEAL_STATE_DIR:-/run/bkshading-wifi-heal}"
 SETTLE_S="$(int_or "${BKSHADING_WIFI_HEAL_SETTLE_S:-}" "$(bkshading_sbc_wifi_heal_settle_s)")"
 TOOL_TIMEOUT_S="$(int_or "${BKSHADING_WIFI_HEAL_TOOL_TIMEOUT_S:-}" "$(bkshading_sbc_wifi_tool_timeout_s)")"
-MIN_SETTLE_S="$(bkshading_sbc_wifi_heal_min_settle_s)"
-[ "$MIN_SETTLE_S" -le "$SETTLE_S" ] || MIN_SETTLE_S="$SETTLE_S"
 PING_COUNT="$(bkshading_sbc_wifi_heal_ping_count)"
 PING_TIMEOUT_S="$(bkshading_sbc_wifi_heal_ping_timeout_s)"
 MISS_LIMIT="$(bkshading_sbc_wifi_heal_miss_limit)"
@@ -55,21 +53,20 @@ SYSTEMCTL_TIMEOUT_S=20
 snapshot() { bkshading_sbc_wifi_snapshot wpa_cli "$CTRL_DIR" "$IFACE" "$TOOL_TIMEOUT_S"; }
 
 # After an action: wait for the NEW association, then print its snapshot. A COMPLETED read counts
-# only once the state left COMPLETED, or the BSSID moved off $1, or MIN_SETTLE_S passed (wpa_cli
-# reassociate returns at once and the supplicant stays COMPLETED on the old BSSID while it scans);
-# never longer than SETTLE_S.
+# only once the state left COMPLETED or the BSSID moved off $1 (wpa_cli reassociate returns at once
+# and the supplicant stays COMPLETED on the old BSSID for its whole scan); otherwise the last read
+# within SETTLE_S is the "after".
 settled_snapshot() {
-  local before="$1" start="$SECONDS" left=0 snap bssid state elapsed
+  local before="$1" start="$SECONDS" left=0 snap bssid state
   while true; do
     snap="$(snapshot)"
     bssid="${snap%% *}"
     state="${snap##* }"
     [ "$state" = COMPLETED ] || left=1
-    elapsed=$((SECONDS - start))
-    if [ "$state" = COMPLETED ] && { [ "$left" = 1 ] || [ "$bssid" != "$before" ] || [ "$elapsed" -ge "$MIN_SETTLE_S" ]; }; then
+    if [ "$state" = COMPLETED ] && { [ "$left" = 1 ] || [ "$bssid" != "$before" ]; }; then
       break
     fi
-    [ "$elapsed" -lt "$SETTLE_S" ] || break
+    [ $((SECONDS - start)) -lt "$SETTLE_S" ] || break
     sleep 1
   done
   printf '%s\n' "$snap"
@@ -124,6 +121,8 @@ if [ "$action" = none ] && [ "$misses" = 1 ]; then
 elif [ "$reachable" = yes ] && { [ "$prev" -gt 0 ] || [ -n "$last_action" ]; }; then
   echo "bkshading-wifi-heal: gateway $gw on $IFACE answers again after $prev consecutive misses (bssid=$b_bssid signal=$b_rssi dBm)${last_action:+, the last action: $last_action}"
   rm -f "$LAST_ACTION_FILE"
+elif [ "$wpa_state" = "?" ] && [ "$prev" -gt 0 ]; then
+  echo "bkshading-wifi-heal: the supplicant on $IFACE does not answer (crashed or hung; systemd restarts a crashed one) -- miss count reset from $prev"
 elif [ "$wpa_state" != COMPLETED ] && [ "$prev" -gt 0 ]; then
   echo "bkshading-wifi-heal: wpa_state=$wpa_state on $IFACE (the supplicant is working) -- miss count reset from $prev"
 fi

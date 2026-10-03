@@ -275,6 +275,26 @@ read_netplan_wifi() {
   fields=()
 }
 
+# --check's netplan read: only WHICH YAML files netplan reads now still define wlan0 (the reader's
+# --names-only mode prints no passphrase). Fills the CALLER's rc and yaml (the files, space-joined).
+read_netplan_wifi_names() {
+  local i
+  local -a fields=() other=()
+  read -r -a other <<<"$NETPLAN_OTHER_DIRS"
+  rc=3
+  mapfile -d '' -t fields < <(
+    set +e
+    "$PYTHON" "$HERE/bkshading_sbc_netplan_wifi.py" --names-only "$NETPLAN_DIR" "$WIFI_IFACE" "${other[@]}"
+    printf 'rc\0%s\0' "$?"
+  )
+  for ((i = 0; i + 1 < ${#fields[@]}; i += 2)); do
+    case "${fields[i]}" in
+      file) yaml="${yaml:+$yaml }${fields[i + 1]}" ;;
+      rc) rc="${fields[i + 1]}" ;;
+    esac
+  done
+}
+
 # The conf the CALLER's ssids/passes/country migrate to, into WIFI_CONF_TEXT. Each passphrase goes
 # to wpa_passphrase on STDIN (it reads it there when no second argument is given); its output,
 # which echoes the passphrase in a #psk= comment, stays in a local variable.
@@ -316,7 +336,9 @@ plan_wifi() {
   missing="$(bkshading_sbc_wifi_missing_tools "$WPA_CLI" "$IP" "$PING")"
   if [ -n "$missing" ]; then
     wifi_refuse "${missing//$'\n'/ } not found -- the WiFi heal and --check need wpa_cli, ip and ping" \
-      "install wpasupplicant (wpa_cli), iproute2 (ip) and iputils-ping (ping), then re-run --install"
+      "install wpasupplicant (wpa_cli), iproute2 (ip) and iputils-ping (ping), then re-run --install;" \
+      "on a read-only root: mount -o remount,rw / && apt-get install -y wpasupplicant iproute2 iputils-ping" \
+      "&& mount -o remount,ro /"
   fi
   if netplan_yaml_present; then
     read_netplan_wifi
@@ -340,10 +362,12 @@ plan_wifi() {
   if [ -e "$WPA_CONF" ]; then
     if [ -n "$WIFI_YAML" ]; then
       # Both define the WiFi (a re-run after an install that never moved the YAML, or a WiFi changed
-      # in netplan later). Only an IDENTICAL migration is finished; a differing one is never dropped.
+      # in netplan later). Only the SAME WiFi (country + SSIDs + PSKs, never the whole text, so a
+      # changed comment or lib constant is no difference) is finished; a different one is never
+      # dropped. Both identities hold the PSK: compared, never printed.
       derive_conf_text
-      existing="$(<"$WPA_CONF")" # holds the PSK: compared, never printed
-      if [ "$existing" != "$WIFI_CONF_TEXT" ]; then
+      existing="$(bkshading_sbc_wpa_conf_identity "$(<"$WPA_CONF")")"
+      if [ "$existing" != "$(bkshading_sbc_wpa_conf_identity "$WIFI_CONF_TEXT")" ]; then
         existing=""
         WIFI_CONF_TEXT=""
         wifi_refuse "$WIFI_YAML still defines wifis.$WIFI_IFACE and its WiFi differs from $WPA_CONF" \
@@ -499,9 +523,9 @@ do_install() {
 # Prints one OK/FAIL row each; returns 1 when any row FAILs. The link reads go through
 # scripts/lib/bkshading-sbc-wifi-probe.sh, the same functions the heal uses.
 check_wifi_takeover() {
-  local fail=0 unit en want line found=0 f mode missing gw snap bssid rssi wstate
-  local rc=3 yaml="" country="" dhcp=""
-  local -a stale=() ssids=() passes=()
+  local fail=0 unit en want line found=0 f mode missing gw snap bssid rssi wstate setting
+  local rc=3 yaml=""
+  local -a stale=() settings=() drift=()
   if [ "${1:-}" = none ]; then
     echo "OK: no wireless interface -- the wpa_supplicant, bgscan, heal and gateway rows are skipped"
     return 0
@@ -519,6 +543,8 @@ check_wifi_takeover() {
   # its conf is 0600 (it holds the PSK) and carries the background scan (read line by line, never
   # printed).
   want="$(bkshading_sbc_bgscan_line)"
+  mapfile -t settings < <(bkshading_sbc_wpa_conf_setting_lines)
+  drift=("${settings[@]}")
   if [ -r "$WPA_CONF" ]; then
     mode="$(stat -c %a "$WPA_CONF" 2>/dev/null || true)"
     if [ "$mode" != 600 ]; then
@@ -528,6 +554,9 @@ check_wifi_takeover() {
     while IFS= read -r line || [ -n "$line" ]; do
       line="${line#"${line%%[![:space:]]*}"}"
       if [ "$line" = "$want" ]; then found=1; fi
+      for f in "${!drift[@]}"; do
+        if [ "$line" = "${drift[f]}" ]; then unset 'drift[f]'; fi
+      done
     done <"$WPA_CONF"
     if [ "$found" = 1 ]; then
       echo "OK: $WPA_CONF carries $want"
@@ -536,15 +565,23 @@ check_wifi_takeover() {
       echo "      add that line to its network block (or move the conf aside, restore the netplan WiFi YAML from its .bak, and re-run --install)" >&2
       fail=1
     fi
+    # the non-secret settings match this lib: a conf kept from before a constant changed drifts.
+    if [ "${#drift[@]}" -eq 0 ]; then
+      echo "OK: $WPA_CONF settings match the lib (${settings[*]%%=*})"
+    else
+      for setting in "${drift[@]}"; do
+        echo "FAIL: $WPA_CONF lacks the lib's $setting -- the conf predates a change of that setting;" >&2
+      done
+      echo "      move the conf aside, move the netplan WiFi YAML back from its .bak, and re-run --install (it migrates again)" >&2
+      fail=1
+    fi
   else
     echo "FAIL: $WPA_CONF missing or unreadable -- re-run --install" >&2
     fail=1
   fi
   # netplan no longer runs its own supplicant on wlan0 (two on one radio fight over it).
   if netplan_yaml_present; then
-    read_netplan_wifi
-    ssids=()
-    passes=()
+    read_netplan_wifi_names
   fi
   case "$rc" in
     3) echo "OK: netplan defines no $WIFI_IFACE (the WiFi is $(bkshading_sbc_wpa_unit)'s)" ;;

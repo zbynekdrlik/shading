@@ -326,6 +326,49 @@ bkshading_sbc_wpa_conf_text() {
   done
 }
 
+# The WiFi IDENTITY of a wpa_supplicant conf: "country=<cc>" then one "network ssid=<v> psk=<v>"
+# line per network block, everything else (comments, ctrl_interface, key_mgmt, bgscan) left out.
+# --install compares identities, never whole texts, so a re-run is not refused because a comment or
+# a constant of this lib changed since the conf was written. Holds the PSK: compare, never print.
+bkshading_sbc_wpa_conf_identity() {
+  local text="${1:-}" line in_net=0 country="" ssid="" psk="" nets=""
+  while [ -n "$text" ]; do
+    line="${text%%$'\n'*}"
+    if [ "$line" = "$text" ]; then text=""; else text="${text#*$'\n'}"; fi
+    line="${line%$'\r'}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    case "$line" in
+      "network={")
+        in_net=1
+        ssid=""
+        psk=""
+        ;;
+      "}")
+        if [ "$in_net" = 1 ]; then nets+="network ssid=$ssid psk=$psk"$'\n'; fi
+        in_net=0
+        ;;
+      country=*)
+        if [ "$in_net" = 0 ]; then country="${line#country=}"; fi
+        ;;
+      ssid=*)
+        if [ "$in_net" = 1 ]; then ssid="${line#ssid=}"; fi
+        ;;
+      psk=*)
+        if [ "$in_net" = 1 ]; then psk="${line#psk=}"; fi
+        ;;
+    esac
+  done
+  printf 'country=%s\n%s' "$country" "$nets"
+}
+
+# The non-secret settings lines a conf must carry to match this lib (--check reports a drift, e.g.
+# a conf kept from before a key_mgmt change); the bgscan line has its own --check row.
+bkshading_sbc_wpa_conf_setting_lines() {
+  printf '%s\n' "ctrl_interface=$(bkshading_sbc_wpa_ctrl_dir)" \
+    "key_mgmt=$(bkshading_sbc_wpa_key_mgmt)" "ieee80211w=$(bkshading_sbc_wpa_ieee80211w)"
+}
+
 # The systemd-networkd file that runs DHCP on the WiFi once wpa_supplicant has associated: the same
 # settings netplan generated before (/run/systemd/network/10-netplan-wlan0.network on handheld-1:
 # DHCP=yes, LinkLocalAddressing=ipv6, RouteMetric=600, UseMTU=true), so nothing else changes. `05-`
@@ -391,14 +434,12 @@ bkshading_sbc_wifi_heal_ping_count() { printf '%s\n' 3; }
 bkshading_sbc_wifi_heal_ping_timeout_s() { printf '%s\n' 2; }
 
 # After an action, wait up to this long for the new association before reading the "after" BSSID
-# and signal for the journal line (a reassociation completes in a few seconds).
+# and signal for the journal line. `wpa_cli reassociate` returns at once, and while the supplicant
+# scans it keeps wpa_state=COMPLETED on the OLD BSSID (it leaves COMPLETED only once it moves), and
+# a full 2.4 + 5 GHz scan with passive DFS channels takes about 3-8 s. So a COMPLETED read counts as
+# the new association only after the state left COMPLETED or the BSSID changed; otherwise (a
+# reassociation back to the same AP, too quick to see) the heal waits this whole bound.
 bkshading_sbc_wifi_heal_settle_s() { printf '%s\n' 15; }
-
-# `wpa_cli reassociate` returns at once, and while the supplicant scans it keeps wpa_state=COMPLETED
-# on the OLD BSSID (it leaves COMPLETED only once it moves). So a COMPLETED read counts as the new
-# association only after the state left COMPLETED, or the BSSID changed, or this many seconds
-# passed (a reassociation back to the same AP); never later than the settle bound above.
-bkshading_sbc_wifi_heal_min_settle_s() { printf '%s\n' 5; }
 
 # One wpa_cli call may take this long: a wedged supplicant (each call otherwise waits ~10 s for its
 # socket) must never push a pass past the service's TimeoutStartSec before its action line is out.
