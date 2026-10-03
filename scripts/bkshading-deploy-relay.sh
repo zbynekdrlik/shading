@@ -15,6 +15,10 @@ set -euo pipefail
 # It mirrors the PROVEN deploy idiom in scripts/deploy-fleet.sh: download ONE CI artifact from a
 # committed/pushed ref (deploy-from-clean-tree.md — never a locally built binary), then the
 # read-only-root swap cycle `remount,rw -> scp -> chmod +x -> sha256 byte-verify -> remount,ro`.
+# ROOT MODE (issue 808, slice B): the deploy READS the target's own root (`findmnt -no OPTIONS /`)
+# and runs that cycle only on a read-only root -- every cambox, and a handheld SBC once its
+# read-only fstab is live. A read-write root (an SBC before its first read-only reboot) is never
+# remounted; an unreadable root refuses before the box is touched. One path for cambox and SBC.
 # Pure decisions (artifact name, relay bin name, the ENABLE-ONLY invariant, the sha-match verdict)
 # live in scripts/lib/bkshading-deploy-runtime.sh so they are Tier-0 unit-testable without a rig.
 #
@@ -29,16 +33,13 @@ set -euo pipefail
 # performs are the standing-approved WORK — this script does NOT ask permission and does NOT gate on
 # "is it off-air"; the operator who runs it guards live timing. It does NOT reboot the host.
 #
-# Usage:  scripts/bkshading-deploy-relay.sh --host <ip> [--arch amd64|arm64] [--no-remount]
+# Usage:  scripts/bkshading-deploy-relay.sh --host <ip> [--arch amd64|arm64]
 #                                           [--run <id> | --binary <path>] [--dry-run] [--force-live]
 #   --host <ip>       (required) the cambox/SBC to deploy the relay to (e.g. 10.77.9.201).
 #   --arch <a>        target arch of the CI artifact: `amd64` (default; cambox — the relay+service
 #                     bkshading-linux-amd64 artifact) or `arm64` (SBC/handheld zero-class arm64 SBC —
 #                     relay-only bkshading-relay-linux-arm64 artifact; issue 808 SBC milestone).
-#   --no-remount      skip the read-only-root remount,rw/remount,ro swap. A camera-box appliance has
-#                     a read-only root (default: remount); a stock arm64 SBC image (Raspberry Pi OS
-#                     / Debian / Armbian) root is read-WRITE, so an SBC deploy passes --no-remount
-#                     (remounting it ro is wrong).
+#                     The remount cycle follows the target's own root mode, never a flag.
 #   --run <id>        pin a specific GitHub Actions ci.yml run id to download the artifact from.
 #   --binary <path>   deploy an already-downloaded CI relay binary (skips gh download).
 #   --dry-run         print the plan and touch no box (no ssh/scp; without --binary it still
@@ -52,7 +53,7 @@ set -euo pipefail
 # logs the chosen run id + date + sha; while the head's own run is in flight or failed it falls back
 # LOUDLY to the newest older successful run, and it REFUSES a stale runs listing (pass --run <id>).
 # (issue 808 + #1394: the old query picked a 3-week-old run twice.)
-# SBC/handheld example: scripts/bkshading-deploy-relay.sh --host <sbc> --arch arm64 --no-remount
+# SBC/handheld example: scripts/bkshading-deploy-relay.sh --host <sbc> --arch arm64
 #
 # Env: SSH_PASS (default newlevel), REPO (default zbynekdrlik/camera-box), BRANCH (default main),
 #      ARTIFACT (default from the lib), STRIH_HOST/STREAM_HOST (rig-busy OBS-WS hosts, default
@@ -60,10 +61,12 @@ set -euo pipefail
 #      BKSHADING_DEPLOY_GH, BKSHADING_DEPLOY_SSH, BKSHADING_DEPLOY_SCP, BKSHADING_DEPLOY_SSHPASS_PREFIX,
 #      BKSHADING_DEPLOY_OBS_PHASE2_DIR (dir holding obs_phase2.py for the rig-busy guard).
 #
-# Exit codes: 0 = relay deployed + byte-verified AND the root back read-only AND the relay back in
-# its previous state; 1 = a step failed / sha256 mismatch / the ro remount failed (holder named) /
-# the restore failed; 2 = bad args. A box never provisioned for the relay: run
-# scripts/bkshading-provision-relay.sh --install on it (setup-device.sh does it on a fresh install).
+# Exit codes: 0 = relay deployed + byte-verified AND the root back in its previous mode (read-only
+# when it was) AND the relay back in its previous state; 1 = a step failed / the root mode or relay
+# state could not be read / sha256 mismatch / the ro remount failed (holder named) / the restore
+# failed; 2 = bad args. A box never provisioned for the relay: run
+# scripts/bkshading-provision-relay.sh --install on a cambox (setup-device.sh does it on a fresh
+# install), scripts/bkshading-provision-sbc.sh --install on a handheld SBC.
 # ---------------------------------------------------------------------------------------------
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -99,7 +102,7 @@ BRANCH="${BRANCH:-main}"
 # arch flag decides which CI artifact to fetch), so capture the override here and resolve below.
 ARTIFACT_ENV="${ARTIFACT:-}"
 ARCH="amd64"   # default: cambox (relay+service amd64 artifact); --arch arm64 = SBC/handheld relay
-RO_ROOT=1      # default: read-only-root remount cycle (cambox); --no-remount = stock rw-root SBC
+RO_ROOT=0      # issue 808: 1 once the target's own root reads read-only (the remount cycle runs)
 
 # Overridable command surfaces (real defaults; the test injects fakes + an empty sshpass prefix).
 GH="${BKSHADING_DEPLOY_GH:-gh}"
@@ -129,7 +132,6 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --host) require_val "$#" --host; HOST="$2"; shift 2 ;;
     --arch) require_val "$#" --arch; ARCH="$2"; shift 2 ;;
-    --no-remount) RO_ROOT=0; shift ;;
     --run) require_val "$#" --run; RUN_ID="$2"; shift 2 ;;
     --binary) require_val "$#" --binary; BINARY="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
@@ -143,7 +145,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ -z "$HOST" ]; then
-  echo "ERROR: --host <ip> is required. Usage: bkshading-deploy-relay.sh --host <ip> [--arch amd64|arm64] [--no-remount] [--run <id> | --binary <path>] [--dry-run]" >&2
+  echo "ERROR: --host <ip> is required. Usage: bkshading-deploy-relay.sh --host <ip> [--arch amd64|arm64] [--run <id> | --binary <path>] [--dry-run]" >&2
   exit 2
 fi
 if [ -n "$RUN_ID" ] && [ -n "$BINARY" ]; then
@@ -158,20 +160,17 @@ case "$ARCH" in
 esac
 ARTIFACT="${ARTIFACT_ENV:-$(bkshading_deploy_artifact_name_for_arch "$ARCH")}"
 
-# arm64 targets an SBC, and a stock arm64 SBC image (Raspberry Pi OS / Debian / Armbian) root is
-# read-WRITE — a ro-root remount on it is almost always wrong. --arch and --no-remount stay
-# ORTHOGONAL (a deliberately read-only SBC image legitimately wants arm64 WITH the remount), so WARN
-# rather than force — the operator keeps the choice. This removes the "forgot --no-remount" footgun
-# without breaking the read-only-image case.
-if [ "$ARCH" = "arm64" ] && [ "$RO_ROOT" = 1 ]; then
-  echo "WARNING: --arch arm64 without --no-remount will remount the target root read-only after the" >&2
-  echo "         deploy; a stock arm64 SBC image has a read-WRITE root, so pass --no-remount" >&2
-  echo "         unless this is a deliberately read-only SBC image." >&2
+# The provisioning a box needs before its relay runs: the cambox relay canon, or the SBC one.
+if [ "$ARCH" = "arm64" ]; then
+  PROVISION_HINT="on the SBC run scripts/bkshading-provision-sbc.sh --install (if not yet) + reboot"
+else
+  PROVISION_HINT="on the box run scripts/bkshading-provision-relay.sh --install --rig-mode <test|event> (if not yet) + reboot"
 fi
 
-# Conditional read-only-root swap (a cambox has a read-only root; a stock arm64 SBC root is rw). No
-# ssh remount call at all when --no-remount is set, so an SBC deploy never tries to remount its
-# root ro (which would be wrong / fail-busy).
+# Conditional read-only-root swap (issue 808, slice B): RO_ROOT is set from the TARGET's own root
+# mode just before the box is touched -- 1 on a read-only root (every cambox, a read-only SBC). No
+# ssh remount call at all on a read-write root, so a board before its first read-only reboot is
+# never remounted ro (which would be wrong / fail-busy).
 maybe_remount_rw() { [ "$RO_ROOT" = 1 ] || return 0; ssh_box "$1" "mount -o remount,rw /"; }
 
 # RESTORE_SESSION is empty on the normal path and `setsid -w` inside the EXIT trap: the trap's restore
@@ -263,7 +262,7 @@ deploy_on_exit() {
     echo "WARNING: the ro-root/relay restore on $HOST was interrupted -- running it again" >&2 2>/dev/null
     FINISHING=0
     if ! finish_once; then
-      echo "ERROR: the ro-root/relay restore on $HOST FAILED after an interruption -- check by hand: 'findmnt -no OPTIONS /' must say ro, 'systemctl is-active $RELAY_UNIT' must match its state before the deploy (${WAS_ACTIVE:-unknown})" >&2 2>/dev/null
+      echo "ERROR: the ro-root/relay restore on $HOST FAILED after an interruption -- check by hand: 'findmnt -no OPTIONS /' must say $([ "$RO_ROOT" = 1 ] && echo ro || echo rw), 'systemctl is-active $RELAY_UNIT' must match its state before the deploy (${WAS_ACTIVE:-unknown})" >&2 2>/dev/null
     fi
   elif [ "$BOX_DIRTY" = 1 ]; then
     echo "ERROR: deploy interrupted/aborted after the box was touched -- restoring the ro root + the relay state" >&2 2>/dev/null
@@ -298,13 +297,7 @@ LOCAL_SHA="$(sha256sum "$BINARY" | awk '{print $1}')"
 
 # --- dry-run: print the plan, touch nothing ---
 if [ "$DRY_RUN" -eq 1 ]; then
-  if [ "$RO_ROOT" = 1 ]; then
-    STEPS="rig-busy guard  ->  stop the relay if active  ->  mount -o remount,rw /  ->  scp (staged $RELAY_STAGE)  ->  chmod +x + atomic mv  ->  sha256 byte-verify  ->  mount -o remount,ro / (FAIL LOUD naming the holder if busy)  ->  start the relay again if it was active"
-    NEXT="on the box run scripts/bkshading-provision-relay.sh --install --rig-mode <test|event> (if not yet) + reboot"
-  else
-    STEPS="rig-busy guard  ->  stop the relay if active  ->  scp (staged $RELAY_STAGE)  ->  chmod +x + atomic mv  ->  sha256 byte-verify  ->  start the relay again if it was active   (no remount -- stock rw-root SBC, --no-remount)"
-    NEXT="on the SBC run scripts/bkshading-provision-sbc.sh --install (if not yet) + reboot"
-  fi
+  STEPS="rig-busy guard  ->  read the relay state + the root mode (findmnt -no OPTIONS /)  ->  stop the relay if active  ->  [read-only root] mount -o remount,rw /  ->  scp (staged $RELAY_STAGE)  ->  chmod +x + atomic mv  ->  sha256 byte-verify  ->  [read-only root] mount -o remount,ro / (FAIL LOUD naming the holder if busy)  ->  start the relay again if it was active"
   cat <<PLAN
 DRY-RUN — bkshading relay deploy plan:
   host           : $HOST
@@ -312,8 +305,9 @@ DRY-RUN — bkshading relay deploy plan:
   source binary  : $BINARY (sha256 $LOCAL_SHA)
   deploy target  : root@$HOST:$RELAY_DEST
   steps          : $STEPS
+  root mode      : read on the box; a read-only root gets the remount cycle, a read-write root none, an unreadable one refuses before the box is touched
   relay state    : an ACTIVE relay is stopped for the swap and started again after; a stopped relay stays stopped (never started)
-  next step      : $NEXT
+  next step      : $PROVISION_HINT
 PLAN
   exit 0
 fi
@@ -353,6 +347,20 @@ if [ "$WAS_RC" -ne 0 ] || [ "$RESTORE_ACTION" = unreadable ]; then
   exit 1
 fi
 echo "relay state before the swap: $WAS_ACTIVE -> after the swap: $([ "$RESTORE_ACTION" = start ] && echo 'start it again' || echo 'leave it stopped')"
+
+# issue 808, slice B: the remount cycle follows the TARGET's own root mode -- read it like the relay
+# state above: an unreadable read (ssh failure / empty / unexpected) REFUSES before touching the box,
+# never taken for rw (an ro root left rw after the swap) or ro (an rw root forced ro mid-use).
+ROOT_RC=0
+ROOT_OPTS="$(ssh_box "$HOST" "$(bkshading_deploy_root_opts_cmd)" 2>/dev/null)" || ROOT_RC=$?
+ROOT_OPTS="$(printf '%s' "$ROOT_OPTS" | tr -d '[:space:]')"
+ROOT_ACTION="$(bkshading_deploy_root_remount_action "$ROOT_OPTS")"
+if [ "$ROOT_RC" -ne 0 ] || [ "$ROOT_ACTION" = unreadable ]; then
+  echo "ERROR: could not read the root mount options on $HOST (ssh rc=$ROOT_RC, findmnt='${ROOT_OPTS}') -- nothing changed on the box" >&2
+  exit 1
+fi
+[ "$ROOT_ACTION" = remount ] && RO_ROOT=1
+echo "root on $HOST: ${ROOT_OPTS%%,*} -> $([ "$RO_ROOT" = 1 ] && echo 'remount rw for the swap, back to ro after' || echo 'read-write, no remount')"
 BOX_DIRTY=1
 if [ "$RESTORE_ACTION" = start ]; then
   if ! ssh_box "$HOST" "systemctl stop $RELAY_UNIT"; then
@@ -421,6 +429,6 @@ echo "OK: relay deployed + byte-verified (executable) on $HOST ($RELAY_DEST, sha
 if [ "$(bkshading_deploy_should_start)" = "yes" ]; then
   echo "WARNING: should_start=yes — refusing to start a stopped relay anyway (enable-only invariant)" >&2
 elif [ "$RESTORE_ACTION" != start ]; then
-  echo "relay was not running: left stopped. Run scripts/bkshading-provision-relay.sh --install --rig-mode <test|event>"
-  echo "             (if not yet provisioned) on the box; it comes up at boot / rig-mode.sh event."
+  echo "relay was not running: left stopped. Next: $PROVISION_HINT;"
+  echo "             it comes up at boot$([ "$ARCH" = arm64 ] || echo ' / rig-mode.sh event')."
 fi

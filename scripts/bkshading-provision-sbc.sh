@@ -22,28 +22,44 @@ set -euo pipefail
 #       graceful — the relay reports capture_fps=None and the service uses its static config,
 #       never a wrong value.
 #
+# READ-ONLY ROOT (issue 808 slice B, owner ruling 5948648089: "the same as the camboxes"): the
+# handheld is unplugged after every ~3 h use, and an abrupt power-off mid-write can corrupt the ext4
+# root on its microSD. So --install also writes the read-only fstab from the ONE shared canon
+# scripts/lib/ro-root.sh (the cambox root line + its five tmpfs mounts; the board's own other mounts
+# kept; the original saved once to fstab.bak), makes journald volatile (the journal in RAM -- a
+# single-partition SBC has no journal partition), and masks armbian-ramlog (it syncs a RAM /var/log
+# back onto the root). It all takes effect at the next reboot. An update later remounts rw, writes,
+# and remounts ro: --install does that itself on a root that is already read-only, and
+# scripts/bkshading-deploy-relay.sh does it when it reads a read-only root on the target.
+#
 # Idempotent (re-run just re-verifies), fail-loud (a gap exits non-zero with the exact remediation),
 # ENABLE-ONLY (daemon-reload + enable, NEVER start/restart — defer to reboot, per
 # .claude/rules/provisioning-scripts.md; the relay's live verify against the camera is the
 # supervisor's post-reboot rig step).
 #
 # The relay BINARY must be the aarch64 build (the `bkshading-relay-linux-arm64` CI artifact,
-# deployed via `scripts/bkshading-deploy-relay.sh --arch arm64 --no-remount`). --check verifies the
-# deployed binary is actually AArch64 (an ELF e_machine read) so a mis-deployed amd64 binary is
-# caught here, not at reboot with an opaque `Exec format error`.
+# deployed via `scripts/bkshading-deploy-relay.sh --arch arm64`). --check verifies the deployed
+# binary is actually AArch64 (an ELF e_machine read) so a mis-deployed amd64 binary is caught here,
+# not at reboot with an opaque `Exec format error`.
 #
 # Usage:  scripts/bkshading-provision-sbc.sh [--check|--install]
 #   --check    (default) verify gphoto2 + unit + enabled + binary present + binary is aarch64 +
-#              the WiFi link is up (SKIPPED on a wired box with no wl* interface, e.g. a cambox);
-#              0 if all OK, 1 + remediation.
-#   --install  install gphoto2 (if missing), install + enable the (reused) relay unit; enable-only.
+#              the WiFi link is up (SKIPPED on a wired box with no wl* interface, e.g. a cambox) +
+#              the root filesystem is read-only; 0 if all OK, 1 + remediation.
+#   --install  install gphoto2 (if missing), install + enable the (reused) relay unit, write the
+#              read-only fstab + volatile journald + mask armbian-ramlog; enable-only, effective at
+#              the next reboot. Refuses (exit 2) on a cambox: setup-device.sh owns a cambox's root.
 #
-# Exit codes: 0 = OK; 1 = not fully provisioned + remediation printed; 2 = bad argument.
+# Exit codes: 0 = OK; 1 = not fully provisioned + remediation printed (or the root could not be
+# read); 2 = bad argument / run on a cambox.
 #
 # Overridable targets (for Tier-0 tests to a temp root — no root/apt/systemd needed):
 #   BKSHADING_SBC_UNIT_DEST, BKSHADING_SBC_BIN, BKSHADING_SBC_GPHOTO2, BKSHADING_SBC_SYSTEMCTL,
 #   BKSHADING_SBC_NET_SYSFS (the /sys/class/net root the WiFi-link --check reads; default
-#   /sys/class/net).
+#   /sys/class/net), BKSHADING_SBC_FSTAB (default /etc/fstab), BKSHADING_SBC_JOURNALD_DIR
+#   (default /etc/systemd/journald.conf.d), BKSHADING_SBC_FINDMNT (default findmnt),
+#   BKSHADING_SBC_MOUNT (default mount), BKSHADING_SBC_PROC_MOUNTS (default /proc/mounts),
+#   BKSHADING_SBC_CAMBOX_MARKER (default /usr/local/bin/camera-box -- present = a cambox).
 # ---------------------------------------------------------------------------------------------
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -52,6 +68,8 @@ REPO="$(cd "$HERE/.." && pwd)"
 . "$HERE/lib/bkshading-relay-runtime.sh" # unit name / bin path / gphoto2 pkg — REUSED (one source of truth)
 # shellcheck source=scripts/lib/bkshading-sbc-runtime.sh
 . "$HERE/lib/bkshading-sbc-runtime.sh" # SBC-specific: ELF-arch check, cross target, no-env decision
+# shellcheck source=scripts/lib/ro-root.sh
+. "$HERE/lib/ro-root.sh" # the ONE read-only-root canon, shared with setup-device.sh STEP 18 (issue 808)
 
 UNIT_NAME="$(bkshading_relay_unit_name)"
 UNIT_SRC="$REPO/systemd/$UNIT_NAME"
@@ -60,6 +78,12 @@ RELAY_BIN="${BKSHADING_SBC_BIN:-$(bkshading_relay_bin_path)}"
 GPHOTO2="${BKSHADING_SBC_GPHOTO2:-gphoto2}"
 SYSTEMCTL="${BKSHADING_SBC_SYSTEMCTL:-systemctl}"
 APT_PKG="$(bkshading_relay_apt_package)"
+FSTAB="${BKSHADING_SBC_FSTAB:-/etc/fstab}"
+JOURNALD_DIR="${BKSHADING_SBC_JOURNALD_DIR:-/etc/systemd/journald.conf.d}"
+FINDMNT="${BKSHADING_SBC_FINDMNT:-findmnt}"
+MOUNT="${BKSHADING_SBC_MOUNT:-mount}"
+PROC_MOUNTS="${BKSHADING_SBC_PROC_MOUNTS:-/proc/mounts}"
+CAMBOX_MARKER="${BKSHADING_SBC_CAMBOX_MARKER:-/usr/local/bin/camera-box}"
 
 MODE="${1:---check}"
 case "$MODE" in
@@ -84,8 +108,89 @@ install_gphoto2() {
   apt-get install -y -qq "$APT_PKG"
 }
 
+# The root filesystem's mount options (`findmnt`, else /proc/mounts — the setup-device.sh
+# ensure_root_writable fallback); empty when neither answers.
+read_root_opts() {
+  "$FINDMNT" -n -o OPTIONS / 2>/dev/null || awk '$2=="/"{print $4; exit}' "$PROC_MOUNTS" 2>/dev/null || true
+}
+
+# ROOT_WAS_RO: set when --install found the root already read-only and remounted it rw for its own
+# writes (a re-run after the read-only reboot); restore_root_mode then puts it back to ro.
+ROOT_WAS_RO=0
+restore_root_mode() {
+  [ "$ROOT_WAS_RO" = 1 ] || return 0
+  ROOT_WAS_RO=0
+  if "$MOUNT" -o remount,ro /; then
+    echo "  root back to read-only"
+  else
+    echo "ERROR: 'mount -o remount,ro /' failed -- the root stays read-WRITE until the next reboot" >&2
+    echo "       (the read-only fstab pins it ro at boot); stop the writer and remount by hand." >&2
+    return 1
+  fi
+}
+
+# Write the read-only fstab (the shared canon), the volatile journald drop-in, and mask the units
+# that would write logs onto the root. Takes effect at the next reboot.
+install_ro_root() {  # $1 = root UUID, $2 = root fstype
+  local uuid="$1" fstype="$2" text f unit
+  if [ ! -f "$FSTAB.bak" ]; then
+    cp "$FSTAB" "$FSTAB.bak"
+    echo "  backed up the original fstab to $FSTAB.bak"
+  else
+    echo "  $FSTAB.bak already exists -- keeping the original backup (re-run)"
+  fi
+  text="$(ro_root_fstab_text "$uuid" "$fstype" "$(cat "$FSTAB.bak")")"
+  printf '%s\n' "$text" > "$FSTAB.tmp.$$"
+  mv -f "$FSTAB.tmp.$$" "$FSTAB"
+  echo "  wrote the read-only fstab: / ro + tmpfs $(ro_root_tmpfs_paths | tr '\n' ' ')(scripts/lib/ro-root.sh)"
+
+  mkdir -p "$JOURNALD_DIR"
+  for f in $(bkshading_sbc_stale_journald_dropins); do
+    if [ -e "$JOURNALD_DIR/$f" ]; then
+      rm -f "$JOURNALD_DIR/$f"
+      echo "  removed the debug journald drop-in $JOURNALD_DIR/$f"
+    fi
+  done
+  bkshading_sbc_journald_dropin_content > "$JOURNALD_DIR/$(bkshading_sbc_journald_dropin_name)"
+  echo "  journald: Storage=volatile ($JOURNALD_DIR/$(bkshading_sbc_journald_dropin_name))"
+
+  for unit in $(bkshading_sbc_masked_units); do
+    "$SYSTEMCTL" mask "$unit"
+    echo "  masked $unit (it would sync logs back onto the read-only root)"
+  done
+}
+
 do_install() {
+  local opts mode uuid fstype
   echo "[bkshading-provision-sbc] --install (enable-only; takes effect on next reboot)"
+  # A cambox's read-only root is setup-device.sh STEP 18's (EFI + journal-partition lines this
+  # script does not write); never rewrite it from here.
+  if [ -e "$CAMBOX_MARKER" ]; then
+    echo "ERROR: $CAMBOX_MARKER exists -- this is a cambox, not a handheld SBC. Its root and relay are" >&2
+    echo "       setup-device.sh's (scripts/bkshading-provision-relay.sh for the relay alone)." >&2
+    exit 2
+  fi
+  # Read everything the read-only fstab needs BEFORE changing anything: an unreadable root refuses
+  # with the box untouched.
+  opts="$(read_root_opts)"
+  mode="$(ro_root_mount_mode "$opts")"
+  if [ "$mode" = unknown ]; then
+    echo "ERROR: could not read the root mount options (findmnt -n -o OPTIONS / = '${opts}') -- nothing changed" >&2
+    exit 1
+  fi
+  uuid="$("$FINDMNT" -n -o UUID / 2>/dev/null || true)"
+  fstype="$("$FINDMNT" -n -o FSTYPE / 2>/dev/null || true)"
+  if [ -z "$uuid" ] || [ -z "$fstype" ]; then
+    echo "ERROR: could not read the root UUID/fstype (findmnt: UUID='${uuid}' FSTYPE='${fstype}') -- nothing changed" >&2
+    exit 1
+  fi
+  if [ "$mode" = ro ]; then
+    echo "  root is read-only (a re-run after the read-only reboot) -- remounting rw for the install"
+    "$MOUNT" -o remount,rw / || { echo "ERROR: 'mount -o remount,rw /' failed -- nothing changed" >&2; exit 1; }
+    ROOT_WAS_RO=1
+    trap 'restore_root_mode || true' EXIT
+  fi
+
   install_gphoto2
 
   # An SBC writes NO CAMERA_BOX_CAPTURE_FPS env (no appliance to derive from; a handheld has no grab
@@ -110,12 +215,16 @@ do_install() {
   if [ ! -x "$RELAY_BIN" ]; then
     echo "  WARNING: relay binary not present/executable at $RELAY_BIN -- deploy the aarch64" >&2
     echo "           bkshading-relay there (scripts/bkshading-deploy-relay.sh --arch arm64" >&2
-    echo "           --no-remount --host <sbc>) before reboot." >&2
+    echo "           --host <sbc>) before reboot." >&2
   elif [ "$(bkshading_sbc_arch_ok "$(bkshading_sbc_elf_arch_of_file "$RELAY_BIN")")" != "yes" ]; then
     echo "  WARNING: relay binary at $RELAY_BIN is not aarch64 (found: $(bkshading_sbc_elf_arch_of_file "$RELAY_BIN")) --" >&2
     echo "           deploy the arm64 build (bkshading-relay-linux-arm64), not the amd64 one." >&2
   fi
-  echo "install done. Verify with: scripts/bkshading-provision-sbc.sh --check"
+
+  install_ro_root "$uuid" "$fstype"
+  restore_root_mode || exit 1
+  echo "install done. Reboot the board to bring the relay up on a read-only root, then verify with:"
+  echo "  scripts/bkshading-provision-sbc.sh --check"
 }
 
 do_check() {
@@ -199,12 +308,29 @@ do_check() {
       ;;
   esac
 
+  # (6) the root filesystem is read-only (issue 808 slice B) -- the same first-token reading as
+  #     the cambox root_mount_is_readonly. An rw root means the read-only fstab is not live yet.
+  local opts mode
+  opts="$(read_root_opts)"
+  mode="$(ro_root_mount_mode "$opts")"
+  case "$mode" in
+    ro) echo "OK: root filesystem is read-only (${opts%%,*})" ;;
+    rw)
+      echo "FAIL: root filesystem is read-WRITE (${opts}) -- reboot after --install (the read-only fstab takes effect at boot)" >&2
+      rc=1
+      ;;
+    *)
+      echo "FAIL: could not read the root mount options (findmnt -n -o OPTIONS / = '${opts}')" >&2
+      rc=1
+      ;;
+  esac
+
   if [ "$rc" -ne 0 ]; then
     cat >&2 <<MSG
 bkshading relay NOT fully provisioned on this SBC. Fix:
-  scripts/bkshading-provision-sbc.sh --install   # gphoto2 + reused relay unit; enable (defer to reboot)
+  scripts/bkshading-provision-sbc.sh --install   # gphoto2 + relay unit + read-only root; enable (defer to reboot)
 Then deploy the aarch64 bkshading-relay binary to $RELAY_BIN and reboot:
-  scripts/bkshading-deploy-relay.sh --arch arm64 --no-remount --host <sbc-ip>
+  scripts/bkshading-deploy-relay.sh --arch arm64 --host <sbc-ip>
 MSG
   else
     echo "OK: bkshading relay fully provisioned on this SBC (live after reboot / already running)."

@@ -173,3 +173,29 @@ bkshading_sbc_first_wifi_iface() {
 bkshading_sbc_wifi_ssid_from_iw() {
   printf '%s\n' "${1:-}" | sed -n 's/^[[:space:]]*SSID:[[:space:]]*//p'
 }
+
+# --- Read-only root (issue 808 slice B, owner ruling 5948648089: "the same as the camboxes") ---
+# The fstab itself comes from the ONE shared canon scripts/lib/ro-root.sh. These are the SBC-only
+# pieces around it: a single-partition SBC has no journal partition, so the journal lives in RAM.
+
+# The journald drop-in the provision writes. `99-` sorts after every other drop-in, so a stray one
+# can never turn the journal persistent on the read-only root again.
+bkshading_sbc_journald_dropin_name() { printf '%s\n' 99-bkshading-volatile.conf; }
+
+# Its content: Storage=volatile = the journal in /run/log/journal (RAM), never on the microSD.
+bkshading_sbc_journald_dropin_content() {
+  printf '%s\n' \
+    "# Written by scripts/bkshading-provision-sbc.sh --install (issue 808): the SBC root is" \
+    "# read-only, so the journal lives in RAM (/run/log/journal) and never writes the microSD." \
+    "[Journal]" \
+    "Storage=volatile"
+}
+
+# journald drop-ins left from bench debugging that make the journal persistent; --install removes
+# them (handheld-1 carried 10-persistent.conf = Storage=persistent, 3.10.2026).
+bkshading_sbc_stale_journald_dropins() { printf '%s\n' 10-persistent.conf; }
+
+# Units that would write logs to the root on an Armbian image: armbian-ramlog keeps /var/log in a
+# zram and syncs it back to /var/log.hdd on the root. On a read-only root /var/log is a tmpfs
+# instead, so --install masks it (masking a unit an image does not ship is a harmless no-op).
+bkshading_sbc_masked_units() { printf '%s\n' armbian-ramlog.service; }

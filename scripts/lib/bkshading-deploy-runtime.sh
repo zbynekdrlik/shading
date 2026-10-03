@@ -14,6 +14,9 @@
 # scripts/lib/frame-probe-deploy.sh + scripts/lib/bkshading-relay-runtime.sh.
 # airuleset:script-ok source-only lib — set -euo pipefail would leak into the sourcing shell (ci-testing-gotchas)
 
+# shellcheck source=scripts/lib/ro-root.sh
+. "$(dirname "${BASH_SOURCE[0]}")/ro-root.sh"  # ro_root_mount_mode -- the ONE first-token root reading (issue 808)
+
 # The CI artifact name the `bkshading` job uploads the relay/service into (KEEP IN SYNC with
 # .github/workflows/ci.yml `Upload bkshading binaries`; the python test cross-checks both).
 bkshading_deploy_artifact_name() { printf '%s\n' bkshading-linux-amd64; }
@@ -57,6 +60,28 @@ bkshading_deploy_sha_match() {  # $1 = local sha, $2 = remote sha
   else
     printf '%s\n' mismatch
   fi
+}
+
+# The REMOTE command that reads the target's root mount options (issue 808, slice B). `findmnt`
+# first; if it fails outright, /proc/mounts directly (the setup-device.sh ensure_root_writable
+# fallback), so a missing findmnt never reads as an empty "unknown" root on a box that has one.
+bkshading_deploy_root_opts_cmd() {
+  # shellcheck disable=SC2016  # the $2/$4 are awk's fields on the REMOTE side, never expanded here
+  printf '%s\n' 'findmnt -no OPTIONS / 2>/dev/null || awk '"'"'$2=="/"{print $4; exit}'"'"' /proc/mounts'
+}
+
+# Remount decision for the swap, from the TARGET's own root mount options (issue 808, slice B --
+# the SBC root goes read-only "the same as the camboxes"): `remount` for a read-only root (the
+# remount,rw -> swap -> remount,ro cycle), `none` for a read-write root (a board before its first
+# read-only reboot: remounting it ro would be wrong), `unreadable` for an empty or unexpected read
+# -- the caller refuses before touching the box. ONE first-token reading: ro_root_mount_mode, the
+# same semantics as setup-device.sh / verify-device.sh root_mount_is_readonly.
+bkshading_deploy_root_remount_action() {  # $1 = `findmnt -no OPTIONS /` output from the target
+  case "$(ro_root_mount_mode "${1:-}")" in
+    ro) printf '%s\n' remount ;;
+    rw) printf '%s\n' none ;;
+    *) printf '%s\n' unreadable ;;
+  esac
 }
 
 # Restore decision after the binary swap (issue 808, 25.9.2026): the deploy STOPS an active relay
