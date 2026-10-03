@@ -196,11 +196,12 @@ the relay/cloudflared provisioning canon but with two deliberate deltas + one go
   timer enabled; wpa_cli/ip/ping present; the gateway answers a ping — the FAIL names the BSSID,
   signal and wpa_state, and a missing tool or a no-verdict ping is named as such, never as a dead
   gateway.
-- **Design-question open (comment 5972616531, the main decides):** `key_mgmt` keeps `SAE` "as
-  today", but SAE cannot authenticate from a hex PSK. wpa_supplicant 2.10 prefers SAE whenever the
-  driver supports it and fails with `SAE: No password available`, so on a WPA2/WPA3-transition AP
-  the board would not join. Inert on the rig's WPA2-PSK APs. Dropping SAE is a one-line change of
-  `bkshading_sbc_wpa_key_mgmt` + its test pin.
+- **`key_mgmt` = `WPA-PSK WPA-PSK-SHA256`, NO SAE (main ROZHODNUTÉ 5973115530).** SAE cannot
+  authenticate from the hex PSK the conf carries; wpa_supplicant 2.10 prefers SAE whenever the
+  driver supports it and fails with `SAE: No password available`. `newlevel.media` advertises
+  `WPA2-PSK+SAE` on every BSSID (a WPA2/WPA3 transition network), so a listed SAE could keep the
+  board off it. WPA2-PSK joins a transition AP fine. Do not re-add SAE without also storing the
+  passphrase (`sae_password`), which the takeover deliberately never does.
 - **Known limit:** a HUNG (not crashed) supplicant answers no `wpa_cli`, reads as not COMPLETED, and
   the heal leaves it alone; the restart drop-in only covers a supplicant that exits.
 - **Testing the heal:** the test runs the REAL script with PATH = a stub dir only (python stubs for

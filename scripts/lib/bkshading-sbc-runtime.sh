@@ -233,14 +233,14 @@ bkshading_sbc_wpa_conf_name() { printf 'wpa_supplicant-%s.conf\n' "$(bkshading_s
 bkshading_sbc_wpa_ctrl_dir() { printf '%s\n' /run/wpa_supplicant; }
 
 # key_mgmt + PMF as netplan generated them for this board (design: "as today").
-# FINDING (a Design-question on the ticket, comment 5972616531, the main decides): SAE (WPA3)
-# cannot authenticate from the 64-hex psk= the takeover writes -- it needs the passphrase.
-# wpa_supplicant 2.10 keeps SAE among the candidate key_mgmt whenever the DRIVER supports SAE
+# No SAE (main ROZHODNUTÉ 5973115530 on the lane's Design-question 5972616531): SAE (WPA3) cannot
+# authenticate from the 64-hex psk= the takeover writes -- it needs the passphrase. wpa_supplicant
+# 2.10 keeps SAE among the candidate key_mgmt whenever the DRIVER supports SAE
 # (wpa_supplicant.c wpa_supplicant_set_suites), prefers it over WPA-PSK-SHA256/WPA-PSK, and then
-# fails the commit with "SAE: No password available" (sme.c). On the rig's WPA2-PSK APs the SAE
-# entry is inert; on a WPA2/WPA3-transition AP with an SAE-capable driver the board would not join.
-# Dropping SAE here is the one-line change if the main rules so.
-bkshading_sbc_wpa_key_mgmt() { printf '%s\n' 'WPA-PSK WPA-PSK-SHA256 SAE'; }
+# fails the commit with "SAE: No password available" (sme.c). newlevel.media advertises
+# WPA2-PSK+SAE on every BSSID (a WPA2/WPA3 transition network), so a listed SAE could keep the
+# board off it; WPA2-PSK joins a transition AP fine.
+bkshading_sbc_wpa_key_mgmt() { printf '%s\n' 'WPA-PSK WPA-PSK-SHA256'; }
 bkshading_sbc_wpa_ieee80211w() { printf '%s\n' 1; }
 
 # bgscan "simple:<short>:<threshold>:<long>": scan every <short> s while the signal is below
