@@ -7,6 +7,10 @@ paths:
   - "scripts/lib/bkshading-deploy-runtime.sh"
   - "tests/python/test_bkshading_sbc_provision_808.py"
   - "tests/python/test_ro_root_808.py"
+  - "scripts/bkshading-wifi-heal.sh"
+  - "scripts/bkshading_sbc_netplan_wifi.py"
+  - "systemd/bkshading-wifi-heal.service"
+  - "systemd/bkshading-wifi-heal.timer"
 ---
 
 # bkshading handheld SBC — provisioning, the read-only root, the arm64 relay deploy (issue 808)
@@ -106,6 +110,62 @@ the relay/cloudflared provisioning canon but with two deliberate deltas + one go
   never gating). A **wired box with no `wl*` interface (the cambox class, which runs the SAME reused
   unit) SKIPs the WiFi check — never FAILs**; a down wireless link FAILs with a `nmcli device wifi
   connect …` join remediation (noting a 2.4 GHz-only board needs a 2.4 GHz SSID on site).
+- **The WiFi belongs to `wpa_supplicant@wlan0`, roams by `bgscan` and heals a dead AP (design
+  5972548198, live on handheld-1 3.10.2026).** After a read-only reboot the two strong APs rejected
+  the board (they still held its PMF association), it joined the far AP at -73 dBm, got DHCP, and
+  passed no traffic while `wpa_state=COMPLETED`. Two gaps: netplan 1.1 has NO `bgscan` key (its
+  generated supplicant roams only on a LOST link), and nothing checks that a COMPLETED link carries
+  traffic (`operstate`/carrier read `up`). `--install` on a board with a `wl*` radio:
+  - MIGRATES the SSID + passphrase + `regulatory-domain` out of the board's own netplan WiFi YAML
+    (`scripts/bkshading_sbc_netplan_wifi.py`, PyYAML **BaseLoader** — every scalar stays its raw
+    text like netplan's libyaml reader, so `password: 12345678` or `012345678` never becomes an
+    int/octal) and writes `/etc/wpa_supplicant/wpa_supplicant-wlan0.conf` (0600): ctrl_interface in
+    `/run`, `country=`, `key_mgmt`, `ieee80211w=1`, `bgscan="simple:30:-65:300"` and the 64-hex PSK.
+    All values are named constants with reasons in `scripts/lib/bkshading-sbc-runtime.sh`.
+  - The passphrase goes to `wpa_passphrase <ssid>` on STDIN (no second argument), never on an
+    argv; its output echoes the passphrase in a `#psk="..."` comment line, which
+    `bkshading_sbc_psk_hex_from_wpa_passphrase` drops (it takes only the `psk=<64 hex>` line). A
+    netplan password that already IS 64 hex is used as-is (wpa_passphrase refuses that length).
+    The YAML reader's stderr never carries a passphrase (a YAML parse error prints its class only:
+    PyYAML's message quotes the offending line).
+  - Moves that YAML aside ONCE as `<file>.bak` (the `fstab.bak` pattern; it still holds the
+    original passphrase, as the YAML did), keeps the ethernet + usb0 YAMLs, and writes
+    `/etc/systemd/network/05-bkshading-wlan0.network` with the settings netplan generated (`05-`
+    sorts before every `10-netplan-*` file).
+  - Refuses (exit 1, nothing changed — read before the rw remount) on: no netplan WiFi YAML AND no
+    conf; a YAML that also configures other interfaces, a static address, an open/enterprise
+    network or any key it would lose; two files defining wlan0; a YAML present again while its
+    `.bak` exists. A re-run keeps an existing conf. A wired box skips all of it.
+  - Installs the heal (`scripts/bkshading-wifi-heal.sh` + the lib, mirroring the repo layout under
+    `/usr/local/lib/bkshading/`, and `systemd/bkshading-wifi-heal.{service,timer}`), enables
+    `wpa_supplicant@wlan0` + the timer, starts nothing.
+- **The heal** (`bkshading-wifi-heal.timer`, 20 s; `AccuracySec=1s` — the default 1 min would
+  stretch the cadence): pings the DHCP default gateway read from `ip -4 route show default dev
+  wlan0` (never a hard-coded address) with `-I wlan0`; a pass misses only when all 3 pings are lost.
+  The pure `bkshading_sbc_wifi_heal_decide` table: not COMPLETED → none + count reset (the
+  supplicant is working; a dead supplicant reads the same and is NOT revived — see the known limit
+  below); 3 misses → `wpa_cli reassociate`; 6 → `systemctl restart wpa_supplicant@wlan0` + count
+  reset. COMPLETED with no DHCP gateway counts as a miss. The count lives in
+  `/run/bkshading-wifi-heal/misses`; a damaged count reads as 0 (decimal, never octal). One journal
+  line per action names the BSSID + signal before and after (after = up to 15 s for COMPLETED);
+  the first miss and the recovery are one line each. No reboot, no ifdown.
+- **`--check` rows (wl* boards only, skipped on a wired box):** `wpa_supplicant@wlan0` enabled; the
+  exact bgscan line in the conf (the conf holds the PSK: read line by line, never printed); the heal
+  installed byte-identical to this checkout + its timer enabled; the gateway answers a ping — the
+  FAIL names the BSSID, signal and wpa_state.
+- **Design-question open (comment 5972616531, the main decides):** `key_mgmt` keeps `SAE` "as
+  today", but SAE cannot authenticate from a hex PSK. wpa_supplicant 2.10 prefers SAE whenever the
+  driver supports it and fails with `SAE: No password available`, so on a WPA2/WPA3-transition AP
+  the board would not join. Inert on the rig's WPA2-PSK APs. Dropping SAE is a one-line change of
+  `bkshading_sbc_wpa_key_mgmt` + its test pin.
+- **Known limit:** Debian's `wpa_supplicant@.service` has no `Restart=`, and the heal never acts
+  while `wpa_state` is not COMPLETED, so a CRASHED supplicant stays down until a reboot.
+- **Testing the heal:** the test runs the REAL script with PATH = a stub dir only (python stubs for
+  `wpa_cli`/`ip`/`ping`/`systemctl` answering from a JSON state that `reassociate`/`restart`
+  update, plus symlinks to `dirname`/`mkdir`/`mv`/`sleep`), so a missing stub never reaches the
+  machine's real `wpa_cli`. The `wpa_passphrase` stub runs the real binary where it exists (dev1)
+  and emulates it exactly elsewhere (the CI runner has none); the PSK assertion uses
+  `hashlib.pbkdf2_hmac` independently, so both paths are checked against the 802.11i definition.
 - The physical bring-up (flash the arm64 image, headless WiFi, then deploy + `--install` + reboot)
   is the owner's/supervisor's rig step. Transports stay USB-PTP (gphoto2/libusb) / USB-Eth REST —
   NEVER Bluetooth; a gphoto2 camera is a USB device, not a network link, so the netplan `enx*`
@@ -140,3 +200,21 @@ The code lane ships the provisioning + `--check`; these live-hardware steps are 
    The tmpfs sizes are caps, not reservations, but the 512M `/var/cache` cap equals all the RAM of
    a 512 MB board (Pi Zero 2 W): an `apt-get` on such a board can run it out of memory. Run apt on
    the 2 GB Orange Pi without worry; on a 512 MB board, keep apt runs small (one package).
+7. **WiFi roam + heal (design 5972548198)** — copy the current `scripts/` dir, rerun `--install`
+   (it migrates the netplan WiFi, moves `30-wifis-dhcp.yaml` to `.bak`) and reboot. Then:
+   - `ls /run/netplan/` has no `wpa-wlan0.conf`; `systemctl is-active wpa_supplicant@wlan0`;
+     `systemctl list-timers bkshading-wifi-heal.timer` shows a 20 s cadence;
+   - `wpa_cli -i wlan0 status` = COMPLETED on the strong AP; `--check` is all OK (the gateway row
+     names the BSSID + signal); `systemctl --failed` is empty;
+   - **forced bad AP:** `wpa_cli -i wlan0 bssid 0 <far-bssid>` + `wpa_cli -i wlan0 reassociate` →
+     the board sits on the far AP (about -73 dBm). Then `wpa_cli -i wlan0 bssid 0 any`: within about
+     30-60 s bgscan (30 s scans below -65 dBm) roams back to the strong AP —
+     `journalctl -u wpa_supplicant@wlan0` shows the new `CTRL-EVENT-CONNECTED`, `wpa_cli status`
+     the strong BSSID;
+   - **the heal acts on an unreachable gateway:** drop only the pings to the gateway, leaving the
+     association COMPLETED — `nft add table inet healtest; nft add chain inet healtest out '{ type
+     filter hook output priority 0; }'; nft add rule inet healtest out ip daddr <gw> icmp type
+     echo-request drop`. `journalctl -u bkshading-wifi-heal -f`: a miss line, about 60 s later the
+     `wpa_cli reassociate` line with BSSID/signal before and after, about 60 s after that the
+     `systemctl restart wpa_supplicant@wlan0` line. `nft delete table inet healtest` → the next
+     pass logs `answers again` (or nothing after a restart reset the count) and `--check` is OK.

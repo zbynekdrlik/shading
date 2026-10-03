@@ -186,8 +186,24 @@ params-only block — a handheld has no NDI feed). This milestone provisions the
   aarch64** (an ELF `e_machine` read — a mis-deployed amd64 binary is caught here, not at reboot
   with an opaque `Exec format error`) + **the WiFi link is up** (reads `/sys/class/net/wl*/operstate`
   — band-agnostic; a wired box with no `wl*` interface, e.g. a cambox, SKIPs this check, never
-  FAILs; a down link FAILs with a `nmcli device wifi connect …` join remediation) + **the root
-  filesystem is read-only** (an rw root FAILs with "reboot after --install").
+  FAILs; a down link FAILs with a `nmcli device wifi connect …` join remediation) + **the WiFi
+  roams and heals** (`wpa_supplicant@wlan0` enabled, the `bgscan` line in its conf, the heal
+  installed with its timer enabled, and the DHCP gateway answers a ping — a FAIL names the BSSID and
+  the signal; all four skipped on a wired box) + **the root filesystem is read-only** (an rw root
+  FAILs with "reboot after --install").
+- **The handheld's WiFi roams to the strongest AP and heals itself (issue 808, design
+  5972548198).** netplan has no background-scan setting and nothing checks that an associated link
+  carries traffic, so after a reboot handheld-1 sat on a far AP with no traffic. On a board with a
+  `wl*` radio `--install` takes the WiFi over from netplan: it migrates the SSID, passphrase and
+  country from the board's own netplan WiFi YAML into `/etc/wpa_supplicant/wpa_supplicant-wlan0.conf`
+  (0600, `bgscan="simple:30:-65:300"`, the `wpa_passphrase`-derived 64-hex PSK — the passphrase is
+  never on an argv, never printed, never logged), moves that YAML aside once as `.bak`, writes a
+  networkd DHCP file for `wlan0` with the settings netplan generated, and enables
+  `wpa_supplicant@wlan0`. `bkshading-wifi-heal.timer` (every 20 s) pings the DHCP gateway: after 3
+  misses it runs `wpa_cli reassociate`, after 6 it restarts `wpa_supplicant@wlan0`, never while
+  the supplicant is still connecting, with one journal line per action naming the BSSID and signal
+  before and after. A re-run keeps the conf; a board with neither a netplan WiFi YAML nor that conf
+  is refused before anything changes.
 - **Read-only root, the same as the camboxes (issue 808, owner ruling 5948648089).** The handheld
   is unplugged after each use, and a power cut mid-write can corrupt its microSD root. So
   `--install` also writes the read-only fstab from the ONE shared canon `scripts/lib/ro-root.sh`
@@ -215,8 +231,8 @@ params-only block — a handheld has no NDI feed). This milestone provisions the
 
 ```
 # on the SBC (after flashing the arm64 image + deploying the aarch64 relay):
-scripts/bkshading-provision-sbc.sh --install   # gphoto2 + reused relay unit + read-only root; enable (defer to reboot)
-scripts/bkshading-provision-sbc.sh --check     # verify gphoto2 + unit enabled + aarch64 binary + WiFi link + ro root
+scripts/bkshading-provision-sbc.sh --install   # gphoto2 + reused relay unit + WiFi roam/heal + read-only root; enable (defer to reboot)
+scripts/bkshading-provision-sbc.sh --check     # verify gphoto2 + unit enabled + aarch64 binary + WiFi link/roam/heal/gateway + ro root
 ```
 
 ## Running (once built on CI)
