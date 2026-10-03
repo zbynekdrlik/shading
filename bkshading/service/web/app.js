@@ -4,8 +4,9 @@
 // (from /ws, or the /api/cameras poll fallback) RECONCILES it — the server stays the single source
 // of truth, the optimistic value just removes the click->confirm lag the owner reported. Controls
 // PUT a shading change to /api/cameras/<id>/params (forwarded to the camera's relay). M2: a camera with an NDI
-// preview shows a live JPEG preview (top block) reloaded a few times a second from
-// /api/cameras/<id>/preview.jpg; a camera with no preview shows a params-only block.
+// preview shows a live JPEG preview (top block) fetched a few times a second from
+// /api/cameras/<id>/preview.jpg while the service reports its feed live (issue 808: previewLive);
+// a camera with no preview shows a params-only block.
 
 const grid = document.getElementById("camera-grid");
 const tmpl = document.getElementById("camera-block");
@@ -17,6 +18,9 @@ const blocks = new Map(); // camera id -> block element (reused to preserve cont
 // Live preview refresh rate (Hz). Shading is about colour/exposure, not motion, so a few
 // fps is plenty; keep it in step with the service-side decimation (~3 fps).
 const PREVIEW_FPS = 3;
+// issue 808: the preview placeholder text before any frame arrived, and after a live feed stopped.
+const PREVIEW_WAIT_TEXT = "NDI preview — čakám…";
+const PREVIEW_STOPPED_TEXT = "NDI preview — obraz sa zastavil, čakám…";
 
 // Present f-number from the AV the relay reported: fNumber = sqrt(2^AV).
 function fNumberFromAv(av) {
@@ -382,33 +386,89 @@ function wire(el, id) {
     });
   }
 
-  // Preview image: show it once a frame loads, fall back to the placeholder on error (503
-  // until the first frame, or a dropped feed). Wired once per block.
+  // Preview image: shown once a frame (an object URL, see loadPreview) has decoded; a frame that
+  // fails to decode falls back to the placeholder. Wired once per block.
   const img = q("preview-img");
   const ph = q("preview-placeholder");
   if (img) {
     img.addEventListener("load", () => {
       img.classList.add("ready");
       if (ph) ph.hidden = true;
+      el.dataset.previewSeen = "1"; // a frame was shown -> a later stop says "obraz sa zastavil"
     });
-    img.addEventListener("error", () => {
-      img.classList.remove("ready");
-      if (ph) ph.hidden = false;
-      el.dataset.previewErrAt = String(Date.now());
-    });
+    img.addEventListener("error", () => showPreviewPlaceholder(el));
   }
 }
 
-// Reload each preview-capable block's <img> from the service. Cache-busting query so the
-// browser fetches a fresh frame; a 503/404 fires the img's error handler (placeholder shown).
+// issue 808: drop a block's preview to its placeholder. The frame is hidden AND released (the
+// object URL revoked, the <img> src attribute removed, which fires no load/error event), so a
+// stopped feed is never left on screen frozen as if live. The text says whether a frame was ever
+// shown in this block.
+function showPreviewPlaceholder(el) {
+  const img = el.querySelector('[data-role="preview-img"]');
+  const ph = el.querySelector('[data-role="preview-placeholder"]');
+  if (img) {
+    img.classList.remove("ready");
+    if (img.hasAttribute("src")) img.removeAttribute("src");
+  }
+  if (el.previewUrl) {
+    URL.revokeObjectURL(el.previewUrl);
+    el.previewUrl = null;
+  }
+  if (ph) {
+    ph.textContent = el.dataset.previewSeen === "1" ? PREVIEW_STOPPED_TEXT : PREVIEW_WAIT_TEXT;
+    ph.hidden = false;
+  }
+}
+
+// issue 808: fetch ONE preview frame and show it. fetch -> blob -> object URL instead of pointing
+// the <img> at the endpoint: the service answers a missing or stale frame with 204 (never a
+// 4xx/5xx), so an absent feed logs nothing, and the previous frame's object URL is revoked as soon
+// as the new one replaces it. One request in flight per block, so a slow link never piles them up.
+async function loadPreview(id, el) {
+  el.dataset.previewBusy = "1";
+  try {
+    const r = await fetch(`/api/cameras/${encodeURIComponent(id)}/preview.jpg`, {
+      cache: "no-store",
+    });
+    // 204 = no fresh frame (the feed is absent or stopped): placeholder, not the last frame.
+    if (r.status !== 200) {
+      showPreviewPlaceholder(el);
+      return;
+    }
+    const blob = await r.blob();
+    // A push may have marked the feed not live while this request was in flight.
+    if (el.dataset.previewLive !== "1") {
+      showPreviewPlaceholder(el);
+      return;
+    }
+    const img = el.querySelector('[data-role="preview-img"]');
+    if (!img) return;
+    const prev = el.previewUrl;
+    el.previewUrl = URL.createObjectURL(blob);
+    img.src = el.previewUrl;
+    if (prev) URL.revokeObjectURL(prev);
+  } catch (e) {
+    // The service is unreachable: the offline banner is the signal; show no frozen frame.
+    showPreviewPlaceholder(el);
+  } finally {
+    el.dataset.previewBusy = "0";
+  }
+}
+
+// Refresh each preview-capable block at PREVIEW_FPS. Only a block whose feed the service reports
+// LIVE (previewLive) is fetched; any other block, and every block while the panel has no contact
+// with the service (isConnected), shows its placeholder.
 function refreshPreviews() {
-  const now = Date.now();
+  const connected = isConnected();
   for (const [id, el] of blocks) {
     if (el.dataset.preview !== "1") continue;
-    // Brief backoff after a failed load, so a down camera (503/404) isn't hit at the full rate.
-    if (now - Number(el.dataset.previewErrAt || 0) < 1500) continue;
-    const img = el.querySelector('[data-role="preview-img"]');
-    if (img) img.src = `/api/cameras/${encodeURIComponent(id)}/preview.jpg?t=${now}`;
+    if (!connected || el.dataset.previewLive !== "1") {
+      showPreviewPlaceholder(el);
+      continue;
+    }
+    if (el.dataset.previewBusy === "1") continue;
+    loadPreview(id, el);
   }
 }
 
@@ -417,11 +477,14 @@ function updateBlock(el, cam) {
   q("label").textContent = cam.label;
 
   // Preview area: shown only for cameras that carry an NDI preview. The `preview` dataset
-  // flag drives refreshPreviews() (which reloads the <img>); a camera without a feed keeps
-  // its preview area hidden and gets no image reloads.
+  // flag drives refreshPreviews(); a camera without a feed keeps its preview area hidden and gets
+  // no image fetches. issue 808: `previewLive` (a fresh frame on the service) gates the fetch; a
+  // push that reports the feed not live drops the frame to the placeholder at once.
   const preview = q("preview");
   if (preview) preview.hidden = !cam.hasPreview;
   el.dataset.preview = cam.hasPreview ? "1" : "0";
+  el.dataset.previewLive = cam.hasPreview && cam.previewLive ? "1" : "0";
+  if (cam.hasPreview && !cam.previewLive) showPreviewPlaceholder(el);
 
   const online = cam.reachable && cam.state && cam.state.online;
   q("online").textContent = !cam.reachable ? "relay offline" : online ? "online" : "kamera offline";

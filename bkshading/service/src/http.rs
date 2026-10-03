@@ -22,7 +22,7 @@ use tokio::sync::watch;
 
 use crate::aggregator::{aggregate_with_camera_update, Aggregator};
 use crate::config::{CameraConfig, ServiceConfig};
-use crate::preview::store::PreviewStore;
+use crate::preview::store::{wall_clock_ms, PreviewStore};
 
 const INDEX_HTML: &str = include_str!("../web/index.html");
 const APP_JS: &str = include_str!("../web/app.js");
@@ -195,7 +195,7 @@ async fn version() -> Json<serde_json::Value> {
 }
 
 async fn cameras(State(state): State<AppState>) -> Json<Aggregate> {
-    Json(state.agg.snapshot(&state.config).await)
+    Json(state.agg.snapshot(&state.config, &state.previews).await)
 }
 
 async fn set_params(
@@ -230,15 +230,31 @@ fn push_camera_update(state: &AppState, cam: &CameraConfig, relay_state: RelaySt
     let _ = state.live_tx.send(Arc::new(updated));
 }
 
-/// The latest JPEG preview frame for a camera. The web UI's preview block reloads an `<img>`
-/// against this at a few fps (cache-busting query). `404` for an unknown camera; `503` until
-/// the first frame is produced (the block shows its placeholder meanwhile). Always `no-store`
-/// — a preview is always "now".
+/// `GET /api/cameras/:id/preview.jpg` — the camera's latest preview frame, served only while it
+/// is fresh. The panel fetches it a few times a second while the camera view says `previewLive`.
 async fn preview_jpg(State(state): State<AppState>, Path(id): Path<String>) -> Response {
-    if !state.config.cameras.iter().any(|c| c.id == id) {
+    preview_response(&state.config, &state.previews, &id, wall_clock_ms())
+}
+
+/// The pure preview-endpoint decision (issue 808), split out so its status contract is Tier-0
+/// tested without an HTTP server:
+/// - an unknown camera id -> `404`, the ONLY error status;
+/// - a frame at most `config.preview.max_frame_age_ms()` old at `now_ms` -> `200` `image/jpeg`;
+/// - no frame yet, a stale frame (the feed stopped), or a camera without an NDI preview ->
+///   `204 No Content`, never a 4xx/5xx. Chromium logs every 4xx/5xx resource load as a console
+///   error, and a stale frame served as live would freeze the operator's picture.
+///
+/// Every answer for a known camera is `Cache-Control: no-store`: a preview is always "now".
+pub fn preview_response(
+    config: &ServiceConfig,
+    previews: &PreviewStore,
+    id: &str,
+    now_ms: u64,
+) -> Response {
+    if !config.cameras.iter().any(|c| c.id == id) {
         return (StatusCode::NOT_FOUND, format!("no camera '{id}'")).into_response();
     }
-    match state.previews.get(&id) {
+    match previews.get_fresh(id, now_ms, config.preview.max_frame_age_ms()) {
         Some(frame) => (
             [
                 (header::CONTENT_TYPE, "image/jpeg"),
@@ -247,6 +263,10 @@ async fn preview_jpg(State(state): State<AppState>, Path(id): Path<String>) -> R
             frame.jpeg.to_vec(),
         )
             .into_response(),
-        None => (StatusCode::SERVICE_UNAVAILABLE, "no preview frame yet").into_response(),
+        None => (
+            StatusCode::NO_CONTENT,
+            [(header::CACHE_CONTROL, "no-store")],
+        )
+            .into_response(),
     }
 }

@@ -216,9 +216,16 @@ pub struct CameraView {
     pub id: String,
     pub label: String,
     pub transport: Transport,
-    /// NDI low-quality preview available (presenter integration = M2). Always `false` in
-    /// M1 — the block shows a preview placeholder.
+    /// The camera has an NDI preview CONFIGURED (`ndi_preview` set): the panel renders a preview
+    /// block for it. Says nothing about whether a picture is arriving — that is `preview_live`.
     pub has_preview: bool,
+    /// The preview has a FRESH frame right now (issue 808): the service's preview store holds a
+    /// frame younger than the freshness bound. The panel loads a frame only while this is set and
+    /// shows its placeholder otherwise, so an absent or stopped feed is never polled into console
+    /// errors and never shown frozen as if live. Always `false` without `has_preview`.
+    /// `#[serde(default)]`: a view from an older service that does not send it reads as not live.
+    #[serde(default)]
+    pub preview_live: bool,
     /// The camera's relay was reachable this cycle.
     pub reachable: bool,
     /// The EFFECTIVE grab-mode fps this camera is compared against (issue 809) — the box's live

@@ -89,7 +89,7 @@ async fn main() -> Result<()> {
     // single snapshot, so the relays are polled once per interval no matter how many panels are
     // open — the single-source-of-truth push the owner asked for. Seed the channel with an
     // initial snapshot so a client connecting before the first tick still gets current state.
-    let initial = Arc::new(agg.snapshot(&config).await);
+    let initial = Arc::new(agg.snapshot(&config, &previews).await);
     let (live_tx, live_rx) = tokio::sync::watch::channel(initial);
     // issue 1337: share the publish handle so `set_params` can push an immediate confirmation over
     // the WS after a write (the pump also holds a clone for its ~2 s cadence snapshots).
@@ -98,6 +98,7 @@ async fn main() -> Result<()> {
         let agg = agg.clone();
         let config = config.clone();
         let live_tx = live_tx.clone();
+        let previews = previews.clone();
         tokio::spawn(async move {
             let mut ticker =
                 tokio::time::interval(std::time::Duration::from_millis(LIVE_PUSH_INTERVAL_MS));
@@ -114,7 +115,7 @@ async fn main() -> Result<()> {
             loop {
                 ticker.tick().await;
                 cycle = cycle.wrapping_add(1);
-                let snapshot = Arc::new(agg.snapshot(&config).await);
+                let snapshot = Arc::new(agg.snapshot(&config, &previews).await);
                 // issue 809: telemetry — surface a camera fps mismatch or a config-vs-capture
                 // grab desync in the log (with the cross-reference to capture_rate_health), on
                 // transition only.

@@ -8,21 +8,13 @@
 //! decision logic it composes (decimate, encode) is unit-tested separately.
 
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use crate::preview::decimate::Decimator;
 use crate::preview::encode::encode_jpeg;
 use crate::preview::source::PreviewSource;
-use crate::preview::store::PreviewStore;
+use crate::preview::store::{wall_clock_ms, PreviewStore};
 use crate::preview::PreviewConfig;
-
-/// Wall-clock milliseconds (monotonic-enough for decimation and staleness).
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
 
 /// A source builder: NDI-source-name → a boxed [`PreviewSource`] (or an error to retry).
 pub type SourceBuilder = fn(&str) -> anyhow::Result<Box<dyn PreviewSource>>;
@@ -80,7 +72,7 @@ fn run_source(
     let timeout = Duration::from_millis(cfg.capture_timeout_ms);
     // Decimation runs on a MONOTONIC clock (immune to a wall-clock / NTP backward step, which
     // would otherwise pause emission until wall time caught up); the store's `updated_ms` stays
-    // wall-clock for diagnostics.
+    // wall clock, the clock the readers judge freshness against (issue 808).
     let started = Instant::now();
     loop {
         match src.next_frame(timeout) {
@@ -89,7 +81,7 @@ fn run_source(
                     continue; // thinned to the target fps
                 }
                 match encode_jpeg(&frame, cfg.jpeg_quality) {
-                    Ok(jpeg) => store.put(cam_id, jpeg, now_ms()),
+                    Ok(jpeg) => store.put(cam_id, jpeg, wall_clock_ms()),
                     Err(e) => {
                         tracing::warn!(cam = %cam_id, error = %e, "preview jpeg encode failed")
                     }

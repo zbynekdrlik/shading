@@ -12,11 +12,20 @@ use bkshading_proto::wire::{
 };
 
 use crate::config::{CameraConfig, ServiceConfig};
+use crate::preview::store::{wall_clock_ms, PreviewStore};
 
 /// Pure assembly of a [`CameraView`] from a camera's config and its (optional) relay state.
 /// Split out so the mapping — including "has NDI preview iff `ndi_preview` is configured"
 /// and the issue-809 fps-vs-grab sync verdict — is unit-testable without any HTTP.
-pub fn camera_view(cam: &CameraConfig, state: Option<RelayState>) -> CameraView {
+///
+/// `preview_live` (issue 808) is whether the preview store holds a FRESH frame for this camera
+/// right now. The caller reads it from the store, so this function stays pure. It is ignored
+/// for a camera without an `ndi_preview`: a params-only camera is never preview-live.
+pub fn camera_view(
+    cam: &CameraConfig,
+    state: Option<RelayState>,
+    preview_live: bool,
+) -> CameraView {
     // issue 809: compare the camera's reported project fps against the box's grab mode.
     // A camera-offline / unreachable state carries `fps100 = None`, which classifies as
     // Unknown (never a false mismatch).
@@ -28,13 +37,16 @@ pub fn camera_view(cam: &CameraConfig, state: Option<RelayState>) -> CameraView 
     let reported_capture = state.as_ref().and_then(|s| s.capture_fps);
     let resolution = resolve_grab(cam.grab_fps, reported_capture);
     let fps_sync = FpsSync::classify(camera_fps100, resolution.effective);
+    // A camera is preview-capable iff it has an NDI source configured (a handheld without a
+    // feed has none -> params-only block); it is preview-LIVE only while that is true AND the
+    // store holds a fresh frame (issue 808).
+    let has_preview = cam.ndi_preview.is_some();
     CameraView {
         id: cam.id.clone(),
         label: cam.label.clone(),
         transport: cam.transport,
-        // M1: preview is a placeholder; a camera is preview-capable iff it has an NDI source
-        // configured (a handheld without a feed has none -> params-only block).
-        has_preview: cam.ndi_preview.is_some(),
+        has_preview,
+        preview_live: has_preview && preview_live,
         reachable: state.is_some(),
         grab_fps: resolution.effective,
         grab_fps_desync: resolution.desync,
@@ -48,15 +60,18 @@ pub fn camera_view(cam: &CameraConfig, state: Option<RelayState>) -> CameraView 
 /// OTHER camera is untouched; if the camera id is not in the aggregate (config changed underneath)
 /// the copy is returned unchanged. Pure — Tier-0 tested, so the "push only this camera, no re-poll"
 /// decision is verified without standing up an HTTP server.
+///
+/// The camera's `preview_live` is carried over from its current view (issue 808): preview
+/// liveness comes from the preview store at pump time, not from the relay, so a shading click
+/// must not flip a live preview to the placeholder until the next pump tick.
 pub fn aggregate_with_camera_update(
     current: &Aggregate,
     cam: &CameraConfig,
     relay_state: RelayState,
 ) -> Aggregate {
     let mut agg = current.clone();
-    let new_view = camera_view(cam, Some(relay_state));
     if let Some(slot) = agg.cameras.iter_mut().find(|c| c.id == cam.id) {
-        *slot = new_view;
+        *slot = camera_view(cam, Some(relay_state), slot.preview_live);
     }
     agg
 }
@@ -92,18 +107,27 @@ impl Aggregator {
         })
     }
 
-    /// One aggregate snapshot across every configured camera.
-    pub async fn snapshot(&self, cfg: &ServiceConfig) -> Aggregate {
+    /// One aggregate snapshot across every configured camera. `previews` is the preview store
+    /// the per-camera workers fill; each camera's `preview_live` is read from it after the relay
+    /// polls, against `cfg.preview`'s freshness bound (issue 808).
+    pub async fn snapshot(&self, cfg: &ServiceConfig, previews: &PreviewStore) -> Aggregate {
         // Poll every relay CONCURRENTLY: /api/cameras latency is bounded by the SLOWEST relay
         // (~one client timeout), not the SUM — the normal M1 state has several relays down, and
         // each unreachable relay would otherwise burn a full connect timeout in series.
         let states =
             futures::future::join_all(cfg.cameras.iter().map(|cam| self.poll_state(cam))).await;
+        // Read the clock AFTER the polls (up to one client timeout), so liveness is judged at the
+        // moment the snapshot is published.
+        let now_ms = wall_clock_ms();
+        let max_age_ms = cfg.preview.max_frame_age_ms();
         let cameras = cfg
             .cameras
             .iter()
             .zip(states)
-            .map(|(cam, state)| camera_view(cam, state))
+            .map(|(cam, state)| {
+                let live = previews.is_live(&cam.id, now_ms, max_age_ms);
+                camera_view(cam, state, live)
+            })
             .collect();
         Aggregate {
             version: self.version.clone(),
