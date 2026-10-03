@@ -585,6 +585,21 @@ def test_install_masks_armbian_ramlog_and_stays_enable_only():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_install_masks_networkd_persistent_storage_on_the_ro_root():
+    # Live on handheld-1 (3.10.2026, the first boot on the read-only root): the Debian trixie
+    # systemd-networkd-persistent-storage.service (`networkctl persistent-storage yes`) failed with
+    # io.systemd.Network.StorageReadOnly and left the board `degraded`. networkd keeps its state in
+    # /run on a read-only root, so --install masks the unit like armbian-ramlog.
+    root = tempfile.mkdtemp()
+    try:
+        r, calls, _b = _run_provision("--install", root)
+        assert r.returncode == 0, (r.stdout, r.stderr)
+        log = _read(calls)
+        assert "mask systemd-networkd-persistent-storage.service" in log, log
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_install_on_a_ro_root_remounts_rw_then_back_ro():
     root = tempfile.mkdtemp()
     try:
