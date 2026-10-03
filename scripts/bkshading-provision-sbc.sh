@@ -29,7 +29,8 @@ set -euo pipefail
 # kept; the original saved once to fstab.bak), makes journald volatile (the journal in RAM -- a
 # single-partition SBC has no journal partition), and masks armbian-ramlog (it syncs a RAM /var/log
 # back onto the root), systemd-networkd-persistent-storage and fake-hwclock-save + its timer (both
-# fail on a read-only root). It all takes effect at the next reboot. An update later remounts rw, writes,
+# fail on a read-only root), and writes a logrotate drop-in that keeps logrotate's state in /run.
+# It all takes effect at the next reboot. An update later remounts rw, writes,
 # and remounts ro: --install does that itself on a root that is already read-only, and
 # scripts/bkshading-deploy-relay.sh does it when it reads a read-only root on the target.
 #
@@ -69,11 +70,13 @@ set -euo pipefail
 #              the WiFi link is up + wpa_supplicant@wlan0 enabled + the bgscan line in its conf +
 #              the heal installed and its timer enabled + the DHCP gateway answers a ping (the WiFi
 #              rows are SKIPPED on a wired box with no wl* interface, e.g. a cambox) + the root
-#              filesystem is read-only + the root writers (bkshading_sbc_masked_units) masked;
+#              filesystem is read-only + the root writers (bkshading_sbc_masked_units) masked +
+#              the logrotate drop-in (state in /run) in place;
 #              0 if all OK, 1 + remediation.
 #   --install  install gphoto2 (if missing), install + enable the (reused) relay unit, take the
 #              WiFi over from netplan + install the heal (a wl* board), write the read-only fstab +
-#              volatile journald + mask the root writers; enable-only, effective at the next
+#              volatile journald + mask the root writers + the logrotate drop-in; enable-only,
+#              effective at the next
 #              reboot. Refuses (exit 2) on a cambox: setup-device.sh owns a cambox's root.
 #
 # Exit codes: 0 = OK; 1 = not fully provisioned + remediation printed (or the root / the WiFi config
@@ -180,8 +183,9 @@ restore_root_mode() {
   fi
 }
 
-# Write the read-only fstab (the shared canon), the volatile journald drop-in, and mask the units
-# that would write logs onto the root. Takes effect at the next reboot.
+# Write the read-only fstab (the shared canon) and the volatile journald drop-in, mask the units
+# that would write onto the root, and write the logrotate drop-in (state in /run). The fstab takes
+# effect at the next reboot; the masks and the drop-in after the daemon-reload at the end.
 install_ro_root() {  # $1 = root UUID, $2 = root fstype
   local uuid="$1" fstype="$2" text f unit
   if [ ! -f "$FSTAB.bak" ]; then
@@ -211,8 +215,12 @@ install_ro_root() {  # $1 = root UUID, $2 = root fstype
   done
 
   mkdir -p "$(dirname "$LOGROTATE_DROPIN")"
+  rm -f "$UNIT_DIR/$(bkshading_sbc_logrotate_legacy_dropin_path)"
   bkshading_sbc_logrotate_dropin_content >"$LOGROTATE_DROPIN"
   echo "  logrotate keeps its state in /run ($LOGROTATE_DROPIN)"
+  # load the drop-in now: a re-run on a running board must not wait for the reboot (the masks above
+  # take effect at once, so must this)
+  "$SYSTEMCTL" daemon-reload
 }
 
 # --- The WiFi takeover + heal (issue 808, design 5972548198) ---

@@ -210,9 +210,15 @@ bkshading_sbc_stale_journald_dropins() { printf '%s\n' 10-persistent.conf; }
 # logrotate keeps its state in /var/lib/logrotate/status, on the read-only root: Armbian's daily
 # logrotate.service failed with "error opening state file ... Read-only file system" and left
 # handheld-1 `degraded` (4.10.2026 00:47). Armbian's unit also runs armbian-ramlog as its
-# ExecStartPre/Post (masked here). The drop-in keeps the state in /run (tmpfs: a lost state after a
-# reboot only means one early rotation) and drops the ramlog steps. Path relative to the unit dir.
-bkshading_sbc_logrotate_dropin_path() { printf '%s\n' logrotate.service.d/99-bkshading-ro-root.conf; }
+# ExecStartPre/Post (masked here). The drop-in keeps the state in /run and drops the ramlog steps.
+# /var/log is itself a tmpfs wiped at every boot, so only rotation within one boot matters: after a
+# reboot logrotate finds no state, stamps every log as just rotated and rotates nothing time-based
+# in that boot (a ~3 h handheld session never reaches a daily rotation); the size rules still apply.
+# The name sorts after every letter-named drop-in (drop-ins of all dirs apply in filename order), so
+# an Armbian override.conf can never re-add the ramlog steps or the old ExecStart after it. Path
+# relative to the unit dir; the first cut's name (99-) is removed by --install.
+bkshading_sbc_logrotate_dropin_path() { printf '%s\n' logrotate.service.d/zz-bkshading-ro-root.conf; }
+bkshading_sbc_logrotate_legacy_dropin_path() { printf '%s\n' logrotate.service.d/99-bkshading-ro-root.conf; }
 bkshading_sbc_logrotate_dropin_content() {
   printf '%s\n' \
     "# Written by scripts/bkshading-provision-sbc.sh --install (issue 808): the root is read-only," \

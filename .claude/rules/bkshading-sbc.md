@@ -67,18 +67,22 @@ the relay/cloudflared provisioning canon but with two deliberate deltas + one go
     `degraded`; live on handheld-1, 3.10.2026 — networkd keeps its state in /run without it), and
     `fake-hwclock-save` + its hourly timer (cannot write `/etc/fake-hwclock.data`; the boot-time
     `fake-hwclock-load` only reads it and stays);
-  - writes `logrotate.service.d/99-bkshading-ro-root.conf`: logrotate keeps its state in
+  - writes `logrotate.service.d/zz-bkshading-ro-root.conf` (zz- sorts after any letter-named
+    Armbian drop-in; the first cut's `99-` name is removed) and daemon-reloads: logrotate keeps its state in
     `/run/logrotate.status` and Armbian's armbian-ramlog ExecStartPre/Post go (live 4.10.2026: the
     daily logrotate failed on `/var/lib/logrotate/status` and left the board `degraded`); `--check`
-    grades it byte-for-byte. Not yet checked on the camboxes: their logrotate also runs on a
-    read-only root (every 15 min since issue 679) with the state under `/var/lib`;
+    grades it byte-for-byte. A lost state after a reboot means no time-based rotation in that boot
+    (/var/log is a tmpfs anyway; size rules still apply). The camboxes run logrotate on a read-only
+    root too (every 15 min since issue 679, state under `/var/lib`): tracked on #1394 (comment
+    5974629330), to read when they are powered on;
   - on a root that is already ro (a re-run), remounts rw for its own writes and back;
   - reads the root first (an unreadable root refuses untouched) and refuses on a cambox
     (`/usr/local/bin/camera-box` present), whose root is `setup-device.sh`'s.
   `--check` grades the root: `ro` = OK, `rw` = FAIL "reboot after --install". It also grades each
   unit of `bkshading_sbc_masked_units`: `systemctl is-enabled` must print `masked` (a real masked
   unit exits 1 with that word; a unit the image does not ship reads `masked` once `mask` linked it
-  to /dev/null), else FAIL "re-run --install". Both rows apply to every SBC, wired or WiFi.
+  to /dev/null), else FAIL "re-run --install". And it grades the logrotate drop-in byte-for-byte.
+  All three root rows (root mode, masked units, logrotate drop-in) apply to every SBC, wired or WiFi.
 - **ONE read-only canon for the provisioning scripts: `scripts/lib/ro-root.sh`.** `setup-device.sh`
   STEP 18 writes its root line and every tmpfs line through it, per line, because the cambox fstab
   also carries the EFI line and the issue-1309 journal-partition line between `/var/log` and
