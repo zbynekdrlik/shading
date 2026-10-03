@@ -419,6 +419,61 @@ test("a preview camera with no NDI feed shows the placeholder, never a 4xx/5xx, 
   expect(problems, `console problems: ${problems.join(" | ")}`).toEqual([]);
 });
 
+test("a hung preview fetch is aborted after its timeout, frees the block for the next one, and recovers, console clean (issue 808)", async ({
+  page,
+}) => {
+  const problems = [];
+  page.on("console", (msg) => {
+    const t = msg.type();
+    if (t === "error" || t === "warning") problems.push(`${t}: ${msg.text()}`);
+  });
+  page.on("pageerror", (err) => problems.push(`pageerror: ${err.message}`));
+
+  // The feed is live, but the first preview request hangs for 4 s (a half-open link). The panel's
+  // 2 s fetch timeout must abort it (an aborted fetch logs nothing) and free the block's single
+  // in-flight slot, so a second request arrives while the first one is still held.
+  let hang = true;
+  let previewHits = 0;
+  await page.addInitScript(DISABLE_WS);
+  await page.route("**/api/cameras", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(makeFixture({ hasPreview: true, previewLive: true })),
+    })
+  );
+  await page.route(PREVIEW_URL_RE, async (route) => {
+    previewHits += 1;
+    if (hang) {
+      await new Promise((resolve) => setTimeout(resolve, 4000));
+      try {
+        await route.fulfill({ status: 200, contentType: "image/jpeg", body: PREVIEW_JPEG });
+      } catch (e) {
+        // the page aborted this request already -- exactly what the test wants
+      }
+      return;
+    }
+    return route.fulfill({ status: 200, contentType: "image/jpeg", body: PREVIEW_JPEG });
+  });
+
+  await page.goto(`${PREVIEW_SVC}/`);
+  const img = page.locator('[data-role="preview-img"]');
+  const placeholder = page.locator('[data-role="preview-placeholder"]');
+
+  // A second request while the first is still held = the timeout freed the slot.
+  await expect.poll(() => previewHits, { timeout: 3500 }).toBeGreaterThanOrEqual(2);
+  await expect(placeholder).toBeVisible();
+  await expect(placeholder).toHaveText("NDI preview — čakám…");
+  await expect(img).not.toHaveClass(/ready/);
+
+  // The link recovers: the next request answers and the frame shows.
+  hang = false;
+  await expect(img).toHaveClass(/ready/, { timeout: 8000 });
+  await expect(placeholder).toBeHidden();
+
+  expect(problems, `console problems: ${problems.join(" | ")}`).toEqual([]);
+});
+
 test("a live preview frame is shown, a stopped feed drops to the placeholder and is no longer fetched, console clean (issue 808)", async ({
   page,
 }) => {

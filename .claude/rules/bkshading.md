@@ -162,7 +162,10 @@ feed stayed on screen frozen as if live.
     attribute REMOVED (fires no error event) and the URL revoked.
   - one `AbortController` per block: a fetch is aborted after `PREVIEW_FETCH_TIMEOUT_MS` (2 s) and
     whenever the block drops to its placeholder (an aborted fetch logs nothing in Chromium), and a
-    frame that arrives after contact was lost is not painted.
+    frame that arrives after contact was lost is not painted. A fetch that only TIMED OUT, on a
+    feed still live with contact, keeps a frame painted less than `PREVIEW_KEEP_ON_TIMEOUT_MS` (3 s)
+    ago, so one slow request never flashes "obraz sa zastavil". `panel.spec.js` pins the abort with a
+    route that holds the first request 4 s (a second request must arrive within 3.5 s).
   The placeholder says "NDI preview — čakám…" before any frame and "NDI preview — obraz sa
   zastavil, čakám…" after a live feed stopped. Never point an `<img>` straight at a polled
   endpoint that can answer 4xx/5xx again.

@@ -24,6 +24,10 @@ const PREVIEW_STOPPED_TEXT = "NDI preview — obraz sa zastavil, čakám…";
 // issue 808: one preview fetch may take at most this long; a slower one is aborted (a half-open
 // connection would otherwise keep the block's single in-flight slot busy for minutes).
 const PREVIEW_FETCH_TIMEOUT_MS = 2000;
+// A fetch that only TIMED OUT (the feed still reported live, contact still there) keeps a frame
+// painted less than this long ago, so one slow request never flashes "obraz sa zastavil"; the same
+// bound as the service's freshness floor (PREVIEW_MAX_AGE_FLOOR_MS).
+const PREVIEW_KEEP_ON_TIMEOUT_MS = 3000;
 
 // Present f-number from the AV the relay reported: fNumber = sqrt(2^AV).
 function fNumberFromAv(av) {
@@ -398,6 +402,7 @@ function wire(el, id) {
       img.classList.add("ready");
       if (ph) ph.hidden = true;
       el.dataset.previewSeen = "1"; // a frame was shown -> a later stop says "obraz sa zastavil"
+      el.dataset.previewShownAt = String(Date.now()); // the timeout keep-window reads this
     });
     img.addEventListener("error", () => showPreviewPlaceholder(el));
   }
@@ -438,7 +443,11 @@ async function loadPreview(id, el) {
   const ctrl = new AbortController();
   el.previewAbort = ctrl;
   el.dataset.previewBusy = "1";
-  const timer = setTimeout(() => ctrl.abort(), PREVIEW_FETCH_TIMEOUT_MS);
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    ctrl.abort();
+  }, PREVIEW_FETCH_TIMEOUT_MS);
   try {
     const r = await fetch(`/api/cameras/${encodeURIComponent(id)}/preview.jpg`, {
       cache: "no-store",
@@ -462,8 +471,14 @@ async function loadPreview(id, el) {
     img.src = el.previewUrl;
     if (prev) URL.revokeObjectURL(prev);
   } catch (e) {
-    // Aborted (a timeout, or the block already dropped to its placeholder) or the service is
-    // unreachable (the offline banner is the signal): show no frozen frame either way.
+    // Only a timeout, on a feed still live with contact, keeps a frame painted moments ago; the
+    // next fetch replaces it or, once it is older than the keep-window, drops it.
+    const shownAgo = Date.now() - Number(el.dataset.previewShownAt || 0);
+    if (timedOut && el.dataset.previewLive === "1" && isConnected() && shownAgo < PREVIEW_KEEP_ON_TIMEOUT_MS) {
+      return;
+    }
+    // Otherwise (the block dropped to its placeholder, a longer stall, or the service is
+    // unreachable -- the offline banner is the signal): no frozen frame.
     showPreviewPlaceholder(el);
   } finally {
     clearTimeout(timer);
