@@ -20,8 +20,15 @@ assumes a read-only root (a stock Pi OS root is read-write). This milestone clos
     is actually aarch64 (an ELF e_machine read) so a mis-deployed amd64 binary is caught here, not at
     reboot with an opaque `Exec format error`.
   - the CI `bkshading` job cross-builds the relay for aarch64 and uploads `bkshading-relay-linux-arm64`.
-  - `scripts/bkshading-deploy-relay.sh` gains `--arch amd64|arm64` (selects the artifact) and
-    `--no-remount` (a stock Pi OS root is rw), so the arm64 relay has a real deploy path.
+  - `scripts/bkshading-deploy-relay.sh` gains `--arch amd64|arm64` (selects the artifact), so the
+    arm64 relay has a real deploy path.
+
+Slice B of the handheld milestone (owner ruling 5948648089, main design 5971558113): the SBC root goes
+READ-ONLY, the same as the camboxes. `--install` writes the read-only fstab from the ONE shared lib
+`scripts/lib/ro-root.sh` (the cambox tmpfs set, the board's own other mounts kept), makes journald
+volatile, masks armbian-ramlog, and remounts an already-ro root rw for its own writes and back.
+`--check` grades the root mode (ro = OK). The deploy reads the target's own root mode instead of a
+flag: an ro root gets the remount cycle, an rw root none, an unreadable one refuses.
 
 These stdlib-only + pyyaml structural/behavioural tests run in the `python-tests` CI job (no Rust
 toolchain, no root, no apt, no real systemd — the impure ops are overridden to fakes into a temp
@@ -292,11 +299,58 @@ def _make_net_sysfs(base, ifaces):
     return root
 
 
-def _run_provision(mode, root, bin_machine=AARCH64, make_bin=True, net_ifaces=None):
+ROOT_UUID = "7c1e2c5a-0000-4b6c-9a1d-123456789abc"
+# The live handheld-1 shape (Armbian community trixie, one partition mmcblk0p1): an rw root + a /tmp
+# tmpfs. A Raspberry Pi OS board would add its own /boot/firmware line, which the ro fstab keeps.
+ARMBIAN_FSTAB = (
+    "UUID=%s / ext4 defaults,noatime,commit=120,errors=remount-ro 0 1\n"
+    "tmpfs /tmp tmpfs defaults,nosuid 0 0\n" % ROOT_UUID
+)
+RW_OPTS = "rw,noatime,commit=120,errors=remount-ro"
+RO_OPTS = "ro,noatime,commit=120,errors=remount-ro"
+
+
+def _fake_findmnt(dirpath):
+    """A findmnt answering the three root reads the provision makes, from env (FAKE_ROOT_*)."""
+    p = os.path.join(dirpath, "findmnt")
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(
+            "#!/usr/bin/env bash\n"
+            'case "$*" in\n'
+            '  *OPTIONS*) printf "%s\\n" "${FAKE_ROOT_OPTS-}" ;;\n'
+            '  *UUID*) printf "%s\\n" "${FAKE_ROOT_UUID-}" ;;\n'
+            '  *FSTYPE*) printf "%s\\n" "${FAKE_ROOT_FSTYPE-}" ;;\n'
+            "esac\n"
+        )
+    os.chmod(p, 0o755)
+    return p
+
+
+def _fake_mount(dirpath, record_path):
+    p = os.path.join(dirpath, "mount")
+    with open(p, "w", encoding="utf-8") as f:
+        f.write('#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s"\n' % record_path)
+    os.chmod(p, 0o755)
+    return p
+
+
+def _sbc_paths(root):
+    return {
+        "fstab": os.path.join(root, "etc", "fstab"),
+        "journald": os.path.join(root, "etc", "systemd", "journald.conf.d"),
+        "mount_log": os.path.join(root, "mount-calls.log"),
+        "cambox_marker": os.path.join(root, "usr", "local", "bin", "camera-box"),
+    }
+
+
+def _run_provision(mode, root, bin_machine=AARCH64, make_bin=True, net_ifaces=None,
+                   root_opts=None, root_uuid=ROOT_UUID, fstab_text=ARMBIAN_FSTAB,
+                   persistent_dropin=True, cambox=False):
     sysd = os.path.join(root, "systemd-system")
     binp = os.path.join(root, "bin", "bkshading-relay")
     calls = os.path.join(root, "systemctl-calls.log")
     sc = _fake_systemctl(calls)
+    paths = _sbc_paths(root)
     if make_bin:
         os.makedirs(os.path.dirname(binp), exist_ok=True)
         _fake_elf(binp, bin_machine)
@@ -305,6 +359,24 @@ def _run_provision(mode, root, bin_machine=AARCH64, make_bin=True, net_ifaces=No
         # green regardless of the CI runner's real interfaces.
         net_ifaces = {"wlan0": "up", "eth0": "up"}
     net_root = _make_net_sysfs(root, net_ifaces)
+    if root_opts is None:
+        # an --install normally runs on the still-rw board; a --check after the reboot sees ro.
+        root_opts = RW_OPTS if mode == "--install" else RO_OPTS
+    # Seed the board's own files once (a re-run keeps whatever the first --install wrote).
+    if not os.path.exists(paths["fstab"]):
+        os.makedirs(os.path.dirname(paths["fstab"]), exist_ok=True)
+        with open(paths["fstab"], "w", encoding="utf-8") as f:
+            f.write(fstab_text)
+    os.makedirs(paths["journald"], exist_ok=True)
+    if persistent_dropin and not os.path.exists(os.path.join(root, ".seeded-journald")):
+        with open(os.path.join(paths["journald"], "10-persistent.conf"), "w") as f:
+            f.write("[Journal]\nStorage=persistent\n")
+        open(os.path.join(root, ".seeded-journald"), "w").close()
+    if cambox:
+        os.makedirs(os.path.dirname(paths["cambox_marker"]), exist_ok=True)
+        _fake_elf(paths["cambox_marker"], X86_64)
+    tools = os.path.join(root, "fake-tools")
+    os.makedirs(tools, exist_ok=True)
     env = dict(
         os.environ,
         BKSHADING_SBC_UNIT_DEST=os.path.join(sysd, UNIT_NAME),
@@ -312,6 +384,14 @@ def _run_provision(mode, root, bin_machine=AARCH64, make_bin=True, net_ifaces=No
         BKSHADING_SBC_GPHOTO2="true",  # exists -> command -v succeeds, apt skipped
         BKSHADING_SBC_SYSTEMCTL=sc,
         BKSHADING_SBC_NET_SYSFS=net_root,
+        BKSHADING_SBC_FSTAB=paths["fstab"],
+        BKSHADING_SBC_JOURNALD_DIR=paths["journald"],
+        BKSHADING_SBC_FINDMNT=_fake_findmnt(tools),
+        BKSHADING_SBC_MOUNT=_fake_mount(tools, paths["mount_log"]),
+        BKSHADING_SBC_CAMBOX_MARKER=paths["cambox_marker"],
+        FAKE_ROOT_OPTS=root_opts,
+        FAKE_ROOT_UUID=root_uuid,
+        FAKE_ROOT_FSTYPE="ext4",
     )
     r = subprocess.run(["bash", SCRIPT, mode], capture_output=True, text=True, env=env)
     return r, calls, binp
@@ -406,6 +486,161 @@ def test_unknown_arg_exits_2():
 
 
 # ---------------------------------------------------------------------------------------------
+# slice B: the read-only root, the same canon as the camboxes (ROZHODNUTÉ 5948648089)
+# ---------------------------------------------------------------------------------------------
+RO_LIB = os.path.join(REPO, "scripts", "lib", "ro-root.sh")
+
+
+def _read(p):
+    with open(p, encoding="utf-8") as f:
+        return f.read()
+
+
+def _lib_fstab_text(original):
+    src = '. "%s"\nro_root_fstab_text "$U" ext4 "$ORIG"' % RO_LIB
+    r = subprocess.run(["bash", "-c", src], capture_output=True, text=True,
+                       env=dict(os.environ, U=ROOT_UUID, ORIG=original), check=True)
+    return r.stdout
+
+
+def test_install_writes_the_ro_fstab_from_the_shared_lib():
+    root = tempfile.mkdtemp()
+    try:
+        r, _c, _b = _run_provision("--install", root)
+        assert r.returncode == 0, (r.stdout, r.stderr)
+        paths = _sbc_paths(root)
+        written = _read(paths["fstab"])
+        assert written == _lib_fstab_text(ARMBIAN_FSTAB), "the fstab must be the lib's text:\n" + written
+        assert "UUID=%s / ext4 ro 0 1\n" % ROOT_UUID in written
+        assert "tmpfs /var/cache tmpfs defaults,noatime,nosuid,nodev,mode=0755,size=512M 0 0" in written
+        # the pristine original is kept once, like the cambox's fstab.bak
+        assert _read(paths["fstab"] + ".bak") == ARMBIAN_FSTAB
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_install_rerun_keeps_the_original_backup_and_the_same_fstab():
+    root = tempfile.mkdtemp()
+    try:
+        r1, _c, _b = _run_provision("--install", root)
+        assert r1.returncode == 0, (r1.stdout, r1.stderr)
+        first = _read(_sbc_paths(root)["fstab"])
+        r2, _c2, _b2 = _run_provision("--install", root, root_opts=RO_OPTS)
+        assert r2.returncode == 0, (r2.stdout, r2.stderr)
+        assert _read(_sbc_paths(root)["fstab"]) == first, "a re-run writes the same fstab"
+        assert _read(_sbc_paths(root)["fstab"] + ".bak") == ARMBIAN_FSTAB, \
+            "a re-run must never overwrite the original backup with the rewritten fstab"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_install_keeps_a_boards_own_mount():
+    pios = (
+        "PARTUUID=1234abcd-01  /boot/firmware  vfat    defaults          0       2\n"
+        "PARTUUID=1234abcd-02  /               ext4    defaults,noatime  0       1\n"
+    )
+    root = tempfile.mkdtemp()
+    try:
+        r, _c, _b = _run_provision("--install", root, fstab_text=pios)
+        assert r.returncode == 0, (r.stdout, r.stderr)
+        written = _read(_sbc_paths(root)["fstab"])
+        assert "PARTUUID=1234abcd-01  /boot/firmware  vfat    defaults          0       2\n" in written
+        assert "PARTUUID=1234abcd-02" not in written
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_install_makes_journald_volatile():
+    root = tempfile.mkdtemp()
+    try:
+        r, _c, _b = _run_provision("--install", root)
+        assert r.returncode == 0, (r.stdout, r.stderr)
+        jd = _sbc_paths(root)["journald"]
+        assert not os.path.exists(os.path.join(jd, "10-persistent.conf")), \
+            "the debug Storage=persistent drop-in must be removed"
+        dropins = sorted(os.listdir(jd))
+        assert dropins, "a volatile journald drop-in must be written"
+        body = "".join(_read(os.path.join(jd, d)) for d in dropins)
+        assert "[Journal]" in body and "Storage=volatile" in body, body
+        assert "Storage=persistent" not in body
+        # it sorts after any other drop-in, so nothing overrides it
+        assert dropins[-1].startswith("99-"), dropins
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_install_masks_armbian_ramlog_and_stays_enable_only():
+    root = tempfile.mkdtemp()
+    try:
+        r, calls, _b = _run_provision("--install", root)
+        assert r.returncode == 0, (r.stdout, r.stderr)
+        log = _read(calls)
+        assert "mask armbian-ramlog.service" in log, log
+        assert "start" not in log and "restart" not in log, "enable-only:\n" + log
+        assert not os.path.exists(_sbc_paths(root)["mount_log"]), \
+            "an rw root is never remounted (the ro fstab takes effect at reboot)"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_install_on_a_ro_root_remounts_rw_then_back_ro():
+    root = tempfile.mkdtemp()
+    try:
+        r, _c, _b = _run_provision("--install", root, root_opts=RO_OPTS)
+        assert r.returncode == 0, (r.stdout, r.stderr)
+        log = _read(_sbc_paths(root)["mount_log"]).splitlines()
+        assert log == ["-o remount,rw /", "-o remount,ro /"], log
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_install_refuses_an_unreadable_root():
+    for opts, uuid in (("", ROOT_UUID), (RW_OPTS, "")):
+        root = tempfile.mkdtemp()
+        try:
+            r, calls, _b = _run_provision("--install", root, root_opts=opts, root_uuid=uuid)
+            assert r.returncode == 1, (opts, uuid, r.returncode, r.stdout, r.stderr)
+            assert _read(_sbc_paths(root)["fstab"]) == ARMBIAN_FSTAB, "fstab untouched"
+            assert not os.path.exists(_sbc_paths(root)["fstab"] + ".bak")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+
+def test_install_refuses_on_a_cambox():
+    root = tempfile.mkdtemp()
+    try:
+        r, calls, _b = _run_provision("--install", root, cambox=True)
+        assert r.returncode == 2, (r.returncode, r.stdout, r.stderr)
+        assert "setup-device.sh" in r.stderr, r.stderr
+        assert _read(_sbc_paths(root)["fstab"]) == ARMBIAN_FSTAB, "a cambox fstab is never rewritten"
+        assert not os.path.exists(calls), "nothing is enabled or masked on a cambox"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_check_grades_the_root_mode():
+    root = tempfile.mkdtemp()
+    try:
+        r, _c, _b = _run_provision("--install", root)
+        assert r.returncode == 0, (r.stdout, r.stderr)
+        ok, _c, _b = _run_provision("--check", root, root_opts=RO_OPTS)
+        assert ok.returncode == 0, (ok.stdout, ok.stderr)
+        assert re.search(r"OK: root filesystem is read-only", ok.stdout), ok.stdout
+        rw, _c, _b = _run_provision("--check", root, root_opts=RW_OPTS)
+        assert rw.returncode == 1, (rw.stdout, rw.stderr)
+        assert re.search(r"FAIL: root filesystem is read-WRITE.*reboot after --install", rw.stderr), rw.stderr
+        unk, _c, _b = _run_provision("--check", root, root_opts="")
+        assert unk.returncode == 1, (unk.stdout, unk.stderr)
+        assert re.search(r"FAIL: .*root", unk.stderr), unk.stderr
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_provision_sources_the_shared_ro_root_lib():
+    assert '. "$HERE/lib/ro-root.sh"' in _read(SCRIPT)
+
+
+# ---------------------------------------------------------------------------------------------
 # CI: the bkshading job cross-builds + uploads the aarch64 relay; no continue-on-error
 # ---------------------------------------------------------------------------------------------
 def test_ci_bkshading_job_cross_builds_aarch64_relay():
@@ -448,7 +683,7 @@ def test_ci_arm64_upload_name_agrees_with_deploy_lib():
 
 
 # ---------------------------------------------------------------------------------------------
-# deploy extension: --arch arm64 selects the arm64 artifact; --no-remount skips the ro-root cycle
+# deploy extension: --arch arm64 selects the arm64 artifact; the remount follows the target's root
 # ---------------------------------------------------------------------------------------------
 def test_deploy_lib_arch_artifact_selection():
     # amd64 (default) unchanged; arm64 -> the relay-only arm64 artifact.
@@ -466,43 +701,35 @@ def _run_deploy(args, env=None):
     return subprocess.run(["bash", DEPLOY_SCRIPT] + args, capture_output=True, text=True, env=e)
 
 
-def test_deploy_dry_run_arm64_no_remount_skips_remount():
+def test_deploy_no_remount_flag_is_gone():
+    # The remount follows the target's own root now (a read-only SBC root, issue 808 slice B), so the
+    # old per-deploy flag is a dead MVP flag: it is refused as an unknown argument.
     with tempfile.TemporaryDirectory() as tmp:
         fake_bin = os.path.join(tmp, "bkshading-relay")
         _fake_elf(fake_bin, AARCH64)
         r = _run_deploy(["--host", "10.77.9.60", "--arch", "arm64", "--no-remount",
                          "--binary", fake_bin, "--dry-run"])
+        assert r.returncode == 2, (r.returncode, r.stdout, r.stderr)
+        assert "unknown argument" in r.stderr, r.stderr
+
+
+def test_deploy_dry_run_arm64_plans_the_root_mode_read():
+    with tempfile.TemporaryDirectory() as tmp:
+        fake_bin = os.path.join(tmp, "bkshading-relay")
+        _fake_elf(fake_bin, AARCH64)
+        r = _run_deploy(["--host", "10.77.9.60", "--arch", "arm64", "--binary", fake_bin, "--dry-run"])
         assert r.returncode == 0, (r.stdout, r.stderr)
         out = r.stdout + r.stderr
-        assert "10.77.9.60" in out
-        assert BIN_PATH in out
-        # NO ro-root remount cycle for a stock-rw-root Pi.
-        assert "remount,rw" not in out and "remount,ro" not in out, \
-            "--no-remount must skip the ro-root swap in the plan"
+        assert "10.77.9.60" in out and BIN_PATH in out
+        assert "findmnt" in out, "the plan must say the root mode is read from the target"
+        assert "remount,rw" in out and "remount,ro" in out, "the ro-root cycle is planned for an ro root"
+        assert "WARNING" not in out, "no rw-root footgun warning is left: the target decides"
+        assert "bkshading-provision-sbc.sh" in out, "an arm64 deploy points at the SBC provisioning"
         # still enable-only.
         assert re.search(r"(NOT start|enable-only|reboot)", out, re.I)
 
 
-def test_deploy_arm64_without_no_remount_warns():
-    # arm64 targets an SBC (rw root); forgetting --no-remount is a footgun -> the script WARNS (but
-    # does not force: --arch/--no-remount stay orthogonal for the read-only-Pi case).
-    with tempfile.TemporaryDirectory() as tmp:
-        fake_bin = os.path.join(tmp, "bkshading-relay")
-        _fake_elf(fake_bin, AARCH64)
-        # arm64 WITHOUT --no-remount -> warning present.
-        r = _run_deploy(["--host", "10.77.9.60", "--arch", "arm64", "--binary", fake_bin, "--dry-run"])
-        assert r.returncode == 0, (r.stdout, r.stderr)
-        assert re.search(r"--no-remount", r.stdout + r.stderr) and \
-            re.search(r"warning", r.stdout + r.stderr, re.I), \
-            "arm64 without --no-remount must warn about the rw-root Pi footgun"
-        # arm64 WITH --no-remount -> no such warning.
-        r2 = _run_deploy(["--host", "10.77.9.60", "--arch", "arm64", "--no-remount",
-                          "--binary", fake_bin, "--dry-run"])
-        assert not re.search(r"WARNING: --arch arm64 without --no-remount", r2.stdout + r2.stderr), \
-            "arm64 WITH --no-remount must not warn"
-
-
-def _fake_deploy_env(tmp, remote_sha):
+def _fake_deploy_env(tmp, remote_sha, root_opts=RW_OPTS):
     log = os.path.join(tmp, "calls.log")
     fake_ssh = os.path.join(tmp, "fake-ssh")
     ssh_body = (
@@ -513,12 +740,14 @@ def _fake_deploy_env(tmp, remote_sha):
         # issue 808: the deploy reads the relay state first and refuses on an unreadable read, so
         # the fake SBC answers it like a real one whose relay is stopped.
         '  *"is-active"*) printf "inactive\\n" ;;\n'
+        # issue 808 slice B: the deploy reads the target's root mode; an empty answer refuses.
+        '  *"findmnt"*) printf "__ROOT__\\n" ;;\n'
         '  *sha256sum*) printf "__SHA__\\n" ;;\n'
         '  *"test -x"*) printf "yes\\n" ;;\n'
         "  *) : ;;\n"
         "esac\n"
         "exit 0\n"
-    ).replace("__LOG__", log).replace("__SHA__", remote_sha)
+    ).replace("__LOG__", log).replace("__SHA__", remote_sha).replace("__ROOT__", root_opts)
     with open(fake_ssh, "w") as f:
         f.write(ssh_body)
     os.chmod(fake_ssh, 0o755)
@@ -553,24 +782,52 @@ def _fake_deploy_env(tmp, remote_sha):
     return env, log
 
 
-def test_fake_deploy_arm64_no_remount_scps_without_remount():
+def _fake_deploy_run(root_opts):
     with tempfile.TemporaryDirectory() as tmp:
         fake_bin = os.path.join(tmp, "bkshading-relay")
         _fake_elf(fake_bin, AARCH64)
         local_sha = subprocess.run(
             ["sha256sum", fake_bin], capture_output=True, text=True, check=True
         ).stdout.split()[0]
-        env, log = _fake_deploy_env(tmp, local_sha)
-        r = _run_deploy(["--host", "10.77.9.60", "--arch", "arm64", "--no-remount",
-                         "--binary", fake_bin], env=env)
-        assert r.returncode == 0, (r.stdout, r.stderr)
-        calls = open(log).read()
-        assert ("root@10.77.9.60:" + BIN_PATH) in calls, "must scp to the relay bin path"
-        assert "sha256sum" in calls, "must byte-verify"
-        assert "remount,rw" not in calls and "remount,ro" not in calls, \
-            "--no-remount must not remount a stock-rw-root Pi"
-        assert "systemctl start" not in calls and "systemctl restart" not in calls, \
-            "deploy is enable-only"
+        env, log = _fake_deploy_env(tmp, local_sha, root_opts=root_opts)
+        r = _run_deploy(["--host", "10.77.9.60", "--arch", "arm64", "--binary", fake_bin], env=env)
+        calls = open(log).read() if os.path.exists(log) else ""
+        return r, calls
+
+
+def test_fake_deploy_to_a_rw_root_sbc_never_remounts():
+    r, calls = _fake_deploy_run(RW_OPTS)
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert "findmnt" in calls, "the deploy must READ the target's root mode"
+    assert ("root@10.77.9.60:" + BIN_PATH) in calls, "must scp to the relay bin path"
+    assert "sha256sum" in calls, "must byte-verify"
+    assert "remount,rw" not in calls and "remount,ro" not in calls, \
+        "an rw root (a board before its first ro reboot) is never remounted"
+    assert "systemctl start" not in calls and "systemctl restart" not in calls, \
+        "deploy is enable-only"
+
+
+def test_fake_deploy_to_a_ro_root_sbc_remounts_rw_then_ro():
+    r, calls = _fake_deploy_run(RO_OPTS)
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    i_root = calls.find("findmnt")
+    i_rw = calls.find("remount,rw /")
+    i_scp = calls.find("root@10.77.9.60:" + BIN_PATH)
+    i_ro = calls.find("remount,ro /")
+    assert 0 <= i_root < i_rw < i_scp < i_ro, "a read-only SBC root gets the cambox cycle:\n" + calls
+    assert "root back to read-only" in r.stdout, r.stdout
+
+
+def test_fake_deploy_refuses_an_unreadable_root_before_touching_the_sbc():
+    r, calls = _fake_deploy_run("")
+    assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+    assert re.search(r"could not read the root mount", r.stderr), r.stderr
+    assert "remount" not in calls and "SCP" not in calls and "systemctl stop" not in calls, calls
+
+
+def test_no_doc_or_usage_line_still_passes_the_removed_flag():
+    for f in (SCRIPT, DEPLOY_SCRIPT, README, os.path.join(REPO, ".claude", "rules", "bkshading.md")):
+        assert "--no-remount" not in _read(f), "%s still mentions the removed flag" % f
 
 
 # ---------------------------------------------------------------------------------------------

@@ -216,6 +216,8 @@ def _deploy_env(tmp, remote_sha, was_active="active", ro_fails=False):
         'cmd="${!#}"\n'
         'case "$cmd" in\n'
         '  *"is-active"*) printf "__WAS__\\n" ;;\n'
+        # issue 808 slice B: a cambox root is read-only, so the deploy runs its remount cycle.
+        '  *"findmnt"*) printf "ro,relatime\\n" ;;\n'
         '  *sha256sum*) printf "__SHA__\\n" ;;\n'
         '  *"test -x"*) printf "yes\\n" ;;\n'
         '  *"remount,ro"*) [ "__ROFAIL__" = 1 ] && { echo "mount: /: mount point is busy." >&2; exit 1; } ;;\n'
