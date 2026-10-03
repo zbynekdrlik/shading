@@ -57,8 +57,8 @@ fn immediate_confirm_push_updates_only_the_target_camera_1337() {
         version: "1.7.0-dev.640".into(),
         not_applied: Vec::new(),
     };
-    let cam1_before = camera_view(&cfg.cameras[0], Some(online_iso(400)));
-    let handheld = camera_view(&cfg.cameras[1], None);
+    let cam1_before = camera_view(&cfg.cameras[0], Some(online_iso(400)), false);
+    let handheld = camera_view(&cfg.cameras[1], None, false);
     let agg = Aggregate {
         version: "1.7.0-dev.640".into(),
         cameras: vec![cam1_before, handheld.clone()],
@@ -103,7 +103,7 @@ fn not_applied_is_carried_through_the_camera_view_and_pushed_1343() {
         version: "1.7.0-dev.643".into(),
         not_applied: vec!["apertureNorm".to_string()],
     };
-    let view = camera_view(&cfg.cameras[0], Some(state));
+    let view = camera_view(&cfg.cameras[0], Some(state), false);
     assert_eq!(
         view.state.as_ref().unwrap().not_applied,
         vec!["apertureNorm".to_string()],
@@ -152,7 +152,7 @@ fn camera_with_ndi_preview_has_preview_block() {
         version: "1.7.0-dev.516".into(),
         not_applied: Vec::new(),
     };
-    let view = camera_view(&cfg.cameras[0], Some(state));
+    let view = camera_view(&cfg.cameras[0], Some(state), false);
     assert!(
         view.has_preview,
         "cam1 has an NDI preview name -> preview block"
@@ -164,7 +164,7 @@ fn camera_with_ndi_preview_has_preview_block() {
 #[test]
 fn handheld_without_preview_is_params_only_and_offline_when_unreachable() {
     let cfg = ServiceConfig::from_toml_str(EXAMPLE).unwrap();
-    let view = camera_view(&cfg.cameras[1], None);
+    let view = camera_view(&cfg.cameras[1], None, false);
     assert!(
         !view.has_preview,
         "handheld without NDI preview -> params-only block"
@@ -268,20 +268,20 @@ grab_fps = 60
     let cam = &cfg.cameras[0];
 
     // Camera at 60.00 fps matches the 60 fps grab -> Synced.
-    let v = camera_view(cam, Some(online_state_with_fps100(Some(6000))));
+    let v = camera_view(cam, Some(online_state_with_fps100(Some(6000))), false);
     assert_eq!(v.grab_fps, Some(60));
     assert_eq!(v.fps_sync, FpsSync::Synced);
 
     // Camera at 50.00 fps against a 60 fps grab -> Mismatch (the beat-artefact warning).
-    let v = camera_view(cam, Some(online_state_with_fps100(Some(5000))));
+    let v = camera_view(cam, Some(online_state_with_fps100(Some(5000))), false);
     assert_eq!(v.fps_sync, FpsSync::Mismatch);
 
     // Reachable but fps not read this cycle -> Unknown, never a false mismatch.
-    let v = camera_view(cam, Some(online_state_with_fps100(None)));
+    let v = camera_view(cam, Some(online_state_with_fps100(None)), false);
     assert_eq!(v.fps_sync, FpsSync::Unknown);
 
     // Relay unreachable -> Unknown, but the configured grab is still surfaced.
-    let v = camera_view(cam, None);
+    let v = camera_view(cam, None, false);
     assert_eq!(v.fps_sync, FpsSync::Unknown);
     assert_eq!(v.grab_fps, Some(60));
 }
@@ -300,7 +300,11 @@ address = \"cam2.lan:8771\"
     .unwrap();
     // Even a perfectly good 60.00 fps reading is Unknown when no grab mode is configured
     // (nothing to compare against).
-    let v = camera_view(&cfg.cameras[0], Some(online_state_with_fps100(Some(6000))));
+    let v = camera_view(
+        &cfg.cameras[0],
+        Some(online_state_with_fps100(Some(6000))),
+        false,
+    );
     assert_eq!(v.grab_fps, None);
     assert_eq!(v.fps_sync, FpsSync::Unknown);
 }
@@ -327,6 +331,7 @@ fn camera_view_derives_effective_grab_from_live_capture_rate() {
     let v = camera_view(
         cam,
         Some(online_state_with_fps_and_capture(Some(5000), Some(50))),
+        false,
     );
     assert_eq!(
         v.grab_fps,
@@ -344,6 +349,7 @@ fn camera_view_derives_effective_grab_from_live_capture_rate() {
     let v = camera_view(
         cam,
         Some(online_state_with_fps_and_capture(Some(5000), Some(60))),
+        false,
     );
     assert!(!v.grab_fps_desync);
     assert_eq!(v.grab_fps, Some(60));
@@ -354,6 +360,7 @@ fn camera_view_derives_effective_grab_from_live_capture_rate() {
     let v = camera_view(
         cam,
         Some(online_state_with_fps_and_capture(Some(6000), None)),
+        false,
     );
     assert!(!v.grab_fps_desync);
     assert_eq!(v.grab_fps, Some(60));
@@ -370,7 +377,11 @@ fn fps_alert_transitions_logs_mismatch_once_per_transition() {
     let mut state: HashMap<String, (FpsSync, bool)> = HashMap::new();
 
     // Camera at 50.00 vs grab 60 -> Mismatch: logs ONCE on entry, with the cross-reference.
-    let mismatch = vec![camera_view(cam, Some(online_state_with_fps100(Some(5000))))];
+    let mismatch = vec![camera_view(
+        cam,
+        Some(online_state_with_fps100(Some(5000))),
+        false,
+    )];
     let lines = fps_alert_transitions(&mut state, &mismatch);
     assert_eq!(lines.len(), 1, "one mismatch line on transition");
     assert!(lines[0].contains("cam1"));
@@ -384,7 +395,11 @@ fn fps_alert_transitions_logs_mismatch_once_per_transition() {
     assert!(fps_alert_transitions(&mut state, &mismatch).is_empty());
 
     // Recover to Synced -> no line; then back to Mismatch -> logs afresh.
-    let synced = vec![camera_view(cam, Some(online_state_with_fps100(Some(6000))))];
+    let synced = vec![camera_view(
+        cam,
+        Some(online_state_with_fps100(Some(6000))),
+        false,
+    )];
     assert!(fps_alert_transitions(&mut state, &synced).is_empty());
     assert_eq!(fps_alert_transitions(&mut state, &mismatch).len(), 1);
 }
@@ -403,6 +418,7 @@ fn fps_alert_transitions_logs_grab_config_desync_once() {
     let desync = vec![camera_view(
         cam,
         Some(online_state_with_fps_and_capture(Some(5000), Some(50))),
+        false,
     )];
     let lines = fps_alert_transitions(&mut state, &desync);
     assert_eq!(lines.len(), 1, "one desync line on transition");
@@ -504,9 +520,13 @@ fn reach_transitions_log_once_per_flip_and_heartbeat_counts() {
 
     let cfg = ServiceConfig::from_toml_str(CAM1_GRAB60).unwrap();
     let cam = &cfg.cameras[0];
-    // camera_view(cam, Some(state)) -> reachable=true; camera_view(cam, None) -> reachable=false.
-    let up = vec![camera_view(cam, Some(online_state_with_fps100(Some(6000))))];
-    let down = vec![camera_view(cam, None)];
+    // camera_view(cam, Some(state), _) -> reachable=true; camera_view(cam, None, _) -> reachable=false.
+    let up = vec![camera_view(
+        cam,
+        Some(online_state_with_fps100(Some(6000))),
+        false,
+    )];
+    let down = vec![camera_view(cam, None, false)];
 
     let mut state: HashMap<String, bool> = HashMap::new();
     // First sighting already down -> logged once.
@@ -526,4 +546,129 @@ fn reach_transitions_log_once_per_flip_and_heartbeat_counts() {
     assert!(reach_heartbeat_line(&up).contains("1/1 reachable"));
     let hb_down = reach_heartbeat_line(&down);
     assert!(hb_down.contains("0/1 reachable") && hb_down.contains("cam1"));
+}
+
+// --- issue 808: a preview camera with no / a stale NDI frame (slice A) -------------------
+
+#[test]
+fn preview_live_rides_the_camera_view_and_needs_a_preview_source_808() {
+    // The panel loads a preview frame ONLY while `previewLive`, so camera_view carries the flag the
+    // pump computed from the preview store, unchanged, for a preview-capable camera.
+    let cfg = ServiceConfig::from_toml_str(EXAMPLE).unwrap();
+    let live = camera_view(&cfg.cameras[0], None, true);
+    assert!(live.has_preview);
+    assert!(
+        live.preview_live,
+        "a fresh frame in the store -> previewLive"
+    );
+    let idle = camera_view(&cfg.cameras[0], None, false);
+    assert!(idle.has_preview, "the preview block stays configured");
+    assert!(
+        !idle.preview_live,
+        "no/stale frame -> not live (placeholder)"
+    );
+    // A camera WITHOUT an NDI preview can never be live, whatever the caller passes: previewLive
+    // implies hasPreview, so the panel never fetches a preview it has no block for.
+    let handheld = camera_view(&cfg.cameras[1], None, true);
+    assert!(!handheld.has_preview);
+    assert!(
+        !handheld.preview_live,
+        "a params-only camera is never preview-live"
+    );
+    // It rides the wire as camelCase `previewLive` (the field app.js reads).
+    let json = serde_json::to_string(&live).unwrap();
+    assert!(json.contains("\"previewLive\":true"), "wire: {json}");
+}
+
+#[test]
+fn immediate_confirm_push_keeps_the_preview_live_flag_808() {
+    // The issue-1337 immediate per-camera push rebuilds the view from the RELAY state only; preview
+    // liveness comes from the preview store at pump time, so the rebuild must carry it over instead
+    // of flipping a live preview to the placeholder for up to one pump tick after every click.
+    let cfg = ServiceConfig::from_toml_str(EXAMPLE).unwrap();
+    let state = |iso: i64| RelayState {
+        online: true,
+        camera: Some("Blackmagic Design Pocket Cinema Camera 4K".into()),
+        params: ShadingParams {
+            iso: Some(iso),
+            ..Default::default()
+        },
+        caps: None,
+        fps_supported: true,
+        capture_fps: None,
+        version: "1.7.0-dev.761".into(),
+        not_applied: Vec::new(),
+    };
+    for live in [true, false] {
+        let agg = Aggregate {
+            version: "1.7.0-dev.761".into(),
+            cameras: vec![camera_view(&cfg.cameras[0], Some(state(400)), live)],
+        };
+        let updated = aggregate_with_camera_update(&agg, &cfg.cameras[0], state(800));
+        let cam1 = &updated.cameras[0];
+        assert_eq!(cam1.state.as_ref().unwrap().params.iso, Some(800));
+        assert_eq!(
+            cam1.preview_live, live,
+            "the immediate push keeps the pump's previewLive ({live})"
+        );
+    }
+}
+
+#[test]
+fn preview_endpoint_serves_only_a_fresh_frame_else_204_808() {
+    use axum::http::{header, StatusCode};
+    use bkshading::http::preview_response;
+    use bkshading::preview::store::PreviewStore;
+
+    let cfg = ServiceConfig::from_toml_str(EXAMPLE).unwrap();
+    let store = PreviewStore::new();
+    let max_age = cfg.preview.max_frame_age_ms();
+    let now: u64 = 1_800_000_000_000;
+    let cache = |r: &axum::response::Response| {
+        r.headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+    };
+
+    // An unknown camera id is the ONLY 404.
+    let r = preview_response(&cfg, &store, "no-such-cam", now);
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+
+    // A preview camera whose feed never delivered a frame: 204 No Content + no-store, never a
+    // 4xx/5xx (Chromium logs every 4xx/5xx resource load as a console error).
+    let r = preview_response(&cfg, &store, "cam1", now);
+    assert_eq!(r.status(), StatusCode::NO_CONTENT);
+    assert_eq!(cache(&r).as_deref(), Some("no-store"));
+
+    // A configured camera without an NDI preview: also 204, never 404/5xx.
+    let r = preview_response(&cfg, &store, "handheld-1", now);
+    assert_eq!(r.status(), StatusCode::NO_CONTENT);
+    assert_eq!(cache(&r).as_deref(), Some("no-store"));
+
+    // A fresh frame is served as a JPEG, no-store.
+    store.put("cam1", vec![0xFF, 0xD8, 0xFF, 0xD9], now - 100);
+    let r = preview_response(&cfg, &store, "cam1", now);
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(
+        r.headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("image/jpeg")
+    );
+    assert_eq!(cache(&r).as_deref(), Some("no-store"));
+
+    // The same frame once it is older than the bound (the feed stopped): 204, never the frozen
+    // frame served as if live.
+    let stale_at = now - 100 + max_age + 1;
+    let r = preview_response(&cfg, &store, "cam1", stale_at);
+    assert_eq!(
+        r.status(),
+        StatusCode::NO_CONTENT,
+        "a stale frame is not served"
+    );
+    assert_eq!(cache(&r).as_deref(), Some("no-store"));
+    // Exactly at the bound it is still fresh.
+    let r = preview_response(&cfg, &store, "cam1", now - 100 + max_age);
+    assert_eq!(r.status(), StatusCode::OK);
 }

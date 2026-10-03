@@ -3,6 +3,8 @@
 // uzávierka steppers (e2e-real-user-testing.md): open the served panel, click + on clona / biely bod
 // / tint / ISO / uzávierka, and assert the ABSOLUTE PUT bodies the service forwarded to the (stub)
 // relay — plus a clean browser console (browser-console-zero-errors).
+const fs = require("fs");
+const path = require("path");
 const { test, expect } = require("@playwright/test");
 
 const STUB = process.env.STUB_BASE_URL || "http://127.0.0.1:8781";
@@ -218,7 +220,9 @@ function makeFixture(opts = {}) {
         id: "cam1",
         label: "Cam 1",
         transport: "cambox-relay",
-        hasPreview: false,
+        // issue 808: a preview-capable camera + whether its feed is live (both default off).
+        hasPreview: !!opts.hasPreview,
+        previewLive: !!opts.previewLive,
         reachable: true,
         grabFps: null,
         grabFpsDesync: false,
@@ -347,6 +351,133 @@ test("a not-applied push after an optimistic tap surfaces the refusal (clears th
   await expect(fnum).not.toHaveClass(/pending/);
   await expect(fnum).toHaveClass(/not-applied/);
   await expect(fnum).toHaveAttribute("title", "Kamera tento zápis neprijala");
+
+  expect(problems, `console problems: ${problems.join(" | ")}`).toEqual([]);
+});
+
+// --- issue 808: the preview of a camera whose NDI feed is absent / stopped ---------------------
+// The second service instance (playwright.config.js, e2e-preview-config.toml) has ONE camera WITH
+// an `ndi_preview` and no feed (CI has no libndi, the source does not exist). Before the fix the
+// endpoint answered 503 and the panel reloaded the <img> at 3 Hz: a console error every ~1.6 s, and
+// a feed that stopped after delivering frames kept its last frame on screen as if live.
+const PREVIEW_SVC = process.env.PREVIEW_SVC_BASE_URL || "http://127.0.0.1:8782";
+const PREVIEW_URL_RE = /\/api\/cameras\/[^/]+\/preview\.jpg/;
+// A valid 16x9 JPEG (PIL, quality 60) for the fixture-driven loader test.
+const PREVIEW_JPEG = fs.readFileSync(path.join(__dirname, "fixtures", "preview-16x9.jpg"));
+
+test("a preview camera with no NDI feed shows the placeholder, never a 4xx/5xx, console clean (issue 808)", async ({
+  page,
+}) => {
+  const problems = [];
+  page.on("console", (msg) => {
+    const t = msg.type();
+    if (t === "error" || t === "warning") problems.push(`${t}: ${msg.text()}`);
+  });
+  page.on("pageerror", (err) => problems.push(`pageerror: ${err.message}`));
+  const previewRequests = [];
+  const badPreview = [];
+  page.on("request", (req) => {
+    if (PREVIEW_URL_RE.test(req.url())) previewRequests.push(req.url());
+  });
+  page.on("response", (res) => {
+    if (PREVIEW_URL_RE.test(res.url()) && res.status() >= 400) {
+      badPreview.push(`${res.status()} ${res.url()}`);
+    }
+  });
+
+  await page.goto(`${PREVIEW_SVC}/`);
+
+  // The service reports the camera preview-capable, but its feed NOT live.
+  const agg = await (await page.request.get(`${PREVIEW_SVC}/api/cameras`)).json();
+  const cam = agg.cameras.find((c) => c.id === "cam1");
+  expect(cam.hasPreview, "cam1 is configured with an ndi_preview").toBe(true);
+  expect(cam.previewLive, "no frame -> previewLive false").toBe(false);
+
+  // The preview block is there, showing its placeholder, no image.
+  const preview = page.locator('[data-role="preview"]');
+  const placeholder = page.locator('[data-role="preview-placeholder"]');
+  const img = page.locator('[data-role="preview-img"]');
+  await expect(preview).toBeVisible({ timeout: 15000 });
+  await expect(placeholder).toBeVisible();
+  await expect(placeholder).toHaveText("NDI preview — čakám…");
+
+  // Several 3 Hz refresh periods plus a 2 s pump tick: still the placeholder, nothing logged.
+  await page.waitForTimeout(3500);
+  await expect(placeholder).toBeVisible();
+  await expect(img).not.toHaveClass(/ready/);
+
+  // The endpoint itself: a configured camera with no fresh frame is 204 + no-store; only an
+  // unknown camera id is a 404 (read via the API context, which never logs to the page console).
+  const r = await page.request.get(`${PREVIEW_SVC}/api/cameras/cam1/preview.jpg`);
+  expect(r.status(), "no fresh frame -> 204").toBe(204);
+  expect(r.headers()["cache-control"] || "").toContain("no-store");
+  const unknown = await page.request.get(`${PREVIEW_SVC}/api/cameras/no-such-cam/preview.jpg`);
+  expect(unknown.status(), "unknown camera -> 404").toBe(404);
+
+  expect(previewRequests, "a not-live preview is never fetched by the panel").toEqual([]);
+  expect(badPreview, `4xx/5xx preview responses: ${badPreview.join(" | ")}`).toEqual([]);
+  expect(problems, `console problems: ${problems.join(" | ")}`).toEqual([]);
+});
+
+test("a live preview frame is shown, a stopped feed drops to the placeholder and is no longer fetched, console clean (issue 808)", async ({
+  page,
+}) => {
+  const problems = [];
+  page.on("console", (msg) => {
+    const t = msg.type();
+    if (t === "error" || t === "warning") problems.push(`${t}: ${msg.text()}`);
+  });
+  page.on("pageerror", (err) => problems.push(`pageerror: ${err.message}`));
+
+  // The HTTP-fallback poll (WS disabled) serves the fixture aggregate; the preview endpoint serves a
+  // fresh JPEG until the feed "stops", then 204 — exactly what the service does for a stale frame.
+  let live = true;
+  let frame = true;
+  let previewHits = 0;
+  await page.addInitScript(DISABLE_WS);
+  await page.route("**/api/cameras", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(makeFixture({ hasPreview: true, previewLive: live })),
+    })
+  );
+  await page.route(PREVIEW_URL_RE, (route) => {
+    previewHits += 1;
+    if (frame) {
+      return route.fulfill({
+        status: 200,
+        contentType: "image/jpeg",
+        headers: { "cache-control": "no-store" },
+        body: PREVIEW_JPEG,
+      });
+    }
+    return route.fulfill({ status: 204, headers: { "cache-control": "no-store" }, body: "" });
+  });
+
+  await page.goto(`${PREVIEW_SVC}/`);
+  const img = page.locator('[data-role="preview-img"]');
+  const placeholder = page.locator('[data-role="preview-placeholder"]');
+
+  // A live feed: the frame shows, loaded as an object URL (fetch -> blob), the placeholder hides.
+  await expect(img).toHaveClass(/ready/, { timeout: 10000 });
+  await expect(placeholder).toBeHidden();
+  expect(await img.getAttribute("src")).toMatch(/^blob:/);
+
+  // The feed stops: the endpoint answers 204 before the next pump flips previewLive. The frozen
+  // frame must go, replaced by the "stopped" placeholder.
+  frame = false;
+  await expect(placeholder).toBeVisible({ timeout: 5000 });
+  await expect(placeholder).toHaveText("NDI preview — obraz sa zastavil, čakám…");
+  await expect(img).not.toHaveClass(/ready/);
+
+  // The pump reports the feed not live: the panel stops fetching it.
+  live = false;
+  await page.waitForTimeout(2500); // the next 2 s fallback poll carries previewLive:false
+  const hitsWhenNotLive = previewHits;
+  await page.waitForTimeout(1500); // ~4 more refresh periods
+  expect(previewHits, "a not-live preview is not fetched").toBe(hitsWhenNotLive);
+  await expect(placeholder).toBeVisible();
 
   expect(problems, `console problems: ${problems.join(" | ")}`).toEqual([]);
 });

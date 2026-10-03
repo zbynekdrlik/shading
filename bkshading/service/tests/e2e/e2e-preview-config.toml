@@ -1,0 +1,16 @@
+# bkshading service config for the issue-808 preview E2E (a SECOND service instance, so the
+# issue-1304 panel tests keep their one params-only camera). ONE camera WITH an `ndi_preview`
+# whose NDI feed is ABSENT: CI builds the service with the default `ndi` feature, the runner has no
+# libndi (and no such source exists), so the preview worker never stores a frame. The panel must
+# show its placeholder with a clean console, and the endpoint must answer 204, never a 4xx/5xx.
+bind = "127.0.0.1:8782"
+
+[preview]
+fps = 3.0
+
+[[camera]]
+id = "cam1"
+label = "Cam 1"
+transport = "cambox-relay"
+address = "127.0.0.1:8781"
+ndi_preview = "E2E ABSENT (no feed)"

@@ -154,6 +154,7 @@ fn camera_view_carries_grab_fps_desync_camel_case() {
         label: "Cam 1".into(),
         transport: Transport::CamboxRelay,
         has_preview: true,
+        preview_live: false,
         reachable: true,
         grab_fps: Some(50),
         grab_fps_desync: true,

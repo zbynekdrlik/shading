@@ -151,6 +151,83 @@ fn store_bumps_sequence_on_update() {
     assert_eq!(store.get("cam1").unwrap().seq, 1, "seq bumps on each put");
 }
 
+// --- issue 808: preview freshness (a stopped feed is never served as live) -------------------
+
+#[test]
+fn store_freshness_is_bounded_by_the_max_frame_age_808() {
+    let store = PreviewStore::new();
+    let max_age = 3000;
+    assert!(
+        !store.is_live("cam1", 10_000, max_age),
+        "no frame yet -> not live"
+    );
+    assert!(store.get_fresh("cam1", 10_000, max_age).is_none());
+
+    store.put("cam1", vec![7, 7], 10_000);
+    assert!(
+        store.is_live("cam1", 10_000, max_age),
+        "just stored -> live"
+    );
+    assert!(
+        store.is_live("cam1", 13_000, max_age),
+        "age == bound is still live"
+    );
+    assert_eq!(
+        *store
+            .get_fresh("cam1", 13_000, max_age)
+            .expect("a fresh frame")
+            .jpeg,
+        vec![7, 7]
+    );
+    // One ms past the bound: the feed stopped. Never served, never reported live.
+    assert!(!store.is_live("cam1", 13_001, max_age));
+    assert!(store.get_fresh("cam1", 13_001, max_age).is_none());
+    // Staleness is a READ decision: the raw store still holds the frame (diagnostics).
+    assert!(store.get("cam1").is_some());
+    // A new frame makes it live again; other cameras are independent.
+    store.put("cam1", vec![8], 20_000);
+    assert!(store.is_live("cam1", 20_500, max_age));
+    assert!(!store.is_live("cam2", 20_500, max_age));
+}
+
+#[test]
+fn store_freshness_tolerates_a_backward_wall_clock_step_808() {
+    // updated_ms is wall clock; a clock stepped BACK after the put reads as age 0 (live), never a
+    // negative age or an underflow.
+    let store = PreviewStore::new();
+    store.put("cam1", vec![1], 50_000);
+    assert!(store.is_live("cam1", 49_950, 3000));
+    assert!(store.get_fresh("cam1", 0, 3000).is_some());
+}
+
+#[test]
+fn preview_max_frame_age_derives_from_fps_and_capture_timeout_808() {
+    use bkshading::preview::{PREVIEW_MAX_AGE_FLOOR_MS, PREVIEW_MAX_AGE_FRAME_PERIODS};
+    assert_eq!(PREVIEW_MAX_AGE_FLOOR_MS, 3000);
+    assert_eq!(PREVIEW_MAX_AGE_FRAME_PERIODS, 5);
+    // Defaults: 3 fps (333 ms period x 5 = 1665 ms), capture timeout 1000 ms (x 2 = 2000 ms) -> the
+    // 3000 ms floor wins.
+    assert_eq!(PreviewConfig::default().max_frame_age_ms(), 3000);
+    // A slow preview: 0.5 fps = 2000 ms period -> five periods = 10 s.
+    let slow = PreviewConfig {
+        fps: 0.5,
+        ..PreviewConfig::default()
+    };
+    assert_eq!(slow.max_frame_age_ms(), 10_000);
+    // A long capture timeout: one timed-out capture call must not flip the preview off -> 2 x 4 s.
+    let long_timeout = PreviewConfig {
+        capture_timeout_ms: 4000,
+        ..PreviewConfig::default()
+    };
+    assert_eq!(long_timeout.max_frame_age_ms(), 8000);
+    // A non-positive fps floors to 1 fps like the decimator (1000 ms period) -> 5000 ms.
+    let bogus = PreviewConfig {
+        fps: 0.0,
+        ..PreviewConfig::default()
+    };
+    assert_eq!(bogus.max_frame_age_ms(), 5000);
+}
+
 // --- stub source --------------------------------------------------------------------------
 
 #[test]
