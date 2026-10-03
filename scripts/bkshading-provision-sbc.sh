@@ -572,7 +572,8 @@ check_wifi_takeover() {
       for setting in "${drift[@]}"; do
         echo "FAIL: $WPA_CONF lacks the lib's $setting -- the conf predates a change of that setting;" >&2
       done
-      echo "      move the conf aside, move the netplan WiFi YAML back from its .bak, and re-run --install (it migrates again)" >&2
+      echo "      on a read-only root run 'mount -o remount,rw /' first, then move the conf aside, move the netplan WiFi YAML" >&2
+      echo "      back from its .bak, re-run --install (it migrates again), and 'mount -o remount,ro /' (or reboot)" >&2
       fail=1
     fi
   else
