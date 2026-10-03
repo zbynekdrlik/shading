@@ -404,6 +404,18 @@ if name == "wpa_cli":
         save()
         print("OK")
     sys.exit(0)
+if name == "journalctl":
+    # the supplicant's journal since the last heal pass: N driver-refused association lines
+    for _ in range(int(st.get("driver_failed", 0))):
+        print("wlan0: Association request to the driver failed")
+    sys.exit(0)
+if name == "modprobe":
+    if st.get("modprobe_rc"):
+        sys.exit(int(st["modprobe_rc"]))
+    if "-r" not in args:
+        st.update(st.get("on_reload", {}))
+        save()
+    sys.exit(0)
 if name == "systemctl":
     if args[:1] == ["restart"]:
         st.update(st.get("on_restart", {}))
@@ -1021,6 +1033,121 @@ def test_heal_decision_table():
         assert got == want, (prev, state, reach, got, want)
 
 
+def test_heal_stuck_decision_table():
+    # Live on handheld-1 (3.10.2026): after a run of forced reassociations the uwe5622 driver
+    # answered every connect with "Association request to the driver failed" -- wpa_state never
+    # reached COMPLETED, so the reachability heal never acted. Neither a supplicant restart nor a
+    # link down/up revived it; reloading the driver module (sprdwl_ng) did, COMPLETED in 6 s.
+    table = [
+        # prev stuck, wpa_state, driver-failed lines since the last pass -> action stuck
+        ("0", "COMPLETED", "0", "none 0"),
+        ("2", "COMPLETED", "4", "none 0"),          # a working link resets the count
+        ("0", "SCANNING", "0", "none 0"),           # out of range / plain scanning: never stuck
+        ("2", "DISCONNECTED", "0", "none 0"),
+        ("0", "DISCONNECTED", "2", "none 1"),       # the driver refused an association
+        ("1", "SCANNING", "1", "none 2"),
+        ("2", "ASSOCIATING", "3", "reload-driver 0"),
+        ("0", "?", "0", "none 1"),                  # the supplicant does not answer (hung)
+        ("2", "?", "0", "reload-driver 0"),
+        ("9", "DISCONNECTED", "1", "reload-driver 0"),  # a stale count past the limit acts at once
+        ("junk", "DISCONNECTED", "1", "none 1"),    # a damaged count reads as 0
+        ("1", "DISCONNECTED", "junk", "none 0"),    # an unreadable journal count is no evidence
+    ]
+    for prev, state, failed, want in table:
+        got = _lib_call('bkshading_sbc_wifi_heal_stuck_decide "$A" "$B" "$C"',
+                        env={"A": prev, "B": state, "C": failed}).strip()
+        assert got == want, (prev, state, failed, got, want)
+    assert _lib_call("bkshading_sbc_wifi_heal_stuck_limit").strip() == "3"
+    assert _lib_call("bkshading_sbc_wifi_heal_driver_failed_text").strip() == \
+        "Association request to the driver failed"
+
+
+def _stuck(env):
+    return _read(os.path.join(env["BKSHADING_WIFI_HEAL_STATE_DIR"], "stuck")).strip()
+
+
+def test_heal_reloads_a_driver_that_refuses_every_association():
+    tmp = tempfile.mkdtemp()
+    try:
+        state = _net_state(wpa_state="DISCONNECTED", reachable=False, driver_failed=3,
+                           on_reload={"wpa_state": "COMPLETED", "bssid": GOOD_BSSID, "rssi": -63,
+                                      "reachable": True, "driver_failed": 0})
+        env = _heal_env(tmp, state, extra_tools=("journalctl", "modprobe"),
+                        driver_module="sprdwl_ng")
+        outs = []
+        for i in range(3):
+            r = _heal_pass(env)
+            assert r.returncode == 0, (i, r.stdout, r.stderr)
+            outs.append(r.stdout)
+        tools = _heal_tools(env)
+        acts = [t for t in tools if t.startswith(("systemctl stop", "systemctl start", "modprobe"))]
+        assert acts == ["systemctl stop wpa_supplicant@wlan0.service", "modprobe -r sprdwl_ng",
+                        "modprobe sprdwl_ng", "systemctl start wpa_supplicant@wlan0.service"], tools
+        assert "driver refused" in outs[0] and "1 of 3" in outs[0], outs[0]
+        assert re.search(r"reload the WiFi driver sprdwl_ng on wlan0 after 3 stuck passes .*"
+                         r"after bssid=%s signal=-63 dBm wpa_state=COMPLETED; result=ok"
+                         % re.escape(GOOD_BSSID), outs[2]), outs[2]
+        assert _stuck(env) == "0", "a reload starts the count over"
+        r4 = _heal_pass(env)
+        assert "answers again" in r4.stdout and "reload the WiFi driver sprdwl_ng" in r4.stdout, r4.stdout
+        assert not any("reboot" in t for t in tools)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_heal_never_reloads_while_the_board_merely_scans():
+    # out of range of every AP (an outdoor venue without the SSID): scanning forever is not stuck
+    tmp = tempfile.mkdtemp()
+    try:
+        env = _heal_env(tmp, _net_state(wpa_state="SCANNING", reachable=False, driver_failed=0),
+                        extra_tools=("journalctl", "modprobe"), driver_module="sprdwl_ng")
+        for _ in range(6):
+            r = _heal_pass(env)
+            assert r.returncode == 0, (r.stdout, r.stderr)
+        tools = _heal_tools(env)
+        assert not any(t.startswith(("modprobe", "systemctl stop", "systemctl start")) for t in tools), tools
+        assert _stuck(env) == "0"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_heal_restarts_a_hung_supplicant_through_the_reload_path():
+    # the supplicant stops answering wpa_cli (hung, not crashed): after 3 passes the heal stops it,
+    # reloads the driver and starts it again (systemctl stop kills a hung one).
+    tmp = tempfile.mkdtemp()
+    try:
+        state = _net_state(wpa_state=None, on_reload={"wpa_state": "COMPLETED", "reachable": True})
+        env = _heal_env(tmp, state, extra_tools=("journalctl", "modprobe"),
+                        driver_module="sprdwl_ng")
+        for _ in range(3):
+            r = _heal_pass(env)
+            assert r.returncode == 0, (r.stdout, r.stderr)
+        tools = _heal_tools(env)
+        assert "systemctl stop wpa_supplicant@wlan0.service" in tools, tools
+        assert "systemctl start wpa_supplicant@wlan0.service" in tools, tools
+        assert "reload the WiFi driver sprdwl_ng" in r.stdout, r.stdout
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_heal_restarts_the_supplicant_alone_for_a_builtin_driver_or_without_modprobe():
+    for extra, module in ((("journalctl", "modprobe"), None), (("journalctl",), "sprdwl_ng")):
+        tmp = tempfile.mkdtemp()
+        try:
+            state = _net_state(wpa_state="DISCONNECTED", reachable=False, driver_failed=2)
+            env = _heal_env(tmp, state, extra_tools=extra, driver_module=module)
+            for _ in range(3):
+                r = _heal_pass(env)
+                assert r.returncode == 0, (extra, module, r.stdout, r.stderr)
+            tools = _heal_tools(env)
+            assert not any(t.startswith("modprobe") for t in tools), tools
+            assert "systemctl stop wpa_supplicant@wlan0.service" in tools, tools
+            assert "systemctl start wpa_supplicant@wlan0.service" in tools, tools
+            assert "no driver reload" in r.stdout, r.stdout
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_networkd_file_matches_the_settings_netplan_generated():
     text = _lib_call("bkshading_sbc_networkd_wifi_content")
     body = [ln for ln in text.splitlines() if ln and not ln.startswith("#")]
@@ -1375,9 +1502,9 @@ def test_heal_units_match_the_lib():
         assert not re.search(r"\b(reboot|shutdown|poweroff|ifdown|ip link set)\b", ln), ln
 
 
-def _heal_env(tmp, state):
+def _heal_env(tmp, state, extra_tools=(), driver_module=None):
     stubdir = os.path.join(tmp, "stubs")
-    _write_tool_stubs(stubdir, names=("wpa_cli", "ip", "ping", "systemctl"))
+    _write_tool_stubs(stubdir, names=("wpa_cli", "ip", "ping", "systemctl") + tuple(extra_tools))
     # PATH is the stub dir ONLY (ci-testing-gotchas, issue 1371): a missing stub can never fall
     # through to the real wpa_cli / ping of the machine running the test.
     for tool in ("dirname", "mkdir", "mv", "sleep", "timeout", "rm"):
@@ -1392,7 +1519,27 @@ def _heal_env(tmp, state):
         "FAKE_TOOL_LOG": os.path.join(tmp, "tools.log"),
         "BKSHADING_WIFI_HEAL_STATE_DIR": os.path.join(tmp, "run"),
         "BKSHADING_WIFI_HEAL_SETTLE_S": "1",
+        "BKSHADING_WIFI_HEAL_SYSFS_NET": _fake_wifi_sysfs(tmp, driver_module),
     }
+
+
+def _fake_wifi_sysfs(tmp, driver_module):
+    """A fake /sys/class/net with wlan0, whose device/driver/module links to a dir named after
+    the driver module (sprdwl_ng on the Orange Pi Zero 2W) -- or no module link (a built-in driver)."""
+    net = os.path.join(tmp, "sys-class-net")
+    dev = os.path.join(tmp, "sys-devices", "wlan0-dev")
+    drv = os.path.join(tmp, "sys-bus", "drivers", "wlan-driver")
+    os.makedirs(os.path.join(net), exist_ok=True)
+    os.makedirs(os.path.join(dev, "net"), exist_ok=True)
+    os.makedirs(drv, exist_ok=True)
+    os.makedirs(os.path.join(net, "wlan0"), exist_ok=True)
+    os.symlink(dev, os.path.join(net, "wlan0", "device"))
+    os.symlink(drv, os.path.join(dev, "driver"))
+    if driver_module:
+        mod = os.path.join(tmp, "sys-module", driver_module)
+        os.makedirs(mod, exist_ok=True)
+        os.symlink(mod, os.path.join(drv, "module"))
+    return net
 
 
 def _heal_pass(env, script=HEAL_SCRIPT):
