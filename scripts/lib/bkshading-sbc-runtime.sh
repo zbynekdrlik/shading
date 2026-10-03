@@ -210,3 +210,240 @@ bkshading_sbc_masked_units() {
   printf '%s\n' armbian-ramlog.service systemd-networkd-persistent-storage.service \
     fake-hwclock-save.service fake-hwclock-save.timer
 }
+
+# --- The handheld's WiFi belongs to wpa_supplicant, with a background scan (issue 808) ---
+# Design 5972548198. Live on handheld-1 (3.10.2026, the second read-only boot): the two strong
+# `newlevel.media` APs rejected the board right after the reboot (they still held its PMF
+# association), wpa_supplicant joined the far AP at -73 dBm, DHCP succeeded, and no traffic passed.
+# The supplicant stayed there: netplan 1.1 has no `bgscan` key, so the supplicant roams only when
+# the link is LOST. --install therefore takes the WiFi over from netplan: its own
+# wpa_supplicant@wlan0 conf (with bgscan) + a systemd-networkd DHCP file. Ethernet and usb0 stay
+# on netplan.
+
+# The ONE WiFi interface the takeover owns. Every candidate board (Pi Zero 2 W, Radxa ZERO 3W,
+# Orange Pi Zero 2W) names its radio wlan0; a board with a wl* radio under another name is refused
+# by --install, never guessed at.
+bkshading_sbc_wifi_iface() { printf '%s\n' wlan0; }
+
+# Debian's stock per-interface supplicant unit and the conf path it reads (-c of its ExecStart).
+bkshading_sbc_wpa_unit() { printf 'wpa_supplicant@%s.service\n' "$(bkshading_sbc_wifi_iface)"; }
+bkshading_sbc_wpa_conf_name() { printf 'wpa_supplicant-%s.conf\n' "$(bkshading_sbc_wifi_iface)"; }
+
+# The control socket dir: in /run (the root is read-only), and what the heal + --check wpa_cli use.
+bkshading_sbc_wpa_ctrl_dir() { printf '%s\n' /run/wpa_supplicant; }
+
+# key_mgmt + PMF as netplan generated them for this board (design: "as today").
+# FINDING (a Design-question on the ticket, comment 5972616531, the main decides): SAE (WPA3)
+# cannot authenticate from the 64-hex psk= the takeover writes -- it needs the passphrase.
+# wpa_supplicant 2.10 keeps SAE among the candidate key_mgmt whenever the DRIVER supports SAE
+# (wpa_supplicant.c wpa_supplicant_set_suites), prefers it over WPA-PSK-SHA256/WPA-PSK, and then
+# fails the commit with "SAE: No password available" (sme.c). On the rig's WPA2-PSK APs the SAE
+# entry is inert; on a WPA2/WPA3-transition AP with an SAE-capable driver the board would not join.
+# Dropping SAE here is the one-line change if the main rules so.
+bkshading_sbc_wpa_key_mgmt() { printf '%s\n' 'WPA-PSK WPA-PSK-SHA256 SAE'; }
+bkshading_sbc_wpa_ieee80211w() { printf '%s\n' 1; }
+
+# bgscan "simple:<short>:<threshold>:<long>": scan every <short> s while the signal is below
+# <threshold> dBm, every <long> s otherwise, and roam to a stronger BSS of the same network.
+# - threshold -65 dBm: in the handheld-1 incident the far AP read -73 dBm and the good one -63 dBm.
+#   -65 sits between them, so a board stuck on a far AP scans fast and finds the near one, while a
+#   board on a good AP (-63 or better) seldom scans.
+# - short 30 s: a cameraman walks between the venue's three APs within minutes; 30 s finds the
+#   nearer AP within one scan period without scanning a weak link continuously.
+# - long 300 s: above the threshold the link is good; a scan every 5 min still finds a much
+#   stronger AP and costs nothing the relay's small traffic would notice.
+bkshading_sbc_bgscan_short_s() { printf '%s\n' 30; }
+bkshading_sbc_bgscan_threshold_dbm() { printf '%s\n' -65; }
+bkshading_sbc_bgscan_long_s() { printf '%s\n' 300; }
+bkshading_sbc_bgscan_line() {
+  printf 'bgscan="simple:%s:%s:%s"\n' "$(bkshading_sbc_bgscan_short_s)" \
+    "$(bkshading_sbc_bgscan_threshold_dbm)" "$(bkshading_sbc_bgscan_long_s)"
+}
+
+# The value of a wpa_supplicant `ssid=` line: the quoted text for a printable-ASCII SSID without a
+# double quote, else the unquoted hex of its bytes (wpa_supplicant reads both forms). Reads only
+# its argument; `od -v` so a repeated run of bytes is never collapsed into a `*` line.
+bkshading_sbc_wpa_ssid_value() {
+  local s="${1:-}" hex i b printable=1
+  hex="$(printf '%s' "$s" | od -An -tx1 -v | tr -d ' \n' || true)"
+  [ -n "$hex" ] || printable=0
+  for ((i = 0; i < ${#hex}; i += 2)); do
+    b=$((16#${hex:i:2}))
+    if [ "$b" -lt 32 ] || [ "$b" -gt 126 ] || [ "$b" -eq 34 ]; then
+      printable=0
+      break
+    fi
+  done
+  if [ "$printable" = 1 ]; then
+    printf '"%s"\n' "$s"
+  else
+    printf '%s\n' "$hex"
+  fi
+}
+
+# The 64-hex PSK out of `wpa_passphrase` output: the `psk=` line, never its `#psk="<passphrase>"`
+# comment line. Prints the lower-case hex or nothing. Walks the text with parameter expansion only
+# (no here-string, no pipe), so the text it is handed is never written anywhere.
+bkshading_sbc_psk_hex_from_wpa_passphrase() {
+  local text="${1:-}" line
+  while [ -n "$text" ]; do
+    line="${text%%$'\n'*}"
+    if [ "$line" = "$text" ]; then text=""; else text="${text#*$'\n'}"; fi
+    line="${line#"${line%%[![:space:]]*}"}"
+    if [[ "$line" =~ ^psk=([0-9a-fA-F]{64})$ ]]; then
+      printf '%s\n' "${BASH_REMATCH[1],,}"
+      return 0
+    fi
+  done
+  return 0
+}
+
+# The wpa_supplicant conf --install writes. $1 = the country (ISO 3166 alpha-2; empty = no line),
+# then pairs of <ssid> <64-hex psk>, one network block each. Pure: the PSK arrives as a FUNCTION
+# argument, which never reaches any process's argv, and leaves only on this function's stdout.
+bkshading_sbc_wpa_conf_text() {
+  local country="${1:-}" ssid psk
+  if [ "$#" -gt 0 ]; then shift; fi
+  printf '%s\n' \
+    "# Written by scripts/bkshading-provision-sbc.sh --install (issue 808): wpa_supplicant@$(bkshading_sbc_wifi_iface)" \
+    "# owns the handheld's WiFi, migrated once from the board's netplan WiFi YAML (kept as .bak)." \
+    "# psk= is the wpa_passphrase-derived 64-hex key, never the passphrase. A re-run keeps this file." \
+    "ctrl_interface=$(bkshading_sbc_wpa_ctrl_dir)"
+  if [ -n "$country" ]; then
+    printf 'country=%s\n' "$country"
+  fi
+  while [ "$#" -ge 2 ]; do
+    ssid="$1"
+    psk="$2"
+    shift 2
+    printf '%s\n' "" "network={" \
+      "	ssid=$(bkshading_sbc_wpa_ssid_value "$ssid")" \
+      "	key_mgmt=$(bkshading_sbc_wpa_key_mgmt)" \
+      "	ieee80211w=$(bkshading_sbc_wpa_ieee80211w)" \
+      "	$(bkshading_sbc_bgscan_line)" \
+      "	psk=$psk" \
+      "}"
+  done
+}
+
+# The systemd-networkd file that runs DHCP on the WiFi once wpa_supplicant has associated: the same
+# settings netplan generated before (/run/systemd/network/10-netplan-wlan0.network on handheld-1:
+# DHCP=yes, LinkLocalAddressing=ipv6, RouteMetric=600, UseMTU=true), so nothing else changes. `05-`
+# sorts before every netplan-generated `10-netplan-*` file, so a netplan catch-all can never win.
+bkshading_sbc_networkd_wifi_name() { printf '05-bkshading-%s.network\n' "$(bkshading_sbc_wifi_iface)"; }
+bkshading_sbc_networkd_wifi_content() {
+  printf '%s\n' \
+    "# Written by scripts/bkshading-provision-sbc.sh --install (issue 808): wpa_supplicant@$(bkshading_sbc_wifi_iface)" \
+    "# associates, systemd-networkd runs DHCP -- the same settings netplan generated before." \
+    "[Match]" \
+    "Name=$(bkshading_sbc_wifi_iface)" \
+    "" \
+    "[Network]" \
+    "DHCP=yes" \
+    "LinkLocalAddressing=ipv6" \
+    "" \
+    "[DHCP]" \
+    "RouteMetric=600" \
+    "UseMTU=true"
+}
+
+# --- The WiFi heal: re-join when the gateway stops answering (issue 808, design 5972548198) ---
+# Nothing in wpa_supplicant or networkd checks that a COMPLETED link carries traffic: in the
+# handheld-1 incident the board sat on a dead AP with wpa_state=COMPLETED and a DHCP lease, and a
+# manual `wpa_cli reassociate` brought the traffic back at once. bkshading-wifi-heal.timer runs
+# scripts/bkshading-wifi-heal.sh every interval: it pings the DHCP default gateway on wlan0 and,
+# after N consecutive misses, reassociates; after another N it restarts wpa_supplicant@wlan0. No
+# reboot, no ifdown loop, and nothing while wpa_state is not COMPLETED (the supplicant itself is
+# still working then). Its state is one counter in /run (tmpfs, the root is read-only).
+
+# How often the timer fires one heal pass. The timer's OnUnitActiveSec carries the same value
+# (a test pins the two equal).
+bkshading_sbc_wifi_heal_interval_s() { printf '%s\n' 20; }
+
+# Consecutive misses before an action: 3 x 20 s = about 60 s of a dead link before a reassociate,
+# and another 60 s before a supplicant restart. Long enough for DHCP after a fresh association
+# (about 20 s on handheld-1) and for one dropped ping burst, short enough that a cameraman notices
+# no more than a minute without shading.
+bkshading_sbc_wifi_heal_miss_limit() { printf '%s\n' 3; }
+
+# One reachability probe = this many pings, each waiting this many seconds for its reply. A pass
+# misses only when ALL of them are lost, so one dropped packet on a busy venue WiFi is not a miss.
+bkshading_sbc_wifi_heal_ping_count() { printf '%s\n' 3; }
+bkshading_sbc_wifi_heal_ping_timeout_s() { printf '%s\n' 2; }
+
+# After an action, wait up to this long for wpa_state=COMPLETED before reading the "after" BSSID
+# and signal for the journal line (a reassociation completes in a few seconds).
+bkshading_sbc_wifi_heal_settle_s() { printf '%s\n' 15; }
+
+# Where the heal script + this lib are installed on the board (mirrors the repo layout, so the
+# script's own `$HERE/lib/bkshading-sbc-runtime.sh` resolves unchanged) and the heal units.
+bkshading_sbc_wifi_heal_install_dir() { printf '%s\n' /usr/local/lib/bkshading; }
+bkshading_sbc_wifi_heal_script_name() { printf '%s\n' bkshading-wifi-heal.sh; }
+bkshading_sbc_wifi_heal_timer() { printf '%s\n' bkshading-wifi-heal.timer; }
+bkshading_sbc_wifi_heal_units() { printf '%s\n' bkshading-wifi-heal.service bkshading-wifi-heal.timer; }
+
+# The heal decision. $1 = the previous consecutive-miss count (anything not a plain number reads
+# as 0), $2 = wpa_state, $3 = whether the gateway answered: yes | no. Prints "<action> <misses>":
+#   - wpa_state not COMPLETED -> none 0 (the supplicant is still working; the count starts over)
+#   - reachable              -> none 0
+#   - a miss                 -> the count + 1; at 2N -> restart 0 (a fresh start for the new
+#                               supplicant), at N -> reassociate N, else none.
+# A count already past 2N (a stale file) restarts at once, never loops forever without acting.
+bkshading_sbc_wifi_heal_decide() {
+  local prev="${1:-0}" state="${2:-}" reachable="${3:-}" limit misses
+  limit="$(bkshading_sbc_wifi_heal_miss_limit)"
+  [[ "$prev" =~ ^[0-9]{1,6}$ ]] || prev=0
+  if [ "$state" != COMPLETED ] || [ "$reachable" = yes ]; then
+    printf '%s\n' "none 0"
+    return 0
+  fi
+  misses=$((10#$prev + 1))
+  if [ "$misses" -ge $((2 * limit)) ]; then
+    printf '%s\n' "restart 0"
+  elif [ "$misses" -eq "$limit" ]; then
+    printf 'reassociate %s\n' "$misses"
+  else
+    printf 'none %s\n' "$misses"
+  fi
+}
+
+# The DHCP default gateway out of `ip -4 route show default dev <iface>`: the address after the
+# first `via`, or nothing. Never a hard-coded address, so the heal works on any venue's WiFi.
+bkshading_sbc_default_gw_from_route() {
+  local text="${1:-}" line
+  while [ -n "$text" ]; do
+    line="${text%%$'\n'*}"
+    if [ "$line" = "$text" ]; then text=""; else text="${text#*$'\n'}"; fi
+    if [[ "$line" =~ (^|[[:space:]])via[[:space:]]+([0-9a-fA-F.:]+) ]]; then
+      printf '%s\n' "${BASH_REMATCH[2]}"
+      return 0
+    fi
+  done
+  return 0
+}
+
+# The value of one `key=value` line in `wpa_cli status` / `wpa_cli signal_poll` output (exact key
+# match; the first line wins), or nothing.
+bkshading_sbc_wpa_field() {
+  local text="${1:-}" key="${2:-}" line
+  [ -n "$key" ] || return 0
+  while [ -n "$text" ]; do
+    line="${text%%$'\n'*}"
+    if [ "$line" = "$text" ]; then text=""; else text="${text#*$'\n'}"; fi
+    line="${line%$'\r'}"
+    if [ "${line%%=*}" = "$key" ] && [ "$line" != "$key" ]; then
+      printf '%s\n' "${line#*=}"
+      return 0
+    fi
+  done
+  return 0
+}
+
+# The one journal line a heal action writes. $1 action, $2 gateway (empty = none), $3 misses,
+# $4/$5 BSSID + signal before, $6/$7/$8 BSSID + signal + wpa_state after, $9 the action's result.
+bkshading_sbc_wifi_heal_action_line() {
+  local action="${1:-}" gw="${2:-}" misses="${3:-}"
+  printf 'bkshading-wifi-heal: %s on %s after %s consecutive misses (gateway %s); before bssid=%s signal=%s dBm; after bssid=%s signal=%s dBm wpa_state=%s; result=%s\n' \
+    "$action" "$(bkshading_sbc_wifi_iface)" "$misses" "${gw:-none (no DHCP default route)}" \
+    "${4:-?}" "${5:-?}" "${6:-?}" "${7:-?}" "${8:-?}" "${9:-?}"
+}

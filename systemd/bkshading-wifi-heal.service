@@ -1,0 +1,21 @@
+[Unit]
+# One pass of the handheld SBC's WiFi heal (issue 808, design 5972548198): ping the DHCP default
+# gateway on wlan0; after 3 consecutive misses `wpa_cli reassociate`, after 3 more restart
+# wpa_supplicant@wlan0. Never acts while wpa_state is not COMPLETED; no reboot. Run every 20 s by
+# bkshading-wifi-heal.timer. Installed (enable-only, the timer) by
+# scripts/bkshading-provision-sbc.sh --install on a board with a wl* interface; a wired cambox
+# never gets it.
+Description=bkshading handheld WiFi heal - re-join when the gateway stops answering (issue 808)
+Documentation=https://github.com/zbynekdrlik/camera-box
+After=wpa_supplicant@wlan0.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/bkshading/bkshading-wifi-heal.sh
+# One pass is a ping burst (at most ~4 s) plus, after an action, up to 15 s waiting for the new
+# association; 60 s bounds a wedged tool without ever overlapping the next pass (the timer does not
+# start a pass while one is still running).
+TimeoutStartSec=60
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bkshading-wifi-heal
