@@ -26,7 +26,7 @@ assumes a read-only root (a stock Pi OS root is read-write). This milestone clos
 Slice B of the handheld milestone (owner ruling 5948648089, main design 5971558113): the SBC root goes
 READ-ONLY, the same as the camboxes. `--install` writes the read-only fstab from the ONE shared lib
 `scripts/lib/ro-root.sh` (the cambox tmpfs set, the board's own other mounts kept), makes journald
-volatile, masks armbian-ramlog, and remounts an already-ro root rw for its own writes and back.
+volatile, masks armbian-ramlog and systemd-networkd-persistent-storage, and remounts an already-ro root rw for its own writes and back.
 `--check` grades the root mode (ro = OK). The deploy reads the target's own root mode instead of a
 flag: an ro root gets the remount cycle, an rw root none, an unreadable one refuses.
 

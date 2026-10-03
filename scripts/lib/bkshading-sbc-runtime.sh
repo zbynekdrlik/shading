@@ -195,7 +195,13 @@ bkshading_sbc_journald_dropin_content() {
 # them (handheld-1 carried 10-persistent.conf = Storage=persistent, 3.10.2026).
 bkshading_sbc_stale_journald_dropins() { printf '%s\n' 10-persistent.conf; }
 
-# Units that would write logs to the root on an Armbian image: armbian-ramlog keeps /var/log in a
-# zram and syncs it back to /var/log.hdd on the root. On a read-only root /var/log is a tmpfs
-# instead, so --install masks it (masking a unit an image does not ship is a harmless no-op).
-bkshading_sbc_masked_units() { printf '%s\n' armbian-ramlog.service; }
+# Units that would write to the root on an Armbian image, so --install masks them (masking a unit
+# an image does not ship is a harmless no-op):
+# - armbian-ramlog keeps /var/log in a zram and syncs it back to /var/log.hdd on the root. On a
+#   read-only root /var/log is a tmpfs instead.
+# - systemd-networkd-persistent-storage (Debian trixie) runs `networkctl persistent-storage yes`,
+#   which fails with io.systemd.Network.StorageReadOnly on a read-only root and leaves the board
+#   `degraded` (live on handheld-1, 3.10.2026). networkd keeps its state in /run without it.
+bkshading_sbc_masked_units() {
+  printf '%s\n' armbian-ramlog.service systemd-networkd-persistent-storage.service
+}

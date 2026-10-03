@@ -28,7 +28,7 @@ set -euo pipefail
 # scripts/lib/ro-root.sh (the cambox root line + its five tmpfs mounts; the board's own other mounts
 # kept; the original saved once to fstab.bak), makes journald volatile (the journal in RAM -- a
 # single-partition SBC has no journal partition), and masks armbian-ramlog (it syncs a RAM /var/log
-# back onto the root). It all takes effect at the next reboot. An update later remounts rw, writes,
+# back onto the root) and systemd-networkd-persistent-storage (it fails on a read-only root). It all takes effect at the next reboot. An update later remounts rw, writes,
 # and remounts ro: --install does that itself on a root that is already read-only, and
 # scripts/bkshading-deploy-relay.sh does it when it reads a read-only root on the target.
 #
@@ -159,7 +159,7 @@ install_ro_root() {  # $1 = root UUID, $2 = root fstype
 
   for unit in $(bkshading_sbc_masked_units); do
     "$SYSTEMCTL" mask "$unit"
-    echo "  masked $unit (it would sync logs back onto the read-only root)"
+    echo "  masked $unit (it would write onto the read-only root)"
   done
 }
 

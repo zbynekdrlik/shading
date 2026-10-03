@@ -53,7 +53,9 @@ the relay/cloudflared provisioning canon but with two deliberate deltas + one go
     saved ONCE to `fstab.bak`;
   - makes journald volatile (`99-bkshading-volatile.conf`, `Storage=volatile`) after removing the
     bench-debug `10-persistent.conf`; a single-partition SBC has no journal partition;
-  - masks `armbian-ramlog`;
+  - masks `armbian-ramlog` and `systemd-networkd-persistent-storage` (the Debian trixie unit runs
+    `networkctl persistent-storage yes`, fails `StorageReadOnly` on a ro root and leaves the board
+    `degraded`; live on handheld-1, 3.10.2026 — networkd keeps its state in /run without it);
   - on a root that is already ro (a re-run), remounts rw for its own writes and back;
   - reads the root first (an unreadable root refuses untouched) and refuses on a cambox
     (`/usr/local/bin/camera-box` present), whose root is `setup-device.sh`'s.
