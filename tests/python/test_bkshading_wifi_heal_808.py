@@ -397,22 +397,24 @@ def test_heal_starts_a_stopped_supplicant_without_a_driver_reload():
 
 def test_heal_driver_plan_table():
     # What the stuck rung can do with the WiFi driver: $1 the module behind wlan0 (empty = none
-    # known), $2 modprobe present, $3 wlan0 present.
+    # known), $2 modprobe present, $3 wlan0 present, $4 the module loaded (/sys/module/<name>).
     table = [
-        ("sprdwl_ng", "yes", "yes", "reload"),       # loaded: unload + load
-        ("sprdwl_ng", "yes", "no", "load"),          # wlan0 gone = the module is not loaded
-        ("sprdwl_ng", "no", "yes", "no-modprobe"),
-        ("sprdwl_ng", "no", "no", "no-modprobe"),
-        ("", "yes", "yes", "builtin"),               # wlan0 with no module link
-        ("", "no", "yes", "builtin"),
-        ("", "yes", "no", "unknown"),                # wlan0 gone and no module name recorded
-        ("../evil", "yes", "yes", "builtin"),        # not a module name: none
-        ("a b", "yes", "no", "unknown"),
+        ("sprdwl_ng", "yes", "yes", "yes", "reload"),   # loaded: unload + load
+        ("sprdwl_ng", "yes", "no", "no", "load"),       # not loaded (a load that failed): load
+        ("sprdwl_ng", "yes", "no", "yes", "reload"),    # loaded but no wlan0: a load is a no-op
+        ("sprdwl_ng", "no", "yes", "yes", "no-modprobe"),
+        ("sprdwl_ng", "no", "no", "no", "no-modprobe"),
+        ("", "yes", "yes", "no", "builtin"),            # wlan0 with no module link
+        ("", "no", "yes", "no", "builtin"),
+        ("", "yes", "no", "no", "unknown"),             # wlan0 gone and no module name recorded
+        ("../evil", "yes", "yes", "no", "builtin"),     # not a module name: none
+        ("a b", "yes", "no", "no", "unknown"),
+        ("-r", "yes", "yes", "yes", "builtin"),         # modprobe would read it as an option
     ]
-    for mod, has_modprobe, iface, want in table:
-        got = _lib_call('bkshading_sbc_wifi_heal_driver_plan "$A" "$B" "$C"',
-                        env={"A": mod, "B": has_modprobe, "C": iface}).strip()
-        assert got == want, (mod, has_modprobe, iface, got, want)
+    for mod, has_modprobe, iface, loaded, want in table:
+        got = _lib_call('bkshading_sbc_wifi_heal_driver_plan "$A" "$B" "$C" "$D"',
+                        env={"A": mod, "B": has_modprobe, "C": iface, "D": loaded}).strip()
+        assert got == want, (mod, has_modprobe, iface, loaded, got, want)
 
 
 def _seed_driver_module(env, name):
@@ -503,27 +505,124 @@ def test_heal_recovers_from_a_driver_load_that_failed_after_the_unload():
 
 
 def test_heal_finishes_the_reload_when_the_pass_is_killed_in_the_middle():
-    # systemd ends a pass at TimeoutStartSec with SIGTERM. Between `modprobe -r` and the start the
-    # board has no driver and no supplicant: the reload's trap loads the module and starts the
-    # supplicant before the pass exits.
+    # systemd ends a pass at TimeoutStartSec with SIGTERM (a terminal run: Ctrl-C = SIGINT).
+    # Between `modprobe -r` and the start the board has no driver and no supplicant: the reload's
+    # trap loads the module and queues the supplicant start (--no-block: a `systemctl stop` of the
+    # heal would hold a blocking start behind its own stop job) before the pass exits.
+    for sig, rc in ((15, 143), (2, 130)):
+        tmp = tempfile.mkdtemp()
+        try:
+            state = _net_state(wpa_state="DISCONNECTED", reachable=False, driver_failed=1,
+                               signal_heal_on_unload=sig,
+                               on_reload={"wpa_state": "COMPLETED", "reachable": True,
+                                          "driver_failed": 0})
+            env = _heal_env(tmp, state, extra_tools=("journalctl", "modprobe"),
+                            driver_module="sprdwl_ng")
+            for _ in range(2):
+                assert _heal_pass(env).returncode == 0
+            r = _heal_pass(env)
+            assert r.returncode == rc, (sig, r.returncode, r.stdout, r.stderr)
+            assert "in the middle of the driver reload" in r.stderr, r.stderr
+            assert _driver_acts(env) == [
+                "systemctl stop wpa_supplicant@wlan0.service", "modprobe -r sprdwl_ng",
+                "modprobe sprdwl_ng", "systemctl start --no-block wpa_supplicant@wlan0.service",
+            ], (sig, _heal_tools(env))
+            assert os.path.isdir(os.path.join(env["BKSHADING_WIFI_HEAL_SYSFS_NET"], "wlan0"))
+            assert _get_state(env)["wpa_active"] is True
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_heal_finishes_the_reload_when_a_command_fails_in_the_middle():
+    # The EXIT arm: a command that fails under `set -e` between the stop and the start (here the
+    # journal cursor cannot be dropped) ends the pass; the trap still starts the supplicant.
     tmp = tempfile.mkdtemp()
     try:
         state = _net_state(wpa_state="DISCONNECTED", reachable=False, driver_failed=1,
-                           term_heal_on_unload=True,
-                           on_reload={"wpa_state": "COMPLETED", "reachable": True,
-                                      "driver_failed": 0})
+                           break_cursor_on_stop=True)
         env = _heal_env(tmp, state, extra_tools=("journalctl", "modprobe"),
                         driver_module="sprdwl_ng")
         for _ in range(2):
             assert _heal_pass(env).returncode == 0
         r = _heal_pass(env)
-        assert r.returncode == 143, (r.returncode, r.stdout, r.stderr)
-        assert "in the middle of the driver reload" in r.stderr, r.stderr
-        assert _driver_acts(env) == ["systemctl stop wpa_supplicant@wlan0.service",
-                                     "modprobe -r sprdwl_ng", "modprobe sprdwl_ng",
-                                     "systemctl start wpa_supplicant@wlan0.service"], _heal_tools(env)
-        assert os.path.isdir(os.path.join(env["BKSHADING_WIFI_HEAL_SYSFS_NET"], "wlan0"))
+        assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+        assert "in the middle of the driver reload (exit 1)" in r.stderr, r.stderr
+        acts = _driver_acts(env)
+        assert acts[0] == "systemctl stop wpa_supplicant@wlan0.service", acts
+        assert acts[-1] == "systemctl start --no-block wpa_supplicant@wlan0.service", acts
+        assert "modprobe -r sprdwl_ng" not in acts, "the failure came before the unload"
         assert _get_state(env)["wpa_active"] is True
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_heal_reloads_a_loaded_driver_whose_wlan0_never_came_back():
+    # The review's second red case: `modprobe` loaded the module but wlan0 never appeared. A
+    # load-only plan would run `modprobe` on a loaded module (a no-op) on every later pass, and the
+    # board would stay off the WiFi until a reboot. A loaded module without wlan0 is reloaded.
+    tmp = tempfile.mkdtemp()
+    try:
+        state = _net_state(wpa_state="DISCONNECTED", reachable=False, driver_failed=1,
+                           load_no_iface=True,
+                           on_reload={"wpa_state": "COMPLETED", "reachable": True,
+                                      "driver_failed": 0})
+        env = _heal_env(tmp, state, extra_tools=("journalctl", "modprobe"),
+                        driver_module="sprdwl_ng")
+        env["BKSHADING_WIFI_HEAL_IFACE_WAIT_S"] = "2"
+        for _ in range(2):
+            assert _heal_pass(env).returncode == 0
+        r3 = _heal_pass(env)
+        assert r3.returncode == 1 and "result=FAILED" in r3.stdout, (r3.stdout, r3.stderr)
+        mods = env["BKSHADING_WIFI_HEAL_SYSFS_MODULE"]
+        assert os.path.isdir(os.path.join(mods, "sprdwl_ng")), "the module is loaded"
+        assert not os.path.isdir(os.path.join(env["BKSHADING_WIFI_HEAL_SYSFS_NET"], "wlan0"))
+        _set_state(env, load_no_iface=False)
+        before = len(_heal_tools(env))
+        r4 = _heal_pass(env)
+        assert r4.returncode == 0 and "result=ok" in r4.stdout, (r4.stdout, r4.stderr)
+        acts = [t for t in _heal_tools(env)[before:]
+                if t.startswith(("systemctl stop", "systemctl start", "modprobe"))]
+        assert acts == ["modprobe -r sprdwl_ng", "modprobe sprdwl_ng",
+                        "systemctl start wpa_supplicant@wlan0.service"], acts
+        assert os.path.isdir(os.path.join(env["BKSHADING_WIFI_HEAL_SYSFS_NET"], "wlan0"))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_heal_never_uses_a_remembered_module_on_a_board_whose_wlan0_has_none():
+    # A remembered name (from a board state that is gone) must not reach modprobe while wlan0
+    # exists without a module link: that is a built-in driver.
+    tmp = tempfile.mkdtemp()
+    try:
+        env = _heal_env(tmp, _net_state(wpa_state="DISCONNECTED", reachable=False, driver_failed=1),
+                        extra_tools=("journalctl", "modprobe"), driver_module=None)
+        _seed_driver_module(env, "sprdwl_ng")
+        for _ in range(3):
+            r = _heal_pass(env)
+            assert r.returncode == 0, (r.stdout, r.stderr)
+        assert "no driver reload: a built-in driver" in r.stdout, r.stdout
+        assert not any(t.startswith("modprobe") for t in _heal_tools(env)), _heal_tools(env)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_heal_resets_the_stuck_state_on_a_completed_pass_it_cannot_judge():
+    # A COMPLETED link resets the stuck count and drops the journal cursor even when the pass
+    # cannot judge reachability (ping exit 2 -> exit 1): a later drop must not count refusals
+    # from before the working stretch, or start one stuck pass from the limit.
+    tmp = tempfile.mkdtemp()
+    try:
+        env = _heal_env(tmp, _net_state(ping_rc=2), extra_tools=("journalctl",))
+        state_dir = env["BKSHADING_WIFI_HEAL_STATE_DIR"]
+        os.makedirs(state_dir)
+        with open(os.path.join(state_dir, "stuck"), "w") as f:
+            f.write("2\n")
+        with open(os.path.join(state_dir, "journal-cursor"), "w") as f:
+            f.write("stub-cursor=0\n")
+        r = _heal_pass(env)
+        assert r.returncode == 1, (r.stdout, r.stderr)
+        assert _stuck(env) == "0", "a COMPLETED pass resets the stuck count"
+        assert not os.path.exists(os.path.join(state_dir, "journal-cursor"))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -554,15 +653,29 @@ def test_heal_service_timeouts_cover_the_longest_pass():
     unit = _read(HEAL_SERVICE)
     assert "= %d s" % reload_pass in unit, "the unit comment must state the computed bound"
     assert "up to %d s" % settled in unit, "the unit comment must state the settled after-read bound"
+    # the start of a stopped supplicant may reload a driver too (no stop): never longer
+    start_pass = reload_pass - sysctl
+    assert start_pass <= reload_pass
     # a pass ended mid-reload runs the trap (load + wlan0 wait + start) inside TimeoutStopSec
     assert 2 * sysctl + iface_wait <= int(_unit_value(HEAL_SERVICE, "TimeoutStopSec"))
-    # the script takes the bounds from the lib, and the reload makes exactly the calls counted above
+    # the script takes the bounds from the lib (the wlan0 wait overridable for tests only), and
+    # the reload and the start make exactly the calls counted above
     script = _read(HEAL_SCRIPT)
     assert 'SYSTEMCTL_TIMEOUT_S="$(bkshading_sbc_wifi_heal_systemctl_timeout_s)"' in script
-    assert 'IFACE_WAIT_S="$(bkshading_sbc_wifi_heal_iface_wait_s)"' in script
-    reload_case = script.split("\n  reload-driver)\n", 1)[1].split("\nesac\n", 1)[0]
-    assert reload_case.count('timeout "$SYSTEMCTL_TIMEOUT_S"') == 3, "stop, modprobe -r, start"
-    load_fn = script.split("\nload_driver() {\n", 1)[1].split("\n}\n", 1)[0]
+    assert '"${BKSHADING_WIFI_HEAL_IFACE_WAIT_S:-}" "$(bkshading_sbc_wifi_heal_iface_wait_s)"' in script
+
+    def body(head, end):
+        return script.split(head, 1)[1].split(end, 1)[0]
+    reload_case = body("\n  reload-driver)\n", "\nesac\n")
+    start_case = body("\n  start)\n", "\n  reload-driver)\n")
+    plan_fn = body("\napply_driver_plan() {\n", "\n}\n")
+    load_fn = body("\nload_driver() {\n", "\n}\n")
+    assert reload_case.count('timeout "$SYSTEMCTL_TIMEOUT_S"') == 2, "stop, start"
+    assert reload_case.count("apply_driver_plan") == 1
+    assert start_case.count('timeout "$SYSTEMCTL_TIMEOUT_S"') == 1, "start"
+    assert start_case.count("apply_driver_plan") == 1
+    assert plan_fn.count('timeout "$SYSTEMCTL_TIMEOUT_S"') == 1, "modprobe -r"
+    assert plan_fn.count("load_driver") == 2, "after the unload, or alone"
     assert load_fn.count('timeout "$SYSTEMCTL_TIMEOUT_S"') == 1 and "wait_for_iface" in load_fn
 
 

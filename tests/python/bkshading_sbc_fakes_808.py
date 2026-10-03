@@ -132,6 +132,21 @@ if name == "journalctl":
     journal = st.setdefault("journal", [])
     has_cursor = os.path.exists(cpath) and os.path.getsize(cpath) > 0
     if rest == ["-n", "1"]:
+        # like the real journalctl (systemd 255, probed): with a cursor file present, -n 1 shows the
+        # ONE entry after the cursor, not the journal's last one -- the caller must drop it first
+        if has_cursor:
+            text = open(cpath).read().strip()
+            if not text.startswith("stub-cursor="):
+                sys.stderr.write("Failed to seek to cursor: Invalid argument\n")
+                sys.exit(1)
+            at = int(text.split("=", 1)[1]) + 1
+            out = journal[at:at + 1]
+            if out:
+                with open(cpath, "w") as f:
+                    f.write("stub-cursor=%d\n" % at)
+            for line in out:
+                print(line)
+            sys.exit(0)
         out = journal[-1:]
     else:
         supplicant_activity()
@@ -156,31 +171,52 @@ if name == "journalctl":
             f.write("stub-cursor=%d\n" % (len(journal) - 1))
     sys.exit(0)
 if name == "modprobe":
-    # The WiFi driver module behind the fake /sys/class/net/wlan0: unloading it removes wlan0 (kept
-    # aside as .wlan0-unloaded with its device/driver/module links); loading it brings wlan0 back
-    # `iface_delay_s` later, from a detached process, as a real driver's probe does. `modprobe_rc`
-    # fails every call, `modprobe_load_rc` only the load.
+    # The WiFi driver module, loaded while <fake /sys/module>/<name> exists. Unloading it removes
+    # that dir and wlan0 (both kept aside as .<name>-unloaded / .wlan0-unloaded, links intact);
+    # loading an unloaded module brings its dir back at once and wlan0 `iface_delay_s` later, from a
+    # detached process, as a real driver's probe does (never when `load_no_iface` is set: a driver
+    # that loads but never creates wlan0). Loading a module that is already loaded does nothing,
+    # like the real modprobe. `modprobe_rc` fails every call, `modprobe_load_rc` only the load.
     net = os.environ["BKSHADING_WIFI_HEAL_SYSFS_NET"]
+    mods = os.environ["BKSHADING_WIFI_HEAL_SYSFS_MODULE"]
     live, gone = os.path.join(net, "wlan0"), os.path.join(net, ".wlan0-unloaded")
+    mod = args[-1] if args else ""
+    mod_live, mod_gone = os.path.join(mods, mod), os.path.join(mods, "." + mod + "-unloaded")
     if st.get("modprobe_rc"):
         sys.exit(int(st["modprobe_rc"]))
     if "-r" in args:
+        if os.path.isdir(mod_live):
+            os.rename(mod_live, mod_gone)
         if os.path.isdir(live):
             os.rename(live, gone)
-        if st.get("term_heal_on_unload") and not st.get("term_sent"):
+        sig = int(st.get("signal_heal_on_unload") or 0)
+        if sig and not st.get("signal_sent"):
             # the heal pass is ended right here, between the unload and the load (systemd's
-            # SIGTERM at TimeoutStartSec): modprobe's parent is `timeout`, whose parent is the heal
-            st["term_sent"] = True
+            # SIGTERM at TimeoutStartSec, a Ctrl-C): signal the heal script's own bash, found by its
+            # command line among this process's ancestors -- never a guess at a parent
+            st["signal_sent"] = True
             save()
-            with open("/proc/%d/stat" % os.getppid()) as f:
-                heal_pid = int(f.read().rsplit(")", 1)[1].split()[1])
-            os.kill(heal_pid, 15)
+            pid = os.getppid()
+            while pid > 1:
+                with open("/proc/%d/cmdline" % pid, "rb") as f:
+                    cmd = f.read()
+                if b"bkshading-wifi-heal.sh" in cmd:
+                    os.kill(pid, sig)
+                    sys.exit(0)
+                with open("/proc/%d/stat" % pid) as f:
+                    pid = int(f.read().rsplit(")", 1)[1].split()[1])
+            sys.stderr.write("stub modprobe: no bkshading-wifi-heal.sh among my ancestors\n")
+            sys.exit(97)
         sys.exit(0)
     if st.get("modprobe_load_rc"):
         sys.exit(int(st["modprobe_load_rc"]))
+    if os.path.isdir(mod_live):
+        sys.exit(0)
+    if os.path.isdir(mod_gone):
+        os.rename(mod_gone, mod_live)
     st.update(st.get("on_reload", {}))
     save()
-    if os.path.isdir(gone):
+    if os.path.isdir(gone) and not st.get("load_no_iface"):
         subprocess.Popen(
             [sys.executable, "-c",
              "import os, sys, time; time.sleep(float(sys.argv[1])); os.rename(sys.argv[2], sys.argv[3])",
@@ -198,18 +234,29 @@ if name == "systemctl":
         supplicant_activity()
         st["wpa_active"] = False
         save()
+        if st.get("break_cursor_on_stop"):
+            # the next command in the reload window fails: the cursor path becomes a non-empty dir,
+            # which `rm -f` cannot remove (an errexit inside the stop..start window)
+            cpath = os.path.join(os.environ["BKSHADING_WIFI_HEAL_STATE_DIR"], "journal-cursor")
+            if os.path.exists(cpath) and not os.path.isdir(cpath):
+                os.remove(cpath)
+            os.makedirs(cpath, exist_ok=True)
+            open(os.path.join(cpath, "x"), "w").close()
         sys.exit(0)
     if args[:1] == ["start"]:
+        # A simplification of the real unit (Requires= the wlan0 device): a real start waits on the
+        # device job until the caller's timeout kills the client; here a start without wlan0 just
+        # fails. `--no-block` only queues the start: it answers 0 at once either way.
+        queued = "--no-block" in args
         net = os.environ.get("BKSHADING_WIFI_HEAL_SYSFS_NET")
         if net and not os.path.isdir(os.path.join(net, "wlan0")):
-            # the unit Requires= the wlan0 device: no interface, no supplicant
             st["start_without_iface"] = st.get("start_without_iface", 0) + 1
             save()
-            sys.exit(1)
+            sys.exit(0 if queued else 1)
         st["wpa_active"] = True
         st.update(st.get("on_start", {}))
         save()
-        sys.exit(int(st.get("start_rc", 0)))
+        sys.exit(0 if queued else int(st.get("start_rc", 0)))
     if args[:1] == ["is-active"]:
         # the supplicant unit's word: `unit_word` when the test sets one, else active/inactive
         word = st.get("unit_word") or ("active" if st.get("wpa_active", True) else "inactive")
@@ -285,6 +332,7 @@ def _heal_env(tmp, state, extra_tools=(), driver_module=None, iface_present=True
         "BKSHADING_WIFI_HEAL_STATE_DIR": os.path.join(tmp, "run"),
         "BKSHADING_WIFI_HEAL_SETTLE_S": "1",
         "BKSHADING_WIFI_HEAL_SYSFS_NET": _fake_wifi_sysfs(tmp, driver_module, iface_present),
+        "BKSHADING_WIFI_HEAL_SYSFS_MODULE": os.path.join(tmp, "sys-module"),
     }
 
 
@@ -304,25 +352,31 @@ def _get_state(env):
 
 
 def _fake_wifi_sysfs(tmp, driver_module, iface_present=True):
-    """A fake /sys/class/net with wlan0, whose device/driver/module links to a dir named after
-    the driver module (sprdwl_ng on the Orange Pi Zero 2W) -- or no module link (a built-in driver).
-    iface_present=False: the module is unloaded, wlan0 is gone (kept aside as .wlan0-unloaded, which
-    the modprobe stub brings back on a load)."""
+    """A fake /sys/class/net with wlan0, whose device/driver/module links to <tmp>/sys-module/<name>
+    (the fake /sys/module: sprdwl_ng on the Orange Pi Zero 2W) -- or no module link (a built-in
+    driver). iface_present=False: the module is unloaded, so wlan0 and the module dir are gone
+    (kept aside as .wlan0-unloaded / .<name>-unloaded, which the modprobe stub brings back on a
+    load)."""
     net = os.path.join(tmp, "sys-class-net")
     dev = os.path.join(tmp, "sys-devices", "wlan0-dev")
     drv = os.path.join(tmp, "sys-bus", "drivers", "wlan-driver")
+    mods = os.path.join(tmp, "sys-module")
     os.makedirs(os.path.join(net), exist_ok=True)
     os.makedirs(os.path.join(dev, "net"), exist_ok=True)
     os.makedirs(drv, exist_ok=True)
+    os.makedirs(mods, exist_ok=True)
     os.makedirs(os.path.join(net, "wlan0"), exist_ok=True)
     os.symlink(dev, os.path.join(net, "wlan0", "device"))
     os.symlink(drv, os.path.join(dev, "driver"))
     if driver_module:
-        mod = os.path.join(tmp, "sys-module", driver_module)
+        mod = os.path.join(mods, driver_module)
         os.makedirs(mod, exist_ok=True)
         os.symlink(mod, os.path.join(drv, "module"))
     if not iface_present:
         os.rename(os.path.join(net, "wlan0"), os.path.join(net, ".wlan0-unloaded"))
+        if driver_module:
+            os.rename(os.path.join(mods, driver_module),
+                      os.path.join(mods, "." + driver_module + "-unloaded"))
     return net
 
 
