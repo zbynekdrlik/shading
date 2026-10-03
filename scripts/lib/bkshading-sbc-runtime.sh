@@ -488,11 +488,13 @@ bkshading_sbc_wifi_heal_decide() {
 # never reached COMPLETED and the reachability rungs above (which wait while the supplicant is
 # "working") never acted. A supplicant restart and a link down/up did not help; reloading the
 # driver module (sprdwl_ng) did, COMPLETED 6 s later. A supplicant that stops answering wpa_cli
-# (hung, not crashed) is the same dead end. So a pass is STUCK when wpa_state is not COMPLETED and
-# either the supplicant journal shows a driver-refused association since the last pass, or the
-# supplicant does not answer ("?"). Plain scanning out of range is never stuck (no refusal lines).
-# After this many consecutive stuck passes (3 x 20 s = about a minute) the heal stops the
-# supplicant, reloads the WiFi driver module and starts the supplicant again.
+# while its unit still runs (hung, not crashed) is the same dead end. So a pass is STUCK when
+# wpa_state is not COMPLETED and either the supplicant journal shows a driver-refused association
+# since the last pass, or the supplicant does not answer ("?") while `systemctl is-active` does not
+# read it stopped. A STOPPED unit (inactive / failed: a manual `systemctl stop`, a start that failed)
+# is simply started again on that pass, no driver reload. Plain scanning out of range is never
+# stuck (no refusal lines). After this many consecutive stuck passes (3 x 20 s = about a minute)
+# the heal stops the supplicant, reloads the WiFi driver module and starts the supplicant again.
 bkshading_sbc_wifi_heal_stuck_limit() { printf '%s\n' 3; }
 # The wpa_supplicant line a driver-refused association writes (wpa_supplicant 2.10, sme.c/events.c).
 bkshading_sbc_wifi_heal_driver_failed_text() { printf '%s\n' 'Association request to the driver failed'; }
@@ -514,15 +516,29 @@ bkshading_sbc_wifi_heal_count_refused() {
 # The stuck decision. $1 = the previous consecutive stuck-pass count (anything not a plain number
 # reads as 0), $2 = wpa_state ("?" = the supplicant does not answer), $3 = driver-refused lines in
 # the supplicant journal since the last pass (anything not a plain number reads as 0 = no
-# evidence). Prints "<action> <stuck>": COMPLETED -> none 0; stuck -> the count + 1, at the limit
-# (or a stale count past it) -> reload-driver 0; any other pass -> none 0.
+# evidence), $4 = the supplicant unit's `systemctl is-active` word, read only when $2 is "?"
+# (empty = not read, or unreadable). Prints "<action> <stuck>":
+#   COMPLETED                              -> none 0
+#   "?" and the unit inactive | failed     -> start 0: the supplicant was stopped (a manual
+#                                             `systemctl stop`, a failed start) -- start it, no
+#                                             driver reload, and no stuck pass
+#   "?" and any other word (active, activating, unreadable) -> a stuck pass: running but silent
+#                                             = hung (an unreadable word never starts anything)
+#   a driver-refused association           -> a stuck pass
+#   a stuck pass                           -> the count + 1; at the limit (or a stale count past
+#                                             it) -> reload-driver 0, else none <count>
+#   any other pass (plain scanning)        -> none 0
 bkshading_sbc_wifi_heal_stuck_decide() {
-  local prev="${1:-0}" state="${2:-}" failed="${3:-0}" limit stuck
+  local prev="${1:-0}" state="${2:-}" failed="${3:-0}" unit="${4:-}" limit stuck
   limit="$(bkshading_sbc_wifi_heal_stuck_limit)"
   [[ "$prev" =~ ^[0-9]{1,6}$ ]] || prev=0
   [[ "$failed" =~ ^[0-9]{1,6}$ ]] || failed=0
   if [ "$state" = COMPLETED ]; then
     printf '%s\n' "none 0"
+    return 0
+  fi
+  if [ "$state" = "?" ] && { [ "$unit" = inactive ] || [ "$unit" = failed ]; }; then
+    printf '%s\n' "start 0"
     return 0
   fi
   if [ "$state" = "?" ] || [ "$((10#$failed))" -gt 0 ]; then

@@ -154,18 +154,24 @@ elif command -v journalctl >/dev/null 2>&1; then
     rm -f "$JOURNAL_CURSOR_FILE"
   fi
 fi
-read -r stuck_action stuck <<<"$(bkshading_sbc_wifi_heal_stuck_decide "$prev_stuck" "$wpa_state" "$refused")"
+# A supplicant that does not answer is either stopped (start it) or hung (the reload path): its
+# unit tells which. Read only then; an unreadable word ("") counts as running, never a start.
+unit_word=""
+if [ "$wpa_state" = "?" ]; then
+  unit_word="$(timeout "$TOOL_TIMEOUT_S" systemctl is-active "$WPA_UNIT" 2>/dev/null || true)"
+fi
+read -r stuck_action stuck <<<"$(bkshading_sbc_wifi_heal_stuck_decide "$prev_stuck" "$wpa_state" "$refused" "$unit_word")"
 printf '%s\n' "$stuck" >"$STUCK_FILE.tmp.$$"
 mv -f "$STUCK_FILE.tmp.$$" "$STUCK_FILE"
 if [ "$stuck" = 1 ]; then
   if [ "$wpa_state" = "?" ]; then
-    echo "bkshading-wifi-heal: the supplicant on $IFACE does not answer -- stuck pass 1 of $STUCK_LIMIT before a driver reload"
+    echo "bkshading-wifi-heal: the supplicant on $IFACE does not answer while $WPA_UNIT is ${unit_word:-unreadable} -- stuck pass 1 of $STUCK_LIMIT before a driver reload"
   else
     echo "bkshading-wifi-heal: the WiFi driver refused $refused association(s) on $IFACE (wpa_state=$wpa_state) -- stuck pass 1 of $STUCK_LIMIT before a driver reload"
   fi
 fi
-if [ "$stuck_action" = reload-driver ]; then
-  action=reload-driver
+if [ "$stuck_action" = reload-driver ] || [ "$stuck_action" = start ]; then
+  action="$stuck_action"
 fi
 
 last_action=""
@@ -182,7 +188,7 @@ elif [ "$reachable" = yes ] && { [ "$prev" -gt 0 ] || [ -n "$last_action" ]; }; 
   echo "bkshading-wifi-heal: gateway $gw on $IFACE answers again after $prev consecutive misses (bssid=$b_bssid signal=$b_rssi dBm)${last_action:+, the last action: $last_action}"
   rm -f "$LAST_ACTION_FILE"
 elif [ "$wpa_state" = "?" ] && [ "$prev" -gt 0 ]; then
-  echo "bkshading-wifi-heal: the supplicant on $IFACE does not answer (crashed or hung; systemd restarts a crashed one) -- miss count reset from $prev"
+  echo "bkshading-wifi-heal: the supplicant on $IFACE does not answer ($WPA_UNIT is ${unit_word:-unreadable}; the stuck rung starts a stopped one and reloads the driver under a hung one) -- miss count reset from $prev"
 elif [ "$wpa_state" != COMPLETED ] && [ "$prev" -gt 0 ]; then
   echo "bkshading-wifi-heal: wpa_state=$wpa_state on $IFACE (the supplicant is working) -- miss count reset from $prev"
 fi
@@ -207,6 +213,20 @@ case "$action" in
     printf '%s\n' "systemctl restart $WPA_UNIT" >"$LAST_ACTION_FILE"
     bkshading_sbc_wifi_heal_action_line "systemctl restart $WPA_UNIT" "$gw" "$((prev + 1))" \
       "$b_bssid" "$b_rssi" "$a_bssid" "$a_rssi" "$a_state" "$result"
+    ;;
+  start)
+    # The supplicant unit is stopped (inactive / failed), not hung: start it, no driver reload. The
+    # journal cursor moves to the end first, so the next pass judges the new supplicant only.
+    label="start $WPA_UNIT"
+    detail="it was $unit_word; no driver reload"
+    result=ok
+    journal_cursor_to_end
+    timeout "$SYSTEMCTL_TIMEOUT_S" systemctl start "$WPA_UNIT" || result=FAILED
+    [ "$result" = ok ] || rc=1
+    read -r a_bssid a_rssi a_state <<<"$(settled_snapshot "$b_bssid")"
+    printf '%s (%s)\n' "$label" "$detail" >"$LAST_ACTION_FILE"
+    printf 'bkshading-wifi-heal: %s on %s (%s); after bssid=%s signal=%s dBm wpa_state=%s; result=%s\n' \
+      "$label" "$IFACE" "$detail" "$a_bssid" "$a_rssi" "$a_state" "$result"
     ;;
   reload-driver)
     # The driver module behind wlan0 (sprdwl_ng on the Orange Pi Zero 2W); none = a built-in driver.
