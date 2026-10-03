@@ -9,6 +9,7 @@ paths:
   - "tests/python/test_ro_root_808.py"
   - "scripts/bkshading-wifi-heal.sh"
   - "scripts/bkshading_sbc_netplan_wifi.py"
+  - "scripts/lib/bkshading-sbc-wifi-probe.sh"
   - "systemd/bkshading-wifi-heal.service"
   - "systemd/bkshading-wifi-heal.timer"
 ---
@@ -116,9 +117,9 @@ the relay/cloudflared provisioning canon but with two deliberate deltas + one go
   passed no traffic while `wpa_state=COMPLETED`. Two gaps: netplan 1.1 has NO `bgscan` key (its
   generated supplicant roams only on a LOST link), and nothing checks that a COMPLETED link carries
   traffic (`operstate`/carrier read `up`). `--install` on a board with a `wl*` radio:
-  - MIGRATES the SSID + passphrase + `regulatory-domain` out of the board's own netplan WiFi YAML
-    (`scripts/bkshading_sbc_netplan_wifi.py`, PyYAML **BaseLoader** — every scalar stays its raw
-    text like netplan's libyaml reader, so `password: 12345678` or `012345678` never becomes an
+  - MIGRATES the SSID + passphrase + `regulatory-domain` + DHCP out of the board's own netplan WiFi
+    YAML (`scripts/bkshading_sbc_netplan_wifi.py`, PyYAML **BaseLoader** — every scalar stays its
+    raw text like netplan's libyaml reader, so `password: 12345678` or `012345678` never becomes an
     int/octal) and writes `/etc/wpa_supplicant/wpa_supplicant-wlan0.conf` (0600): ctrl_interface in
     `/run`, `country=`, `key_mgmt`, `ieee80211w=1`, `bgscan="simple:30:-65:300"` and the 64-hex PSK.
     All values are named constants with reasons in `scripts/lib/bkshading-sbc-runtime.sh`.
@@ -128,44 +129,78 @@ the relay/cloudflared provisioning canon but with two deliberate deltas + one go
     netplan password that already IS 64 hex is used as-is (wpa_passphrase refuses that length).
     The YAML reader's stderr never carries a passphrase (a YAML parse error prints its class only:
     PyYAML's message quotes the offending line).
-  - Moves that YAML aside ONCE as `<file>.bak` (the `fstab.bak` pattern; it still holds the
-    original passphrase, as the YAML did), keeps the ethernet + usb0 YAMLs, and writes
-    `/etc/systemd/network/05-bkshading-wlan0.network` with the settings netplan generated (`05-`
-    sorts before every `10-netplan-*` file).
+  - **The reader's exit code needs `set +e` INSIDE its process substitution.** The script runs
+    under `set -euo pipefail`, and the `<( … )` subshell inherits errexit: a failing reader ended the
+    subshell before `printf 'rc\0%s\0' "$?"` ran, so every reader failure read as "nothing to
+    migrate" (review finding: with a conf present, `--install` then exited 0 and left netplan's
+    wlan0 in place). Any `mapfile < <(cmd; printf rc)` pattern in a `set -e` script needs the same.
+  - Writes `/etc/systemd/network/05-bkshading-wlan0.network` with the settings netplan generated
+    (`05-` sorts before every `10-netplan-*` file; `DHCP=yes` for dhcp4 + dhcp6, `ipv4` for dhcp4
+    alone — never a DHCPv6 the YAML did not ask for) and a `wpa_supplicant@wlan0.service.d/
+    bkshading-restart.conf` drop-in (`Restart=on-failure`: Debian's unit has no `Restart=`, and the
+    heal never acts on a supplicant that does not answer).
+  - Installs the heal (`scripts/bkshading-wifi-heal.sh` + its two libs, mirroring the repo layout
+    under `/usr/local/lib/bkshading/`, and `systemd/bkshading-wifi-heal.{service,timer}`), enables
+    `systemd-networkd` + `wpa_supplicant@wlan0` + the timer, starts nothing — and only THEN moves the
+    netplan WiFi YAML aside ONCE as `<file>.bak` (the `fstab.bak` pattern; it still holds the original
+    passphrase, as the YAML did). A failure before the move leaves netplan's WiFi in charge at the
+    next boot, never a board with no WiFi. Ethernet + usb0 YAMLs stay.
   - Refuses (exit 1, nothing changed — read before the rw remount) on: no netplan WiFi YAML AND no
     conf; a YAML that also configures other interfaces, a static address, an open/enterprise
-    network or any key it would lose; two files defining wlan0; a YAML present again while its
-    `.bak` exists. A re-run keeps an existing conf. A wired box skips all of it.
-  - Installs the heal (`scripts/bkshading-wifi-heal.sh` + the lib, mirroring the repo layout under
-    `/usr/local/lib/bkshading/`, and `systemd/bkshading-wifi-heal.{service,timer}`), enables
-    `wpa_supplicant@wlan0` + the timer, starts nothing.
+    network or any key it would lose; two files defining wlan0; a wlan0 in `/run/netplan` or
+    `/lib/netplan` that no `/etc/netplan` file of the same name shadows (netplan reads all three, the
+    migration moves only `/etc` files); a YAML present again while its `.bak` exists; a YAML next to
+    an existing conf that migrates to a DIFFERENT conf (both named; an IDENTICAL one — a re-run after
+    an install that never got to the move — is finished); wpa_cli/ip/ping missing. A re-run keeps an
+    existing conf. A wired box skips all of it.
 - **The heal** (`bkshading-wifi-heal.timer`, 20 s; `AccuracySec=1s` — the default 1 min would
   stretch the cadence): pings the DHCP default gateway read from `ip -4 route show default dev
   wlan0` (never a hard-coded address) with `-I wlan0`; a pass misses only when all 3 pings are lost.
   The pure `bkshading_sbc_wifi_heal_decide` table: not COMPLETED → none + count reset (the
-  supplicant is working; a dead supplicant reads the same and is NOT revived — see the known limit
-  below); 3 misses → `wpa_cli reassociate`; 6 → `systemctl restart wpa_supplicant@wlan0` + count
-  reset. COMPLETED with no DHCP gateway counts as a miss. The count lives in
-  `/run/bkshading-wifi-heal/misses`; a damaged count reads as 0 (decimal, never octal). One journal
-  line per action names the BSSID + signal before and after (after = up to 15 s for COMPLETED);
-  the first miss and the recovery are one line each. No reboot, no ifdown.
-- **`--check` rows (wl* boards only, skipped on a wired box):** `wpa_supplicant@wlan0` enabled; the
-  exact bgscan line in the conf (the conf holds the PSK: read line by line, never printed); the heal
-  installed byte-identical to this checkout + its timer enabled; the gateway answers a ping — the
-  FAIL names the BSSID, signal and wpa_state.
+  supplicant is working; each new association gets its full ~60 s for DHCP — the trade-off is
+  written at the function); 3 misses → `wpa_cli reassociate`; 6 → `systemctl restart
+  wpa_supplicant@wlan0` + count reset. COMPLETED with no DHCP route counts as a miss (its own
+  line, never "did not answer pings"). The count lives in `/run/bkshading-wifi-heal/misses`; a
+  damaged count reads as 0 (decimal, never octal).
+  - **The link reads are ONE probe lib** (`scripts/lib/bkshading-sbc-wifi-probe.sh`) the heal and
+    `--check` share: the gateway (rc 2 = the read itself failed), the ping verdict (0 reply, 1 no
+    reply, 2 no verdict — iputils exits 2 on setup errors, a missing tool reads 127), and the
+    BSSID/signal/state snapshot with every `wpa_cli` call bounded by `timeout` (a wedged supplicant
+    otherwise holds each call ~10 s and pushes a pass past `TimeoutStartSec`).
+  - **A pass that cannot judge the link changes nothing.** A missing tool, an `ip` failure or a ping
+    exit other than 0/1 keeps the count, names the tool and exits 1 (the unit shows failed). The
+    first draft counted a missing `ping` as a miss: a healthy link was reassociated every ~60 s and
+    its supplicant restarted every ~2 min (review finding, reproduced).
+  - **The after-read waits for the NEW association.** `wpa_cli reassociate` returns at once, and
+    while the supplicant scans it stays COMPLETED on the OLD BSSID, so an immediate read repeats
+    "before" even when the roam succeeds. A COMPLETED read counts only after the state left
+    COMPLETED, or the BSSID moved, or 5 s passed (`bkshading_sbc_wifi_heal_min_settle_s`), never past
+    15 s. The test stub keeps the old BSSID for N status reads to prove it.
+  - One journal line per action names the BSSID + signal before and after; the first miss, and the
+    first answer after misses or an action (naming that action, from `/run/.../last-action`), are
+    one line each. No reboot, no ifdown.
+- **`--check` rows (wl* boards only, skipped on a wired box):** `wpa_supplicant@wlan0` and
+  `systemd-networkd` enabled; the conf is mode 0600 and carries the exact bgscan line (the conf
+  holds the PSK: read line by line, never printed); netplan defines no wlan0 any more; the heal
+  (script, both libs, units, the restart drop-in) installed byte-identical to this checkout + its
+  timer enabled; wpa_cli/ip/ping present; the gateway answers a ping — the FAIL names the BSSID,
+  signal and wpa_state, and a missing tool or a no-verdict ping is named as such, never as a dead
+  gateway.
 - **Design-question open (comment 5972616531, the main decides):** `key_mgmt` keeps `SAE` "as
   today", but SAE cannot authenticate from a hex PSK. wpa_supplicant 2.10 prefers SAE whenever the
   driver supports it and fails with `SAE: No password available`, so on a WPA2/WPA3-transition AP
   the board would not join. Inert on the rig's WPA2-PSK APs. Dropping SAE is a one-line change of
   `bkshading_sbc_wpa_key_mgmt` + its test pin.
-- **Known limit:** Debian's `wpa_supplicant@.service` has no `Restart=`, and the heal never acts
-  while `wpa_state` is not COMPLETED, so a CRASHED supplicant stays down until a reboot.
+- **Known limit:** a HUNG (not crashed) supplicant answers no `wpa_cli`, reads as not COMPLETED, and
+  the heal leaves it alone; the restart drop-in only covers a supplicant that exits.
 - **Testing the heal:** the test runs the REAL script with PATH = a stub dir only (python stubs for
   `wpa_cli`/`ip`/`ping`/`systemctl` answering from a JSON state that `reassociate`/`restart`
-  update, plus symlinks to `dirname`/`mkdir`/`mv`/`sleep`), so a missing stub never reaches the
-  machine's real `wpa_cli`. The `wpa_passphrase` stub runs the real binary where it exists (dev1)
-  and emulates it exactly elsewhere (the CI runner has none); the PSK assertion uses
-  `hashlib.pbkdf2_hmac` independently, so both paths are checked against the 802.11i definition.
+  update — incl. a delayed roam, a ping exit code and a hanging `wpa_cli` — plus symlinks to
+  `dirname`/`mkdir`/`mv`/`rm`/`sleep`/`timeout`), so a missing stub never reaches the machine's real
+  `wpa_cli`. The `wpa_passphrase` stub runs the real binary where it exists (dev1) and emulates it
+  exactly elsewhere (the CI runner has none); the PSK assertion uses `hashlib.pbkdf2_hmac`
+  independently, so both paths are checked against the 802.11i definition. The provision harness
+  points `BKSHADING_SBC_NETPLAN_OTHER_DIRS` at temp dirs, never the test machine's own netplan.
 - The physical bring-up (flash the arm64 image, headless WiFi, then deploy + `--install` + reboot)
   is the owner's/supervisor's rig step. Transports stay USB-PTP (gphoto2/libusb) / USB-Eth REST —
   NEVER Bluetooth; a gphoto2 camera is a USB device, not a network link, so the netplan `enx*`
@@ -203,6 +238,7 @@ The code lane ships the provisioning + `--check`; these live-hardware steps are 
 7. **WiFi roam + heal (design 5972548198)** — copy the current `scripts/` dir, rerun `--install`
    (it migrates the netplan WiFi, moves `30-wifis-dhcp.yaml` to `.bak`) and reboot. Then:
    - `ls /run/netplan/` has no `wpa-wlan0.conf`; `systemctl is-active wpa_supplicant@wlan0`;
+     `systemctl cat wpa_supplicant@wlan0` shows the `bkshading-restart.conf` drop-in;
      `systemctl list-timers bkshading-wifi-heal.timer` shows a 20 s cadence;
    - `wpa_cli -i wlan0 status` = COMPLETED on the strong AP; `--check` is all OK (the gateway row
      names the BSSID + signal); `systemctl --failed` is empty;

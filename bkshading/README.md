@@ -197,13 +197,16 @@ params-only block — a handheld has no NDI feed). This milestone provisions the
   `wl*` radio `--install` takes the WiFi over from netplan: it migrates the SSID, passphrase and
   country from the board's own netplan WiFi YAML into `/etc/wpa_supplicant/wpa_supplicant-wlan0.conf`
   (0600, `bgscan="simple:30:-65:300"`, the `wpa_passphrase`-derived 64-hex PSK — the passphrase is
-  never on an argv, never printed, never logged), moves that YAML aside once as `.bak`, writes a
-  networkd DHCP file for `wlan0` with the settings netplan generated, and enables
-  `wpa_supplicant@wlan0`. `bkshading-wifi-heal.timer` (every 20 s) pings the DHCP gateway: after 3
-  misses it runs `wpa_cli reassociate`, after 6 it restarts `wpa_supplicant@wlan0`, never while
-  the supplicant is still connecting, with one journal line per action naming the BSSID and signal
-  before and after. A re-run keeps the conf; a board with neither a netplan WiFi YAML nor that conf
-  is refused before anything changes.
+  never on an argv, never printed, never logged), writes a networkd DHCP file for `wlan0` with the
+  settings netplan generated plus a `Restart=on-failure` drop-in for `wpa_supplicant@wlan0`,
+  enables `systemd-networkd`, `wpa_supplicant@wlan0` and the heal timer, and only then moves that
+  YAML aside once as `.bak`. `bkshading-wifi-heal.timer` (every 20 s) pings the DHCP gateway: after
+  3 misses it runs `wpa_cli reassociate`, after 6 it restarts `wpa_supplicant@wlan0`, never while
+  the supplicant is still connecting and never on a pass it could not measure (a missing tool is
+  named, not counted), with one journal line per action naming the BSSID and signal before and
+  after the new association. A re-run keeps the conf. Refused before anything changes: a board with
+  neither a netplan WiFi YAML nor that conf, a netplan WiFi that differs from an existing conf, a
+  YAML the migration cannot carry whole, or no `wpa_cli`/`ip`/`ping`.
 - **Read-only root, the same as the camboxes (issue 808, owner ruling 5948648089).** The handheld
   is unplugged after each use, and a power cut mid-write can corrupt its microSD root. So
   `--install` also writes the read-only fstab from the ONE shared canon `scripts/lib/ro-root.sh`
