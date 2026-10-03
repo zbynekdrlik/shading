@@ -34,11 +34,15 @@ These stdlib-only + pyyaml structural/behavioural tests run in the `python-tests
 toolchain, no root, no apt, no real systemd — the impure ops are overridden to fakes into a temp
 root). Runnable directly (`python3 tests/python/test_bkshading_sbc_provision_808.py`) or under pytest.
 """
+import hashlib
+import json
 import os
 import re
 import shutil
+import stat
 import struct
 import subprocess
+import sys
 import tempfile
 
 import yaml
@@ -263,19 +267,158 @@ def test_provision_is_enable_only():
     assert "enable --now" not in s, "enable --now would live-start (not enable-only)"
 
 
-def _fake_systemctl(record_path, fail_on=None):
+def _fake_systemctl(record_path, fail_on=None, disabled_units=()):
     d = tempfile.mkdtemp()
     p = os.path.join(d, "systemctl")
     fail = ('if [ "$1" = "%s" ]; then exit 1; fi\n' % fail_on) if fail_on else ""
+    # issue 808 WiFi rows: a unit listed here answers is-enabled with "disabled".
+    disabled = "".join(
+        'if [ "$1" = "is-enabled" ] && [ "$2" = "%s" ]; then echo disabled; exit 1; fi\n' % u
+        for u in disabled_units
+    )
     with open(p, "w", encoding="utf-8") as f:
         f.write(
             "#!/usr/bin/env bash\n"
-            'printf "%%s\\n" "$*" >> "%s"\n'
-            'if [ "$1" = "is-enabled" ]; then echo enabled; fi\n' % record_path
+            'printf "%%s\\n" "$*" >> "%s"\n' % record_path
+            + disabled
+            + 'if [ "$1" = "is-enabled" ]; then echo enabled; fi\n'
             + fail
         )
     os.chmod(p, 0o755)
     return p
+
+
+# ---------------------------------------------------------------------------------------------
+# issue 808 WiFi roam + heal fixtures (design 5972548198): the board's netplan files, the tool stubs
+# ---------------------------------------------------------------------------------------------
+WIFI_SSID = "newlevel.media"
+# A passphrase with every awkward character for a shell or a YAML reader: a double quote, a dollar,
+# a space, a backslash and a single quote. It must survive the migration bit-exact and never leak.
+WIFI_PASS = "p\"a$s s\\w0rd'x"
+WIFI_GW = "10.77.8.1"
+GOOD_BSSID = "92:0d:ab:03:67:07"
+FAR_BSSID = "aa:0d:ab:03:6f:af"
+NETPLAN_ETH = (
+    "network:\n  version: 2\n  renderer: networkd\n  ethernets:\n    all-eth-interfaces:\n"
+    '      match:\n        name: "e*"\n      dhcp4: yes\n      dhcp6: yes\n'
+)
+NETPLAN_USB0 = "network:\n  version: 2\n  ethernets:\n    usb0:\n      addresses: [10.55.0.2/24]\n"
+WIFI_YAML_NAME = "30-wifis-dhcp.yaml"
+
+
+def _wifi_yaml(ssid=WIFI_SSID, password=WIFI_PASS, country="SK"):
+    """The Armbian preset shape (live handheld-1). JSON strings are valid YAML double-quoted scalars,
+    so the awkward passphrase is encoded the way a careful writer encodes it."""
+    return (
+        "network:\n  version: 2\n  renderer: networkd\n  wifis:\n    wlan0:\n"
+        "      dhcp4: yes\n      dhcp6: yes\n      regulatory-domain: %s\n"
+        "      access-points:\n        %s:\n          password: %s\n"
+        % (country, json.dumps(ssid), json.dumps(password))
+    )
+
+
+def _armbian_netplan():
+    return {"10-dhcp-all-interfaces.yaml": NETPLAN_ETH, WIFI_YAML_NAME: _wifi_yaml(),
+            "40-usb0.yaml": NETPLAN_USB0}
+
+
+def _expected_psk(ssid=WIFI_SSID, password=WIFI_PASS):
+    # IEEE 802.11i PSK = PBKDF2-HMAC-SHA1(passphrase, ssid, 4096, 32): exactly what wpa_passphrase
+    # computes. Independent of the tool under test, so a wrong derivation cannot pass.
+    return hashlib.pbkdf2_hmac("sha1", password.encode(), ssid.encode(), 4096, 32).hex()
+
+
+REAL_WPA_PASSPHRASE = shutil.which("wpa_passphrase") or ""
+
+# One python stub serving every board tool the WiFi takeover + heal call. It logs its argv to
+# FAKE_TOOL_LOG and answers from the JSON state at FAKE_NET_STATE (which reassociate/restart update),
+# so the REAL script text runs end to end. `wpa_passphrase` runs the real binary when this machine
+# has one, else emulates it exactly (the passphrase on stdin when no 2nd argument is given, the
+# 8..63 length rule, and the `#psk="<passphrase>"` comment line the script must strip).
+TOOL_STUB = r'''#!__PY__
+import hashlib, json, os, subprocess, sys
+name = os.path.basename(sys.argv[0])
+args = sys.argv[1:]
+with open(os.environ["FAKE_TOOL_LOG"], "a") as f:
+    f.write(name + " " + " ".join(args) + "\n")
+if name == "wpa_passphrase":
+    real = "__REAL_WPA_PASSPHRASE__"
+    if real:
+        sys.exit(subprocess.run([real] + args).returncode)
+    ssid = args[0]
+    if len(args) > 1:
+        pw = args[1].encode()
+    else:
+        sys.stderr.write("# reading passphrase from stdin\n")
+        pw = sys.stdin.buffer.readline().split(b"\n")[0].split(b"\r")[0]
+    if not 8 <= len(pw) <= 63:
+        print("Passphrase must be 8..63 characters")
+        sys.exit(1)
+    psk = hashlib.pbkdf2_hmac("sha1", pw, ssid.encode(), 4096, 32).hex()
+    print("network={")
+    print('\tssid="%s"' % ssid)
+    print('\t#psk="%s"' % pw.decode())
+    print("\tpsk=%s" % psk)
+    print("}")
+    sys.exit(0)
+state_path = os.environ["FAKE_NET_STATE"]
+with open(state_path) as f:
+    st = json.load(f)
+def save():
+    with open(state_path, "w") as f:
+        json.dump(st, f)
+if name == "ip":
+    if "route" in args and "default" in args and st.get("gateway"):
+        print("default via %s dev wlan0 proto dhcp src 10.77.9.165 metric 600" % st["gateway"])
+    sys.exit(0)
+if name == "ping":
+    ok = bool(st.get("reachable")) and bool(st.get("gateway")) and args[-1:] == [st["gateway"]]
+    sys.exit(0 if ok else 1)
+if name == "wpa_cli":
+    cmd = args[-1] if args else ""
+    if st.get("wpa_state") is None:
+        sys.exit(255)  # no supplicant behind the control socket
+    if cmd == "status":
+        print("bssid=%s\nfreq=2437\nssid=newlevel.media\nid=0\nmode=station\nkey_mgmt=WPA2-PSK\n"
+              "wpa_state=%s\nip_address=10.77.9.165" % (st["bssid"], st["wpa_state"]))
+    elif cmd == "signal_poll":
+        print("RSSI=%s\nLINKSPEED=65\nNOISE=9999\nFREQUENCY=2437" % st["rssi"])
+    elif cmd == "reassociate":
+        st.update(st.get("on_reassociate", {}))
+        save()
+        print("OK")
+    sys.exit(0)
+if name == "systemctl":
+    if args[:1] == ["restart"]:
+        st.update(st.get("on_restart", {}))
+        save()
+        sys.exit(int(st.get("restart_rc", 0)))
+    if args[:1] == ["is-enabled"]:
+        print("enabled")
+    sys.exit(0)
+sys.exit(2)
+'''
+
+
+def _write_tool_stubs(dirpath, names=("wpa_passphrase", "wpa_cli", "ip", "ping")):
+    os.makedirs(dirpath, exist_ok=True)
+    body = TOOL_STUB.replace("__PY__", sys.executable).replace(
+        "__REAL_WPA_PASSPHRASE__", REAL_WPA_PASSPHRASE)
+    out = {}
+    for n in names:
+        p = os.path.join(dirpath, n)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(body)
+        os.chmod(p, 0o755)
+        out[n] = p
+    return out
+
+
+def _net_state(**kw):
+    st = {"wpa_state": "COMPLETED", "bssid": GOOD_BSSID, "rssi": -63, "gateway": WIFI_GW,
+          "reachable": True}
+    st.update(kw)
+    return st
 
 
 def _make_net_sysfs(base, ifaces):
@@ -342,17 +485,35 @@ def _sbc_paths(root):
         "journald": os.path.join(root, "etc", "systemd", "journald.conf.d"),
         "mount_log": os.path.join(root, "mount-calls.log"),
         "cambox_marker": os.path.join(root, "usr", "local", "bin", "camera-box"),
+        "netplan": os.path.join(root, "etc", "netplan"),
+        "wpa_conf": os.path.join(root, "etc", "wpa_supplicant", "wpa_supplicant-wlan0.conf"),
+        "networkd": os.path.join(root, "etc", "systemd", "network"),
+        "heal_dir": os.path.join(root, "usr", "local", "lib", "bkshading"),
+        "unit_dir": os.path.join(root, "systemd-system"),
+        "tool_log": os.path.join(root, "tool-calls.log"),
+        "net_state": os.path.join(root, "fake-net.json"),
     }
 
 
 def _run_provision(mode, root, bin_machine=AARCH64, make_bin=True, net_ifaces=None,
                    root_opts=None, root_uuid=ROOT_UUID, fstab_text=ARMBIAN_FSTAB,
-                   persistent_dropin=True, cambox=False, systemctl_fail_on=None):
+                   persistent_dropin=True, cambox=False, systemctl_fail_on=None,
+                   netplan_files=None, net_state=None, disabled_units=()):
     sysd = os.path.join(root, "systemd-system")
     binp = os.path.join(root, "bin", "bkshading-relay")
     calls = os.path.join(root, "systemctl-calls.log")
-    sc = _fake_systemctl(calls, fail_on=systemctl_fail_on)
+    sc = _fake_systemctl(calls, fail_on=systemctl_fail_on, disabled_units=disabled_units)
     paths = _sbc_paths(root)
+    # issue 808 WiFi: the board's own netplan files, seeded once (a re-run keeps whatever an
+    # earlier --install moved aside); default = the live handheld-1 set incl. the WiFi preset.
+    if not os.path.isdir(paths["netplan"]):
+        os.makedirs(paths["netplan"])
+        for name, text in (_armbian_netplan() if netplan_files is None else netplan_files).items():
+            with open(os.path.join(paths["netplan"], name), "w", encoding="utf-8") as f:
+                f.write(text)
+    with open(paths["net_state"], "w", encoding="utf-8") as f:
+        json.dump(_net_state() if net_state is None else net_state, f)
+    stubs = _write_tool_stubs(os.path.join(root, "fake-board-tools"))
     if make_bin:
         os.makedirs(os.path.dirname(binp), exist_ok=True)
         _fake_elf(binp, bin_machine)
@@ -391,6 +552,17 @@ def _run_provision(mode, root, bin_machine=AARCH64, make_bin=True, net_ifaces=No
         BKSHADING_SBC_FINDMNT=_fake_findmnt(tools),
         BKSHADING_SBC_MOUNT=_fake_mount(tools, paths["mount_log"]),
         BKSHADING_SBC_CAMBOX_MARKER=paths["cambox_marker"],
+        BKSHADING_SBC_NETPLAN_DIR=paths["netplan"],
+        BKSHADING_SBC_WPA_CONF_DIR=os.path.dirname(paths["wpa_conf"]),
+        BKSHADING_SBC_NETWORKD_DIR=paths["networkd"],
+        BKSHADING_SBC_HEAL_DIR=paths["heal_dir"],
+        BKSHADING_SBC_PYTHON=sys.executable,
+        BKSHADING_SBC_WPA_PASSPHRASE=stubs["wpa_passphrase"],
+        BKSHADING_SBC_WPA_CLI=stubs["wpa_cli"],
+        BKSHADING_SBC_IP=stubs["ip"],
+        BKSHADING_SBC_PING=stubs["ping"],
+        FAKE_TOOL_LOG=paths["tool_log"],
+        FAKE_NET_STATE=paths["net_state"],
         FAKE_ROOT_OPTS=root_opts,
         FAKE_ROOT_UUID=root_uuid,
         FAKE_ROOT_FSTYPE="ext4",
@@ -689,6 +861,638 @@ def test_check_grades_the_root_mode():
 
 def test_provision_sources_the_shared_ro_root_lib():
     assert '. "$HERE/lib/ro-root.sh"' in _read(SCRIPT)
+
+
+# ---------------------------------------------------------------------------------------------
+# issue 808 WiFi roam + heal (design 5972548198): the handheld sat on a dead far AP after a reboot
+# with wpa_state=COMPLETED and a DHCP lease; netplan has no bgscan and nothing checked traffic.
+# ---------------------------------------------------------------------------------------------
+HEAL_SCRIPT = os.path.join(REPO, "scripts", "bkshading-wifi-heal.sh")
+NETPLAN_READER = os.path.join(REPO, "scripts", "bkshading_sbc_netplan_wifi.py")
+HEAL_SERVICE = os.path.join(REPO, "systemd", "bkshading-wifi-heal.service")
+HEAL_TIMER = os.path.join(REPO, "systemd", "bkshading-wifi-heal.timer")
+BGSCAN_LINE = 'bgscan="simple:30:-65:300"'
+
+
+def _lib_call(snippet, env=None):
+    src = '. "%s"\n%s' % (LIB, snippet)
+    e = dict(os.environ)
+    e.update(env or {})
+    r = subprocess.run(["bash", "-c", "set -euo pipefail\n" + src], capture_output=True, text=True,
+                       env=e)
+    assert r.returncode == 0, (snippet, r.returncode, r.stdout, r.stderr)
+    return r.stdout
+
+
+def _unit_value(path, key):
+    for line in _read(path).splitlines():
+        if line.startswith(key + "="):
+            return line.split("=", 1)[1].strip()
+    return None
+
+
+def test_wifi_constants_pin_the_design():
+    assert _lib_call("bkshading_sbc_wifi_iface").strip() == "wlan0"
+    assert _lib_call("bkshading_sbc_wpa_unit").strip() == "wpa_supplicant@wlan0.service"
+    assert _lib_call("bkshading_sbc_wpa_conf_name").strip() == "wpa_supplicant-wlan0.conf"
+    assert _lib_call("bkshading_sbc_wpa_ctrl_dir").strip() == "/run/wpa_supplicant"
+    assert _lib_call("bkshading_sbc_wpa_key_mgmt").strip() == "WPA-PSK WPA-PSK-SHA256 SAE"
+    assert _lib_call("bkshading_sbc_wpa_ieee80211w").strip() == "1"
+    assert _lib_call("bkshading_sbc_bgscan_line").strip() == BGSCAN_LINE
+    assert _lib_call("bkshading_sbc_wifi_heal_miss_limit").strip() == "3"
+    assert _lib_call("bkshading_sbc_wifi_heal_interval_s").strip() == "20"
+
+
+def test_wpa_conf_text_shape():
+    psk = "ab" * 32
+    out = _lib_call('bkshading_sbc_wpa_conf_text SK "$S" "$P"', env={"S": WIFI_SSID, "P": psk})
+    lines = [ln.strip() for ln in out.splitlines()]
+    assert "ctrl_interface=/run/wpa_supplicant" in lines
+    assert "country=SK" in lines
+    block = lines[lines.index("network={"):]
+    assert block[:7] == ["network={", 'ssid="newlevel.media"', "key_mgmt=WPA-PSK WPA-PSK-SHA256 SAE",
+                         "ieee80211w=1", BGSCAN_LINE, "psk=" + psk, "}"], block
+    assert not any(ln.startswith("#psk") for ln in lines)
+    # no regulatory domain in the YAML -> no country line, never a guessed one
+    none = _lib_call('bkshading_sbc_wpa_conf_text "" "$S" "$P"', env={"S": WIFI_SSID, "P": psk})
+    assert "country=" not in none
+    # two access points -> two network blocks
+    two = _lib_call('bkshading_sbc_wpa_conf_text SK a1a1a1a1 "$P" b2b2b2b2 "$P"', env={"P": psk})
+    assert two.count("network={") == 2 and '\tssid="a1a1a1a1"' in two and '\tssid="b2b2b2b2"' in two
+
+
+def test_wpa_ssid_value_quotes_printable_ascii_and_hexes_the_rest():
+    def ssid(s):
+        return _lib_call('bkshading_sbc_wpa_ssid_value "$S"', env={"S": s}).strip()
+    assert ssid("newlevel.media") == '"newlevel.media"'
+    assert ssid("rig 5G") == '"rig 5G"'
+    # a double quote, a non-ASCII byte -> the hex form wpa_supplicant also reads
+    assert ssid('a"b') == "612262"
+    assert ssid("Café") == "436166c3a9"
+    # a long run of one byte stays whole (od -v: never a `*` repeat line)
+    assert ssid("é" * 12) == "c3a9" * 12
+
+
+def test_psk_extractor_takes_the_hex_never_the_plaintext_comment():
+    out = 'network={\n\tssid="x"\n\t#psk="%s"\n\tpsk=%s\n}\n' % (WIFI_PASS, "AB" * 32)
+    assert _lib_call('bkshading_sbc_psk_hex_from_wpa_passphrase "$O"', env={"O": out}).strip() \
+        == "ab" * 32
+    # the error text wpa_passphrase prints for a bad length -> nothing, never a guess
+    assert _lib_call('bkshading_sbc_psk_hex_from_wpa_passphrase "$O"',
+                     env={"O": "Passphrase must be 8..63 characters\n"}).strip() == ""
+    assert _lib_call('bkshading_sbc_psk_hex_from_wpa_passphrase ""').strip() == ""
+
+
+def test_default_gateway_parser():
+    def gw(text):
+        return _lib_call('bkshading_sbc_default_gw_from_route "$T"', env={"T": text}).strip()
+    assert gw("default via 10.77.8.1 dev wlan0 proto dhcp src 10.77.9.165 metric 600\n") \
+        == "10.77.8.1"
+    assert gw("default via 192.168.1.254 dev wlan0 proto dhcp metric 600\n"
+              "default via 10.0.0.1 dev wlan0 metric 700\n") == "192.168.1.254"
+    assert gw("default dev wlan0 scope link\n") == ""
+    assert gw("") == ""
+
+
+def test_wpa_field_parser():
+    status = "bssid=92:0d:ab:03:67:07\nwpa_state_hint=X\nwpa_state=COMPLETED\nssid=newlevel.media\n"
+    def field(text, key):
+        return _lib_call('bkshading_sbc_wpa_field "$T" "$K"', env={"T": text, "K": key}).strip()
+    assert field(status, "bssid") == GOOD_BSSID
+    assert field(status, "wpa_state") == "COMPLETED"  # exact key, never the wpa_state_hint line
+    assert field("RSSI=-73\r\nLINKSPEED=65\r\n", "RSSI") == "-73"
+    assert field(status, "freq") == ""
+    assert field("", "bssid") == ""
+
+
+def test_heal_decision_table():
+    table = [
+        # prev, wpa_state, reachable -> action misses
+        ("0", "COMPLETED", "yes", "none 0"),
+        ("4", "COMPLETED", "yes", "none 0"),
+        ("0", "COMPLETED", "no", "none 1"),
+        ("1", "COMPLETED", "no", "none 2"),
+        ("2", "COMPLETED", "no", "reassociate 3"),
+        ("3", "COMPLETED", "no", "none 4"),
+        ("4", "COMPLETED", "no", "none 5"),
+        ("5", "COMPLETED", "no", "restart 0"),
+        ("17", "COMPLETED", "no", "restart 0"),   # a stale count past 2N acts at once
+        ("2", "SCANNING", "no", "none 0"),        # the supplicant is working: never act
+        ("5", "ASSOCIATING", "no", "none 0"),
+        ("5", "", "no", "none 0"),                # no supplicant answer = not COMPLETED
+        ("junk", "COMPLETED", "no", "none 1"),    # a damaged count reads as 0
+        ("08", "COMPLETED", "no", "restart 0"),   # decimal 8 (octal would be an arithmetic error)
+        ("02", "COMPLETED", "no", "reassociate 3"),
+    ]
+    for prev, state, reach, want in table:
+        got = _lib_call('bkshading_sbc_wifi_heal_decide "$A" "$B" "$C"',
+                        env={"A": prev, "B": state, "C": reach}).strip()
+        assert got == want, (prev, state, reach, got, want)
+
+
+def test_networkd_file_matches_the_settings_netplan_generated():
+    text = _lib_call("bkshading_sbc_networkd_wifi_content")
+    body = [ln for ln in text.splitlines() if ln and not ln.startswith("#")]
+    assert body == ["[Match]", "Name=wlan0", "[Network]", "DHCP=yes", "LinkLocalAddressing=ipv6",
+                    "[DHCP]", "RouteMetric=600", "UseMTU=true"], body
+    assert _lib_call("bkshading_sbc_networkd_wifi_name").strip() == "05-bkshading-wlan0.network"
+
+
+# --- the netplan WiFi reader (scripts/bkshading_sbc_netplan_wifi.py) ---
+def _netplan_dir(files):
+    d = tempfile.mkdtemp()
+    for name, text in files.items():
+        with open(os.path.join(d, name), "w", encoding="utf-8") as f:
+            f.write(text)
+    return d
+
+
+def _reader(netplan_dir, iface="wlan0"):
+    r = subprocess.run([sys.executable, NETPLAN_READER, netplan_dir, iface], capture_output=True)
+    fields = r.stdout.split(b"\0")[:-1] if r.stdout else []
+    pairs = [(fields[i].decode(), fields[i + 1].decode()) for i in range(0, len(fields), 2)]
+    return r.returncode, pairs, r.stderr.decode()
+
+
+def test_netplan_reader_reads_the_armbian_preset_bit_exact():
+    d = _netplan_dir(_armbian_netplan())
+    try:
+        rc, pairs, err = _reader(d)
+        assert rc == 0, err
+        assert pairs == [("file", os.path.join(d, WIFI_YAML_NAME)), ("country", "SK"),
+                         ("ssid", WIFI_SSID), ("pass", WIFI_PASS)], pairs
+        assert WIFI_PASS not in err
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_netplan_reader_keeps_raw_scalar_text_like_netplan():
+    # unquoted scalars stay their text (never an int / an octal / a bool), as netplan reads them
+    for raw in ("12345678", "0x1A2B3C4D", "012345678", "yesyesyes"):
+        y = _wifi_yaml().replace(json.dumps(WIFI_PASS), raw)
+        d = _netplan_dir({WIFI_YAML_NAME: y})
+        try:
+            rc, pairs, err = _reader(d)
+            assert rc == 0, (raw, err)
+            assert ("pass", raw) in pairs, (raw, pairs)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+
+def test_netplan_reader_finds_nothing_or_refuses_what_it_cannot_carry():
+    d = _netplan_dir({"10-dhcp-all-interfaces.yaml": NETPLAN_ETH, "40-usb0.yaml": NETPLAN_USB0})
+    try:
+        assert _reader(d)[0] == 3, "no WiFi YAML -> 3 (the provision refuses or keeps its conf)"
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    bad = {
+        "the WiFi shares its file with ethernet": NETPLAN_ETH.rstrip("\n") + "\n" + _wifi_yaml().split(
+            "network:\n  version: 2\n  renderer: networkd\n", 1)[1],
+        "an open network": (
+            "network:\n  version: 2\n  renderer: networkd\n  wifis:\n    wlan0:\n"
+            '      dhcp4: yes\n      access-points:\n        "open-cafe": {}\n'),
+        "static addresses": _wifi_yaml().replace("      dhcp4: yes\n",
+                                                 "      dhcp4: no\n      addresses: [10.0.0.9/24]\n"),
+        "an enterprise network": _wifi_yaml().replace(
+            "          password: %s\n" % json.dumps(WIFI_PASS),
+            "          auth:\n            key-management: eap\n            password: x\n"),
+    }
+    for why, text in bad.items():
+        d = _netplan_dir({WIFI_YAML_NAME: text})
+        try:
+            rc, pairs, err = _reader(d)
+            assert rc == 2, (why, rc, pairs, err)
+            assert "cannot be migrated" in err, (why, err)
+            assert WIFI_PASS not in err and pairs == [], why
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+    d = _netplan_dir({WIFI_YAML_NAME: _wifi_yaml(), "50-again.yaml": _wifi_yaml()})
+    try:
+        rc, _pairs, err = _reader(d)
+        assert rc == 2 and "more than one netplan file" in err, err
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+# --- --install: the takeover ---
+def _all_files_containing(root, needle, skip=()):
+    hits = []
+    for dirpath, _dirs, files in os.walk(root):
+        for fn in files:
+            p = os.path.join(dirpath, fn)
+            if p in skip:
+                continue
+            with open(p, "rb") as f:
+                if needle.encode() in f.read():
+                    hits.append(p)
+    return hits
+
+
+def test_install_migrates_the_netplan_wifi_into_its_own_supplicant_conf():
+    root = tempfile.mkdtemp()
+    try:
+        r, calls, _b = _run_provision("--install", root)
+        assert r.returncode == 0, (r.stdout, r.stderr)
+        paths = _sbc_paths(root)
+        conf = _read(paths["wpa_conf"])
+        assert stat.S_IMODE(os.stat(paths["wpa_conf"]).st_mode) == 0o600
+        lines = [ln.strip() for ln in conf.splitlines()]
+        assert "ctrl_interface=/run/wpa_supplicant" in lines
+        assert "country=SK" in lines, "the country comes from the netplan regulatory-domain"
+        assert 'ssid="newlevel.media"' in lines
+        assert "key_mgmt=WPA-PSK WPA-PSK-SHA256 SAE" in lines and "ieee80211w=1" in lines
+        assert BGSCAN_LINE in lines
+        assert "psk=" + _expected_psk() in lines, "the PSK must equal wpa_passphrase's derivation"
+        assert WIFI_PASS not in conf and "#psk" not in conf, "never the plaintext passphrase"
+        # the netplan WiFi YAML moved aside once, byte-identical; ethernet + usb0 stay
+        np = paths["netplan"]
+        assert not os.path.exists(os.path.join(np, WIFI_YAML_NAME))
+        assert _read(os.path.join(np, WIFI_YAML_NAME + ".bak")) == _wifi_yaml()
+        assert _read(os.path.join(np, "10-dhcp-all-interfaces.yaml")) == NETPLAN_ETH
+        assert _read(os.path.join(np, "40-usb0.yaml")) == NETPLAN_USB0
+        # DHCP on wlan0 through networkd, the settings netplan generated
+        net = _read(os.path.join(paths["networkd"], "05-bkshading-wlan0.network"))
+        for want in ("Name=wlan0", "DHCP=yes", "LinkLocalAddressing=ipv6", "RouteMetric=600",
+                     "UseMTU=true"):
+            assert want in net, (want, net)
+        # the heal: script + lib beside it + both units, byte-identical to the checkout
+        heal = paths["heal_dir"]
+        assert _read(os.path.join(heal, "bkshading-wifi-heal.sh")) == _read(HEAL_SCRIPT)
+        assert os.access(os.path.join(heal, "bkshading-wifi-heal.sh"), os.X_OK)
+        assert _read(os.path.join(heal, "lib", "bkshading-sbc-runtime.sh")) == _read(LIB)
+        for unit in (HEAL_SERVICE, HEAL_TIMER):
+            assert _read(os.path.join(paths["unit_dir"], os.path.basename(unit))) == _read(unit)
+        # enable-only
+        log = _read(calls)
+        assert "enable wpa_supplicant@wlan0.service" in log, log
+        assert "enable bkshading-wifi-heal.timer" in log, log
+        assert "start" not in log and "restart" not in log, "enable-only:\n" + log
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_install_never_leaks_the_passphrase_or_the_psk():
+    root = tempfile.mkdtemp()
+    try:
+        r, calls, _b = _run_provision("--install", root)
+        assert r.returncode == 0, (r.stdout, r.stderr)
+        paths = _sbc_paths(root)
+        psk = _expected_psk()
+        for secret in (WIFI_PASS, psk):
+            assert secret not in r.stdout and secret not in r.stderr
+        # the passphrase reaches no argv: wpa_passphrase gets the SSID only, the passphrase on stdin
+        tool_log = _read(paths["tool_log"])
+        assert "wpa_passphrase newlevel.media\n" in tool_log, tool_log
+        # on disk: the passphrase only in the original YAML kept as .bak (YAML-escaped there, so the
+        # decoded text is nowhere and its escape-free tail only in the .bak), the PSK only in the conf
+        bak = os.path.join(paths["netplan"], WIFI_YAML_NAME + ".bak")
+        assert _all_files_containing(root, WIFI_PASS) == []
+        assert _all_files_containing(root, json.dumps(WIFI_PASS)) == [bak]
+        assert _all_files_containing(root, "w0rd'x") == [bak]
+        assert _all_files_containing(root, psk) == [paths["wpa_conf"]]
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_install_rerun_keeps_the_conf_and_moves_nothing_again():
+    root = tempfile.mkdtemp()
+    try:
+        r1, _c, _b = _run_provision("--install", root)
+        assert r1.returncode == 0, (r1.stdout, r1.stderr)
+        paths = _sbc_paths(root)
+        conf1 = _read(paths["wpa_conf"])
+        bak = os.path.join(paths["netplan"], WIFI_YAML_NAME + ".bak")
+        bak1 = _read(bak)
+        os.remove(paths["tool_log"])
+        r2, calls2, _b2 = _run_provision("--install", root, root_opts=RO_OPTS)
+        assert r2.returncode == 0, (r2.stdout, r2.stderr)
+        assert _read(paths["wpa_conf"]) == conf1, "a re-run keeps the conf byte-identical"
+        assert _read(bak) == bak1 and not os.path.exists(bak + ".bak")
+        assert "already exists -- kept" in r2.stdout, r2.stdout
+        tool_log = _read(paths["tool_log"]) if os.path.exists(paths["tool_log"]) else ""
+        assert "wpa_passphrase" not in tool_log, "a kept conf derives nothing again"
+        assert "enable bkshading-wifi-heal.timer" in _read(calls2)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_install_refuses_with_no_netplan_wifi_and_no_conf():
+    root = tempfile.mkdtemp()
+    try:
+        r, calls, _b = _run_provision(
+            "--install", root, root_opts=RO_OPTS,
+            netplan_files={"10-dhcp-all-interfaces.yaml": NETPLAN_ETH, "40-usb0.yaml": NETPLAN_USB0})
+        assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+        assert re.search(r"no WiFi config to migrate", r.stderr), r.stderr
+        assert "wpa_supplicant-wlan0.conf" in r.stderr and "30-wifis-dhcp.yaml" in r.stderr
+        assert "nothing changed" in r.stderr
+        paths = _sbc_paths(root)
+        assert _read(paths["fstab"]) == ARMBIAN_FSTAB, "refused before any write"
+        assert not os.path.exists(os.path.join(paths["unit_dir"], UNIT_NAME))
+        assert not os.path.exists(calls), "nothing enabled or masked"
+        assert not os.path.exists(paths["mount_log"]), "an ro root is not even remounted"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_install_refuses_a_netplan_wifi_it_cannot_carry_whole():
+    shared = NETPLAN_ETH.rstrip("\n") + "\n" + _wifi_yaml().split(
+        "network:\n  version: 2\n  renderer: networkd\n", 1)[1]
+    root = tempfile.mkdtemp()
+    try:
+        r, calls, _b = _run_provision("--install", root, netplan_files={"01-all.yaml": shared})
+        assert r.returncode == 1, (r.stdout, r.stderr)
+        assert "cannot be migrated" in r.stderr and "nothing changed" in r.stderr, r.stderr
+        assert WIFI_PASS not in r.stdout + r.stderr
+        paths = _sbc_paths(root)
+        assert _read(os.path.join(paths["netplan"], "01-all.yaml")) == shared
+        assert not os.path.exists(paths["wpa_conf"]) and not os.path.exists(calls)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_install_accepts_a_ready_64_hex_psk_in_netplan():
+    hexpsk = "A1" * 32
+    root = tempfile.mkdtemp()
+    try:
+        files = _armbian_netplan()
+        files[WIFI_YAML_NAME] = _wifi_yaml(password=hexpsk)
+        r, _c, _b = _run_provision("--install", root, netplan_files=files)
+        assert r.returncode == 0, (r.stdout, r.stderr)
+        paths = _sbc_paths(root)
+        assert "psk=" + hexpsk.lower() in _read(paths["wpa_conf"])
+        assert "wpa_passphrase" not in (_read(paths["tool_log"]) if os.path.exists(paths["tool_log"]) else "")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_install_on_a_wired_box_skips_the_wifi_takeover():
+    root = tempfile.mkdtemp()
+    try:
+        r, calls, _b = _run_provision("--install", root, net_ifaces={"eth0": "up"})
+        assert r.returncode == 0, (r.stdout, r.stderr)
+        paths = _sbc_paths(root)
+        assert "WiFi takeover + heal skipped" in r.stdout, r.stdout
+        assert not os.path.exists(paths["wpa_conf"])
+        assert os.path.exists(os.path.join(paths["netplan"], WIFI_YAML_NAME)), "netplan untouched"
+        assert not os.path.exists(paths["heal_dir"])
+        log = _read(calls)
+        assert "wpa_supplicant" not in log and "wifi-heal" not in log, log
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+# --- --check: the new rows ---
+def test_check_wifi_rows_ok_after_install():
+    root = tempfile.mkdtemp()
+    try:
+        r, _c, _b = _run_provision("--install", root)
+        assert r.returncode == 0, (r.stdout, r.stderr)
+        ok, _c2, _b2 = _run_provision("--check", root)
+        assert ok.returncode == 0, (ok.stdout, ok.stderr)
+        assert "OK: wpa_supplicant@wlan0.service enabled" in ok.stdout
+        assert "OK: %s carries %s" % (_sbc_paths(root)["wpa_conf"], BGSCAN_LINE) in ok.stdout
+        assert "OK: WiFi heal installed + bkshading-wifi-heal.timer enabled" in ok.stdout
+        assert re.search(r"OK: gateway 10\.77\.8\.1 answers a ping on wlan0 \(bssid=%s signal=-63"
+                         % re.escape(GOOD_BSSID), ok.stdout), ok.stdout
+        pings = [ln for ln in _read(_sbc_paths(root)["tool_log"]).splitlines()
+                 if ln.startswith("ping ")]
+        assert pings and all("-I wlan0" in p and p.endswith(" " + WIFI_GW) for p in pings), pings
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_check_fails_when_the_gateway_does_not_answer_naming_bssid_and_signal():
+    root = tempfile.mkdtemp()
+    try:
+        r, _c, _b = _run_provision("--install", root)
+        assert r.returncode == 0, (r.stdout, r.stderr)
+        dead = _net_state(reachable=False, bssid=FAR_BSSID, rssi=-73)
+        bad, _c2, _b2 = _run_provision("--check", root, net_state=dead)
+        assert bad.returncode == 1, (bad.stdout, bad.stderr)
+        assert re.search(r"FAIL: gateway 10\.77\.8\.1 does not answer a ping on wlan0 "
+                         r"\(bssid=%s signal=-73 dBm" % re.escape(FAR_BSSID), bad.stderr), bad.stderr
+        nogw, _c3, _b3 = _run_provision("--check", root,
+                                        net_state=_net_state(gateway=None, bssid=FAR_BSSID))
+        assert nogw.returncode == 1
+        assert re.search(r"FAIL: no DHCP default gateway on wlan0 \(bssid=%s"
+                         % re.escape(FAR_BSSID), nogw.stderr), nogw.stderr
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_check_fails_on_a_conf_without_bgscan_disabled_units_or_a_stale_heal():
+    root = tempfile.mkdtemp()
+    try:
+        r, _c, _b = _run_provision("--install", root)
+        assert r.returncode == 0, (r.stdout, r.stderr)
+        paths = _sbc_paths(root)
+        conf = _read(paths["wpa_conf"])
+        with open(paths["wpa_conf"], "w", encoding="utf-8") as f:
+            f.write(conf.replace("\t" + BGSCAN_LINE + "\n", ""))
+        nob, _c2, _b2 = _run_provision("--check", root)
+        assert nob.returncode == 1 and "has no %s line" % BGSCAN_LINE in nob.stderr, nob.stderr
+        with open(paths["wpa_conf"], "w", encoding="utf-8") as f:
+            f.write(conf)
+        dis, _c3, _b3 = _run_provision(
+            "--check", root,
+            disabled_units=("wpa_supplicant@wlan0.service", "bkshading-wifi-heal.timer"))
+        assert dis.returncode == 1
+        assert "FAIL: wpa_supplicant@wlan0.service not enabled" in dis.stderr, dis.stderr
+        assert "FAIL: bkshading-wifi-heal.timer not enabled" in dis.stderr, dis.stderr
+        with open(os.path.join(paths["heal_dir"], "bkshading-wifi-heal.sh"), "a") as f:
+            f.write("# drift\n")
+        stale, _c4, _b4 = _run_provision("--check", root)
+        assert stale.returncode == 1
+        assert re.search(r"FAIL: WiFi heal missing or differs from this checkout: .*bkshading-wifi-heal\.sh",
+                         stale.stderr), stale.stderr
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_check_skips_every_wifi_row_on_a_wired_box():
+    root = tempfile.mkdtemp()
+    try:
+        r, _c, _b = _run_provision("--install", root, net_ifaces={"eth0": "up"})
+        assert r.returncode == 0, (r.stdout, r.stderr)
+        ok, _c2, _b2 = _run_provision("--check", root, net_ifaces={"eth0": "up"})
+        assert ok.returncode == 0, (ok.stdout, ok.stderr)
+        assert "the wpa_supplicant, bgscan, heal and gateway rows are skipped" in ok.stdout
+        assert not os.path.exists(_sbc_paths(root)["tool_log"]), "no ping / wpa_cli on a wired box"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+# --- the heal units + the heal script, run for real against stubs on PATH ---
+def test_heal_units_match_the_lib():
+    interval = _lib_call("bkshading_sbc_wifi_heal_interval_s").strip()
+    assert _unit_value(HEAL_TIMER, "OnUnitActiveSec") == interval + "s"
+    acc = _unit_value(HEAL_TIMER, "AccuracySec")
+    assert acc is not None and int(acc.rstrip("s")) < int(interval), \
+        "the default 1 min AccuracySec would stretch the cadence"
+    assert "WantedBy=timers.target" in _read(HEAL_TIMER)
+    install_dir = _lib_call("bkshading_sbc_wifi_heal_install_dir").strip()
+    assert _unit_value(HEAL_SERVICE, "ExecStart") == install_dir + "/bkshading-wifi-heal.sh"
+    assert _unit_value(HEAL_SERVICE, "Type") == "oneshot"
+    # no reboot, no ifdown loop: no such command on any non-comment line of the heal
+    code = [ln for ln in _read(HEAL_SCRIPT).splitlines() if not ln.lstrip().startswith("#")]
+    for ln in code:
+        assert not re.search(r"\b(reboot|shutdown|poweroff|ifdown|ip link set)\b", ln), ln
+
+
+def _heal_env(tmp, state):
+    stubdir = os.path.join(tmp, "stubs")
+    _write_tool_stubs(stubdir, names=("wpa_cli", "ip", "ping", "systemctl"))
+    # PATH is the stub dir ONLY (ci-testing-gotchas, issue 1371): a missing stub can never fall
+    # through to the real wpa_cli / ping of the machine running the test.
+    for tool in ("dirname", "mkdir", "mv", "sleep"):
+        os.symlink(shutil.which(tool), os.path.join(stubdir, tool))
+    statef = os.path.join(tmp, "net.json")
+    with open(statef, "w", encoding="utf-8") as f:
+        json.dump(state, f)
+    return {
+        "PATH": stubdir,
+        "HOME": tmp,
+        "FAKE_NET_STATE": statef,
+        "FAKE_TOOL_LOG": os.path.join(tmp, "tools.log"),
+        "BKSHADING_WIFI_HEAL_STATE_DIR": os.path.join(tmp, "run"),
+        "BKSHADING_WIFI_HEAL_SETTLE_S": "1",
+    }
+
+
+def _heal_pass(env, script=HEAL_SCRIPT):
+    return subprocess.run(["/bin/bash", script], env=env, capture_output=True, text=True)
+
+
+def _heal_misses(env):
+    return _read(os.path.join(env["BKSHADING_WIFI_HEAL_STATE_DIR"], "misses")).strip()
+
+
+def _heal_tools(env):
+    p = env["FAKE_TOOL_LOG"]
+    return _read(p).splitlines() if os.path.exists(p) else []
+
+
+def test_heal_reassociates_after_three_misses_then_restarts_after_three_more():
+    tmp = tempfile.mkdtemp()
+    try:
+        env = _heal_env(tmp, _net_state(reachable=False, bssid=FAR_BSSID, rssi=-73))
+        outs = []
+        for i in range(6):
+            r = _heal_pass(env)
+            assert r.returncode == 0, (i, r.stdout, r.stderr)
+            outs.append(r.stdout)
+        tools = _heal_tools(env)
+        reassoc = [t for t in tools if t.endswith(" reassociate")]
+        restart = [t for t in tools if t.startswith("systemctl restart")]
+        assert len(reassoc) == 1 and reassoc[0].startswith("wpa_cli -p /run/wpa_supplicant -i wlan0"), tools
+        assert restart == ["systemctl restart wpa_supplicant@wlan0.service"], tools
+        assert "miss 1 of 3" in outs[0] and outs[1] == ""
+        assert re.search(r"wpa_cli reassociate on wlan0 after 3 consecutive misses \(gateway 10\.77\.8\.1\); "
+                         r"before bssid=%s signal=-73 dBm; after bssid=%s signal=-73 dBm wpa_state=COMPLETED; "
+                         r"result=OK" % (re.escape(FAR_BSSID), re.escape(FAR_BSSID)), outs[2]), outs[2]
+        assert outs[3] == "" and outs[4] == ""
+        assert re.search(r"systemctl restart wpa_supplicant@wlan0\.service on wlan0 after 6 consecutive "
+                         r"misses .*result=ok", outs[5]), outs[5]
+        assert _heal_misses(env) == "0", "a restart starts the count over"
+        assert not any("reboot" in t for t in tools)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_heal_reassociate_moves_to_the_strong_ap_and_logs_before_and_after():
+    tmp = tempfile.mkdtemp()
+    try:
+        state = _net_state(reachable=False, bssid=FAR_BSSID, rssi=-73,
+                           on_reassociate={"bssid": GOOD_BSSID, "rssi": -63, "reachable": True})
+        env = _heal_env(tmp, state)
+        for _ in range(3):
+            r = _heal_pass(env)
+            assert r.returncode == 0, (r.stdout, r.stderr)
+        assert re.search(r"before bssid=%s signal=-73 dBm; after bssid=%s signal=-63 dBm"
+                         % (re.escape(FAR_BSSID), re.escape(GOOD_BSSID)), r.stdout), r.stdout
+        assert len([ln for ln in r.stdout.splitlines() if ln.strip()]) == 1, "ONE line per action"
+        r4 = _heal_pass(env)
+        assert "answers again after 3 consecutive misses" in r4.stdout, r4.stdout
+        assert _heal_misses(env) == "0"
+        assert _heal_pass(env).stdout == "", "a healthy pass is quiet"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_heal_never_acts_while_the_supplicant_is_not_completed():
+    tmp = tempfile.mkdtemp()
+    try:
+        env = _heal_env(tmp, _net_state(wpa_state="SCANNING", reachable=False))
+        os.makedirs(env["BKSHADING_WIFI_HEAL_STATE_DIR"])
+        with open(os.path.join(env["BKSHADING_WIFI_HEAL_STATE_DIR"], "misses"), "w") as f:
+            f.write("5\n")
+        r = _heal_pass(env)
+        assert r.returncode == 0, (r.stdout, r.stderr)
+        tools = _heal_tools(env)
+        assert not any(t.startswith("ping") or t.endswith("reassociate") or
+                       t.startswith("systemctl") for t in tools), tools
+        assert _heal_misses(env) == "0"
+        assert "wpa_state=SCANNING" in r.stdout and "reset from 5" in r.stdout, r.stdout
+        # no supplicant behind the socket at all: also no action
+        other = os.path.join(tmp, "no-supplicant")
+        os.makedirs(other)
+        env2 = _heal_env(other, _net_state(wpa_state=None))
+        r2 = _heal_pass(env2)
+        assert r2.returncode == 0 and _heal_misses(env2) == "0", (r2.stdout, r2.stderr)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_heal_counts_a_missing_dhcp_gateway_as_a_miss_without_pinging():
+    tmp = tempfile.mkdtemp()
+    try:
+        env = _heal_env(tmp, _net_state(gateway=None))
+        r = _heal_pass(env)
+        assert r.returncode == 0, (r.stdout, r.stderr)
+        assert _heal_misses(env) == "1"
+        assert "gateway none (no DHCP default route)" in r.stdout, r.stdout
+        assert not any(t.startswith("ping") for t in _heal_tools(env))
+        ips = [t for t in _heal_tools(env) if t.startswith("ip ")]
+        assert ips == ["ip -4 route show default dev wlan0"], ips
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_heal_damaged_counter_reads_as_zero_and_a_failed_restart_exits_nonzero():
+    tmp = tempfile.mkdtemp()
+    try:
+        env = _heal_env(tmp, _net_state(reachable=False, restart_rc=1,
+                                        on_restart={"wpa_state": "DISCONNECTED"}))
+        os.makedirs(env["BKSHADING_WIFI_HEAL_STATE_DIR"])
+        mf = os.path.join(env["BKSHADING_WIFI_HEAL_STATE_DIR"], "misses")
+        with open(mf, "w") as f:
+            f.write("garbage\n")
+        r = _heal_pass(env)
+        assert r.returncode == 0 and _heal_misses(env) == "1", (r.stdout, r.stderr)
+        with open(mf, "w") as f:
+            f.write("5\n")
+        r2 = _heal_pass(env)
+        assert r2.returncode == 1, (r2.stdout, r2.stderr)
+        assert "result=FAILED" in r2.stdout and "wpa_state=DISCONNECTED" in r2.stdout, r2.stdout
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_heal_runs_from_the_installed_layout():
+    root = tempfile.mkdtemp()
+    try:
+        r, _c, _b = _run_provision("--install", root)
+        assert r.returncode == 0, (r.stdout, r.stderr)
+        installed = os.path.join(_sbc_paths(root)["heal_dir"], "bkshading-wifi-heal.sh")
+        run_dir = os.path.join(root, "heal-run")
+        os.makedirs(run_dir)
+        env = _heal_env(run_dir, _net_state(reachable=False))
+        h = _heal_pass(env, script=installed)
+        assert h.returncode == 0, (h.stdout, h.stderr)
+        assert _heal_misses(env) == "1", "the installed script finds its lib and counts a miss"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------------------------
