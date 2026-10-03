@@ -367,6 +367,16 @@ with open(state_path) as f:
 def save():
     with open(state_path, "w") as f:
         json.dump(st, f)
+REFUSED = "wlan0: Association request to the driver failed"
+def supplicant_activity():
+    # what the supplicant writes to its journal while the board is off the WiFi: ordinary lines,
+    # and `driver_failed` driver-refused associations among them (the uwe5622 wedge)
+    journal = st.setdefault("journal", [])
+    journal.append("wlan0: CTRL-EVENT-SCAN-STARTED")
+    for _ in range(int(st.get("driver_failed", 0))):
+        journal.append("wlan0: Trying to associate with 92:0d:ab:03:67:07 (SSID='newlevel.media' freq=5180 MHz)")
+        journal.append(REFUSED)
+        journal.append("wlan0: CTRL-EVENT-ASSOC-REJECT bssid=92:0d:ab:03:67:07 status_code=1")
 if name == "ip":
     if "route" in args and "default" in args and st.get("gateway"):
         print("default via %s dev wlan0 proto dhcp src 10.77.9.165 metric 600" % st["gateway"])
@@ -378,6 +388,8 @@ if name == "ping":
     sys.exit(0 if ok else 1)
 if name == "wpa_cli":
     cmd = args[-1] if args else ""
+    if st.get("wpa_active") is False:
+        sys.exit(255)  # the supplicant unit is stopped: nothing behind the control socket
     if st.get("wpa_hang"):
         import time
         time.sleep(30)  # a wedged supplicant: the caller must bound the call
@@ -405,9 +417,47 @@ if name == "wpa_cli":
         print("OK")
     sys.exit(0)
 if name == "journalctl":
-    # the supplicant's journal since the last heal pass: N driver-refused association lines
-    for _ in range(int(st.get("driver_failed", 0))):
-        print("wlan0: Association request to the driver failed")
+    # The supplicant's journal, served ONLY for the exact calls the heal must make (anything else
+    # prints nothing, so a changed call can never count refusals by accident):
+    #   count read, first: -u <unit> --cursor-file=<state>/journal-cursor --since <FAKE_JOURNAL_SINCE> -o cat --no-pager
+    #   count read, next:  -u <unit> --cursor-file=<state>/journal-cursor -o cat --no-pager
+    #   cursor to the end: -u <unit> --cursor-file=<state>/journal-cursor -n 1 -o cat --no-pager
+    # A count read first appends the supplicant's lines since the last pass. The cursor file holds
+    # the index of the last line served (journalctl writes the cursor of the last entry it showed);
+    # a cursor it cannot read fails like the real one ("Failed to seek to cursor", exit 1). The
+    # --since window starts at `journal_since_from` (default 0: every line is "recent", so a
+    # caller that re-reads the window instead of following the cursor counts lines twice).
+    cpath = os.path.join(os.environ["BKSHADING_WIFI_HEAL_STATE_DIR"], "journal-cursor")
+    head = ["-u", "wpa_supplicant@wlan0.service", "--cursor-file=" + cpath]
+    tail = ["-o", "cat", "--no-pager"]
+    if args[:3] != head or args[-3:] != tail:
+        sys.exit(0)
+    rest = args[3:-3]
+    journal = st.setdefault("journal", [])
+    has_cursor = os.path.exists(cpath) and os.path.getsize(cpath) > 0
+    if rest == ["-n", "1"]:
+        out = journal[-1:]
+    else:
+        supplicant_activity()
+        save()
+        if has_cursor:
+            if rest:
+                sys.stderr.write("stub journalctl: --since next to a cursor: %r\n" % rest)
+                sys.exit(3)
+            text = open(cpath).read().strip()
+            if not text.startswith("stub-cursor="):
+                sys.stderr.write("Failed to seek to cursor: Invalid argument\n")
+                sys.exit(1)
+            out = journal[int(text.split("=", 1)[1]) + 1:]
+        elif rest == ["--since", os.environ["FAKE_JOURNAL_SINCE"]]:
+            out = journal[int(st.get("journal_since_from", 0)):]
+        else:
+            sys.exit(0)
+    for line in out:
+        print(line)
+    if out:
+        with open(cpath, "w") as f:
+            f.write("stub-cursor=%d\n" % (len(journal) - 1))
     sys.exit(0)
 if name == "modprobe":
     if st.get("modprobe_rc"):
@@ -421,6 +471,17 @@ if name == "systemctl":
         st.update(st.get("on_restart", {}))
         save()
         sys.exit(int(st.get("restart_rc", 0)))
+    if args[:1] == ["stop"]:
+        # the old supplicant keeps writing its refusals until it terminates
+        supplicant_activity()
+        st["wpa_active"] = False
+        save()
+        sys.exit(0)
+    if args[:1] == ["start"]:
+        st["wpa_active"] = True
+        st.update(st.get("on_start", {}))
+        save()
+        sys.exit(int(st.get("start_rc", 0)))
     if args[:1] == ["is-enabled"]:
         print("enabled")
     sys.exit(0)
@@ -1148,6 +1209,131 @@ def test_heal_restarts_the_supplicant_alone_for_a_builtin_driver_or_without_modp
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ---------------------------------------------------------------------------------------------
+# issue 808 stuck-rung review (fresh-context review of the driver-reload rung)
+# ---------------------------------------------------------------------------------------------
+JOURNAL_COUNT = "journalctl -u wpa_supplicant@wlan0.service --cursor-file=%s%s -o cat --no-pager"
+
+
+def _journal_calls(env):
+    return [t for t in _heal_tools(env) if t.startswith("journalctl")]
+
+
+def _cursor_path(env):
+    return os.path.join(env["BKSHADING_WIFI_HEAL_STATE_DIR"], "journal-cursor")
+
+
+def test_heal_counts_each_refusal_once_through_the_journal_cursor():
+    # A --since window on every pass (25 s on a 20 s cadence) counted every refusal twice. The
+    # heal follows a cursor instead: --since only on the first read, then only lines after it.
+    tmp = tempfile.mkdtemp()
+    try:
+        env = _heal_env(tmp, _net_state(wpa_state="DISCONNECTED", reachable=False, driver_failed=1),
+                        extra_tools=("journalctl",))
+        r1 = _heal_pass(env)
+        assert r1.returncode == 0, (r1.stdout, r1.stderr)
+        assert _stuck(env) == "1" and "refused 1 association" in r1.stdout, r1.stdout
+        # the driver stops refusing; the board still scans
+        _set_state(env, driver_failed=0)
+        r2 = _heal_pass(env)
+        assert r2.returncode == 0, (r2.stdout, r2.stderr)
+        assert _stuck(env) == "0", "the refusal of the first pass was counted again"
+        cursor = _cursor_path(env)
+        assert _journal_calls(env) == [
+            JOURNAL_COUNT % (cursor, " --since " + env["FAKE_JOURNAL_SINCE"]),
+            JOURNAL_COUNT % (cursor, ""),
+        ], _heal_tools(env)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_heal_counts_no_refusal_from_before_a_driver_reload():
+    # The old supplicant keeps refusing until `systemctl stop` returns; a pass after the reload
+    # judges the reloaded driver only, so the cursor moves to the journal's end after the stop.
+    tmp = tempfile.mkdtemp()
+    try:
+        state = _net_state(wpa_state="DISCONNECTED", reachable=False, driver_failed=2,
+                           on_reload={"driver_failed": 0})
+        env = _heal_env(tmp, state, extra_tools=("journalctl", "modprobe"),
+                        driver_module="sprdwl_ng")
+        for _ in range(3):
+            r = _heal_pass(env)
+            assert r.returncode == 0, (r.stdout, r.stderr)
+        assert "reload the WiFi driver sprdwl_ng" in r.stdout, r.stdout
+        tools = _heal_tools(env)
+        cursor = _cursor_path(env)
+        to_end = JOURNAL_COUNT % (cursor, " -n 1")
+        assert to_end in tools, tools
+        assert tools.index("systemctl stop wpa_supplicant@wlan0.service") < tools.index(to_end) \
+            < tools.index("modprobe -r sprdwl_ng"), tools
+        r4 = _heal_pass(env)
+        assert r4.returncode == 0, (r4.stdout, r4.stderr)
+        assert _stuck(env) == "0" and "stuck pass" not in r4.stdout, r4.stdout
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_heal_drops_the_journal_cursor_on_a_working_link():
+    # A cursor kept through an hour of COMPLETED would count that hour's refusals at the next drop.
+    tmp = tempfile.mkdtemp()
+    try:
+        env = _heal_env(tmp, _net_state(wpa_state="DISCONNECTED", reachable=False, driver_failed=1),
+                        extra_tools=("journalctl",))
+        assert _heal_pass(env).returncode == 0
+        assert os.path.exists(_cursor_path(env)) and _stuck(env) == "1"
+        _set_state(env, wpa_state="COMPLETED", reachable=True, driver_failed=0)
+        assert _heal_pass(env).returncode == 0
+        assert not os.path.exists(_cursor_path(env)), "a COMPLETED pass drops the cursor"
+        # refusals written while the link worked, older than the next pass's --since window
+        st = _get_state(env)
+        st["journal"] += ["wlan0: Association request to the driver failed"] * 2
+        _set_state(env, journal=st["journal"], journal_since_from=len(st["journal"]),
+                   wpa_state="DISCONNECTED", reachable=False)
+        r3 = _heal_pass(env)
+        assert r3.returncode == 0, (r3.stdout, r3.stderr)
+        assert _stuck(env) == "0", "refusals from before the drop were counted"
+        assert _journal_calls(env)[-1] == JOURNAL_COUNT % (
+            _cursor_path(env), " --since " + env["FAKE_JOURNAL_SINCE"]), _heal_tools(env)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_heal_drops_a_cursor_journald_cannot_seek():
+    # journalctl exits 1 on a cursor it cannot seek ("Failed to seek to cursor", live on dev1):
+    # kept, that file would blind the count forever; dropped, the next pass reads --since again.
+    tmp = tempfile.mkdtemp()
+    try:
+        env = _heal_env(tmp, _net_state(wpa_state="DISCONNECTED", reachable=False, driver_failed=1),
+                        extra_tools=("journalctl",))
+        os.makedirs(env["BKSHADING_WIFI_HEAL_STATE_DIR"])
+        with open(_cursor_path(env), "w") as f:
+            f.write("s=gone;i=1\n")
+        r1 = _heal_pass(env)
+        assert r1.returncode == 0, (r1.stdout, r1.stderr)
+        assert _stuck(env) == "0", "an unreadable journal is no evidence"
+        assert not os.path.exists(_cursor_path(env))
+        r2 = _heal_pass(env)
+        assert r2.returncode == 0, (r2.stdout, r2.stderr)
+        assert _stuck(env) == "1", r2.stdout
+        assert _journal_calls(env)[-1] == JOURNAL_COUNT % (
+            _cursor_path(env), " --since " + env["FAKE_JOURNAL_SINCE"]), _heal_tools(env)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_heal_refused_count_ignores_other_supplicant_lines():
+    text = "\n".join([
+        "wlan0: CTRL-EVENT-SCAN-STARTED",
+        "wlan0: Association request to the driver failed",
+        "wlan0: CTRL-EVENT-ASSOC-REJECT bssid=92:0d:ab:03:67:07 status_code=1",
+        "wlan0: Trying to associate with 92:0d:ab:03:67:07",
+        "wlan0: Association request to the driver failed",
+        "",
+    ])
+    assert _lib_call('bkshading_sbc_wifi_heal_count_refused "$A"', env={"A": text}).strip() == "2"
+    assert _lib_call('bkshading_sbc_wifi_heal_count_refused ""').strip() == "0"
+
+
 def test_networkd_file_matches_the_settings_netplan_generated():
     text = _lib_call("bkshading_sbc_networkd_wifi_content")
     body = [ln for ln in text.splitlines() if ln and not ln.startswith("#")]
@@ -1517,10 +1703,27 @@ def _heal_env(tmp, state, extra_tools=(), driver_module=None):
         "HOME": tmp,
         "FAKE_NET_STATE": statef,
         "FAKE_TOOL_LOG": os.path.join(tmp, "tools.log"),
+        # the --since of the heal's first journal read: one timer interval + 5 s of slack
+        "FAKE_JOURNAL_SINCE": "-%ds" % (int(_lib_call("bkshading_sbc_wifi_heal_interval_s")) + 5),
         "BKSHADING_WIFI_HEAL_STATE_DIR": os.path.join(tmp, "run"),
         "BKSHADING_WIFI_HEAL_SETTLE_S": "1",
         "BKSHADING_WIFI_HEAL_SYSFS_NET": _fake_wifi_sysfs(tmp, driver_module),
     }
+
+
+def _set_state(env, **kw):
+    """Change the stubs' board state between two heal passes."""
+    with open(env["FAKE_NET_STATE"], encoding="utf-8") as f:
+        st = json.load(f)
+    st.update(kw)
+    with open(env["FAKE_NET_STATE"], "w", encoding="utf-8") as f:
+        json.dump(st, f)
+    return st
+
+
+def _get_state(env):
+    with open(env["FAKE_NET_STATE"], encoding="utf-8") as f:
+        return json.load(f)
 
 
 def _fake_wifi_sysfs(tmp, driver_module):
