@@ -372,18 +372,34 @@ if name == "ip":
         print("default via %s dev wlan0 proto dhcp src 10.77.9.165 metric 600" % st["gateway"])
     sys.exit(0)
 if name == "ping":
+    if st.get("ping_rc") is not None:
+        sys.exit(int(st["ping_rc"]))  # a ping that fails for another reason than a lost reply
     ok = bool(st.get("reachable")) and bool(st.get("gateway")) and args[-1:] == [st["gateway"]]
     sys.exit(0 if ok else 1)
 if name == "wpa_cli":
     cmd = args[-1] if args else ""
+    if st.get("wpa_hang"):
+        import time
+        time.sleep(30)  # a wedged supplicant: the caller must bound the call
     if st.get("wpa_state") is None:
         sys.exit(255)  # no supplicant behind the control socket
     if cmd == "status":
+        # a reassociate whose new association shows only after `pending_delay` more status reads
+        # (wpa_supplicant keeps COMPLETED on the old BSSID while it scans)
+        if "pending" in st:
+            if st.get("pending_delay", 0) > 0:
+                st["pending_delay"] -= 1
+            else:
+                st.update(st.pop("pending"))
+            save()
         print("bssid=%s\nfreq=2437\nssid=newlevel.media\nid=0\nmode=station\nkey_mgmt=WPA2-PSK\n"
               "wpa_state=%s\nip_address=10.77.9.165" % (st["bssid"], st["wpa_state"]))
     elif cmd == "signal_poll":
         print("RSSI=%s\nLINKSPEED=65\nNOISE=9999\nFREQUENCY=2437" % st["rssi"])
     elif cmd == "reassociate":
+        if "on_reassociate_delayed" in st:
+            st["pending"] = st["on_reassociate_delayed"]
+            st["pending_delay"] = int(st.get("reassociate_delay", 0))
         st.update(st.get("on_reassociate", {}))
         save()
         print("OK")
@@ -498,7 +514,8 @@ def _sbc_paths(root):
 def _run_provision(mode, root, bin_machine=AARCH64, make_bin=True, net_ifaces=None,
                    root_opts=None, root_uuid=ROOT_UUID, fstab_text=ARMBIAN_FSTAB,
                    persistent_dropin=True, cambox=False, systemctl_fail_on=None,
-                   netplan_files=None, net_state=None, disabled_units=()):
+                   netplan_files=None, net_state=None, disabled_units=(), netplan_other=None,
+                   env_extra=None):
     sysd = os.path.join(root, "systemd-system")
     binp = os.path.join(root, "bin", "bkshading-relay")
     calls = os.path.join(root, "systemctl-calls.log")
@@ -514,6 +531,15 @@ def _run_provision(mode, root, bin_machine=AARCH64, make_bin=True, net_ifaces=No
     with open(paths["net_state"], "w", encoding="utf-8") as f:
         json.dump(_net_state() if net_state is None else net_state, f)
     stubs = _write_tool_stubs(os.path.join(root, "fake-board-tools"))
+    # netplan also reads /run/netplan and /lib/netplan: point those at temp dirs (never the test
+    # machine's own netplan), optionally seeded with YAML files.
+    other_dirs = [os.path.join(root, "run-netplan"), os.path.join(root, "lib-netplan")]
+    for d, files in zip(other_dirs, netplan_other or ({}, {})):
+        if files and not os.path.isdir(d):
+            os.makedirs(d)
+            for name, text in files.items():
+                with open(os.path.join(d, name), "w", encoding="utf-8") as f:
+                    f.write(text)
     if make_bin:
         os.makedirs(os.path.dirname(binp), exist_ok=True)
         _fake_elf(binp, bin_machine)
@@ -563,10 +589,12 @@ def _run_provision(mode, root, bin_machine=AARCH64, make_bin=True, net_ifaces=No
         BKSHADING_SBC_PING=stubs["ping"],
         FAKE_TOOL_LOG=paths["tool_log"],
         FAKE_NET_STATE=paths["net_state"],
+        BKSHADING_SBC_NETPLAN_OTHER_DIRS=" ".join(other_dirs),
         FAKE_ROOT_OPTS=root_opts,
         FAKE_ROOT_UUID=root_uuid,
         FAKE_ROOT_FSTYPE="ext4",
     )
+    env.update(env_extra or {})
     r = subprocess.run(["bash", SCRIPT, mode], capture_output=True, text=True, env=env)
     return r, calls, binp
 
@@ -1202,7 +1230,10 @@ def test_install_refuses_a_netplan_wifi_it_cannot_carry_whole():
     try:
         r, calls, _b = _run_provision("--install", root, netplan_files={"01-all.yaml": shared})
         assert r.returncode == 1, (r.stdout, r.stderr)
-        assert "cannot be migrated" in r.stderr and "nothing changed" in r.stderr, r.stderr
+        # the shell's own refusal for the reader's exit 2, never the "nothing to migrate" one
+        assert "cannot be migrated (reason above)" in r.stderr, r.stderr
+        assert "no WiFi config to migrate" not in r.stderr, r.stderr
+        assert "nothing changed" in r.stderr, r.stderr
         assert WIFI_PASS not in r.stdout + r.stderr
         paths = _sbc_paths(root)
         assert _read(os.path.join(paths["netplan"], "01-all.yaml")) == shared
@@ -1345,7 +1376,7 @@ def _heal_env(tmp, state):
     _write_tool_stubs(stubdir, names=("wpa_cli", "ip", "ping", "systemctl"))
     # PATH is the stub dir ONLY (ci-testing-gotchas, issue 1371): a missing stub can never fall
     # through to the real wpa_cli / ping of the machine running the test.
-    for tool in ("dirname", "mkdir", "mv", "sleep"):
+    for tool in ("dirname", "mkdir", "mv", "sleep", "timeout", "rm"):
         os.symlink(shutil.which(tool), os.path.join(stubdir, tool))
     statef = os.path.join(tmp, "net.json")
     with open(statef, "w", encoding="utf-8") as f:
@@ -1451,7 +1482,8 @@ def test_heal_counts_a_missing_dhcp_gateway_as_a_miss_without_pinging():
         r = _heal_pass(env)
         assert r.returncode == 0, (r.stdout, r.stderr)
         assert _heal_misses(env) == "1"
-        assert "gateway none (no DHCP default route)" in r.stdout, r.stdout
+        assert "no DHCP default route on wlan0" in r.stdout, r.stdout
+        assert "did not answer" not in r.stdout, "no ping was sent, so none can be unanswered"
         assert not any(t.startswith("ping") for t in _heal_tools(env))
         ips = [t for t in _heal_tools(env) if t.startswith("ip ")]
         assert ips == ["ip -4 route show default dev wlan0"], ips
@@ -1493,6 +1525,283 @@ def test_heal_runs_from_the_installed_layout():
         assert _heal_misses(env) == "1", "the installed script finds its lib and counts a miss"
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------------------------
+# issue 808 WiFi review round 1 (the fresh-context review on the lane): the regressions it found
+# ---------------------------------------------------------------------------------------------
+SHARED_WIFI_ETH = NETPLAN_ETH.rstrip("\n") + "\n" + _wifi_yaml().split(
+    "network:\n  version: 2\n  renderer: networkd\n", 1)[1]
+
+
+def test_install_refuses_an_unmigratable_yaml_even_when_a_conf_exists():
+    # The reader's exit code was lost under set -e: with a conf already on the box --install exited
+    # 0 and left a netplan YAML defining wlan0 -> two supplicants on wlan0 after the reboot.
+    root = tempfile.mkdtemp()
+    try:
+        paths = _sbc_paths(root)
+        os.makedirs(os.path.dirname(paths["wpa_conf"]))
+        with open(paths["wpa_conf"], "w") as f:
+            f.write("ctrl_interface=/run/wpa_supplicant\n")
+        r, calls, _b = _run_provision("--install", root, netplan_files={"01-all.yaml": SHARED_WIFI_ETH})
+        assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+        assert "cannot be migrated (reason above)" in r.stderr, r.stderr
+        assert _read(os.path.join(paths["netplan"], "01-all.yaml")) == SHARED_WIFI_ETH
+        assert not os.path.exists(calls), "refused before anything is enabled"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_install_refuses_when_the_netplan_reader_cannot_run():
+    root = tempfile.mkdtemp()
+    try:
+        r, calls, _b = _run_provision("--install", root,
+                                      env_extra={"BKSHADING_SBC_PYTHON": shutil.which("false")})
+        assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+        assert "could not read the netplan YAML" in r.stderr, r.stderr
+        assert _read(_sbc_paths(root)["fstab"]) == ARMBIAN_FSTAB and not os.path.exists(calls)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_install_refuses_without_the_tools_the_heal_needs():
+    # a missing ping made every heal pass a "miss": a self-made reassociate + restart on a healthy link
+    for tool in ("BKSHADING_SBC_PING", "BKSHADING_SBC_IP", "BKSHADING_SBC_WPA_CLI"):
+        root = tempfile.mkdtemp()
+        try:
+            missing = os.path.join(root, "no-such-tool")
+            r, calls, _b = _run_provision("--install", root, env_extra={tool: missing})
+            assert r.returncode == 1, (tool, r.stdout, r.stderr)
+            assert missing in r.stderr and "nothing changed" in r.stderr, (tool, r.stderr)
+            assert not os.path.exists(calls) and not os.path.exists(_sbc_paths(root)["wpa_conf"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+
+def test_install_moves_the_netplan_yaml_aside_only_after_the_units_are_enabled():
+    # a failure between the YAML move and the enable left a board with no WiFi after the reboot
+    root = tempfile.mkdtemp()
+    try:
+        r, _calls, _b = _run_provision("--install", root, systemctl_fail_on="enable")
+        assert r.returncode != 0, (r.stdout, r.stderr)
+        np = _sbc_paths(root)["netplan"]
+        assert _read(os.path.join(np, WIFI_YAML_NAME)) == _wifi_yaml(), "netplan keeps the WiFi"
+        assert not os.path.exists(os.path.join(np, WIFI_YAML_NAME + ".bak"))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_install_rerun_after_a_partial_install_finishes_the_move():
+    # the conf was written but the YAML was not moved: an IDENTICAL migration is finished, not refused
+    root = tempfile.mkdtemp()
+    try:
+        r1, _c, _b = _run_provision("--install", root)
+        assert r1.returncode == 0, (r1.stdout, r1.stderr)
+        paths = _sbc_paths(root)
+        np = paths["netplan"]
+        os.rename(os.path.join(np, WIFI_YAML_NAME + ".bak"), os.path.join(np, WIFI_YAML_NAME))
+        conf1 = _read(paths["wpa_conf"])
+        r2, _c2, _b2 = _run_provision("--install", root)
+        assert r2.returncode == 0, (r2.stdout, r2.stderr)
+        assert _read(paths["wpa_conf"]) == conf1
+        assert not os.path.exists(os.path.join(np, WIFI_YAML_NAME))
+        assert _read(os.path.join(np, WIFI_YAML_NAME + ".bak")) == _wifi_yaml()
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_install_refuses_when_the_netplan_yaml_and_the_conf_differ():
+    # a netplan WiFi changed after the takeover must never be dropped silently
+    root = tempfile.mkdtemp()
+    try:
+        r1, _c, _b = _run_provision("--install", root)
+        assert r1.returncode == 0, (r1.stdout, r1.stderr)
+        paths = _sbc_paths(root)
+        np = paths["netplan"]
+        os.remove(os.path.join(np, WIFI_YAML_NAME + ".bak"))
+        changed = _wifi_yaml(password="an0ther-passphrase")
+        with open(os.path.join(np, WIFI_YAML_NAME), "w") as f:
+            f.write(changed)
+        conf1 = _read(paths["wpa_conf"])
+        r2, _c2, _b2 = _run_provision("--install", root)
+        assert r2.returncode == 1, (r2.stdout, r2.stderr)
+        assert paths["wpa_conf"] in r2.stderr and os.path.join(np, WIFI_YAML_NAME) in r2.stderr
+        assert "differ" in r2.stderr, r2.stderr
+        assert "an0ther-passphrase" not in r2.stdout + r2.stderr
+        assert _read(paths["wpa_conf"]) == conf1 and _read(os.path.join(np, WIFI_YAML_NAME)) == changed
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_install_enables_networkd_and_a_supplicant_restart_dropin():
+    # a crashed wpa_supplicant@wlan0 (no Restart= in Debian's unit) left the board off the WiFi
+    root = tempfile.mkdtemp()
+    try:
+        r, calls, _b = _run_provision("--install", root)
+        assert r.returncode == 0, (r.stdout, r.stderr)
+        dropin = os.path.join(_sbc_paths(root)["unit_dir"], "wpa_supplicant@wlan0.service.d",
+                              "bkshading-restart.conf")
+        body = _read(dropin)
+        assert "[Service]" in body and "Restart=on-failure" in body and "RestartSec=" in body, body
+        assert body == _lib_call("bkshading_sbc_wpa_restart_dropin_content")
+        log = _read(calls)
+        assert "enable systemd-networkd.service" in log, log
+        assert "start" not in log, log
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_networkd_dhcp_follows_the_netplan_dhcp6():
+    # netplan writes DHCP=ipv4 for a WiFi without dhcp6; the takeover must not add DHCPv6
+    assert "DHCP=ipv4" in _lib_call("bkshading_sbc_networkd_wifi_content ipv4")
+    assert "DHCP=yes" in _lib_call("bkshading_sbc_networkd_wifi_content yes")
+    root = tempfile.mkdtemp()
+    try:
+        files = _armbian_netplan()
+        files[WIFI_YAML_NAME] = _wifi_yaml().replace("      dhcp6: yes\n", "")
+        r, _c, _b = _run_provision("--install", root, netplan_files=files)
+        assert r.returncode == 0, (r.stdout, r.stderr)
+        net = _read(os.path.join(_sbc_paths(root)["networkd"], "05-bkshading-wlan0.network"))
+        assert "DHCP=ipv4" in net and "DHCP=yes" not in net, net
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_netplan_reader_refuses_a_wifi_it_cannot_move_aside():
+    # netplan also reads /run/netplan and /lib/netplan; a wlan0 there survives the takeover
+    etc = _netplan_dir({"10-dhcp-all-interfaces.yaml": NETPLAN_ETH})
+    lib = _netplan_dir({"90-vendor-wifi.yaml": _wifi_yaml()})
+    try:
+        r = subprocess.run([sys.executable, NETPLAN_READER, etc, "wlan0", lib], capture_output=True)
+        assert r.returncode == 2, (r.returncode, r.stderr)
+        assert b"90-vendor-wifi.yaml" in r.stderr and b"cannot move" in r.stderr, r.stderr
+    finally:
+        shutil.rmtree(etc, ignore_errors=True)
+        shutil.rmtree(lib, ignore_errors=True)
+    # a file of the same name in /etc/netplan shadows the /lib one: only the /etc one counts
+    etc = _netplan_dir({WIFI_YAML_NAME: _wifi_yaml()})
+    lib = _netplan_dir({WIFI_YAML_NAME: _wifi_yaml(password="shadowed-pass")})
+    try:
+        rc, pairs, err = _reader_dirs(etc, lib)
+        assert rc == 0, err
+        assert ("pass", WIFI_PASS) in pairs and ("file", os.path.join(etc, WIFI_YAML_NAME)) in pairs
+    finally:
+        shutil.rmtree(etc, ignore_errors=True)
+        shutil.rmtree(lib, ignore_errors=True)
+
+
+def _reader_dirs(etc, *others):
+    r = subprocess.run([sys.executable, NETPLAN_READER, etc, "wlan0"] + list(others),
+                       capture_output=True)
+    fields = r.stdout.split(b"\0")[:-1] if r.stdout else []
+    pairs = [(fields[i].decode(), fields[i + 1].decode()) for i in range(0, len(fields), 2)]
+    return r.returncode, pairs, r.stderr.decode()
+
+
+def test_check_fails_on_a_readable_conf_a_netplan_wlan0_or_a_missing_tool():
+    root = tempfile.mkdtemp()
+    try:
+        r, _c, _b = _run_provision("--install", root)
+        assert r.returncode == 0, (r.stdout, r.stderr)
+        paths = _sbc_paths(root)
+        os.chmod(paths["wpa_conf"], 0o644)
+        ro, _c2, _b2 = _run_provision("--check", root)
+        assert ro.returncode == 1 and re.search(r"FAIL: .*mode 644.*0600", ro.stderr), ro.stderr
+        os.chmod(paths["wpa_conf"], 0o600)
+        np = paths["netplan"]
+        os.rename(os.path.join(np, WIFI_YAML_NAME + ".bak"), os.path.join(np, WIFI_YAML_NAME))
+        two, _c3, _b3 = _run_provision("--check", root)
+        assert two.returncode == 1, two.stdout
+        assert re.search(r"FAIL: netplan still defines wlan0", two.stderr), two.stderr
+        os.rename(os.path.join(np, WIFI_YAML_NAME), os.path.join(np, WIFI_YAML_NAME + ".bak"))
+        noping, _c4, _b4 = _run_provision(
+            "--check", root, env_extra={"BKSHADING_SBC_PING": os.path.join(root, "no-ping")})
+        assert noping.returncode == 1
+        assert re.search(r"FAIL: .*no-ping.* not found", noping.stderr), noping.stderr
+        assert "does not answer" not in noping.stderr, "a missing tool is not a dead gateway"
+        os.remove(os.path.join(paths["unit_dir"], "wpa_supplicant@wlan0.service.d",
+                               "bkshading-restart.conf"))
+        nodrop, _c5, _b5 = _run_provision("--check", root)
+        assert nodrop.returncode == 1 and "bkshading-restart.conf" in nodrop.stderr, nodrop.stderr
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_heal_never_acts_when_a_tool_is_missing_or_ping_errors():
+    tmp = tempfile.mkdtemp()
+    try:
+        env = _heal_env(tmp, _net_state())
+        os.remove(os.path.join(env["PATH"], "ping"))
+        for i in range(6):
+            r = _heal_pass(env)
+            assert r.returncode == 1, (i, r.stdout, r.stderr)
+            assert "ping" in r.stderr and "not found" in r.stderr, r.stderr
+        tools = _heal_tools(env)
+        assert not any(t.endswith("reassociate") or t.startswith("systemctl") for t in tools), tools
+        assert not os.path.exists(os.path.join(env["BKSHADING_WIFI_HEAL_STATE_DIR"], "misses")) \
+            or _heal_misses(env) == "0"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    tmp = tempfile.mkdtemp()
+    try:
+        env = _heal_env(tmp, _net_state(ping_rc=2))
+        for i in range(6):
+            r = _heal_pass(env)
+            assert r.returncode == 1, (i, r.stdout, r.stderr)
+        assert "exit 2" in r.stderr, r.stderr
+        assert not any(t.endswith("reassociate") or t.startswith("systemctl")
+                       for t in _heal_tools(env))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_heal_waits_for_the_new_association_before_reading_after():
+    # wpa_cli reassociate returns at once and the supplicant stays COMPLETED on the old BSSID while
+    # it scans: an "after" read at once repeats "before" even when the roam succeeds.
+    tmp = tempfile.mkdtemp()
+    try:
+        state = _net_state(reachable=False, bssid=FAR_BSSID, rssi=-73, reassociate_delay=2,
+                           on_reassociate_delayed={"bssid": GOOD_BSSID, "rssi": -63,
+                                                   "reachable": True})
+        env = _heal_env(tmp, state)
+        env["BKSHADING_WIFI_HEAL_SETTLE_S"] = "6"
+        for _ in range(3):
+            r = _heal_pass(env)
+            assert r.returncode == 0, (r.stdout, r.stderr)
+        assert re.search(r"before bssid=%s signal=-73 dBm; after bssid=%s signal=-63 dBm"
+                         % (re.escape(FAR_BSSID), re.escape(GOOD_BSSID)), r.stdout), r.stdout
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_heal_logs_the_recovery_after_a_restart():
+    tmp = tempfile.mkdtemp()
+    try:
+        state = _net_state(reachable=False, on_restart={"reachable": True, "bssid": GOOD_BSSID})
+        env = _heal_env(tmp, state)
+        for _ in range(6):
+            assert _heal_pass(env).returncode == 0
+        r = _heal_pass(env)
+        assert re.search(r"answers again .*systemctl restart wpa_supplicant@wlan0", r.stdout), r.stdout
+        assert _heal_pass(env).stdout == "", "the recovery is logged once"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_heal_bounds_a_wedged_wpa_cli():
+    import time
+    tmp = tempfile.mkdtemp()
+    try:
+        env = _heal_env(tmp, _net_state(wpa_hang=True))
+        env["BKSHADING_WIFI_HEAL_TOOL_TIMEOUT_S"] = "1"
+        t0 = time.monotonic()
+        r = _heal_pass(env)
+        took = time.monotonic() - t0
+        assert r.returncode == 0, (r.stdout, r.stderr)
+        assert took < 10, "a wedged wpa_cli must be killed, not waited out (%.1f s)" % took
+        assert _heal_misses(env) == "0", "an unanswered supplicant is not COMPLETED: no action"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------------------------
