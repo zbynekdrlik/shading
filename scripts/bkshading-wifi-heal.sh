@@ -59,9 +59,19 @@ STUCK_FILE="$STATE_DIR/stuck"
 STUCK_LIMIT="$(bkshading_sbc_wifi_heal_stuck_limit)"
 SYSFS_NET="${BKSHADING_WIFI_HEAL_SYSFS_NET:-/sys/class/net}"
 LAST_ACTION_FILE="$STATE_DIR/last-action"
+JOURNAL_CURSOR_FILE="$STATE_DIR/journal-cursor"
 SYSTEMCTL_TIMEOUT_S=20
 
 snapshot() { bkshading_sbc_wifi_snapshot wpa_cli "$CTRL_DIR" "$IFACE" "$TOOL_TIMEOUT_S"; }
+
+# Point the journal cursor at the supplicant journal's last line: the next pass counts only lines a
+# fresh supplicant writes (journalctl writes the cursor of the last entry it shows).
+journal_cursor_to_end() {
+  command -v journalctl >/dev/null 2>&1 || return 0
+  rm -f "$JOURNAL_CURSOR_FILE"
+  timeout "$TOOL_TIMEOUT_S" journalctl -u "$WPA_UNIT" "--cursor-file=$JOURNAL_CURSOR_FILE" -n 1 \
+    -o cat --no-pager >/dev/null 2>&1 || true
+}
 
 # After an action: wait for the NEW association, then print its snapshot. A COMPLETED read counts
 # only once the state left COMPLETED or the BSSID moved off $1 (wpa_cli reassociate returns at once
@@ -120,20 +130,29 @@ printf '%s\n' "$misses" >"$MISSES_FILE.tmp.$$"
 mv -f "$MISSES_FILE.tmp.$$" "$MISSES_FILE"
 
 # The stuck rung (see the header, step 5). Driver-refused associations since the last pass, read
-# from the supplicant journal only while the link is not COMPLETED (journalctl is optional).
+# from the supplicant journal only while the link is not COMPLETED (journalctl is optional). The
+# read follows a cursor in /run, so every line counts once: --since one interval (+5 s) only when
+# there is no cursor yet. A COMPLETED pass drops the cursor, so the next not-COMPLETED stretch starts
+# at its own pass, never at lines from an hour of a working link. A failed read (a cursor journald
+# no longer has, a hung journalctl) counts 0 and drops the cursor: the next pass reads --since again.
 prev_stuck=0
 if [ -r "$STUCK_FILE" ]; then
   prev_stuck="$(<"$STUCK_FILE")"
 fi
 if [[ "$prev_stuck" =~ ^[0-9]{1,6}$ ]]; then prev_stuck=$((10#$prev_stuck)); else prev_stuck=0; fi
 refused=0
-if [ "$wpa_state" != COMPLETED ] && command -v journalctl >/dev/null 2>&1; then
-  since_s=$(($(bkshading_sbc_wifi_heal_interval_s) + 5))
-  refused_text="$(bkshading_sbc_wifi_heal_driver_failed_text)"
-  # counted with bash itself (no grep): an unreadable journal leaves 0, never a false stuck pass
-  while IFS= read -r line; do
-    [[ "$line" == *"$refused_text"* ]] && refused=$((refused + 1))
-  done < <(timeout "$TOOL_TIMEOUT_S" journalctl -u "$WPA_UNIT" --since "-${since_s}s" -o cat --no-pager 2>/dev/null || true)
+if [ "$wpa_state" = COMPLETED ]; then
+  [ ! -e "$JOURNAL_CURSOR_FILE" ] || rm -f "$JOURNAL_CURSOR_FILE"
+elif command -v journalctl >/dev/null 2>&1; then
+  journal_args=(-u "$WPA_UNIT" "--cursor-file=$JOURNAL_CURSOR_FILE")
+  if [ ! -s "$JOURNAL_CURSOR_FILE" ]; then
+    journal_args+=(--since "-$(($(bkshading_sbc_wifi_heal_interval_s) + 5))s")
+  fi
+  if journal_text="$(timeout "$TOOL_TIMEOUT_S" journalctl "${journal_args[@]}" -o cat --no-pager 2>/dev/null)"; then
+    refused="$(bkshading_sbc_wifi_heal_count_refused "$journal_text")"
+  else
+    rm -f "$JOURNAL_CURSOR_FILE"
+  fi
 fi
 read -r stuck_action stuck <<<"$(bkshading_sbc_wifi_heal_stuck_decide "$prev_stuck" "$wpa_state" "$refused")"
 printf '%s\n' "$stuck" >"$STUCK_FILE.tmp.$$"
@@ -200,6 +219,9 @@ case "$action" in
     fi
     result=ok
     timeout "$SYSTEMCTL_TIMEOUT_S" systemctl stop "$WPA_UNIT" || result=FAILED
+    # the old supplicant wrote its last refusals until the stop returned: the next pass judges the
+    # reloaded driver on the lines written from here on
+    journal_cursor_to_end
     if [ -n "$mod" ] && command -v modprobe >/dev/null 2>&1; then
       label="reload the WiFi driver $mod"
       if ! { timeout "$SYSTEMCTL_TIMEOUT_S" modprobe -r "$mod" && timeout "$SYSTEMCTL_TIMEOUT_S" modprobe "$mod"; }; then

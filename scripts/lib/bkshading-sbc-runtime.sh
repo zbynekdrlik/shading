@@ -497,6 +497,20 @@ bkshading_sbc_wifi_heal_stuck_limit() { printf '%s\n' 3; }
 # The wpa_supplicant line a driver-refused association writes (wpa_supplicant 2.10, sme.c/events.c).
 bkshading_sbc_wifi_heal_driver_failed_text() { printf '%s\n' 'Association request to the driver failed'; }
 
+# How many lines of $1 (the supplicant journal text since the last pass) carry the driver-refused
+# text; every other supplicant line is ignored. Counted with bash itself (no grep): the heal runs
+# with the declared tools only, and an empty text is 0, never a false stuck pass.
+bkshading_sbc_wifi_heal_count_refused() {
+  local text="${1:-}" line needle n=0
+  needle="$(bkshading_sbc_wifi_heal_driver_failed_text)"
+  while [ -n "$text" ]; do
+    line="${text%%$'\n'*}"
+    if [ "$line" = "$text" ]; then text=""; else text="${text#*$'\n'}"; fi
+    if [[ "$line" == *"$needle"* ]]; then n=$((n + 1)); fi
+  done
+  printf '%s\n' "$n"
+}
+
 # The stuck decision. $1 = the previous consecutive stuck-pass count (anything not a plain number
 # reads as 0), $2 = wpa_state ("?" = the supplicant does not answer), $3 = driver-refused lines in
 # the supplicant journal since the last pass (anything not a plain number reads as 0 = no
