@@ -13,7 +13,12 @@ set -euo pipefail
 #      and pings it over wlan0;
 #   3. keeps the consecutive-miss count in /run (tmpfs: the root is read-only) and lets the pure
 #      bkshading_sbc_wifi_heal_decide choose none / reassociate (N misses) / restart (2N misses);
-#   4. writes ONE journal line per action naming the BSSID + signal before and after.
+#   4. writes ONE journal line per action naming the BSSID + signal before and after;
+#   5. the STUCK rung: a pass whose wpa_state is not COMPLETED and whose supplicant journal shows a
+#      driver-refused association since the last pass (or whose supplicant does not answer) is a
+#      stuck pass; after 3 in a row it stops the supplicant, reloads the WiFi driver module and
+#      starts the supplicant again (live 3.10.2026: the uwe5622 driver refused every association,
+#      only a sprdwl_ng reload revived it). Plain scanning out of range is never stuck.
 # No reboot, no ifdown loop. A first miss, and the first answer after misses or an action, are
 # logged once each. A pass that cannot judge the link (a tool missing, ip or ping failing for
 # another reason than a lost reply) changes nothing, says which tool, and exits 1, so the unit
@@ -21,8 +26,11 @@ set -euo pipefail
 #
 # Installed by scripts/bkshading-provision-sbc.sh --install to /usr/local/lib/bkshading/ (both libs
 # beside it in lib/), run by systemd/bkshading-wifi-heal.service. The tools come from PATH
-# (wpa_cli, ip, ping, systemctl, timeout). For tests: BKSHADING_WIFI_HEAL_STATE_DIR (default
-# /run/bkshading-wifi-heal), BKSHADING_WIFI_HEAL_SETTLE_S, BKSHADING_WIFI_HEAL_TOOL_TIMEOUT_S.
+# (wpa_cli, ip, ping, systemctl, timeout; journalctl + modprobe are optional: without journalctl
+# the stuck rung sees only a supplicant that does not answer, without modprobe or with a built-in
+# driver it restarts the supplicant alone). For tests: BKSHADING_WIFI_HEAL_STATE_DIR (default
+# /run/bkshading-wifi-heal), BKSHADING_WIFI_HEAL_SETTLE_S, BKSHADING_WIFI_HEAL_TOOL_TIMEOUT_S,
+# BKSHADING_WIFI_HEAL_SYSFS_NET (default /sys/class/net, where the driver module link is read).
 # Exit 0 after a judged pass (also one that acted); 1 when it could not judge, or a restart failed.
 # ---------------------------------------------------------------------------------------------
 
@@ -47,6 +55,9 @@ PING_COUNT="$(bkshading_sbc_wifi_heal_ping_count)"
 PING_TIMEOUT_S="$(bkshading_sbc_wifi_heal_ping_timeout_s)"
 MISS_LIMIT="$(bkshading_sbc_wifi_heal_miss_limit)"
 MISSES_FILE="$STATE_DIR/misses"
+STUCK_FILE="$STATE_DIR/stuck"
+STUCK_LIMIT="$(bkshading_sbc_wifi_heal_stuck_limit)"
+SYSFS_NET="${BKSHADING_WIFI_HEAL_SYSFS_NET:-/sys/class/net}"
 LAST_ACTION_FILE="$STATE_DIR/last-action"
 SYSTEMCTL_TIMEOUT_S=20
 
@@ -108,6 +119,36 @@ read -r action misses <<<"$(bkshading_sbc_wifi_heal_decide "$prev" "$wpa_state" 
 printf '%s\n' "$misses" >"$MISSES_FILE.tmp.$$"
 mv -f "$MISSES_FILE.tmp.$$" "$MISSES_FILE"
 
+# The stuck rung (see the header, step 5). Driver-refused associations since the last pass, read
+# from the supplicant journal only while the link is not COMPLETED (journalctl is optional).
+prev_stuck=0
+if [ -r "$STUCK_FILE" ]; then
+  prev_stuck="$(<"$STUCK_FILE")"
+fi
+if [[ "$prev_stuck" =~ ^[0-9]{1,6}$ ]]; then prev_stuck=$((10#$prev_stuck)); else prev_stuck=0; fi
+refused=0
+if [ "$wpa_state" != COMPLETED ] && command -v journalctl >/dev/null 2>&1; then
+  since_s=$(($(bkshading_sbc_wifi_heal_interval_s) + 5))
+  refused_text="$(bkshading_sbc_wifi_heal_driver_failed_text)"
+  # counted with bash itself (no grep): an unreadable journal leaves 0, never a false stuck pass
+  while IFS= read -r line; do
+    [[ "$line" == *"$refused_text"* ]] && refused=$((refused + 1))
+  done < <(timeout "$TOOL_TIMEOUT_S" journalctl -u "$WPA_UNIT" --since "-${since_s}s" -o cat --no-pager 2>/dev/null || true)
+fi
+read -r stuck_action stuck <<<"$(bkshading_sbc_wifi_heal_stuck_decide "$prev_stuck" "$wpa_state" "$refused")"
+printf '%s\n' "$stuck" >"$STUCK_FILE.tmp.$$"
+mv -f "$STUCK_FILE.tmp.$$" "$STUCK_FILE"
+if [ "$stuck" = 1 ]; then
+  if [ "$wpa_state" = "?" ]; then
+    echo "bkshading-wifi-heal: the supplicant on $IFACE does not answer -- stuck pass 1 of $STUCK_LIMIT before a driver reload"
+  else
+    echo "bkshading-wifi-heal: the WiFi driver refused $refused association(s) on $IFACE (wpa_state=$wpa_state) -- stuck pass 1 of $STUCK_LIMIT before a driver reload"
+  fi
+fi
+if [ "$stuck_action" = reload-driver ]; then
+  action=reload-driver
+fi
+
 last_action=""
 if [ -r "$LAST_ACTION_FILE" ]; then
   last_action="$(<"$LAST_ACTION_FILE")"
@@ -147,6 +188,39 @@ case "$action" in
     printf '%s\n' "systemctl restart $WPA_UNIT" >"$LAST_ACTION_FILE"
     bkshading_sbc_wifi_heal_action_line "systemctl restart $WPA_UNIT" "$gw" "$((prev + 1))" \
       "$b_bssid" "$b_rssi" "$a_bssid" "$a_rssi" "$a_state" "$result"
+    ;;
+  reload-driver)
+    # The driver module behind wlan0 (sprdwl_ng on the Orange Pi Zero 2W); none = a built-in driver.
+    mod=""
+    modlink="$SYSFS_NET/$IFACE/device/driver/module"
+    if [ -e "$modlink" ]; then
+      # resolve the symlink with bash itself (cd + pwd -P), keep the last path part
+      mod="$(cd "$modlink" 2>/dev/null && pwd -P || true)"
+      mod="${mod##*/}"
+    fi
+    result=ok
+    timeout "$SYSTEMCTL_TIMEOUT_S" systemctl stop "$WPA_UNIT" || result=FAILED
+    if [ -n "$mod" ] && command -v modprobe >/dev/null 2>&1; then
+      label="reload the WiFi driver $mod"
+      if ! { timeout "$SYSTEMCTL_TIMEOUT_S" modprobe -r "$mod" && timeout "$SYSTEMCTL_TIMEOUT_S" modprobe "$mod"; }; then
+        result=FAILED
+      fi
+      # the module re-creates the interface; give it a moment before the supplicant binds to it
+      for ((i = 0; i < 15; i++)); do
+        [ -e "$SYSFS_NET/$IFACE" ] && break
+        sleep 1
+      done
+    elif [ -n "$mod" ]; then
+      label="restart $WPA_UNIT (no driver reload: modprobe not found)"
+    else
+      label="restart $WPA_UNIT (no driver reload: a built-in driver)"
+    fi
+    timeout "$SYSTEMCTL_TIMEOUT_S" systemctl start "$WPA_UNIT" || result=FAILED
+    [ "$result" = ok ] || rc=1
+    read -r a_bssid a_rssi a_state <<<"$(settled_snapshot "$b_bssid")"
+    printf '%s\n' "$label" >"$LAST_ACTION_FILE"
+    printf 'bkshading-wifi-heal: %s on %s after %s stuck passes (wpa_state=%s, driver-refused associations=%s); before bssid=%s signal=%s dBm; after bssid=%s signal=%s dBm wpa_state=%s; result=%s\n' \
+      "$label" "$IFACE" "$STUCK_LIMIT" "$wpa_state" "$refused" "$b_bssid" "$b_rssi" "$a_bssid" "$a_rssi" "$a_state" "$result"
     ;;
 esac
 exit "$rc"

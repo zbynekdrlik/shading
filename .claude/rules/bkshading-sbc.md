@@ -202,8 +202,23 @@ the relay/cloudflared provisioning canon but with two deliberate deltas + one go
   `WPA2-PSK+SAE` on every BSSID (a WPA2/WPA3 transition network), so a listed SAE could keep the
   board off it. WPA2-PSK joins a transition AP fine. Do not re-add SAE without also storing the
   passphrase (`sae_password`), which the takeover deliberately never does.
-- **Known limit:** a HUNG (not crashed) supplicant answers no `wpa_cli`, reads as not COMPLETED, and
-  the heal leaves it alone; the restart drop-in only covers a supplicant that exits.
+- **The STUCK rung (live 3.10.2026):** after a run of forced reassociations the out-of-tree
+  uwe5622 driver answered every connect with `Association request to the driver failed`, so
+  wpa_state never reached COMPLETED and the reachability rungs (which wait while the supplicant is
+  "working") never acted. A supplicant restart and a link down/up did NOT help; `modprobe -r
+  sprdwl_ng && modprobe sprdwl_ng` did (COMPLETED in 6 s). So a pass is stuck when wpa_state is not
+  COMPLETED and the supplicant journal shows a driver-refused association since the last pass, or
+  the supplicant does not answer wpa_cli (hung). After 3 stuck passes (~60 s) the heal stops
+  `wpa_supplicant@wlan0`, reloads the module found at `/sys/class/net/wlan0/device/driver/module`
+  and starts the supplicant (a built-in driver or no modprobe: the supplicant restart alone).
+  Plain scanning out of range is never stuck. The pure `bkshading_sbc_wifi_heal_stuck_decide`
+  decides; the script counts journal lines and resolves the module link with bash builtins only
+  (the tests run it with PATH = the stub dir). `TimeoutStartSec=150` covers the whole reload path:
+  a pass killed between stop and start would leave the supplicant down until the next reload.
+  Live check: `systemctl stop wpa_supplicant@wlan0` and watch the heal reload within ~60 s.
+- **Do not force a BSSID with `wpa_cli bssid 0 <mac>` to test roaming unless you clear it with
+  `bssid 0 00:00:00:00:00:00`** (`bssid 0 any` returns FAIL and leaves the lock). A locked network
+  keeps the board on that one AP, and the heal cannot undo a lock it did not set.
 - **Testing the heal:** the test runs the REAL script with PATH = a stub dir only (python stubs for
   `wpa_cli`/`ip`/`ping`/`systemctl` answering from a JSON state that `reassociate`/`restart`
   update — incl. a delayed roam, a ping exit code and a hanging `wpa_cli` — plus symlinks to

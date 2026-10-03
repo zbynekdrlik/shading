@@ -482,6 +482,47 @@ bkshading_sbc_wifi_heal_decide() {
   fi
 }
 
+# --- The stuck rung: a supplicant that never gets back to COMPLETED -----------------------------
+# Live on handheld-1 (3.10.2026): after a run of forced reassociations the out-of-tree uwe5622
+# driver answered every connect with "Association request to the driver failed", so wpa_state
+# never reached COMPLETED and the reachability rungs above (which wait while the supplicant is
+# "working") never acted. A supplicant restart and a link down/up did not help; reloading the
+# driver module (sprdwl_ng) did, COMPLETED 6 s later. A supplicant that stops answering wpa_cli
+# (hung, not crashed) is the same dead end. So a pass is STUCK when wpa_state is not COMPLETED and
+# either the supplicant journal shows a driver-refused association since the last pass, or the
+# supplicant does not answer ("?"). Plain scanning out of range is never stuck (no refusal lines).
+# After this many consecutive stuck passes (3 x 20 s = about a minute) the heal stops the
+# supplicant, reloads the WiFi driver module and starts the supplicant again.
+bkshading_sbc_wifi_heal_stuck_limit() { printf '%s\n' 3; }
+# The wpa_supplicant line a driver-refused association writes (wpa_supplicant 2.10, sme.c/events.c).
+bkshading_sbc_wifi_heal_driver_failed_text() { printf '%s\n' 'Association request to the driver failed'; }
+
+# The stuck decision. $1 = the previous consecutive stuck-pass count (anything not a plain number
+# reads as 0), $2 = wpa_state ("?" = the supplicant does not answer), $3 = driver-refused lines in
+# the supplicant journal since the last pass (anything not a plain number reads as 0 = no
+# evidence). Prints "<action> <stuck>": COMPLETED -> none 0; stuck -> the count + 1, at the limit
+# (or a stale count past it) -> reload-driver 0; any other pass -> none 0.
+bkshading_sbc_wifi_heal_stuck_decide() {
+  local prev="${1:-0}" state="${2:-}" failed="${3:-0}" limit stuck
+  limit="$(bkshading_sbc_wifi_heal_stuck_limit)"
+  [[ "$prev" =~ ^[0-9]{1,6}$ ]] || prev=0
+  [[ "$failed" =~ ^[0-9]{1,6}$ ]] || failed=0
+  if [ "$state" = COMPLETED ]; then
+    printf '%s\n' "none 0"
+    return 0
+  fi
+  if [ "$state" = "?" ] || [ "$((10#$failed))" -gt 0 ]; then
+    stuck=$((10#$prev + 1))
+    if [ "$stuck" -ge "$limit" ]; then
+      printf '%s\n' "reload-driver 0"
+    else
+      printf 'none %s\n' "$stuck"
+    fi
+    return 0
+  fi
+  printf '%s\n' "none 0"
+}
+
 # The DHCP default gateway out of `ip -4 route show default dev <iface>`: the address after the
 # first `via`, or nothing. Never a hard-coded address, so the heal works on any venue's WiFi.
 bkshading_sbc_default_gw_from_route() {

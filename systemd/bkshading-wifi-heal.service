@@ -16,7 +16,11 @@ ExecStart=/usr/local/lib/bkshading/bkshading-wifi-heal.sh
 # association; every wpa_cli call is bounded to 3 s and the supplicant restart to 20 s, so a pass
 # stays well inside 60 s even with a wedged supplicant (the timer never starts a pass while one is
 # still running).
-TimeoutStartSec=60
+# A driver reload pass (issue 808 stuck rung) is the longest: stop + modprobe -r + modprobe +
+# up to 15 s for the interface + start (each bounded to 20 s) + up to 15 s settle = under 150 s.
+# A pass killed mid-reload would leave the supplicant stopped (the next passes read it as not
+# answering and reload again), so the bound must cover the whole path.
+TimeoutStartSec=150
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=bkshading-wifi-heal
