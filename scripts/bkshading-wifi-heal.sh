@@ -32,8 +32,9 @@ set -euo pipefail
 #      Plain scanning out of range is never stuck.
 # No reboot, no ifdown loop. A first miss, and the first answer after misses or an action, are
 # logged once each. A pass that cannot judge the link (a tool missing, ip or ping failing for
-# another reason than a lost reply) changes nothing, says which tool, and exits 1, so the unit
-# shows failed -- never a self-made reassociate or restart on a link nobody measured.
+# another reason than a lost reply) takes no action and keeps the miss count (a COMPLETED read
+# still ends a stuck stretch first), says which tool, and exits 1, so the unit shows failed --
+# never a self-made reassociate or restart on a link nobody measured.
 #
 # Installed by scripts/bkshading-provision-sbc.sh --install to /usr/local/lib/bkshading/ (both libs
 # beside it in lib/), run by systemd/bkshading-wifi-heal.service. The tools come from PATH

@@ -25,10 +25,11 @@ ExecStart=/usr/local/lib/bkshading/bkshading-wifi-heal.sh
 # stopped supplicant may run the same driver steps without the stop, so it is never longer. A test
 # computes that from the lib constants and pins it under TimeoutStartSec (the timer never starts a
 # pass while one is still running).
-# A pass ended in the middle of a reload (the SIGTERM at that timeout, a `systemctl stop` of this
-# unit) runs a trap that loads the module and queues the supplicant start (--no-block: a stop of
-# this unit holds a blocking start behind its own stop job): modprobe 20 + wlan0 wait 15 + queued
-# start 20 = 55 s at most, inside TimeoutStopSec, after which systemd sends SIGKILL.
+# A pass ended in the middle of a driver reload or a supplicant start (the SIGTERM at that
+# timeout, a `systemctl stop` of this unit) runs a restore trap: it loads the module (when the plan
+# has a load) and queues the supplicant start (--no-block: a stop of this unit holds a blocking
+# start behind its own stop job): modprobe 20 + wlan0 wait 15 + queued start 20 = 55 s at most,
+# inside TimeoutStopSec, after which systemd sends SIGKILL.
 TimeoutStartSec=150
 TimeoutStopSec=90
 StandardOutput=journal

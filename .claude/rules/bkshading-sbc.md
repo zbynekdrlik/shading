@@ -180,8 +180,9 @@ the relay/cloudflared provisioning canon but with two deliberate deltas + one go
     reply, 2 no verdict — iputils exits 2 on setup errors, a missing tool reads 127), and the
     BSSID/signal/state snapshot with every `wpa_cli` call bounded by `timeout` (a wedged supplicant
     otherwise holds each call ~10 s and pushes a pass past `TimeoutStartSec`).
-  - **A pass that cannot judge the link changes nothing.** A missing tool, an `ip` failure or a ping
-    exit other than 0/1 keeps the count, names the tool and exits 1 (the unit shows failed). The
+  - **A pass that cannot judge the link takes no action and keeps the miss count.** A missing tool,
+    an `ip` failure or a ping exit other than 0/1 keeps the count, names the tool and exits 1 (the
+    unit shows failed); a COMPLETED read still ends a stuck stretch first (below). The
     first draft counted a missing `ping` as a miss: a healthy link was reassociated every ~60 s and
     its supplicant restarted every ~2 min (review finding, reproduced).
   - **The after-read waits for the NEW association.** `wpa_cli reassociate` returns at once, and
