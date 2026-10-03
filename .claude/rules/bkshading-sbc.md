@@ -7,6 +7,7 @@ paths:
   - "scripts/lib/bkshading-deploy-runtime.sh"
   - "tests/python/test_bkshading_sbc_provision_808.py"
   - "tests/python/test_bkshading_wifi_heal_808.py"
+  - "tests/python/test_bkshading_wifi_heal_stuck_808.py"
   - "tests/python/test_bkshading_sbc_wifi_takeover_808.py"
   - "tests/python/bkshading_sbc_fakes_808.py"
   - "tests/python/test_ro_root_808.py"
@@ -276,7 +277,8 @@ the relay/cloudflared provisioning canon but with two deliberate deltas + one go
 - **Do not force a BSSID with `wpa_cli bssid 0 <mac>` to test roaming unless you clear it with
   `bssid 0 00:00:00:00:00:00`** (`bssid 0 any` returns FAIL and leaves the lock). A locked network
   keeps the board on that one AP, and the heal cannot undo a lock it did not set.
-- **Testing the heal:** `tests/python/test_bkshading_wifi_heal_808.py` runs the REAL script with
+- **Testing the heal:** `tests/python/test_bkshading_wifi_heal_808.py` (reachability rungs, unit
+  bounds, docs pins) and `test_bkshading_wifi_heal_stuck_808.py` (the stuck rung) run the REAL script with
   PATH = a stub dir only, so a missing stub never reaches the machine's real `wpa_cli`. The stubs,
   the heal harness and the provision harness (`_run_provision`) live in
   `tests/python/bkshading_sbc_fakes_808.py`, shared with `test_bkshading_sbc_provision_808.py`
