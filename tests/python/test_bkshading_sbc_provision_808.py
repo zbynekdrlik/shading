@@ -1902,6 +1902,24 @@ def test_install_rerun_compares_the_wifi_identity_not_the_conf_text():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_check_settings_drift_remediation_names_the_remount():
+    # following it means two moves on the (usually read-only) root
+    root = tempfile.mkdtemp()
+    try:
+        r, _c, _b = _run_provision("--install", root)
+        assert r.returncode == 0, (r.stdout, r.stderr)
+        paths = _sbc_paths(root)
+        with open(paths["wpa_conf"]) as f:
+            conf = f.read()
+        with open(paths["wpa_conf"], "w") as f:
+            f.write(conf.replace("ieee80211w=1", "ieee80211w=2"))
+        c, _c2, _b2 = _run_provision("--check", root)
+        assert c.returncode == 1 and "lacks the lib's ieee80211w=1" in c.stderr, c.stderr
+        assert "mount -o remount,rw /" in c.stderr, c.stderr
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_heal_waits_out_a_long_scan_before_reading_after():
     # a full 2.4 + 5 GHz scan with passive DFS channels can take longer than 5 s; the supplicant
     # stays COMPLETED on the old BSSID all that time
