@@ -1679,9 +1679,9 @@ def test_netplan_reader_refuses_a_wifi_it_cannot_move_aside():
     finally:
         shutil.rmtree(etc, ignore_errors=True)
         shutil.rmtree(lib, ignore_errors=True)
-    # a file of the same name in /etc/netplan shadows the /lib one: only the /etc one counts
-    etc = _netplan_dir({WIFI_YAML_NAME: _wifi_yaml()})
-    lib = _netplan_dir({WIFI_YAML_NAME: _wifi_yaml(password="shadowed-pass")})
+    # a /lib file shadowed by an /etc file that STAYS (not the migrated one) never goes live
+    etc = _netplan_dir({WIFI_YAML_NAME: _wifi_yaml(), "90-vendor.yaml": NETPLAN_USB0})
+    lib = _netplan_dir({"90-vendor.yaml": _wifi_yaml(password="shadowed-pass")})
     try:
         rc, pairs, err = _reader_dirs(etc, lib)
         assert rc == 0, err
@@ -1689,6 +1689,18 @@ def test_netplan_reader_refuses_a_wifi_it_cannot_move_aside():
     finally:
         shutil.rmtree(etc, ignore_errors=True)
         shutil.rmtree(lib, ignore_errors=True)
+    # the MIGRATED file shadows only until it is moved aside: a same-name /lib file would then go
+    # live, so it is refused, whatever it defines
+    for text in (_wifi_yaml(password="shadowed-pass"), NETPLAN_USB0):
+        etc = _netplan_dir({WIFI_YAML_NAME: _wifi_yaml()})
+        lib = _netplan_dir({WIFI_YAML_NAME: text})
+        try:
+            rc, pairs, err = _reader_dirs(etc, lib)
+            assert rc == 2 and "un-hide" in err, (rc, err)
+            assert pairs == [] and "shadowed-pass" not in err
+        finally:
+            shutil.rmtree(etc, ignore_errors=True)
+            shutil.rmtree(lib, ignore_errors=True)
 
 
 def _reader_dirs(etc, *others):
