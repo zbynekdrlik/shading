@@ -47,8 +47,8 @@ set -euo pipefail
 # /sys/module, where a loaded module has its dir).
 # Exit 0 after a judged pass (also one that acted); 1 when it could not judge, or an action failed
 # (result=FAILED); 143 / 130 when a SIGTERM / SIGINT ended a driver reload or start, and the failing
-# status when a command failed inside one -- each after the restore trap loaded the driver and
-# queued the supplicant start.
+# status when a command failed inside one -- each after the restore trap loaded the driver (when
+# the plan has a load) and queued the supplicant start.
 # ---------------------------------------------------------------------------------------------
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
