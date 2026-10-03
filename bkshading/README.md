@@ -194,8 +194,8 @@ params-only block — a handheld has no NDI feed). This milestone provisions the
   (the cambox root line + its five tmpfs mounts `/tmp /var/log /var/tmp /var/cache /var/spool`,
   the board's own other mounts kept, the original saved once to `/etc/fstab.bak`). It also makes
   journald volatile (`Storage=volatile`, the journal in RAM) after removing any debug
-  `Storage=persistent` drop-in, and masks `armbian-ramlog` and `systemd-networkd-persistent-storage`
-  (which fails on a read-only root). All of it takes effect at the next
+  `Storage=persistent` drop-in, and masks `armbian-ramlog`, `systemd-networkd-persistent-storage` and
+  `fake-hwclock-save` with its timer (both fail on a read-only root). All of it takes effect at the next
   reboot. A later `--install` on the read-only root remounts it rw for its own writes and back.
   `--install` refuses on a cambox, whose root is `setup-device.sh`'s.
 - **Deploy the ARM relay:** `scripts/bkshading-deploy-relay.sh --host <sbc> --arch arm64` —

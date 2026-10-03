@@ -202,6 +202,11 @@ bkshading_sbc_stale_journald_dropins() { printf '%s\n' 10-persistent.conf; }
 # - systemd-networkd-persistent-storage (Debian trixie) runs `networkctl persistent-storage yes`,
 #   which fails with io.systemd.Network.StorageReadOnly on a read-only root and leaves the board
 #   `degraded` (live on handheld-1, 3.10.2026). networkd keeps its state in /run without it.
+# - fake-hwclock-save (service + its hourly timer) runs `fake-hwclock save`, which cannot write
+#   /etc/fake-hwclock.data on a read-only root (the second read-only boot of handheld-1 went
+#   `degraded` on it). The boot-time fake-hwclock-load only READS the file and stays; NTP sets the
+#   real time right after boot.
 bkshading_sbc_masked_units() {
-  printf '%s\n' armbian-ramlog.service systemd-networkd-persistent-storage.service
+  printf '%s\n' armbian-ramlog.service systemd-networkd-persistent-storage.service \
+    fake-hwclock-save.service fake-hwclock-save.timer
 }
