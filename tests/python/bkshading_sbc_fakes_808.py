@@ -316,7 +316,8 @@ def _unit_value(path, key):
     return None
 
 
-def _heal_env(tmp, state, extra_tools=(), driver_module=None, iface_present=True):
+def _heal_env(tmp, state, extra_tools=(), driver_module=None, iface_present=True,
+              module_loaded=None):
     stubdir = os.path.join(tmp, "stubs")
     _write_tool_stubs(stubdir, names=("wpa_cli", "ip", "ping", "systemctl") + tuple(extra_tools))
     # PATH is the stub dir ONLY (ci-testing-gotchas, issue 1371): a missing stub can never fall
@@ -335,7 +336,8 @@ def _heal_env(tmp, state, extra_tools=(), driver_module=None, iface_present=True
         "FAKE_JOURNAL_SINCE": "-%ds" % (int(_lib_call("bkshading_sbc_wifi_heal_interval_s")) + 5),
         "BKSHADING_WIFI_HEAL_STATE_DIR": os.path.join(tmp, "run"),
         "BKSHADING_WIFI_HEAL_SETTLE_S": "1",
-        "BKSHADING_WIFI_HEAL_SYSFS_NET": _fake_wifi_sysfs(tmp, driver_module, iface_present),
+        "BKSHADING_WIFI_HEAL_SYSFS_NET": _fake_wifi_sysfs(tmp, driver_module, iface_present,
+                                                         module_loaded),
         "BKSHADING_WIFI_HEAL_SYSFS_MODULE": os.path.join(tmp, "sys-module"),
     }
 
@@ -355,12 +357,13 @@ def _get_state(env):
         return json.load(f)
 
 
-def _fake_wifi_sysfs(tmp, driver_module, iface_present=True):
+def _fake_wifi_sysfs(tmp, driver_module, iface_present=True, module_loaded=None):
     """A fake /sys/class/net with wlan0, whose device/driver/module links to <tmp>/sys-module/<name>
     (the fake /sys/module: sprdwl_ng on the Orange Pi Zero 2W) -- or no module link (a built-in
     driver). iface_present=False: the module is unloaded, so wlan0 and the module dir are gone
     (kept aside as .wlan0-unloaded / .<name>-unloaded, which the modprobe stub brings back on a
-    load)."""
+    load). module_loaded (default: iface_present) = False keeps the module dir aside; True keeps it
+    loaded without wlan0 (a load that never brought wlan0 back)."""
     net = os.path.join(tmp, "sys-class-net")
     dev = os.path.join(tmp, "sys-devices", "wlan0-dev")
     drv = os.path.join(tmp, "sys-bus", "drivers", "wlan-driver")
@@ -376,8 +379,11 @@ def _fake_wifi_sysfs(tmp, driver_module, iface_present=True):
         mod = os.path.join(mods, driver_module)
         os.makedirs(mod, exist_ok=True)
         os.symlink(mod, os.path.join(drv, "module"))
+    if module_loaded is None:
+        module_loaded = iface_present
     if not iface_present:
         os.rename(os.path.join(net, "wlan0"), os.path.join(net, ".wlan0-unloaded"))
+    if not module_loaded:
         if driver_module:
             os.rename(os.path.join(mods, driver_module),
                       os.path.join(mods, "." + driver_module + "-unloaded"))

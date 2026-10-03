@@ -577,6 +577,8 @@ def test_heal_reloads_a_loaded_driver_whose_wlan0_never_came_back():
         assert os.path.isdir(os.path.join(mods, "sprdwl_ng")), "the module is loaded"
         assert not os.path.isdir(os.path.join(env["BKSHADING_WIFI_HEAL_SYSFS_NET"], "wlan0"))
         _set_state(env, load_no_iface=False)
+        # the wait ends the moment wlan0 is back (~1 s here): the full bound costs nothing
+        env.pop("BKSHADING_WIFI_HEAL_IFACE_WAIT_S")
         before = len(_heal_tools(env))
         r4 = _heal_pass(env)
         assert r4.returncode == 0 and "result=ok" in r4.stdout, (r4.stdout, r4.stderr)
@@ -585,6 +587,27 @@ def test_heal_reloads_a_loaded_driver_whose_wlan0_never_came_back():
         assert acts == ["modprobe -r sprdwl_ng", "modprobe sprdwl_ng",
                         "systemctl start wpa_supplicant@wlan0.service"], acts
         assert os.path.isdir(os.path.join(env["BKSHADING_WIFI_HEAL_SYSFS_NET"], "wlan0"))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_heal_finishes_the_start_when_the_pass_is_killed_after_the_unload():
+    # The start of a stopped supplicant with wlan0 gone and the module loaded unloads it first.
+    # A pass ended between that unload and the load is restored by the same trap as a reload.
+    tmp = tempfile.mkdtemp()
+    try:
+        state = _net_state(wpa_active=False, signal_heal_on_unload=15)
+        env = _heal_env(tmp, state, extra_tools=("journalctl", "modprobe"),
+                        driver_module="sprdwl_ng", iface_present=False, module_loaded=True)
+        _seed_driver_module(env, "sprdwl_ng")
+        r = _heal_pass(env)
+        assert r.returncode == 143, (r.returncode, r.stdout, r.stderr)
+        assert "in the middle of the driver reload" in r.stderr, r.stderr
+        assert _driver_acts(env) == ["modprobe -r sprdwl_ng", "modprobe sprdwl_ng",
+                                     "systemctl start --no-block wpa_supplicant@wlan0.service"], \
+            _heal_tools(env)
+        assert os.path.isdir(os.path.join(env["BKSHADING_WIFI_HEAL_SYSFS_NET"], "wlan0"))
+        assert _get_state(env)["wpa_active"] is True
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -653,9 +676,16 @@ def test_heal_service_timeouts_cover_the_longest_pass():
     unit = _read(HEAL_SERVICE)
     assert "= %d s" % reload_pass in unit, "the unit comment must state the computed bound"
     assert "up to %d s" % settled in unit, "the unit comment must state the settled after-read bound"
-    # the start of a stopped supplicant may reload a driver too (no stop): never longer
-    start_pass = reload_pass - sysctl
-    assert start_pass <= reload_pass
+    # the start of a stopped supplicant with wlan0 gone runs its own driver steps (no stop)
+    start_pass = (snapshot                # the "before" read
+                  + tool                  # systemctl is-active
+                  + tool                  # the journal count read
+                  + 2 * sysctl            # modprobe -r, modprobe (a loaded module without wlan0)
+                  + iface_wait            # wlan0 comes back
+                  + tool                  # the journal cursor to the end
+                  + sysctl                # systemctl start
+                  + settled)
+    assert start_pass <= int(_unit_value(HEAL_SERVICE, "TimeoutStartSec")), start_pass
     # a pass ended mid-reload runs the trap (load + wlan0 wait + start) inside TimeoutStopSec
     assert 2 * sysctl + iface_wait <= int(_unit_value(HEAL_SERVICE, "TimeoutStopSec"))
     # the script takes the bounds from the lib (the wlan0 wait overridable for tests only), and
