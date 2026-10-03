@@ -508,7 +508,9 @@ def test_heal_finishes_the_reload_when_a_command_fails_in_the_middle():
             assert _heal_pass(env).returncode == 0
         r = _heal_pass(env)
         assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
-        assert "in the middle of the driver reload (exit 1)" in r.stderr, r.stderr
+        assert "in the middle of the driver reload or supplicant start (exit 1)" in r.stderr, r.stderr
+        # a reload plan: the trap does load the driver, and says so
+        assert "loading the driver sprdwl_ng and queueing the start" in r.stderr, r.stderr
         acts = _driver_acts(env)
         assert acts[0] == "systemctl stop wpa_supplicant@wlan0.service", acts
         assert acts[-1] == "systemctl start --no-block wpa_supplicant@wlan0.service", acts
