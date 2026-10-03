@@ -505,6 +505,36 @@ def test_check_requires_the_read_only_root_writers_masked():
             shutil.rmtree(root, ignore_errors=True)
 
 
+def test_install_keeps_the_logrotate_state_off_the_read_only_root():
+    # Live on handheld-1 (4.10.2026 00:47): Armbian's daily logrotate.service failed with
+    # "error opening state file /var/lib/logrotate/status: Read-only file system" and left the board
+    # `degraded`; its Armbian ExecStartPre/Post also run armbian-ramlog (masked by --install). The
+    # drop-in moves the state to /run and drops the ramlog steps; --check grades it byte-for-byte.
+    content = _lib_call("bkshading_sbc_logrotate_dropin_content")
+    lines = [ln for ln in content.splitlines() if ln and not ln.startswith("#")]
+    assert lines == ["[Service]", "ExecStartPre=", "ExecStartPost=", "ExecStart=",
+                     "ExecStart=/usr/sbin/logrotate --state /run/logrotate.status /etc/logrotate.conf"], lines
+    rel = _lib_call("bkshading_sbc_logrotate_dropin_path").strip()
+    assert rel == "logrotate.service.d/99-bkshading-ro-root.conf"
+    for net in ({"wlan0": "up", "eth0": "up"}, {"eth0": "up"}):
+        root = tempfile.mkdtemp()
+        try:
+            r, _c, _b = _run_provision("--install", root, net_ifaces=net)
+            assert r.returncode == 0, (net, r.stdout, r.stderr)
+            dropin = os.path.join(_sbc_paths(root)["unit_dir"], rel)
+            assert _read(dropin) == content, (net, _read(dropin))
+            r2, _c2, _b2 = _run_provision("--check", root, net_ifaces=net)
+            assert r2.returncode == 0, (net, r2.stdout, r2.stderr)
+            assert "OK: logrotate keeps its state in /run" in r2.stdout, (net, r2.stdout)
+            with open(dropin, "w", encoding="utf-8") as f:
+                f.write("[Service]\n")
+            r3, _c3, _b3 = _run_provision("--check", root, net_ifaces=net)
+            assert r3.returncode == 1, (net, r3.stdout, r3.stderr)
+            assert re.search(r"FAIL: .*99-bkshading-ro-root\.conf.*re-run --install", r3.stderr), (net, r3.stderr)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+
 def test_install_on_a_ro_root_remounts_rw_then_back_ro():
     root = tempfile.mkdtemp()
     try:
