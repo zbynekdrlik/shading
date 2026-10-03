@@ -330,8 +330,11 @@ bkshading_sbc_wpa_conf_text() {
 # settings netplan generated before (/run/systemd/network/10-netplan-wlan0.network on handheld-1:
 # DHCP=yes, LinkLocalAddressing=ipv6, RouteMetric=600, UseMTU=true), so nothing else changes. `05-`
 # sorts before every netplan-generated `10-netplan-*` file, so a netplan catch-all can never win.
+# $1 = the DHCP= value netplan would generate: `yes` for dhcp4 + dhcp6 (the Armbian preset, the
+# default), `ipv4` for dhcp4 alone -- the takeover never adds DHCPv6 the YAML did not ask for.
 bkshading_sbc_networkd_wifi_name() { printf '05-bkshading-%s.network\n' "$(bkshading_sbc_wifi_iface)"; }
 bkshading_sbc_networkd_wifi_content() {
+  local dhcp="${1:-yes}"
   printf '%s\n' \
     "# Written by scripts/bkshading-provision-sbc.sh --install (issue 808): wpa_supplicant@$(bkshading_sbc_wifi_iface)" \
     "# associates, systemd-networkd runs DHCP -- the same settings netplan generated before." \
@@ -339,12 +342,28 @@ bkshading_sbc_networkd_wifi_content() {
     "Name=$(bkshading_sbc_wifi_iface)" \
     "" \
     "[Network]" \
-    "DHCP=yes" \
+    "DHCP=$dhcp" \
     "LinkLocalAddressing=ipv6" \
     "" \
     "[DHCP]" \
     "RouteMetric=600" \
     "UseMTU=true"
+}
+
+# Debian's wpa_supplicant@.service has no Restart=, and the heal does nothing while wpa_state is
+# not COMPLETED (an unanswered supplicant reads exactly so), so a CRASHED supplicant would keep the
+# board off the WiFi until a reboot. This drop-in lets systemd restart it on a failure; a clean stop
+# (systemctl stop, the heal's own restart) is untouched. Path relative to the unit directory.
+bkshading_sbc_wpa_restart_dropin_path() {
+  printf '%s.d/bkshading-restart.conf\n' "$(bkshading_sbc_wpa_unit)"
+}
+bkshading_sbc_wpa_restart_dropin_content() {
+  printf '%s\n' \
+    "# Written by scripts/bkshading-provision-sbc.sh --install (issue 808): a crashed supplicant" \
+    "# comes back by itself; the WiFi heal only acts on a COMPLETED link." \
+    "[Service]" \
+    "Restart=on-failure" \
+    "RestartSec=5"
 }
 
 # --- The WiFi heal: re-join when the gateway stops answering (issue 808, design 5972548198) ---
@@ -371,9 +390,19 @@ bkshading_sbc_wifi_heal_miss_limit() { printf '%s\n' 3; }
 bkshading_sbc_wifi_heal_ping_count() { printf '%s\n' 3; }
 bkshading_sbc_wifi_heal_ping_timeout_s() { printf '%s\n' 2; }
 
-# After an action, wait up to this long for wpa_state=COMPLETED before reading the "after" BSSID
+# After an action, wait up to this long for the new association before reading the "after" BSSID
 # and signal for the journal line (a reassociation completes in a few seconds).
 bkshading_sbc_wifi_heal_settle_s() { printf '%s\n' 15; }
+
+# `wpa_cli reassociate` returns at once, and while the supplicant scans it keeps wpa_state=COMPLETED
+# on the OLD BSSID (it leaves COMPLETED only once it moves). So a COMPLETED read counts as the new
+# association only after the state left COMPLETED, or the BSSID changed, or this many seconds
+# passed (a reassociation back to the same AP); never later than the settle bound above.
+bkshading_sbc_wifi_heal_min_settle_s() { printf '%s\n' 5; }
+
+# One wpa_cli call may take this long: a wedged supplicant (each call otherwise waits ~10 s for its
+# socket) must never push a pass past the service's TimeoutStartSec before its action line is out.
+bkshading_sbc_wifi_tool_timeout_s() { printf '%s\n' 3; }
 
 # Where the heal script + this lib are installed on the board (mirrors the repo layout, so the
 # script's own `$HERE/lib/bkshading-sbc-runtime.sh` resolves unchanged) and the heal units.
@@ -389,6 +418,11 @@ bkshading_sbc_wifi_heal_units() { printf '%s\n' bkshading-wifi-heal.service bksh
 #   - a miss                 -> the count + 1; at 2N -> restart 0 (a fresh start for the new
 #                               supplicant), at N -> reassociate N, else none.
 # A count already past 2N (a stale file) restarts at once, never loops forever without acting.
+# The count starts over on a not-COMPLETED pass on purpose: each NEW association gets its full N
+# passes (about 60 s) for DHCP before it is judged. The cost: a board that is caught mid-transition
+# after every reassociate never reaches the restart tier. A reassociation to a dead AP reads
+# COMPLETED again within one 20 s pass, so the restart still comes in practice, and a supplicant
+# that keeps failing to associate is the supplicant working (and restarted by systemd if it dies).
 bkshading_sbc_wifi_heal_decide() {
   local prev="${1:-0}" state="${2:-}" reachable="${3:-}" limit misses
   limit="$(bkshading_sbc_wifi_heal_miss_limit)"

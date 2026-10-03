@@ -13,8 +13,9 @@ After=wpa_supplicant@wlan0.service
 Type=oneshot
 ExecStart=/usr/local/lib/bkshading/bkshading-wifi-heal.sh
 # One pass is a ping burst (at most ~4 s) plus, after an action, up to 15 s waiting for the new
-# association; 60 s bounds a wedged tool without ever overlapping the next pass (the timer does not
-# start a pass while one is still running).
+# association; every wpa_cli call is bounded to 3 s and the supplicant restart to 20 s, so a pass
+# stays well inside 60 s even with a wedged supplicant (the timer never starts a pass while one is
+# still running).
 TimeoutStartSec=60
 StandardOutput=journal
 StandardError=journal

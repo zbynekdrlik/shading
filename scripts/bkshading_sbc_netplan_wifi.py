@@ -13,12 +13,19 @@ an int, and `dhcp4: yes` stays the string `yes`. PyYAML is a dependency of the `
 so it is present on every board this helper has a netplan YAML to read on.
 
 Output (stdout, for the provision script only): NUL-terminated `tag value` pairs --
-    file <path>   country <ISO code or empty>   then per access point:  ssid <ssid>  pass <passphrase>
+    file <path>   country <ISO code or empty>   dhcp <yes|ipv4>
+    then per access point:  ssid <ssid>  pass <passphrase>
+`dhcp` is the DHCP= value netplan itself generates: yes for dhcp4 + dhcp6, ipv4 for dhcp4 alone.
 Exit codes: 0 = one WiFi YAML found; 3 = no netplan YAML defines the interface; 2 = a shape this
 migration does not carry over (the reason on stderr, which never carries a passphrase). The script
 refuses rather than drop a setting it would lose by moving the YAML aside.
 
-Usage: bkshading_sbc_netplan_wifi.py <netplan-dir> <iface>
+netplan reads /etc/netplan, /run/netplan and /lib/netplan, a file name in an earlier directory
+shadowing the same name in a later one. The migration moves aside a file in <netplan-dir> (the
+/etc one) only, so a WiFi for the interface in an <other-dir> (/run, /lib) that is not shadowed is
+refused: it would survive the takeover and run a second supplicant on the interface.
+
+Usage: bkshading_sbc_netplan_wifi.py <netplan-dir> <iface> [<other-dir> ...]
 """
 import glob
 import os
@@ -46,10 +53,13 @@ def _load(path):
         return yaml.load(f, Loader=yaml.BaseLoader)  # noqa: S506 - BaseLoader builds only str/list/dict
 
 
-def find_wifi_yamls(netplan_dir, iface):
-    """[(path, document)] of every *.yaml in netplan_dir whose network.wifis defines iface."""
+def find_wifi_yamls(netplan_dir, iface, skip_names=()):
+    """[(path, document)] of every *.yaml in netplan_dir whose network.wifis defines iface; a file
+    whose name is in skip_names (shadowed by an earlier netplan directory) is not read."""
     found = []
     for path in sorted(glob.glob(os.path.join(netplan_dir, "*.yaml"))):
+        if os.path.basename(path) in skip_names:
+            continue
         try:
             doc = _load(path)
         except yaml.YAMLError as e:
@@ -89,11 +99,24 @@ def _password_of(ssid, ap):
     return password
 
 
-def extract(netplan_dir, iface):
+def _yaml_names(directory):
+    return {os.path.basename(p) for p in glob.glob(os.path.join(directory, "*.yaml"))}
+
+
+def extract(netplan_dir, iface, other_dirs=()):
     """The migration's view of the one netplan YAML that defines iface, or None when none does.
 
-    Returns {"file", "country", "aps": [(ssid, passphrase), ...]}. Raises Unsupported on a shape the
-    migration cannot carry over whole."""
+    Returns {"file", "country", "dhcp", "aps": [(ssid, passphrase), ...]}. Raises Unsupported on a
+    shape the migration cannot carry over whole, or on a WiFi for iface in an other_dirs file that
+    no earlier directory shadows (the migration cannot move it aside)."""
+    seen = _yaml_names(netplan_dir)
+    for other in other_dirs:
+        outside = find_wifi_yamls(other, iface, skip_names=seen)
+        if outside:
+            raise Unsupported("%s defines wifis.%s outside %s, and the migration cannot move it aside "
+                              "-- move it into %s (or remove it) first"
+                              % (", ".join(p for p, _ in outside), iface, netplan_dir, netplan_dir))
+        seen |= _yaml_names(other)
     found = find_wifi_yamls(netplan_dir, iface)
     if not found:
         return None
@@ -125,6 +148,7 @@ def extract(netplan_dir, iface):
     return {
         "file": path,
         "country": country.upper(),
+        "dhcp": "yes" if str(cfg.get("dhcp6", "")).lower() in TRUE_WORDS else "ipv4",
         "aps": [(ssid, _password_of(ssid, ap)) for ssid, ap in aps.items()],
     }
 
@@ -134,11 +158,11 @@ def _emit(tag, value):
 
 
 def main(argv):
-    if len(argv) != 3:
-        sys.stderr.write("usage: bkshading_sbc_netplan_wifi.py <netplan-dir> <iface>\n")
+    if len(argv) < 3:
+        sys.stderr.write("usage: bkshading_sbc_netplan_wifi.py <netplan-dir> <iface> [<other-dir> ...]\n")
         return 2
     try:
-        found = extract(argv[1], argv[2])
+        found = extract(argv[1], argv[2], argv[3:])
     except Unsupported as e:
         sys.stderr.write("ERROR: the netplan WiFi config cannot be migrated: %s\n" % e)
         return 2
@@ -146,6 +170,7 @@ def main(argv):
         return 3
     _emit("file", found["file"])
     _emit("country", found["country"])
+    _emit("dhcp", found["dhcp"])
     for ssid, password in found["aps"]:
         _emit("ssid", ssid)
         _emit("pass", password)

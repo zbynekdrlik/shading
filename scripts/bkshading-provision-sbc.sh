@@ -42,12 +42,17 @@ set -euo pipefail
 #     and the PSK as the 64-hex wpa_passphrase value. The SSID + passphrase are MIGRATED from the
 #     board's own netplan WiFi YAML (read by scripts/bkshading_sbc_netplan_wifi.py); the passphrase
 #     goes to wpa_passphrase on stdin, never on an argv, never printed, never into a log;
-#   - moves that netplan YAML aside once as <file>.bak (ethernet + usb0 YAMLs stay) and writes a
-#     systemd-networkd DHCP file for wlan0 with the settings netplan generated;
-#   - installs the heal (scripts/bkshading-wifi-heal.sh + this lib, to /usr/local/lib/bkshading/,
-#     and systemd/bkshading-wifi-heal.{service,timer}) and enables wpa_supplicant@wlan0 + the timer.
-# A re-run keeps an existing wpa_supplicant-wlan0.conf. A board with neither a netplan WiFi YAML nor
-# that conf is refused (exit 1, nothing changed). A wired box (no wl* radio) skips all of it.
+#   - writes a systemd-networkd DHCP file for wlan0 with the settings netplan generated, and a
+#     Restart=on-failure drop-in for wpa_supplicant@wlan0 (Debian's unit has none);
+#   - installs the heal (scripts/bkshading-wifi-heal.sh + its two libs, to /usr/local/lib/bkshading/,
+#     and systemd/bkshading-wifi-heal.{service,timer}), enables systemd-networkd +
+#     wpa_supplicant@wlan0 + the timer, and only THEN moves that netplan YAML aside once as
+#     <file>.bak (ethernet + usb0 YAMLs stay), so a failure on the way never leaves a board with no
+#     WiFi at the next boot.
+# A re-run keeps an existing wpa_supplicant-wlan0.conf; a netplan WiFi YAML next to it is moved
+# aside only when it migrates to that same conf, and refused when it differs. Refused (exit 1,
+# nothing changed): neither a netplan WiFi YAML nor that conf; a YAML the migration cannot carry
+# whole; wpa_cli/ip/ping missing. A wired box (no wl* radio) skips all of it.
 #
 # Idempotent (re-run just re-verifies), fail-loud (a gap exits non-zero with the exact remediation),
 # ENABLE-ONLY (daemon-reload + enable, NEVER start/restart — defer to reboot, per
@@ -84,7 +89,9 @@ set -euo pipefail
 #   BKSHADING_SBC_NETWORKD_DIR (/etc/systemd/network), BKSHADING_SBC_HEAL_DIR
 #   (/usr/local/lib/bkshading), BKSHADING_SBC_PYTHON (python3), BKSHADING_SBC_WPA_PASSPHRASE
 #   (wpa_passphrase), BKSHADING_SBC_WPA_CLI (wpa_cli), BKSHADING_SBC_IP (ip), BKSHADING_SBC_PING
-#   (ping). The heal units go beside the relay unit (the directory of BKSHADING_SBC_UNIT_DEST).
+#   (ping), BKSHADING_SBC_NETPLAN_OTHER_DIRS ("/run/netplan /lib/netplan", the other directories
+#   netplan reads). The heal units go beside the relay unit (the directory of
+#   BKSHADING_SBC_UNIT_DEST).
 # ---------------------------------------------------------------------------------------------
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -95,6 +102,8 @@ REPO="$(cd "$HERE/.." && pwd)"
 . "$HERE/lib/bkshading-sbc-runtime.sh" # SBC-specific: ELF-arch check, cross target, no-env decision
 # shellcheck source=scripts/lib/ro-root.sh
 . "$HERE/lib/ro-root.sh" # the ONE read-only-root canon, shared with setup-device.sh STEP 18 (issue 808)
+# shellcheck source=scripts/lib/bkshading-sbc-wifi-probe.sh
+. "$HERE/lib/bkshading-sbc-wifi-probe.sh" # the WiFi link reads, shared with the heal (issue 808)
 
 UNIT_NAME="$(bkshading_relay_unit_name)"
 UNIT_SRC="$REPO/systemd/$UNIT_NAME"
@@ -203,14 +212,22 @@ install_ro_root() {  # $1 = root UUID, $2 = root fstype
 
 # --- The WiFi takeover + heal (issue 808, design 5972548198) ---
 # plan_wifi READS and decides before anything changes (a refusal leaves the box untouched);
-# apply_wifi writes inside the rw window; enable_wifi enables (never starts) the units.
+# apply_wifi writes the conf, the networkd file, the heal and the supplicant drop-in inside the rw
+# window; enable_wifi enables (never starts) the units and moves the netplan WiFi YAML aside LAST,
+# so a failure on the way leaves netplan's WiFi in charge at the next boot, never a board with none.
 #   WIFI_PLAN: skip (no wl* radio), keep (the existing conf stays), migrate (write it from netplan)
 #   WIFI_YAML: the netplan WiFi YAML to move aside ("" = none present)
+#   WIFI_DHCP: the DHCP= of the networkd file ("" = keep the file already there)
 #   WIFI_CONF_TEXT: the conf to write on migrate -- it holds the PSK, so it is never printed.
 WIFI_PLAN=skip
 WIFI_YAML=""
+WIFI_DHCP=""
 WIFI_CONF_TEXT=""
 WIFI_SUMMARY=""
+WIFI_DROPIN="$UNIT_DIR/$(bkshading_sbc_wpa_restart_dropin_path)"
+WIFI_NETWORKD_FILE="$NETWORKD_DIR/$(bkshading_sbc_networkd_wifi_name)"
+WIFI_HEAL_LIBS="bkshading-sbc-runtime.sh bkshading-sbc-wifi-probe.sh"
+NETPLAN_OTHER_DIRS="${BKSHADING_SBC_NETPLAN_OTHER_DIRS:-/run/netplan /lib/netplan}"
 
 wifi_refuse() {
   echo "ERROR: $1 -- nothing changed" >&2
@@ -220,9 +237,73 @@ wifi_refuse() {
   exit 1
 }
 
+# Any netplan YAML in the directories netplan reads (/etc + the others)?
+netplan_yaml_present() {
+  local d
+  local -a other=()
+  read -r -a other <<<"$NETPLAN_OTHER_DIRS"
+  for d in "$NETPLAN_DIR" "${other[@]}"; do
+    if compgen -G "$d/*.yaml" >/dev/null; then return 0; fi
+  done
+  return 1
+}
+
+# Run the one netplan YAML reader. Fills the CALLER's locals (bash dynamic scope): rc, yaml,
+# country, dhcp and the arrays ssids + passes. `set +e` inside the process substitution: the
+# inherited errexit would end that subshell on a failing reader before its exit code is appended.
+# The passphrase travels only through this pipe into bash variables -- never an argv, never a file.
+read_netplan_wifi() {
+  local i
+  local -a fields=() other=()
+  read -r -a other <<<"$NETPLAN_OTHER_DIRS"
+  rc=3
+  mapfile -d '' -t fields < <(
+    set +e
+    "$PYTHON" "$HERE/bkshading_sbc_netplan_wifi.py" "$NETPLAN_DIR" "$WIFI_IFACE" "${other[@]}"
+    printf 'rc\0%s\0' "$?"
+  )
+  for ((i = 0; i + 1 < ${#fields[@]}; i += 2)); do
+    case "${fields[i]}" in
+      file) yaml="${fields[i + 1]}" ;;
+      country) country="${fields[i + 1]}" ;;
+      dhcp) dhcp="${fields[i + 1]}" ;;
+      ssid) ssids+=("${fields[i + 1]}") ;;
+      pass) passes+=("${fields[i + 1]}") ;;
+      rc) rc="${fields[i + 1]}" ;;
+    esac
+  done
+  fields=()
+}
+
+# The conf the CALLER's ssids/passes/country migrate to, into WIFI_CONF_TEXT. Each passphrase goes
+# to wpa_passphrase on STDIN (it reads it there when no second argument is given); its output,
+# which echoes the passphrase in a #psk= comment, stays in a local variable.
+derive_conf_text() {
+  local i pass psk out
+  local -a pairs=()
+  for i in "${!ssids[@]}"; do
+    pass="${passes[i]}"
+    if [[ "$pass" =~ ^[0-9a-fA-F]{64}$ ]]; then
+      psk="${pass,,}" # netplan accepts a ready 64-hex PSK; wpa_passphrase would refuse its length
+    else
+      [ -z "$(bkshading_sbc_wifi_missing_tools "$WPA_PASSPHRASE")" ] \
+        || wifi_refuse "$WPA_PASSPHRASE not found" "install the wpasupplicant package, then re-run --install"
+      out="$(printf '%s\n' "$pass" | "$WPA_PASSPHRASE" "${ssids[i]}" 2>/dev/null || true)"
+      psk="$(bkshading_sbc_psk_hex_from_wpa_passphrase "$out")"
+      out=""
+      [ -n "$psk" ] || wifi_refuse "wpa_passphrase derived no PSK for SSID '${ssids[i]}'" \
+        "a WPA passphrase is 8-63 printable characters; fix it in $yaml"
+    fi
+    pairs+=("${ssids[i]}" "$psk")
+  done
+  pass=""
+  psk=""
+  WIFI_CONF_TEXT="$(bkshading_sbc_wpa_conf_text "$country" "${pairs[@]}")"
+}
+
 plan_wifi() {
-  local state rc=3 i country="" pass psk out
-  local -a fields=() ssids=() passes=() pairs=()
+  local state rc=3 yaml="" country="" dhcp="" missing existing
+  local -a ssids=() passes=()
   state="$(bkshading_sbc_wifi_link_state "$NET_SYSFS" 'wl*')"
   if [ "$state" = none ]; then
     WIFI_PLAN=skip
@@ -232,36 +313,47 @@ plan_wifi() {
     wifi_refuse "a wireless radio is present ($(bkshading_sbc_first_wifi_iface "$NET_SYSFS" 'wl*')) but no $WIFI_IFACE" \
       "the WiFi takeover owns $WIFI_IFACE only (every candidate board names its radio $WIFI_IFACE)"
   fi
-  if compgen -G "$NETPLAN_DIR/*.yaml" >/dev/null; then
-    # NUL-separated tag/value pairs from the one YAML reader, its exit code appended last. The
-    # passphrase travels only through this pipe into bash variables -- never an argv, never a file.
-    mapfile -d '' -t fields < <("$PYTHON" "$HERE/bkshading_sbc_netplan_wifi.py" "$NETPLAN_DIR" "$WIFI_IFACE"; printf 'rc\0%s\0' "$?")
-    for ((i = 0; i + 1 < ${#fields[@]}; i += 2)); do
-      case "${fields[i]}" in
-        file) WIFI_YAML="${fields[i + 1]}" ;;
-        country) country="${fields[i + 1]}" ;;
-        ssid) ssids+=("${fields[i + 1]}") ;;
-        pass) passes+=("${fields[i + 1]}") ;;
-        rc) rc="${fields[i + 1]}" ;;
-      esac
-    done
-    fields=()
-    case "$rc" in
-      0 | 3) ;;
-      2) wifi_refuse "the netplan WiFi config under $NETPLAN_DIR cannot be migrated (reason above)" \
-        "fix that YAML by hand (or write $WPA_CONF yourself), then re-run --install" ;;
-      *) wifi_refuse "could not read the netplan YAML under $NETPLAN_DIR ($PYTHON exited $rc)" \
-        "the reader needs python3 + PyYAML, which the netplan.io package depends on" ;;
-    esac
+  missing="$(bkshading_sbc_wifi_missing_tools "$WPA_CLI" "$IP" "$PING")"
+  if [ -n "$missing" ]; then
+    wifi_refuse "${missing//$'\n'/ } not found -- the WiFi heal and --check need wpa_cli, ip and ping" \
+      "install wpasupplicant (wpa_cli), iproute2 (ip) and iputils-ping (ping), then re-run --install"
   fi
+  if netplan_yaml_present; then
+    read_netplan_wifi
+  fi
+  case "$rc" in
+    0 | 3) ;;
+    2) wifi_refuse "the netplan WiFi config cannot be migrated (reason above)" \
+      "split wifis.$WIFI_IFACE into its own netplan YAML (the Armbian 30-wifis-dhcp.yaml shape), or" \
+      "move that YAML aside and write $WPA_CONF by hand, then re-run --install" ;;
+    *) wifi_refuse "could not read the netplan YAML under $NETPLAN_DIR ($PYTHON exited $rc)" \
+      "the reader needs python3 + PyYAML, which the netplan.io package depends on" ;;
+  esac
   if [ "$rc" = 0 ] && { [ "${#ssids[@]}" -eq 0 ] || [ "${#ssids[@]}" -ne "${#passes[@]}" ]; }; then
     wifi_refuse "the netplan WiFi reader returned an incomplete access-point list for $WIFI_IFACE"
   fi
+  WIFI_YAML="$yaml"
   if [ -n "$WIFI_YAML" ] && [ -e "$WIFI_YAML.bak" ]; then
     wifi_refuse "$WIFI_YAML defines $WIFI_IFACE again while $WIFI_YAML.bak already holds the original" \
       "netplan would run a second supplicant on $WIFI_IFACE; remove or merge one of the two by hand"
   fi
   if [ -e "$WPA_CONF" ]; then
+    if [ -n "$WIFI_YAML" ]; then
+      # Both define the WiFi (a re-run after an install that never moved the YAML, or a WiFi changed
+      # in netplan later). Only an IDENTICAL migration is finished; a differing one is never dropped.
+      derive_conf_text
+      existing="$(<"$WPA_CONF")" # holds the PSK: compared, never printed
+      if [ "$existing" != "$WIFI_CONF_TEXT" ]; then
+        existing=""
+        WIFI_CONF_TEXT=""
+        wifi_refuse "$WIFI_YAML still defines wifis.$WIFI_IFACE and its WiFi differs from $WPA_CONF" \
+          "keep ONE by hand: move the YAML aside (the conf stays), or remove the conf (the YAML is" \
+          "migrated), then re-run --install"
+      fi
+      existing=""
+      WIFI_CONF_TEXT=""
+      WIFI_DHCP="$dhcp"
+    fi
     WIFI_PLAN=keep
     return 0
   fi
@@ -271,28 +363,9 @@ plan_wifi() {
       "wifis: $WIFI_IFACE: access-points: <SSID>: password: ...), or restore a moved-aside <file>.yaml.bak," \
       "then re-run --install"
   fi
-  for i in "${!ssids[@]}"; do
-    pass="${passes[i]}"
-    if [[ "$pass" =~ ^[0-9a-fA-F]{64}$ ]]; then
-      psk="${pass,,}" # netplan accepts a ready 64-hex PSK; wpa_passphrase would refuse its length
-    else
-      command -v "$WPA_PASSPHRASE" >/dev/null 2>&1 \
-        || wifi_refuse "$WPA_PASSPHRASE not found" "install the wpasupplicant package, then re-run --install"
-      # The passphrase on STDIN (wpa_passphrase reads it there when no second argument is given);
-      # its output (which echoes the passphrase in a #psk= comment) stays in this variable.
-      out="$(printf '%s\n' "$pass" | "$WPA_PASSPHRASE" "${ssids[i]}" 2>/dev/null || true)"
-      psk="$(bkshading_sbc_psk_hex_from_wpa_passphrase "$out")"
-      out=""
-      [ -n "$psk" ] || wifi_refuse "wpa_passphrase derived no PSK for SSID '${ssids[i]}'" \
-        "a WPA passphrase is 8-63 printable characters; fix it in $WIFI_YAML"
-    fi
-    pairs+=("${ssids[i]}" "$psk")
-  done
-  WIFI_CONF_TEXT="$(bkshading_sbc_wpa_conf_text "$country" "${pairs[@]}")"
-  pairs=()
+  derive_conf_text
   passes=()
-  pass=""
-  psk=""
+  WIFI_DHCP="$dhcp"
   WIFI_PLAN=migrate
   WIFI_SUMMARY="SSID ${ssids[*]}, country ${country:-<none in the YAML>}"
 }
@@ -316,28 +389,37 @@ apply_wifi() {
   else
     echo "  $WPA_CONF already exists -- kept (a re-run never rewrites it)"
   fi
-  if [ -n "$WIFI_YAML" ]; then
-    mv "$WIFI_YAML" "$WIFI_YAML.bak"
-    echo "  moved the netplan WiFi YAML aside: $WIFI_YAML -> $WIFI_YAML.bak (netplan runs no supplicant on $WIFI_IFACE now)"
-  fi
   mkdir -p "$NETWORKD_DIR"
-  bkshading_sbc_networkd_wifi_content >"$NETWORKD_DIR/$(bkshading_sbc_networkd_wifi_name)"
-  echo "  wrote $NETWORKD_DIR/$(bkshading_sbc_networkd_wifi_name) (DHCP on $WIFI_IFACE, as netplan generated it)"
+  if [ -n "$WIFI_DHCP" ] || [ ! -e "$WIFI_NETWORKD_FILE" ]; then
+    bkshading_sbc_networkd_wifi_content "${WIFI_DHCP:-yes}" >"$WIFI_NETWORKD_FILE"
+    echo "  wrote $WIFI_NETWORKD_FILE (DHCP=${WIFI_DHCP:-yes} on $WIFI_IFACE, as netplan generated it)"
+  else
+    echo "  $WIFI_NETWORKD_FILE already exists and no netplan WiFi YAML is left -- kept"
+  fi
 
-  mkdir -p "$HEAL_DIR/lib" "$UNIT_DIR"
+  mkdir -p "$HEAL_DIR/lib" "$UNIT_DIR" "$(dirname "$WIFI_DROPIN")"
   install -m 0755 "$HERE/$(bkshading_sbc_wifi_heal_script_name)" "$HEAL_DIR/$(bkshading_sbc_wifi_heal_script_name)"
-  install -m 0644 "$HERE/lib/bkshading-sbc-runtime.sh" "$HEAL_DIR/lib/bkshading-sbc-runtime.sh"
+  for f in $WIFI_HEAL_LIBS; do
+    install -m 0644 "$HERE/lib/$f" "$HEAL_DIR/lib/$f"
+  done
   for f in $(bkshading_sbc_wifi_heal_units); do
     install -m 0644 "$REPO/systemd/$f" "$UNIT_DIR/$f"
   done
-  echo "  installed the WiFi heal: $HEAL_DIR/$(bkshading_sbc_wifi_heal_script_name) + $(bkshading_sbc_wifi_heal_units | tr '\n' ' ')"
+  bkshading_sbc_wpa_restart_dropin_content >"$WIFI_DROPIN"
+  echo "  installed the WiFi heal: $HEAL_DIR/$(bkshading_sbc_wifi_heal_script_name) + $(bkshading_sbc_wifi_heal_units | tr '\n' ' ')+ $WIFI_DROPIN"
 }
 
 enable_wifi() {
   [ "$WIFI_PLAN" != skip ] || return 0
+  "$SYSTEMCTL" enable systemd-networkd.service
   "$SYSTEMCTL" enable "$(bkshading_sbc_wpa_unit)"
   "$SYSTEMCTL" enable "$(bkshading_sbc_wifi_heal_timer)"
-  echo "  enabled $(bkshading_sbc_wpa_unit) + $(bkshading_sbc_wifi_heal_timer) (NOT started -- reboot to take effect)"
+  echo "  enabled systemd-networkd + $(bkshading_sbc_wpa_unit) + $(bkshading_sbc_wifi_heal_timer) (NOT started -- reboot to take effect)"
+  # LAST: only now netplan stops running a supplicant on wlan0 at the next boot.
+  if [ -n "$WIFI_YAML" ]; then
+    mv "$WIFI_YAML" "$WIFI_YAML.bak"
+    echo "  moved the netplan WiFi YAML aside: $WIFI_YAML -> $WIFI_YAML.bak (netplan runs no supplicant on $WIFI_IFACE now)"
+  fi
 }
 
 do_install() {
@@ -414,26 +496,35 @@ do_install() {
 }
 
 # --check rows for the WiFi takeover + heal (issue 808). $1 = the WiFi link state of row (5).
-# Prints one OK/FAIL row each; returns 1 when any row FAILs.
+# Prints one OK/FAIL row each; returns 1 when any row FAILs. The link reads go through
+# scripts/lib/bkshading-sbc-wifi-probe.sh, the same functions the heal uses.
 check_wifi_takeover() {
-  local fail=0 unit en want line found=0 f gw status poll bssid rssi wstate
-  local -a stale=()
+  local fail=0 unit en want line found=0 f mode missing gw snap bssid rssi wstate
+  local rc=3 yaml="" country="" dhcp=""
+  local -a stale=() ssids=() passes=()
   if [ "${1:-}" = none ]; then
     echo "OK: no wireless interface -- the wpa_supplicant, bgscan, heal and gateway rows are skipped"
     return 0
   fi
-  # wpa_supplicant@wlan0 owns the WiFi (not netplan's generated supplicant).
-  unit="$(bkshading_sbc_wpa_unit)"
-  en="$("$SYSTEMCTL" is-enabled "$unit" 2>/dev/null || true)"
-  if [ "$en" = enabled ]; then
-    echo "OK: $unit enabled"
-  else
-    echo "FAIL: $unit not enabled (is-enabled=${en:-<none>}) -- re-run --install" >&2
-    fail=1
-  fi
-  # its conf carries the background scan (read line by line: the file holds the PSK, never printed).
+  # wpa_supplicant@wlan0 owns the WiFi, and systemd-networkd runs its DHCP.
+  for unit in "$(bkshading_sbc_wpa_unit)" systemd-networkd.service; do
+    en="$("$SYSTEMCTL" is-enabled "$unit" 2>/dev/null || true)"
+    if [ "$en" = enabled ]; then
+      echo "OK: $unit enabled"
+    else
+      echo "FAIL: $unit not enabled (is-enabled=${en:-<none>}) -- re-run --install" >&2
+      fail=1
+    fi
+  done
+  # its conf is 0600 (it holds the PSK) and carries the background scan (read line by line, never
+  # printed).
   want="$(bkshading_sbc_bgscan_line)"
   if [ -r "$WPA_CONF" ]; then
+    mode="$(stat -c %a "$WPA_CONF" 2>/dev/null || true)"
+    if [ "$mode" != 600 ]; then
+      echo "FAIL: $WPA_CONF is mode ${mode:-?} -- it holds the PSK and must be 0600 (chmod 0600 $WPA_CONF)" >&2
+      fail=1
+    fi
     while IFS= read -r line || [ -n "$line" ]; do
       line="${line#"${line%%[![:space:]]*}"}"
       if [ "$line" = "$want" ]; then found=1; fi
@@ -449,14 +540,36 @@ check_wifi_takeover() {
     echo "FAIL: $WPA_CONF missing or unreadable -- re-run --install" >&2
     fail=1
   fi
-  # the heal is installed (byte-identical to this checkout) and its timer enabled.
+  # netplan no longer runs its own supplicant on wlan0 (two on one radio fight over it).
+  if netplan_yaml_present; then
+    read_netplan_wifi
+    ssids=()
+    passes=()
+  fi
+  case "$rc" in
+    3) echo "OK: netplan defines no $WIFI_IFACE (the WiFi is $(bkshading_sbc_wpa_unit)'s)" ;;
+    0)
+      echo "FAIL: netplan still defines $WIFI_IFACE in $yaml -- a second supplicant would run on it; re-run --install" >&2
+      fail=1
+      ;;
+    *)
+      echo "FAIL: the netplan YAML could not be read cleanly for $WIFI_IFACE (reader exit $rc, reason above)" >&2
+      fail=1
+      ;;
+  esac
+  # the heal is installed (byte-identical to this checkout, the supplicant restart drop-in included)
+  # and its timer enabled.
   for f in $(bkshading_sbc_wifi_heal_units); do
     cmp -s "$REPO/systemd/$f" "$UNIT_DIR/$f" || stale+=("$UNIT_DIR/$f")
   done
   cmp -s "$HERE/$(bkshading_sbc_wifi_heal_script_name)" "$HEAL_DIR/$(bkshading_sbc_wifi_heal_script_name)" \
     || stale+=("$HEAL_DIR/$(bkshading_sbc_wifi_heal_script_name)")
-  cmp -s "$HERE/lib/bkshading-sbc-runtime.sh" "$HEAL_DIR/lib/bkshading-sbc-runtime.sh" \
-    || stale+=("$HEAL_DIR/lib/bkshading-sbc-runtime.sh")
+  for f in $WIFI_HEAL_LIBS; do
+    cmp -s "$HERE/lib/$f" "$HEAL_DIR/lib/$f" || stale+=("$HEAL_DIR/lib/$f")
+  done
+  if [ ! -r "$WIFI_DROPIN" ] || [ "$(<"$WIFI_DROPIN")" != "$(bkshading_sbc_wpa_restart_dropin_content)" ]; then
+    stale+=("$WIFI_DROPIN")
+  fi
   en="$("$SYSTEMCTL" is-enabled "$(bkshading_sbc_wifi_heal_timer)" 2>/dev/null || true)"
   if [ "${#stale[@]}" -eq 0 ] && [ "$en" = enabled ]; then
     echo "OK: WiFi heal installed + $(bkshading_sbc_wifi_heal_timer) enabled"
@@ -466,21 +579,27 @@ check_wifi_takeover() {
     fail=1
   fi
   # the DHCP default gateway answers over the WiFi (a COMPLETED link on a dead AP reads "up" above).
-  gw="$(bkshading_sbc_default_gw_from_route "$("$IP" -4 route show default dev "$WIFI_IFACE" 2>/dev/null || true)")"
-  status="$("$WPA_CLI" -p "$(bkshading_sbc_wpa_ctrl_dir)" -i "$WIFI_IFACE" status 2>/dev/null || true)"
-  poll="$("$WPA_CLI" -p "$(bkshading_sbc_wpa_ctrl_dir)" -i "$WIFI_IFACE" signal_poll 2>/dev/null || true)"
-  bssid="$(bkshading_sbc_wpa_field "$status" bssid)"
-  wstate="$(bkshading_sbc_wpa_field "$status" wpa_state)"
-  rssi="$(bkshading_sbc_wpa_field "$poll" RSSI)"
-  if [ -z "$gw" ]; then
-    echo "FAIL: no DHCP default gateway on $WIFI_IFACE (bssid=${bssid:-?} signal=${rssi:-?} dBm wpa_state=${wstate:-?})" >&2
+  missing="$(bkshading_sbc_wifi_missing_tools "$WPA_CLI" "$IP" "$PING")"
+  if [ -n "$missing" ]; then
+    echo "FAIL: ${missing//$'\n'/ } not found -- the gateway row and the heal need wpa_cli, ip and ping" >&2
+    return 1
+  fi
+  snap="$(bkshading_sbc_wifi_snapshot "$WPA_CLI" "$(bkshading_sbc_wpa_ctrl_dir)" "$WIFI_IFACE" "$(bkshading_sbc_wifi_tool_timeout_s)")"
+  read -r bssid rssi wstate <<<"$snap"
+  if ! gw="$(bkshading_sbc_wifi_gateway "$IP" "$WIFI_IFACE")"; then
+    echo "FAIL: '$IP -4 route show default dev $WIFI_IFACE' failed -- the gateway cannot be read" >&2
     fail=1
-  elif "$PING" -n -q -c "$(bkshading_sbc_wifi_heal_ping_count)" -W "$(bkshading_sbc_wifi_heal_ping_timeout_s)" \
-    -I "$WIFI_IFACE" "$gw" >/dev/null 2>&1; then
-    echo "OK: gateway $gw answers a ping on $WIFI_IFACE (bssid=${bssid:-?} signal=${rssi:-?} dBm)"
-  else
-    echo "FAIL: gateway $gw does not answer a ping on $WIFI_IFACE (bssid=${bssid:-?} signal=${rssi:-?} dBm wpa_state=${wstate:-?})" >&2
+  elif [ -z "$gw" ]; then
+    echo "FAIL: no DHCP default gateway on $WIFI_IFACE (bssid=$bssid signal=$rssi dBm wpa_state=$wstate)" >&2
+    fail=1
+  elif bkshading_sbc_wifi_ping "$PING" "$WIFI_IFACE" "$gw" "$(bkshading_sbc_wifi_heal_ping_count)" "$(bkshading_sbc_wifi_heal_ping_timeout_s)"; then
+    echo "OK: gateway $gw answers a ping on $WIFI_IFACE (bssid=$bssid signal=$rssi dBm)"
+  elif [ "$BKSHADING_SBC_WIFI_PING_RC" = 1 ]; then
+    echo "FAIL: gateway $gw does not answer a ping on $WIFI_IFACE (bssid=$bssid signal=$rssi dBm wpa_state=$wstate)" >&2
     echo "      the heal timer reassociates after $(bkshading_sbc_wifi_heal_miss_limit) misses; to force it now: wpa_cli -i $WIFI_IFACE reassociate" >&2
+    fail=1
+  else
+    echo "FAIL: '$PING' to gateway $gw failed with exit $BKSHADING_SBC_WIFI_PING_RC (no verdict, not a lost reply)" >&2
     fail=1
   fi
   return "$fail"
