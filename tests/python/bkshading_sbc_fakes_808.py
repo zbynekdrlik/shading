@@ -1,15 +1,19 @@
-"""Shared fakes for the handheld SBC tests (issue 808): the board-tool stubs and the heal harness.
+"""Shared fakes for the handheld SBC tests (issue 808): the board-tool stubs, the heal harness and
+the provision harness.
 
-`test_bkshading_sbc_provision_808.py` (provisioning + --check) and `test_bkshading_wifi_heal_808.py`
-(the WiFi heal) both run the REAL scripts against these fakes, so they live in one place. Not a test
-module (no `test_` prefix, pytest never collects it): the test files import it after putting this
-directory on sys.path. Stdlib only.
+`test_bkshading_sbc_provision_808.py` (relay, read-only root, deploy, CI),
+`test_bkshading_sbc_wifi_takeover_808.py` (netplan migration, supplicant conf, WiFi --check rows) and
+`test_bkshading_wifi_heal_808.py` (the WiFi heal) run the REAL scripts against these fakes, so they
+live in one place. Not a test module (no `test_` prefix, pytest never collects it): the test files
+import it after putting this directory on sys.path. Stdlib only.
 """
 import json
 import os
 import shutil
+import struct
 import subprocess
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.normpath(os.path.join(HERE, "..", ".."))
@@ -391,3 +395,246 @@ def _heal_misses(env):
 def _heal_tools(env):
     p = env["FAKE_TOOL_LOG"]
     return _read(p).splitlines() if os.path.exists(p) else []
+
+
+# ---------------------------------------------------------------------------------------------
+# the provision harness: the real scripts/bkshading-provision-sbc.sh run into a temp root, with a
+# fake systemctl / findmnt / mount, a fake ELF relay binary, the board's netplan files and a fake
+# /sys/class/net (shared by the provisioning and the WiFi takeover tests)
+# ---------------------------------------------------------------------------------------------
+SCRIPT = os.path.join(REPO, "scripts", "bkshading-provision-sbc.sh")
+UNIT_NAME = "bkshading-relay.service"
+
+
+def _fake_elf(path, e_machine):
+    """Write a minimal 20-byte ELF header with the given e_machine (little-endian)."""
+    hdr = b"\x7fELF\x02\x01\x01" + b"\x00" * 9  # ident (16 bytes)
+    hdr += struct.pack("<H", 2)  # e_type = ET_EXEC (offset 16-17)
+    hdr += struct.pack("<H", e_machine)  # e_machine (offset 18-19)
+    with open(path, "wb") as f:
+        f.write(hdr)
+    os.chmod(path, 0o755)
+
+
+AARCH64 = 183
+X86_64 = 62
+
+
+def _fake_systemctl(record_path, fail_on=None, disabled_units=()):
+    d = tempfile.mkdtemp()
+    p = os.path.join(d, "systemctl")
+    fail = ('if [ "$1" = "%s" ]; then exit 1; fi\n' % fail_on) if fail_on else ""
+    # issue 808 WiFi rows: a unit listed here answers is-enabled with "disabled".
+    disabled = "".join(
+        'if [ "$1" = "is-enabled" ] && [ "$2" = "%s" ]; then echo disabled; exit 1; fi\n' % u
+        for u in disabled_units
+    )
+    # issue 808 --check masked rows: a unit this fake masked earlier answers like a real masked
+    # unit ("masked", exit 1)
+    masked = ('if [ "$1" = "is-enabled" ] && grep -qxF "mask $2" "%s"; then echo masked; exit 1; fi\n'
+              % record_path)
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(
+            "#!/usr/bin/env bash\n"
+            'printf "%%s\\n" "$*" >> "%s"\n' % record_path
+            + disabled
+            + masked
+            + 'if [ "$1" = "is-enabled" ]; then echo enabled; fi\n'
+            + fail
+        )
+    os.chmod(p, 0o755)
+    return p
+
+
+# ---------------------------------------------------------------------------------------------
+# issue 808 WiFi roam + heal fixtures (design 5972548198): the board's netplan files (the board-tool
+# stubs are in bkshading_sbc_fakes_808.py)
+# ---------------------------------------------------------------------------------------------
+WIFI_SSID = "newlevel.media"
+# A passphrase with every awkward character for a shell or a YAML reader: a double quote, a dollar,
+# a space, a backslash and a single quote. It must survive the migration bit-exact and never leak.
+WIFI_PASS = "p\"a$s s\\w0rd'x"
+NETPLAN_ETH = (
+    "network:\n  version: 2\n  renderer: networkd\n  ethernets:\n    all-eth-interfaces:\n"
+    '      match:\n        name: "e*"\n      dhcp4: yes\n      dhcp6: yes\n'
+)
+NETPLAN_USB0 = "network:\n  version: 2\n  ethernets:\n    usb0:\n      addresses: [10.55.0.2/24]\n"
+WIFI_YAML_NAME = "30-wifis-dhcp.yaml"
+
+
+def _wifi_yaml(ssid=WIFI_SSID, password=WIFI_PASS, country="SK"):
+    """The Armbian preset shape (live handheld-1). JSON strings are valid YAML double-quoted scalars,
+    so the awkward passphrase is encoded the way a careful writer encodes it."""
+    return (
+        "network:\n  version: 2\n  renderer: networkd\n  wifis:\n    wlan0:\n"
+        "      dhcp4: yes\n      dhcp6: yes\n      regulatory-domain: %s\n"
+        "      access-points:\n        %s:\n          password: %s\n"
+        % (country, json.dumps(ssid), json.dumps(password))
+    )
+
+
+def _armbian_netplan():
+    return {"10-dhcp-all-interfaces.yaml": NETPLAN_ETH, WIFI_YAML_NAME: _wifi_yaml(),
+            "40-usb0.yaml": NETPLAN_USB0}
+
+
+def _make_net_sysfs(base, ifaces):
+    """Build a fake /sys/class/net tree. `ifaces` maps iface name -> either an operstate string, or a
+    dict {"operstate": <str>, "carrier": <str>} to also write a `carrier` file. Returns the root path
+    (injected via BKSHADING_SBC_NET_SYSFS) so the WiFi-link check reads a controlled tree instead of
+    the CI runner's real interfaces."""
+    root = os.path.join(base, "net-sysfs")
+    os.makedirs(root, exist_ok=True)
+    for name, state in ifaces.items():
+        d = os.path.join(root, name)
+        os.makedirs(d, exist_ok=True)
+        if isinstance(state, dict):
+            operstate = state["operstate"]
+            carrier = state.get("carrier")
+        else:
+            operstate, carrier = state, None
+        with open(os.path.join(d, "operstate"), "w") as f:
+            f.write(operstate + "\n")
+        if carrier is not None:
+            with open(os.path.join(d, "carrier"), "w") as f:
+                f.write(carrier + "\n")
+    return root
+
+
+ROOT_UUID = "7c1e2c5a-0000-4b6c-9a1d-123456789abc"
+# The live handheld-1 shape (Armbian community trixie, one partition mmcblk0p1): an rw root + a /tmp
+# tmpfs. A Raspberry Pi OS board would add its own /boot/firmware line, which the ro fstab keeps.
+ARMBIAN_FSTAB = (
+    "UUID=%s / ext4 defaults,noatime,commit=120,errors=remount-ro 0 1\n"
+    "tmpfs /tmp tmpfs defaults,nosuid 0 0\n" % ROOT_UUID
+)
+RW_OPTS = "rw,noatime,commit=120,errors=remount-ro"
+RO_OPTS = "ro,noatime,commit=120,errors=remount-ro"
+
+
+def _fake_findmnt(dirpath):
+    """A findmnt answering the three root reads the provision makes, from env (FAKE_ROOT_*)."""
+    p = os.path.join(dirpath, "findmnt")
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(
+            "#!/usr/bin/env bash\n"
+            'case "$*" in\n'
+            '  *OPTIONS*) printf "%s\\n" "${FAKE_ROOT_OPTS-}" ;;\n'
+            '  *UUID*) printf "%s\\n" "${FAKE_ROOT_UUID-}" ;;\n'
+            '  *FSTYPE*) printf "%s\\n" "${FAKE_ROOT_FSTYPE-}" ;;\n'
+            "esac\n"
+        )
+    os.chmod(p, 0o755)
+    return p
+
+
+def _fake_mount(dirpath, record_path):
+    p = os.path.join(dirpath, "mount")
+    with open(p, "w", encoding="utf-8") as f:
+        f.write('#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s"\n' % record_path)
+    os.chmod(p, 0o755)
+    return p
+
+
+def _sbc_paths(root):
+    return {
+        "fstab": os.path.join(root, "etc", "fstab"),
+        "journald": os.path.join(root, "etc", "systemd", "journald.conf.d"),
+        "mount_log": os.path.join(root, "mount-calls.log"),
+        "cambox_marker": os.path.join(root, "usr", "local", "bin", "camera-box"),
+        "netplan": os.path.join(root, "etc", "netplan"),
+        "wpa_conf": os.path.join(root, "etc", "wpa_supplicant", "wpa_supplicant-wlan0.conf"),
+        "networkd": os.path.join(root, "etc", "systemd", "network"),
+        "heal_dir": os.path.join(root, "usr", "local", "lib", "bkshading"),
+        "unit_dir": os.path.join(root, "systemd-system"),
+        "tool_log": os.path.join(root, "tool-calls.log"),
+        "net_state": os.path.join(root, "fake-net.json"),
+    }
+
+
+def _run_provision(mode, root, bin_machine=AARCH64, make_bin=True, net_ifaces=None,
+                   root_opts=None, root_uuid=ROOT_UUID, fstab_text=ARMBIAN_FSTAB,
+                   persistent_dropin=True, cambox=False, systemctl_fail_on=None,
+                   netplan_files=None, net_state=None, disabled_units=(), netplan_other=None,
+                   env_extra=None):
+    sysd = os.path.join(root, "systemd-system")
+    binp = os.path.join(root, "bin", "bkshading-relay")
+    calls = os.path.join(root, "systemctl-calls.log")
+    sc = _fake_systemctl(calls, fail_on=systemctl_fail_on, disabled_units=disabled_units)
+    paths = _sbc_paths(root)
+    # issue 808 WiFi: the board's own netplan files, seeded once (a re-run keeps whatever an
+    # earlier --install moved aside); default = the live handheld-1 set incl. the WiFi preset.
+    if not os.path.isdir(paths["netplan"]):
+        os.makedirs(paths["netplan"])
+        for name, text in (_armbian_netplan() if netplan_files is None else netplan_files).items():
+            with open(os.path.join(paths["netplan"], name), "w", encoding="utf-8") as f:
+                f.write(text)
+    with open(paths["net_state"], "w", encoding="utf-8") as f:
+        json.dump(_net_state() if net_state is None else net_state, f)
+    stubs = _write_tool_stubs(os.path.join(root, "fake-board-tools"))
+    # netplan also reads /run/netplan and /lib/netplan: point those at temp dirs (never the test
+    # machine's own netplan), optionally seeded with YAML files.
+    other_dirs = [os.path.join(root, "run-netplan"), os.path.join(root, "lib-netplan")]
+    for d, files in zip(other_dirs, netplan_other or ({}, {})):
+        if files and not os.path.isdir(d):
+            os.makedirs(d)
+            for name, text in files.items():
+                with open(os.path.join(d, name), "w", encoding="utf-8") as f:
+                    f.write(text)
+    if make_bin:
+        os.makedirs(os.path.dirname(binp), exist_ok=True)
+        _fake_elf(binp, bin_machine)
+    if net_ifaces is None:
+        # default: a joined wireless handheld (wl* operstate=up) so --check is deterministic and
+        # green regardless of the CI runner's real interfaces.
+        net_ifaces = {"wlan0": "up", "eth0": "up"}
+    net_root = _make_net_sysfs(root, net_ifaces)
+    if root_opts is None:
+        # an --install normally runs on the still-rw board; a --check after the reboot sees ro.
+        root_opts = RW_OPTS if mode == "--install" else RO_OPTS
+    # Seed the board's own files once (a re-run keeps whatever the first --install wrote).
+    if not os.path.exists(paths["fstab"]):
+        os.makedirs(os.path.dirname(paths["fstab"]), exist_ok=True)
+        with open(paths["fstab"], "w", encoding="utf-8") as f:
+            f.write(fstab_text)
+    os.makedirs(paths["journald"], exist_ok=True)
+    if persistent_dropin and not os.path.exists(os.path.join(root, ".seeded-journald")):
+        with open(os.path.join(paths["journald"], "10-persistent.conf"), "w") as f:
+            f.write("[Journal]\nStorage=persistent\n")
+        open(os.path.join(root, ".seeded-journald"), "w").close()
+    if cambox:
+        os.makedirs(os.path.dirname(paths["cambox_marker"]), exist_ok=True)
+        _fake_elf(paths["cambox_marker"], X86_64)
+    tools = os.path.join(root, "fake-tools")
+    os.makedirs(tools, exist_ok=True)
+    env = dict(
+        os.environ,
+        BKSHADING_SBC_UNIT_DEST=os.path.join(sysd, UNIT_NAME),
+        BKSHADING_SBC_BIN=binp,
+        BKSHADING_SBC_GPHOTO2="true",  # exists -> command -v succeeds, apt skipped
+        BKSHADING_SBC_SYSTEMCTL=sc,
+        BKSHADING_SBC_NET_SYSFS=net_root,
+        BKSHADING_SBC_FSTAB=paths["fstab"],
+        BKSHADING_SBC_JOURNALD_DIR=paths["journald"],
+        BKSHADING_SBC_FINDMNT=_fake_findmnt(tools),
+        BKSHADING_SBC_MOUNT=_fake_mount(tools, paths["mount_log"]),
+        BKSHADING_SBC_CAMBOX_MARKER=paths["cambox_marker"],
+        BKSHADING_SBC_NETPLAN_DIR=paths["netplan"],
+        BKSHADING_SBC_WPA_CONF_DIR=os.path.dirname(paths["wpa_conf"]),
+        BKSHADING_SBC_NETWORKD_DIR=paths["networkd"],
+        BKSHADING_SBC_HEAL_DIR=paths["heal_dir"],
+        BKSHADING_SBC_PYTHON=sys.executable,
+        BKSHADING_SBC_WPA_PASSPHRASE=stubs["wpa_passphrase"],
+        BKSHADING_SBC_WPA_CLI=stubs["wpa_cli"],
+        BKSHADING_SBC_IP=stubs["ip"],
+        BKSHADING_SBC_PING=stubs["ping"],
+        FAKE_TOOL_LOG=paths["tool_log"],
+        FAKE_NET_STATE=paths["net_state"],
+        BKSHADING_SBC_NETPLAN_OTHER_DIRS=" ".join(other_dirs),
+        FAKE_ROOT_OPTS=root_opts,
+        FAKE_ROOT_UUID=root_uuid,
+        FAKE_ROOT_FSTYPE="ext4",
+    )
+    env.update(env_extra or {})
+    r = subprocess.run(["bash", SCRIPT, mode], capture_output=True, text=True, env=env)
+    return r, calls, binp

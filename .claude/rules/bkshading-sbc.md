@@ -7,6 +7,7 @@ paths:
   - "scripts/lib/bkshading-deploy-runtime.sh"
   - "tests/python/test_bkshading_sbc_provision_808.py"
   - "tests/python/test_bkshading_wifi_heal_808.py"
+  - "tests/python/test_bkshading_sbc_wifi_takeover_808.py"
   - "tests/python/bkshading_sbc_fakes_808.py"
   - "tests/python/test_ro_root_808.py"
   - "scripts/bkshading-wifi-heal.sh"
@@ -276,10 +277,12 @@ the relay/cloudflared provisioning canon but with two deliberate deltas + one go
   `bssid 0 00:00:00:00:00:00`** (`bssid 0 any` returns FAIL and leaves the lock). A locked network
   keeps the board on that one AP, and the heal cannot undo a lock it did not set.
 - **Testing the heal:** `tests/python/test_bkshading_wifi_heal_808.py` runs the REAL script with
-  PATH = a stub dir only, so a missing stub never reaches the machine's real `wpa_cli`. The stubs
-  and the heal harness live in `tests/python/bkshading_sbc_fakes_808.py`, shared with the
-  provisioning tests (`test_bkshading_sbc_provision_808.py`, which were one ~2900-line file before
-  the heal tests moved out):
+  PATH = a stub dir only, so a missing stub never reaches the machine's real `wpa_cli`. The stubs,
+  the heal harness and the provision harness (`_run_provision`) live in
+  `tests/python/bkshading_sbc_fakes_808.py`, shared with `test_bkshading_sbc_provision_808.py`
+  (relay, read-only root, deploy, CI) and `test_bkshading_sbc_wifi_takeover_808.py` (netplan
+  migration, supplicant conf, WiFi `--check` rows). The three were one ~2900-line file before the
+  issue-808 heal review split them:
   - python stubs for `wpa_cli`/`ip`/`ping`/`systemctl` answer from a JSON state that
     `reassociate`/`restart` update: a delayed roam, a ping exit code, a hanging `wpa_cli`;
   - `systemctl` models the supplicant unit: `stop` sets it inactive (no wpa_cli answer),
