@@ -195,8 +195,9 @@ bkshading_sbc_journald_dropin_content() {
 # them (handheld-1 carried 10-persistent.conf = Storage=persistent, 3.10.2026).
 bkshading_sbc_stale_journald_dropins() { printf '%s\n' 10-persistent.conf; }
 
-# Units that would write to the root on an Armbian image, so --install masks them (masking a unit
-# an image does not ship is a harmless no-op):
+# Units that would write to the root on an Armbian image, so --install masks them and --check
+# requires `systemctl is-enabled` = masked for each. Masking a unit an image does not ship only
+# links it to /dev/null, and is-enabled then reads `masked` too (checked on systemd 255):
 # - armbian-ramlog keeps /var/log in a zram and syncs it back to /var/log.hdd on the root. On a
 #   read-only root /var/log is a tmpfs instead.
 # - systemd-networkd-persistent-storage (Debian trixie) runs `networkctl persistent-storage yes`,
@@ -232,8 +233,9 @@ bkshading_sbc_wpa_conf_name() { printf 'wpa_supplicant-%s.conf\n' "$(bkshading_s
 # The control socket dir: in /run (the root is read-only), and what the heal + --check wpa_cli use.
 bkshading_sbc_wpa_ctrl_dir() { printf '%s\n' /run/wpa_supplicant; }
 
-# key_mgmt + PMF as netplan generated them for this board (design: "as today").
-# No SAE (main ROZHODNUTÉ 5973115530 on the lane's Design-question 5972616531): SAE (WPA3) cannot
+# PMF (ieee80211w=1) as netplan generated it for this board (design: "as today"). key_mgmt
+# deliberately DIFFERS from netplan's: no SAE (main ROZHODNUTÉ 5973115530 on the lane's
+# Design-question 5972616531), only WPA-PSK + WPA-PSK-SHA256. SAE (WPA3) cannot
 # authenticate from the 64-hex psk= the takeover writes -- it needs the passphrase. wpa_supplicant
 # 2.10 keeps SAE among the candidate key_mgmt whenever the DRIVER supports SAE
 # (wpa_supplicant.c wpa_supplicant_set_suites), prefers it over WPA-PSK-SHA256/WPA-PSK, and then
@@ -393,17 +395,19 @@ bkshading_sbc_networkd_wifi_content() {
     "UseMTU=true"
 }
 
-# Debian's wpa_supplicant@.service has no Restart=, and the heal does nothing while wpa_state is
-# not COMPLETED (an unanswered supplicant reads exactly so), so a CRASHED supplicant would keep the
-# board off the WiFi until a reboot. This drop-in lets systemd restart it on a failure; a clean stop
-# (systemctl stop, the heal's own restart) is untouched. Path relative to the unit directory.
+# Debian's wpa_supplicant@.service has no Restart=. With this drop-in systemd restarts a CRASHED
+# supplicant 5 s after the crash. The heal's stuck rung would also get there: a stopped/failed unit
+# is started on the next pass (up to 20 s), and a hung one gets a driver reload after 3 passes
+# (about a minute). A clean stop (systemctl stop, the heal's own restart) is untouched by
+# Restart=on-failure. Path relative to the unit directory.
 bkshading_sbc_wpa_restart_dropin_path() {
   printf '%s.d/bkshading-restart.conf\n' "$(bkshading_sbc_wpa_unit)"
 }
 bkshading_sbc_wpa_restart_dropin_content() {
   printf '%s\n' \
     "# Written by scripts/bkshading-provision-sbc.sh --install (issue 808): a crashed supplicant" \
-    "# comes back by itself; the WiFi heal only acts on a COMPLETED link." \
+    "# comes back by itself within 5 s; the WiFi heal starts a stopped one and reloads the driver" \
+    "# under a hung one, which takes longer." \
     "[Service]" \
     "Restart=on-failure" \
     "RestartSec=5"
@@ -415,8 +419,11 @@ bkshading_sbc_wpa_restart_dropin_content() {
 # manual `wpa_cli reassociate` brought the traffic back at once. bkshading-wifi-heal.timer runs
 # scripts/bkshading-wifi-heal.sh every interval: it pings the DHCP default gateway on wlan0 and,
 # after N consecutive misses, reassociates; after another N it restarts wpa_supplicant@wlan0. No
-# reboot, no ifdown loop, and nothing while wpa_state is not COMPLETED (the supplicant itself is
-# still working then). Its state is one counter in /run (tmpfs, the root is read-only).
+# reboot, no ifdown loop. These reachability rungs do nothing while wpa_state is not COMPLETED (the
+# supplicant itself is still working then); the stuck rung below is the one exception (a driver
+# that refuses every association, a stopped or hung supplicant). Its state lives in /run (tmpfs,
+# the root is read-only): the miss and stuck counts, the last action, the journal cursor and the
+# remembered driver module.
 
 # How often the timer fires one heal pass. The timer's OnUnitActiveSec carries the same value
 # (a test pins the two equal).
@@ -472,8 +479,9 @@ bkshading_sbc_wifi_heal_units() { printf '%s\n' bkshading-wifi-heal.service bksh
 # The count starts over on a not-COMPLETED pass on purpose: each NEW association gets its full N
 # passes (about 60 s) for DHCP before it is judged. The cost: a board that is caught mid-transition
 # after every reassociate never reaches the restart tier. A reassociation to a dead AP reads
-# COMPLETED again within one 20 s pass, so the restart still comes in practice, and a supplicant
-# that keeps failing to associate is the supplicant working (and restarted by systemd if it dies).
+# COMPLETED again within one 20 s pass, so the restart still comes in practice. A supplicant that
+# keeps failing to associate is the supplicant working, unless the DRIVER refuses the associations
+# or the supplicant stopped or hung: those are the stuck rung's (bkshading_sbc_wifi_heal_stuck_decide).
 bkshading_sbc_wifi_heal_decide() {
   local prev="${1:-0}" state="${2:-}" reachable="${3:-}" limit misses
   limit="$(bkshading_sbc_wifi_heal_miss_limit)"

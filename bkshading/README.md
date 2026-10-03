@@ -190,7 +190,9 @@ params-only block — a handheld has no NDI feed). This milestone provisions the
   roams and heals** (`wpa_supplicant@wlan0` enabled, the `bgscan` line in its conf, the heal
   installed with its timer enabled, and the DHCP gateway answers a ping — a FAIL names the BSSID and
   the signal; all four skipped on a wired box) + **the root filesystem is read-only** (an rw root
-  FAILs with "reboot after --install").
+  FAILs with "reboot after --install") + **the root writers are masked** (`armbian-ramlog`,
+  `systemd-networkd-persistent-storage`, `fake-hwclock-save` and its timer; graded on every SBC,
+  wired or WiFi).
 - **The handheld's WiFi roams to the strongest AP and heals itself (issue 808, design
   5972548198).** netplan has no background-scan setting and nothing checks that an associated link
   carries traffic, so after a reboot handheld-1 sat on a far AP with no traffic. On a board with a
@@ -201,12 +203,23 @@ params-only block — a handheld has no NDI feed). This milestone provisions the
   settings netplan generated plus a `Restart=on-failure` drop-in for `wpa_supplicant@wlan0`,
   enables `systemd-networkd`, `wpa_supplicant@wlan0` and the heal timer, and only then moves that
   YAML aside once as `.bak`. `bkshading-wifi-heal.timer` (every 20 s) pings the DHCP gateway: after
-  3 misses it runs `wpa_cli reassociate`, after 6 it restarts `wpa_supplicant@wlan0`, never while
-  the supplicant is still connecting and never on a pass it could not measure (a missing tool is
-  named, not counted), with one journal line per action naming the BSSID and signal before and
-  after the new association. A re-run keeps the conf. Refused before anything changes: a board with
-  neither a netplan WiFi YAML nor that conf, a netplan WiFi that differs from an existing conf, a
-  YAML the migration cannot carry whole, or no `wpa_cli`/`ip`/`ping`.
+  3 misses it runs `wpa_cli reassociate`, after 6 it restarts `wpa_supplicant@wlan0`. It never
+  acts on a pass it could not measure (a missing tool is named, not counted). Each action writes
+  one journal line naming the BSSID and signal before and after the new association. While the
+  supplicant is still connecting (not COMPLETED) these steps wait, with one exception, the
+  **stuck rung**:
+  - a stopped supplicant unit is started at once, with no driver reload;
+  - after 3 passes in which the WiFi driver refused associations or a running supplicant did not
+    answer, the heal stops the supplicant, does a **driver reload** (the module behind `wlan0`,
+    `sprdwl_ng` on the Orange Pi Zero 2W) and starts it again. A refusal is the supplicant journal
+    line `Association request to the driver failed`, each line counted once. Live on handheld-1
+    the uwe5622 driver wedged this way, and only a module reload revived it.
+
+  Plain scanning out of range never triggers it.
+
+  A re-run keeps the conf. Refused before anything changes: a board with neither a netplan WiFi
+  YAML nor that conf, a netplan WiFi that differs from an existing conf, a YAML the migration
+  cannot carry whole, or no `wpa_cli`/`ip`/`ping`.
 - **Read-only root, the same as the camboxes (issue 808, owner ruling 5948648089).** The handheld
   is unplugged after each use, and a power cut mid-write can corrupt its microSD root. So
   `--install` also writes the read-only fstab from the ONE shared canon `scripts/lib/ro-root.sh`

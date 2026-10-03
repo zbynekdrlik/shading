@@ -66,7 +66,10 @@ the relay/cloudflared provisioning canon but with two deliberate deltas + one go
   - on a root that is already ro (a re-run), remounts rw for its own writes and back;
   - reads the root first (an unreadable root refuses untouched) and refuses on a cambox
     (`/usr/local/bin/camera-box` present), whose root is `setup-device.sh`'s.
-  `--check` grades the root: `ro` = OK, `rw` = FAIL "reboot after --install".
+  `--check` grades the root: `ro` = OK, `rw` = FAIL "reboot after --install". It also grades each
+  unit of `bkshading_sbc_masked_units`: `systemctl is-enabled` must print `masked` (a real masked
+  unit exits 1 with that word; a unit the image does not ship reads `masked` once `mask` linked it
+  to /dev/null), else FAIL "re-run --install". Both rows apply to every SBC, wired or WiFi.
 - **ONE read-only canon for the provisioning scripts: `scripts/lib/ro-root.sh`.** `setup-device.sh`
   STEP 18 writes its root line and every tmpfs line through it, per line, because the cambox fstab
   also carries the EFI line and the issue-1309 journal-partition line between `/var/log` and
@@ -137,8 +140,9 @@ the relay/cloudflared provisioning canon but with two deliberate deltas + one go
   - Writes `/etc/systemd/network/05-bkshading-wlan0.network` with the settings netplan generated
     (`05-` sorts before every `10-netplan-*` file; `DHCP=yes` for dhcp4 + dhcp6, `ipv4` for dhcp4
     alone — never a DHCPv6 the YAML did not ask for) and a `wpa_supplicant@wlan0.service.d/
-    bkshading-restart.conf` drop-in (`Restart=on-failure`: Debian's unit has no `Restart=`, and the
-    heal never acts on a supplicant that does not answer).
+    bkshading-restart.conf` drop-in (`Restart=on-failure`: Debian's unit has no `Restart=`; systemd
+    brings a CRASHED supplicant back in 5 s, faster than the heal's stuck rung, which starts a
+    stopped one on its next pass and reloads the driver under a hung one).
   - Installs the heal (`scripts/bkshading-wifi-heal.sh` + its two libs, mirroring the repo layout
     under `/usr/local/lib/bkshading/`, and `systemd/bkshading-wifi-heal.{service,timer}`), enables
     `systemd-networkd` + `wpa_supplicant@wlan0` + the timer, starts nothing — and only THEN moves the
@@ -162,7 +166,8 @@ the relay/cloudflared provisioning canon but with two deliberate deltas + one go
   wlan0` (never a hard-coded address) with `-I wlan0`; a pass misses only when all 3 pings are lost.
   The pure `bkshading_sbc_wifi_heal_decide` table: not COMPLETED → none + count reset (the
   supplicant is working; each new association gets its full ~60 s for DHCP — the trade-off is
-  written at the function); 3 misses → `wpa_cli reassociate`; 6 → `systemctl restart
+  written at the function; the STUCK rung below is the one exception to "not COMPLETED = wait");
+  3 misses → `wpa_cli reassociate`; 6 → `systemctl restart
   wpa_supplicant@wlan0` + count reset. COMPLETED with no DHCP route counts as a miss (its own
   line, never "did not answer pings"). The count lives in `/run/bkshading-wifi-heal/misses`; a
   damaged count reads as 0 (decimal, never octal).
@@ -206,24 +211,76 @@ the relay/cloudflared provisioning canon but with two deliberate deltas + one go
   uwe5622 driver answered every connect with `Association request to the driver failed`, so
   wpa_state never reached COMPLETED and the reachability rungs (which wait while the supplicant is
   "working") never acted. A supplicant restart and a link down/up did NOT help; `modprobe -r
-  sprdwl_ng && modprobe sprdwl_ng` did (COMPLETED in 6 s). So a pass is stuck when wpa_state is not
-  COMPLETED and the supplicant journal shows a driver-refused association since the last pass, or
-  the supplicant does not answer wpa_cli (hung). After 3 stuck passes (~60 s) the heal stops
-  `wpa_supplicant@wlan0`, reloads the module found at `/sys/class/net/wlan0/device/driver/module`
-  and starts the supplicant (a built-in driver or no modprobe: the supplicant restart alone).
-  Plain scanning out of range is never stuck. The pure `bkshading_sbc_wifi_heal_stuck_decide`
-  decides; the script counts journal lines and resolves the module link with bash builtins only
-  (the tests run it with PATH = the stub dir). `TimeoutStartSec=150` covers the whole reload path:
-  a pass killed between stop and start would leave the supplicant down until the next reload.
-  Live check: `systemctl stop wpa_supplicant@wlan0` and watch the heal reload within ~60 s.
+  sprdwl_ng && modprobe sprdwl_ng` did (COMPLETED in 6 s). The pure
+  `bkshading_sbc_wifi_heal_stuck_decide` decides each pass (fresh-context review round, 3.10.2026):
+  - **A supplicant that does not answer (`?`) is told apart by its unit.** The heal reads
+    `systemctl is-active wpa_supplicant@wlan0` only then. `inactive`/`failed` = STOPPED: it is
+    started on that pass, no driver reload, no stuck pass (the supervisor's live
+    `systemctl stop` first read as hung and cost a reload). Any other word, an unreadable one
+    included, = running but silent = HUNG = a stuck pass.
+  - **A stuck pass** = not COMPLETED and either a driver-refused association in the supplicant
+    journal since the last pass, or a hung supplicant. Plain scanning out of range is never stuck.
+  - **Each journal line counts once.** The read follows `journalctl --cursor-file=/run/
+    bkshading-wifi-heal/journal-cursor`; `--since -25s` only when there is no cursor yet (the old
+    `--since` on every 20 s pass counted each refusal twice). A COMPLETED pass drops the cursor, so a
+    later drop never reads an hour of a working stretch. A failed read counts 0 and drops the
+    cursor; journalctl exits 1 on a cursor it cannot seek (live on dev1), and a kept bad cursor
+    would blind the count forever. Right after the reload's `systemctl stop` the cursor moves to
+    the end (`-n 1`): the old supplicant refuses until the stop returns, and none of that counts
+    against the reloaded driver.
+  - **After 3 stuck passes** (~60 s) the heal stops the supplicant and runs the pure
+    `bkshading_sbc_wifi_heal_driver_plan`, then starts the supplicant:
+    - `reload` (`modprobe -r` + load) while wlan0 is there;
+    - `load` alone when wlan0 is gone;
+    - no reload for no-modprobe / a built-in driver / an unknown module.
+  - **The module name is remembered in `/run/bkshading-wifi-heal/driver-module`** whenever
+    `/sys/class/net/wlan0/device/driver/module` resolves (every pass, bash `cd` + `pwd -P`). Without
+    it, a reload whose load failed (wlan0 and its link gone) would read "a built-in driver" on every
+    later pass until a reboot. A stopped supplicant with wlan0 gone gets the remembered module
+    loaded before its start. Both names must pass `bkshading_sbc_wifi_heal_module_name_ok`.
+  - **A TERM/INT/EXIT trap is armed only from the supplicant stop to its start.** A pass ended
+    there loads the module, waits for wlan0 and starts the supplicant before it exits 143/130. The
+    trap runs a no-op handler for further signals, never SIG_IGN: an ignored TERM is inherited, so
+    `timeout` could no longer kill the children it starts.
+  - **Every step is bounded** by named lib constants: wpa_cli/journalctl/is-active 3 s,
+    systemctl/modprobe 20 s, the wlan0 wait 15 s, the after-read 23 s. The longest pass, a reload,
+    is 133 s under `TimeoutStartSec=150`; the trap's 55 s fits `TimeoutStopSec=90`. A test computes
+    both from the constants and pins the unit comment's figures.
+  - **Live module facts, handheld-1 (read by the supervisor, 3.10.2026):**
+    - `readlink -f /sys/class/net/wlan0/device/driver/module` = `/sys/module/sprdwl_ng`;
+    - the driver is `/sys/bus/platform/drivers/unisoc_wifi`;
+    - `sprdwl_ng` has refcount 0 with the supplicant stopped, so `modprobe -r` succeeds;
+    - `uwe5622_bsp_sdio` is the in-use bus module, NOT what the link resolves to: never reload it;
+    - the live reload via the heal logged `reload the WiFi driver sprdwl_ng ... result=ok`.
+  - **Live checks:**
+    - stopped: `systemctl stop wpa_supplicant@wlan0` → the next pass logs
+      `start wpa_supplicant@wlan0.service on wlan0 (it was inactive; no driver reload)`;
+    - hung: `systemctl kill -s STOP wpa_supplicant@wlan0` (the unit stays active, wpa_cli times
+      out) → 3 stuck passes, then the reload (systemd's stop sends SIGCONT after SIGTERM, so the
+      frozen process ends).
 - **Do not force a BSSID with `wpa_cli bssid 0 <mac>` to test roaming unless you clear it with
   `bssid 0 00:00:00:00:00:00`** (`bssid 0 any` returns FAIL and leaves the lock). A locked network
   keeps the board on that one AP, and the heal cannot undo a lock it did not set.
-- **Testing the heal:** the test runs the REAL script with PATH = a stub dir only (python stubs for
-  `wpa_cli`/`ip`/`ping`/`systemctl` answering from a JSON state that `reassociate`/`restart`
-  update — incl. a delayed roam, a ping exit code and a hanging `wpa_cli` — plus symlinks to
-  `dirname`/`mkdir`/`mv`/`rm`/`sleep`/`timeout`), so a missing stub never reaches the machine's real
-  `wpa_cli`. The `wpa_passphrase` stub runs the real binary where it exists (dev1) and emulates it
+- **Testing the heal:** the test runs the REAL script with PATH = a stub dir only, so a missing stub
+  never reaches the machine's real `wpa_cli`:
+  - python stubs for `wpa_cli`/`ip`/`ping`/`systemctl` answer from a JSON state that
+    `reassociate`/`restart` update: a delayed roam, a ping exit code, a hanging `wpa_cli`;
+  - `systemctl` models the supplicant unit: `stop` sets it inactive (no wpa_cli answer), `start`
+    refuses while the fake wlan0 is missing (the unit Requires= the device), `is-active` answers;
+  - the `journalctl` stub serves lines ONLY for the exact calls the heal must make (a `--since`
+    read without a cursor, a cursor read, a `-n 1` cursor-to-end), and mixes ordinary supplicant
+    lines into the output. It also fails a cursor it cannot seek like the real journalctl;
+  - the `modprobe` stub moves `<fake sysfs>/wlan0` aside on `-r` and brings it back from a
+    detached process `iface_delay_s` after a load (`modprobe_rc` / `modprobe_load_rc` fail it), so
+    the wait for wlan0 is exercised;
+  - `BKSHADING_WIFI_HEAL_SYSFS_NET` points the script at that fake `/sys/class/net`, where
+    `wlan0/device/driver/module` links to a dir named after the module;
+  - symlinks to `dirname`/`mkdir`/`mv`/`rm`/`sleep`/`timeout` complete the stub dir.
+
+  The trap test lets the modprobe stub SIGTERM the heal's bash (its grandparent, through
+  `timeout`, found in `/proc/<ppid>/stat`) right after `modprobe -r`.
+
+  The `wpa_passphrase` stub runs the real binary where it exists (dev1) and emulates it
   exactly elsewhere (the CI runner has none); the PSK assertion uses `hashlib.pbkdf2_hmac`
   independently, so both paths are checked against the 802.11i definition. The provision harness
   points `BKSHADING_SBC_NETPLAN_OTHER_DIRS` at temp dirs, never the test machine's own netplan.
@@ -269,7 +326,8 @@ The code lane ships the provisioning + `--check`; these live-hardware steps are 
    - `wpa_cli -i wlan0 status` = COMPLETED on the strong AP; `--check` is all OK (the gateway row
      names the BSSID + signal); `systemctl --failed` is empty;
    - **forced bad AP:** `wpa_cli -i wlan0 bssid 0 <far-bssid>` + `wpa_cli -i wlan0 reassociate` →
-     the board sits on the far AP (about -73 dBm). Then `wpa_cli -i wlan0 bssid 0 any`: within about
+     the board sits on the far AP (about -73 dBm). Then clear the lock with
+     `wpa_cli -i wlan0 bssid 0 00:00:00:00:00:00` (`bssid 0 any` FAILs and keeps it): within about
      30-60 s bgscan (30 s scans below -65 dBm) roams back to the strong AP —
      `journalctl -u wpa_supplicant@wlan0` shows the new `CTRL-EVENT-CONNECTED`, `wpa_cli status`
      the strong BSSID;

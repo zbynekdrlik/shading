@@ -8,17 +8,27 @@ set -euo pipefail
 # wpa_state=COMPLETED and a DHCP lease, and no traffic passed; nothing in wpa_supplicant or
 # systemd-networkd checks that a COMPLETED link carries traffic. A manual `wpa_cli reassociate`
 # brought it back at once. This pass, run by bkshading-wifi-heal.timer every 20 s:
-#   1. reads wpa_state; while it is not COMPLETED it does nothing (the supplicant is working);
+#   1. reads wpa_state; while it is not COMPLETED the reachability rungs (steps 2-4) do nothing
+#      (the supplicant is working) -- the stuck rung (step 5) is the one exception;
 #   2. reads the DHCP default gateway of wlan0 from the route table (never a hard-coded address)
 #      and pings it over wlan0;
 #   3. keeps the consecutive-miss count in /run (tmpfs: the root is read-only) and lets the pure
 #      bkshading_sbc_wifi_heal_decide choose none / reassociate (N misses) / restart (2N misses);
 #   4. writes ONE journal line per action naming the BSSID + signal before and after;
-#   5. the STUCK rung: a pass whose wpa_state is not COMPLETED and whose supplicant journal shows a
-#      driver-refused association since the last pass (or whose supplicant does not answer) is a
-#      stuck pass; after 3 in a row it stops the supplicant, reloads the WiFi driver module and
-#      starts the supplicant again (live 3.10.2026: the uwe5622 driver refused every association,
-#      only a sprdwl_ng reload revived it). Plain scanning out of range is never stuck.
+#   5. the STUCK rung, decided by the pure bkshading_sbc_wifi_heal_stuck_decide:
+#      - a supplicant that does not answer while its unit is STOPPED (inactive / failed) is started
+#        at once, no driver reload;
+#      - a pass whose wpa_state is not COMPLETED and whose supplicant journal shows a
+#        driver-refused association since the last pass (read through a journal cursor in /run,
+#        so each line counts once), or whose supplicant does not answer while its unit runs (hung),
+#        is a stuck pass. After 3 in a row it stops the supplicant, reloads the WiFi driver module
+#        and starts the supplicant again (live 3.10.2026: the uwe5622 driver refused every
+#        association, only a sprdwl_ng reload revived it);
+#      - the module name is remembered in /run, so a module unloaded by a reload whose load failed
+#        is still loaded again;
+#      - a trap armed only between the stop and the start loads the module and starts the
+#        supplicant if the pass is ended in between.
+#      Plain scanning out of range is never stuck.
 # No reboot, no ifdown loop. A first miss, and the first answer after misses or an action, are
 # logged once each. A pass that cannot judge the link (a tool missing, ip or ping failing for
 # another reason than a lost reply) changes nothing, says which tool, and exits 1, so the unit
@@ -26,12 +36,15 @@ set -euo pipefail
 #
 # Installed by scripts/bkshading-provision-sbc.sh --install to /usr/local/lib/bkshading/ (both libs
 # beside it in lib/), run by systemd/bkshading-wifi-heal.service. The tools come from PATH
-# (wpa_cli, ip, ping, systemctl, timeout; journalctl + modprobe are optional: without journalctl
-# the stuck rung sees only a supplicant that does not answer, without modprobe or with a built-in
-# driver it restarts the supplicant alone). For tests: BKSHADING_WIFI_HEAL_STATE_DIR (default
-# /run/bkshading-wifi-heal), BKSHADING_WIFI_HEAL_SETTLE_S, BKSHADING_WIFI_HEAL_TOOL_TIMEOUT_S,
-# BKSHADING_WIFI_HEAL_SYSFS_NET (default /sys/class/net, where the driver module link is read).
-# Exit 0 after a judged pass (also one that acted); 1 when it could not judge, or a restart failed.
+# (wpa_cli, ip, ping, systemctl, timeout, plus dirname/mkdir/mv/rm/sleep; everything else is a
+# bash builtin; journalctl + modprobe are optional: without journalctl the stuck rung sees only a
+# supplicant that does not answer, without modprobe or with a built-in driver it restarts the
+# supplicant alone). For tests: BKSHADING_WIFI_HEAL_STATE_DIR (default /run/bkshading-wifi-heal),
+# BKSHADING_WIFI_HEAL_SETTLE_S, BKSHADING_WIFI_HEAL_TOOL_TIMEOUT_S, BKSHADING_WIFI_HEAL_SYSFS_NET
+# (default /sys/class/net, where wlan0 and its driver module link are read).
+# Exit 0 after a judged pass (also one that acted); 1 when it could not judge, or an action failed
+# (result=FAILED); 143 / 130 when a SIGTERM / SIGINT ended a driver reload (after its trap loaded
+# the driver and started the supplicant).
 # ---------------------------------------------------------------------------------------------
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

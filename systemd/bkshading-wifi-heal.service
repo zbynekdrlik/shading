@@ -1,10 +1,12 @@
 [Unit]
 # One pass of the handheld SBC's WiFi heal (issue 808, design 5972548198): ping the DHCP default
 # gateway on wlan0; after 3 consecutive misses `wpa_cli reassociate`, after 3 more restart
-# wpa_supplicant@wlan0. Never acts while wpa_state is not COMPLETED; no reboot. Run every 20 s by
-# bkshading-wifi-heal.timer. Installed (enable-only, the timer) by
-# scripts/bkshading-provision-sbc.sh --install on a board with a wl* interface; a wired cambox
-# never gets it.
+# wpa_supplicant@wlan0. These reachability rungs never act while wpa_state is not COMPLETED (the
+# supplicant is working). The one exception is the stuck rung: a stopped supplicant is started at
+# once, and after 3 passes of driver-refused associations or a hung supplicant the WiFi driver
+# module is reloaded. No reboot. Run every 20 s by bkshading-wifi-heal.timer. Installed
+# (enable-only, the timer) by scripts/bkshading-provision-sbc.sh --install on a board with a wl*
+# interface; a wired cambox never gets it.
 Description=bkshading handheld WiFi heal - re-join when the gateway stops answering (issue 808)
 Documentation=https://github.com/zbynekdrlik/camera-box
 After=wpa_supplicant@wlan0.service
