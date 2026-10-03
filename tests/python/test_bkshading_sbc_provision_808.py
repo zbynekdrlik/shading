@@ -1818,6 +1818,135 @@ def test_heal_bounds_a_wedged_wpa_cli():
 
 
 # ---------------------------------------------------------------------------------------------
+# issue 808 WiFi review round 2
+# ---------------------------------------------------------------------------------------------
+def test_install_refuses_when_moving_the_yaml_would_unhide_a_same_name_file():
+    root = tempfile.mkdtemp()
+    try:
+        r, calls, _b = _run_provision(
+            "--install", root, netplan_other=({}, {WIFI_YAML_NAME: _wifi_yaml(password="lib-pass1")}))
+        assert r.returncode == 1, (r.stdout, r.stderr)
+        assert "un-hide" in r.stderr and "nothing changed" in r.stderr, r.stderr
+        assert "netplan runs no supplicant" not in r.stdout
+        assert os.path.exists(os.path.join(_sbc_paths(root)["netplan"], WIFI_YAML_NAME))
+        assert not os.path.exists(calls)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _reader_spy(root):
+    """A BKSHADING_SBC_PYTHON that runs the real reader and keeps a copy of everything it printed."""
+    p = os.path.join(root, "python-spy")
+    with open(p, "w", encoding="utf-8") as f:
+        f.write("#!%s\nimport subprocess, sys\n"
+                "r = subprocess.run([%r] + sys.argv[1:], stdout=subprocess.PIPE)\n"
+                "open(%r, 'ab').write(r.stdout)\n"
+                "sys.stdout.buffer.write(r.stdout)\nsys.exit(r.returncode)\n"
+                % (sys.executable, sys.executable, os.path.join(root, "reader-out.bin")))
+    os.chmod(p, 0o755)
+    return p, os.path.join(root, "reader-out.bin")
+
+
+def test_check_reads_netplan_without_loading_any_passphrase():
+    root = tempfile.mkdtemp()
+    try:
+        r, _c, _b = _run_provision("--install", root)
+        assert r.returncode == 0, (r.stdout, r.stderr)
+        np = _sbc_paths(root)["netplan"]
+        os.rename(os.path.join(np, WIFI_YAML_NAME + ".bak"), os.path.join(np, WIFI_YAML_NAME))
+        spy, out = _reader_spy(root)
+        c, _c2, _b2 = _run_provision("--check", root, env_extra={"BKSHADING_SBC_PYTHON": spy})
+        assert re.search(r"FAIL: netplan still defines wlan0", c.stderr), c.stderr
+        seen = open(out, "rb").read()
+        assert WIFI_YAML_NAME.encode() in seen, seen
+        assert WIFI_PASS.encode() not in seen and b"pass\0" not in seen, seen
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+    # the names-only reader mode, directly
+    d = _netplan_dir(_armbian_netplan())
+    try:
+        r = subprocess.run([sys.executable, NETPLAN_READER, "--names-only", d, "wlan0"],
+                           capture_output=True)
+        assert r.returncode == 0, r.stderr
+        assert r.stdout == b"file\0" + os.path.join(d, WIFI_YAML_NAME).encode() + b"\0", r.stdout
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_install_rerun_compares_the_wifi_identity_not_the_conf_text():
+    # a partial re-run must not turn into a "differs" refusal because a comment or a constant of
+    # the lib changed since the conf was written (the pending key_mgmt ruling, a reworded header)
+    root = tempfile.mkdtemp()
+    try:
+        r1, _c, _b = _run_provision("--install", root)
+        assert r1.returncode == 0, (r1.stdout, r1.stderr)
+        paths = _sbc_paths(root)
+        np = paths["netplan"]
+        os.rename(os.path.join(np, WIFI_YAML_NAME + ".bak"), os.path.join(np, WIFI_YAML_NAME))
+        conf = _read(paths["wpa_conf"]).replace(
+            "# Written by", "# (an older header)\n# Written by").replace(
+            "key_mgmt=WPA-PSK WPA-PSK-SHA256 SAE", "key_mgmt=WPA-PSK")
+        with open(paths["wpa_conf"], "w") as f:
+            f.write(conf)
+        r2, _c2, _b2 = _run_provision("--install", root)
+        assert r2.returncode == 0, (r2.stdout, r2.stderr)
+        assert _read(paths["wpa_conf"]) == conf, "a kept conf is never rewritten"
+        assert os.path.exists(os.path.join(np, WIFI_YAML_NAME + ".bak"))
+        # ... and --check names the drift from the lib's settings (non-secret lines only)
+        c, _c3, _b3 = _run_provision("--check", root)
+        assert c.returncode == 1, c.stdout
+        assert re.search(r"FAIL: .*wpa_supplicant-wlan0\.conf.*key_mgmt=WPA-PSK WPA-PSK-SHA256 SAE",
+                         c.stderr), c.stderr
+        assert _expected_psk() not in c.stdout + c.stderr
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_heal_waits_out_a_long_scan_before_reading_after():
+    # a full 2.4 + 5 GHz scan with passive DFS channels can take longer than 5 s; the supplicant
+    # stays COMPLETED on the old BSSID all that time
+    tmp = tempfile.mkdtemp()
+    try:
+        state = _net_state(reachable=False, bssid=FAR_BSSID, rssi=-73, reassociate_delay=7,
+                           on_reassociate_delayed={"bssid": GOOD_BSSID, "rssi": -63,
+                                                   "reachable": True})
+        env = _heal_env(tmp, state)
+        env["BKSHADING_WIFI_HEAL_SETTLE_S"] = "12"
+        for _ in range(3):
+            r = _heal_pass(env)
+            assert r.returncode == 0, (r.stdout, r.stderr)
+        assert re.search(r"after bssid=%s signal=-63 dBm" % re.escape(GOOD_BSSID), r.stdout), r.stdout
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_heal_names_a_supplicant_that_does_not_answer():
+    tmp = tempfile.mkdtemp()
+    try:
+        env = _heal_env(tmp, _net_state(wpa_state=None))
+        os.makedirs(env["BKSHADING_WIFI_HEAL_STATE_DIR"])
+        with open(os.path.join(env["BKSHADING_WIFI_HEAL_STATE_DIR"], "misses"), "w") as f:
+            f.write("2\n")
+        r = _heal_pass(env)
+        assert r.returncode == 0, (r.stdout, r.stderr)
+        assert "does not answer" in r.stdout and "is working" not in r.stdout, r.stdout
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_install_tool_refusal_names_the_remount_on_a_read_only_root():
+    root = tempfile.mkdtemp()
+    try:
+        r, _c, _b = _run_provision("--install", root, root_opts=RO_OPTS,
+                                   env_extra={"BKSHADING_SBC_PING": os.path.join(root, "no-ping")})
+        assert r.returncode == 1, (r.stdout, r.stderr)
+        assert "mount -o remount,rw /" in r.stderr and "apt-get install" in r.stderr, r.stderr
+        assert not os.path.exists(_sbc_paths(root)["mount_log"]), "the refusal itself remounts nothing"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------------------------
 # CI: the bkshading job cross-builds + uploads the aarch64 relay; no continue-on-error
 # ---------------------------------------------------------------------------------------------
 def test_ci_bkshading_job_cross_builds_aarch64_relay():
