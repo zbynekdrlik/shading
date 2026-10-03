@@ -460,11 +460,29 @@ if name == "journalctl":
             f.write("stub-cursor=%d\n" % (len(journal) - 1))
     sys.exit(0)
 if name == "modprobe":
+    # The WiFi driver module behind the fake /sys/class/net/wlan0: unloading it removes wlan0 (kept
+    # aside as .wlan0-unloaded with its device/driver/module links); loading it brings wlan0 back
+    # `iface_delay_s` later, from a detached process, as a real driver's probe does. `modprobe_rc`
+    # fails every call, `modprobe_load_rc` only the load.
+    net = os.environ["BKSHADING_WIFI_HEAL_SYSFS_NET"]
+    live, gone = os.path.join(net, "wlan0"), os.path.join(net, ".wlan0-unloaded")
     if st.get("modprobe_rc"):
         sys.exit(int(st["modprobe_rc"]))
-    if "-r" not in args:
-        st.update(st.get("on_reload", {}))
-        save()
+    if "-r" in args:
+        if os.path.isdir(live):
+            os.rename(live, gone)
+        sys.exit(0)
+    if st.get("modprobe_load_rc"):
+        sys.exit(int(st["modprobe_load_rc"]))
+    st.update(st.get("on_reload", {}))
+    save()
+    if os.path.isdir(gone):
+        subprocess.Popen(
+            [sys.executable, "-c",
+             "import os, sys, time; time.sleep(float(sys.argv[1])); os.rename(sys.argv[2], sys.argv[3])",
+             str(st.get("iface_delay_s", 1)), gone, live],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True)
     sys.exit(0)
 if name == "systemctl":
     if args[:1] == ["restart"]:
@@ -478,6 +496,12 @@ if name == "systemctl":
         save()
         sys.exit(0)
     if args[:1] == ["start"]:
+        net = os.environ.get("BKSHADING_WIFI_HEAL_SYSFS_NET")
+        if net and not os.path.isdir(os.path.join(net, "wlan0")):
+            # the unit Requires= the wlan0 device: no interface, no supplicant
+            st["start_without_iface"] = st.get("start_without_iface", 0) + 1
+            save()
+            sys.exit(1)
         st["wpa_active"] = True
         st.update(st.get("on_start", {}))
         save()
@@ -1317,6 +1341,55 @@ def test_heal_drops_a_cursor_journald_cannot_seek():
         assert _stuck(env) == "1", r2.stdout
         assert _journal_calls(env)[-1] == JOURNAL_COUNT % (
             _cursor_path(env), " --since " + env["FAKE_JOURNAL_SINCE"]), _heal_tools(env)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_heal_waits_for_wlan0_before_it_starts_the_supplicant():
+    # `modprobe -r` removes wlan0; the reloaded driver brings it back a moment later (the stub's
+    # detached probe, 2 s). The supplicant starts only once wlan0 is back, and the pass leaves the
+    # wait as soon as it is: a wait that ignored wlan0's return would sit out the whole bound.
+    import time
+    tmp = tempfile.mkdtemp()
+    try:
+        state = _net_state(wpa_state="DISCONNECTED", reachable=False, driver_failed=1,
+                           iface_delay_s=2,
+                           on_reload={"wpa_state": "COMPLETED", "reachable": True,
+                                      "driver_failed": 0})
+        env = _heal_env(tmp, state, extra_tools=("journalctl", "modprobe"),
+                        driver_module="sprdwl_ng")
+        for _ in range(2):
+            assert _heal_pass(env).returncode == 0
+        t0 = time.monotonic()
+        r = _heal_pass(env)
+        took = time.monotonic() - t0
+        assert r.returncode == 0 and "result=ok" in r.stdout, (r.stdout, r.stderr)
+        assert "start_without_iface" not in _get_state(env), "the supplicant started without wlan0"
+        assert os.path.isdir(os.path.join(env["BKSHADING_WIFI_HEAL_SYSFS_NET"], "wlan0"))
+        assert 2 <= took < 10, "the pass waited %.1f s for a wlan0 back after 2 s" % took
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_heal_reports_a_failed_driver_reload():
+    # `modprobe -r` refuses (the module is in use): no load follows, the supplicant is started
+    # again on the still-loaded driver, and the pass says result=FAILED and exits 1.
+    tmp = tempfile.mkdtemp()
+    try:
+        state = _net_state(wpa_state="DISCONNECTED", reachable=False, driver_failed=1,
+                           modprobe_rc=1)
+        env = _heal_env(tmp, state, extra_tools=("journalctl", "modprobe"),
+                        driver_module="sprdwl_ng")
+        for _ in range(2):
+            assert _heal_pass(env).returncode == 0
+        r = _heal_pass(env)
+        assert r.returncode == 1, (r.stdout, r.stderr)
+        assert "reload the WiFi driver sprdwl_ng" in r.stdout and "result=FAILED" in r.stdout, r.stdout
+        acts = [t for t in _heal_tools(env)
+                if t.startswith(("systemctl stop", "systemctl start", "modprobe"))]
+        assert acts == ["systemctl stop wpa_supplicant@wlan0.service", "modprobe -r sprdwl_ng",
+                        "systemctl start wpa_supplicant@wlan0.service"], acts
+        assert _get_state(env)["wpa_active"] is True, "the supplicant must not be left stopped"
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
