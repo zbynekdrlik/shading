@@ -1655,6 +1655,42 @@ def test_heal_service_timeouts_cover_the_longest_pass():
     assert load_fn.count('timeout "$SYSTEMCTL_TIMEOUT_S"') == 1 and "wait_for_iface" in load_fn
 
 
+SBC_RULE = os.path.join(REPO, ".claude", "rules", "bkshading-sbc.md")
+
+
+def test_heal_docs_name_the_stuck_rung_exception():
+    # Review findings 4-7 + 12: the docs still said the heal never acts on a link that is not
+    # COMPLETED -- the stuck rung (a refusing driver, a stopped or hung supplicant) does.
+    stale = {
+        HEAL_SERVICE: ["Never acts while wpa_state is not COMPLETED"],
+        HEAL_SCRIPT: ["while it is not COMPLETED it does nothing"],
+        README: ["never while\n  the supplicant is still connecting", "never while the supplicant is still connecting"],
+        LIB: ["the heal does nothing while wpa_state is\n# not COMPLETED",
+              "the WiFi heal only acts on a COMPLETED link",
+              "and nothing while wpa_state is not COMPLETED",
+              "key_mgmt + PMF as netplan generated them"],
+    }
+    for path, phrases in stale.items():
+        text = _read(path)
+        for phrase in phrases:
+            assert phrase not in text, (path, phrase)
+    assert "stuck rung" in _read(HEAL_SERVICE)
+    assert "stuck rung" in _read(HEAL_SCRIPT).split("set -euo pipefail", 1)[1].split("HERE=", 1)[0]
+    readme = _read(README)
+    assert "Association request to the driver failed" in readme and "driver reload" in readme
+    dropin = _lib_call("bkshading_sbc_wpa_restart_dropin_content")
+    assert "COMPLETED" not in dropin and "stopped" in dropin, dropin
+    assert "deliberately" in _read(LIB).split("bkshading_sbc_wpa_key_mgmt()", 1)[0][-1200:], \
+        "the key_mgmt comment says it differs from netplan on purpose (no SAE)"
+    rule = _read(SBC_RULE)
+    testing = rule.split("**Testing the heal:**", 1)[1].split("\n- ", 1)[0]
+    for word in ("journalctl", "modprobe", "BKSHADING_WIFI_HEAL_SYSFS_NET"):
+        assert word in testing, word
+    # the live handheld-1 facts (3.10.2026) the module resolution rests on
+    for fact in ("/sys/module/sprdwl_ng", "unisoc_wifi", "uwe5622_bsp_sdio"):
+        assert fact in rule, fact
+
+
 def test_heal_refused_count_ignores_other_supplicant_lines():
     text = "\n".join([
         "wlan0: CTRL-EVENT-SCAN-STARTED",
