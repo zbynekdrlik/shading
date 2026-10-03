@@ -87,6 +87,41 @@ pub fn reach_transitions(prev: &mut ReachState, views: &[CameraView]) -> Vec<Str
     lines
 }
 
+/// Per-camera preview liveness, tracked across pump cycles (issue 808): `true` == the last
+/// snapshot had a fresh preview frame for this camera.
+type PreviewState = HashMap<String, bool>;
+
+/// Preview-liveness TRANSITION tracker (issue 808) — the preview sibling of [`reach_transitions`].
+/// A feed that stops leaves the preview worker on quiet capture timeouts, so nothing would reach
+/// the service log while the panel shows "obraz sa zastavil". Returns ONE line per preview-capable
+/// camera whose `preview_live` just FLIPPED (live -> stale and back), plus a one-time line for a
+/// camera first seen without a fresh frame. A camera without an NDI preview is ignored. Updates
+/// `prev` in place and prunes cameras that left the config.
+pub fn preview_transitions(prev: &mut PreviewState, views: &[CameraView]) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for v in views.iter().filter(|v| v.has_preview) {
+        seen.insert(v.id.clone());
+        match prev.get(&v.id).copied() {
+            Some(was) if was != v.preview_live => lines.push(if v.preview_live {
+                format!("preview {} live (fresh NDI frame)", v.id)
+            } else {
+                format!(
+                    "preview {} stale (no fresh NDI frame; the panel shows its placeholder)",
+                    v.id
+                )
+            }),
+            None if !v.preview_live => {
+                lines.push(format!("preview {} has no fresh NDI frame", v.id))
+            }
+            _ => {}
+        }
+        prev.insert(v.id.clone(), v.preview_live);
+    }
+    prev.retain(|id, _| seen.contains(id));
+    lines
+}
+
 /// A periodic reachability HEARTBEAT summary (issue 1309): `N/M relays reachable` (plus the
 /// down ids), emitted every ~5 min by the pump so a chronically-down set stays visible without the
 /// per-poll spam the transition tracker replaced.

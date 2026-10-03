@@ -672,3 +672,42 @@ fn preview_endpoint_serves_only_a_fresh_frame_else_204_808() {
     let r = preview_response(&cfg, &store, "cam1", now - 100 + max_age);
     assert_eq!(r.status(), StatusCode::OK);
 }
+
+#[test]
+fn preview_transitions_log_each_live_stale_flip_once_808() {
+    // A feed that stops leaves the preview worker on quiet capture timeouts; the pump logs ONE
+    // line per live/stale flip (the issue-1309 transition model), never one per ~2 s cycle, and
+    // ignores a camera without an NDI preview.
+    use bkshading::monitor::preview_transitions;
+    use std::collections::HashMap;
+
+    let cfg = ServiceConfig::from_toml_str(EXAMPLE).unwrap();
+    let views = |live: bool| {
+        vec![
+            camera_view(&cfg.cameras[0], None, live),
+            camera_view(&cfg.cameras[1], None, false),
+        ]
+    };
+    let mut state: HashMap<String, bool> = HashMap::new();
+    // First sighting without a frame: one line for cam1, nothing for the params-only handheld.
+    let l = preview_transitions(&mut state, &views(false));
+    assert_eq!(l.len(), 1, "{l:?}");
+    assert!(
+        l[0].contains("cam1") && l[0].contains("no fresh NDI frame"),
+        "{l:?}"
+    );
+    // Unchanged -> silent.
+    assert!(preview_transitions(&mut state, &views(false)).is_empty());
+    // The feed comes up -> one line; stays up -> silent.
+    let l = preview_transitions(&mut state, &views(true));
+    assert_eq!(l.len(), 1, "{l:?}");
+    assert!(l[0].contains("cam1") && l[0].contains("live"), "{l:?}");
+    assert!(preview_transitions(&mut state, &views(true)).is_empty());
+    // The feed stops -> one stale line.
+    let l = preview_transitions(&mut state, &views(false));
+    assert_eq!(l.len(), 1, "{l:?}");
+    assert!(l[0].contains("cam1") && l[0].contains("stale"), "{l:?}");
+    // A camera first seen already live logs nothing.
+    let mut fresh: HashMap<String, bool> = HashMap::new();
+    assert!(preview_transitions(&mut fresh, &views(true)).is_empty());
+}

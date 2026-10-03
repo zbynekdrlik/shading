@@ -331,6 +331,8 @@ def test_fake_deploy_to_a_rw_root_never_remounts():
         assert "findmnt" in calls and ("root@10.77.9.60:" + RELAY_BIN_PATH) in calls, calls
         assert "remount" not in calls, "an rw root is never remounted:\n" + calls
         assert "root back to read-only" not in r.stdout
+        # a cambox (the amd64 default) always runs read-only: an rw one is reported loudly
+        assert "WARNING: the root on 10.77.9.60 is read-WRITE" in r.stderr, r.stderr
 
 
 def test_unreadable_root_refuses_before_touching_the_box():

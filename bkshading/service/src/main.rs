@@ -110,6 +110,10 @@ async fn main() -> Result<()> {
             // transition + a periodic heartbeat (replacing the per-poll `relay unreachable` spam).
             let mut reach_state: std::collections::HashMap<String, bool> =
                 std::collections::HashMap::new();
+            // issue 808: per-camera preview liveness, so a feed that stops (or comes back) is
+            // logged ONCE per transition.
+            let mut preview_state: std::collections::HashMap<String, bool> =
+                std::collections::HashMap::new();
             let mut cycle: u64 = 0;
             ticker.tick().await; // consume the immediate first tick (channel is already seeded)
             loop {
@@ -128,6 +132,12 @@ async fn main() -> Result<()> {
                 // issue 1309: relay reachability — one info line per transition, plus a heartbeat.
                 for line in
                     bkshading::monitor::reach_transitions(&mut reach_state, &snapshot.cameras)
+                {
+                    tracing::info!("{line}");
+                }
+                // issue 808: preview liveness — one info line per live/stale flip.
+                for line in
+                    bkshading::monitor::preview_transitions(&mut preview_state, &snapshot.cameras)
                 {
                     tracing::info!("{line}");
                 }

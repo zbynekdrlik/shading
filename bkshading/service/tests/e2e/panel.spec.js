@@ -471,11 +471,18 @@ test("a live preview frame is shown, a stopped feed drops to the placeholder and
   await expect(placeholder).toHaveText("NDI preview — obraz sa zastavil, čakám…");
   await expect(img).not.toHaveClass(/ready/);
 
-  // The pump reports the feed not live: the panel stops fetching it.
+  // The pump reports the feed not live: the panel stops fetching it. Wait for the block to take
+  // that push (the next 2 s fallback poll) and for any fetch already in flight to finish, then no
+  // further preview request may arrive over ~4 more refresh periods.
   live = false;
-  await page.waitForTimeout(2500); // the next 2 s fallback poll carries previewLive:false
+  const block = page.locator('[data-role="camera-block"]');
+  await expect
+    .poll(() => block.evaluate((e) => `${e.dataset.previewLive}/${e.dataset.previewBusy}`), {
+      timeout: 8000,
+    })
+    .toBe("0/0");
   const hitsWhenNotLive = previewHits;
-  await page.waitForTimeout(1500); // ~4 more refresh periods
+  await page.waitForTimeout(1500);
   expect(previewHits, "a not-live preview is not fetched").toBe(hitsWhenNotLive);
   await expect(placeholder).toBeVisible();
 

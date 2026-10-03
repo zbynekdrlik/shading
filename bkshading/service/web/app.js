@@ -21,6 +21,9 @@ const PREVIEW_FPS = 3;
 // issue 808: the preview placeholder text before any frame arrived, and after a live feed stopped.
 const PREVIEW_WAIT_TEXT = "NDI preview — čakám…";
 const PREVIEW_STOPPED_TEXT = "NDI preview — obraz sa zastavil, čakám…";
+// issue 808: one preview fetch may take at most this long; a slower one is aborted (a half-open
+// connection would otherwise keep the block's single in-flight slot busy for minutes).
+const PREVIEW_FETCH_TIMEOUT_MS = 2000;
 
 // Present f-number from the AV the relay reported: fNumber = sqrt(2^AV).
 function fNumberFromAv(av) {
@@ -407,6 +410,11 @@ function wire(el, id) {
 function showPreviewPlaceholder(el) {
   const img = el.querySelector('[data-role="preview-img"]');
   const ph = el.querySelector('[data-role="preview-placeholder"]');
+  // Cancel a fetch still in flight: its frame must not be painted after this.
+  if (el.previewAbort) {
+    el.previewAbort.abort();
+    el.previewAbort = null;
+  }
   if (img) {
     img.classList.remove("ready");
     if (img.hasAttribute("src")) img.removeAttribute("src");
@@ -424,12 +432,17 @@ function showPreviewPlaceholder(el) {
 // issue 808: fetch ONE preview frame and show it. fetch -> blob -> object URL instead of pointing
 // the <img> at the endpoint: the service answers a missing or stale frame with 204 (never a
 // 4xx/5xx), so an absent feed logs nothing, and the previous frame's object URL is revoked as soon
-// as the new one replaces it. One request in flight per block, so a slow link never piles them up.
+// as the new one replaces it. One request in flight per block, so a slow link never piles them up;
+// it is aborted after PREVIEW_FETCH_TIMEOUT_MS or when the block drops to its placeholder.
 async function loadPreview(id, el) {
+  const ctrl = new AbortController();
+  el.previewAbort = ctrl;
   el.dataset.previewBusy = "1";
+  const timer = setTimeout(() => ctrl.abort(), PREVIEW_FETCH_TIMEOUT_MS);
   try {
     const r = await fetch(`/api/cameras/${encodeURIComponent(id)}/preview.jpg`, {
       cache: "no-store",
+      signal: ctrl.signal,
     });
     // 204 = no fresh frame (the feed is absent or stopped): placeholder, not the last frame.
     if (r.status !== 200) {
@@ -437,8 +450,8 @@ async function loadPreview(id, el) {
       return;
     }
     const blob = await r.blob();
-    // A push may have marked the feed not live while this request was in flight.
-    if (el.dataset.previewLive !== "1") {
+    // The feed may have stopped, or the panel lost contact, while this request was in flight.
+    if (ctrl.signal.aborted || el.dataset.previewLive !== "1" || !isConnected()) {
       showPreviewPlaceholder(el);
       return;
     }
@@ -449,9 +462,12 @@ async function loadPreview(id, el) {
     img.src = el.previewUrl;
     if (prev) URL.revokeObjectURL(prev);
   } catch (e) {
-    // The service is unreachable: the offline banner is the signal; show no frozen frame.
+    // Aborted (a timeout, or the block already dropped to its placeholder) or the service is
+    // unreachable (the offline banner is the signal): show no frozen frame either way.
     showPreviewPlaceholder(el);
   } finally {
+    clearTimeout(timer);
+    if (el.previewAbort === ctrl) el.previewAbort = null;
     el.dataset.previewBusy = "0";
   }
 }

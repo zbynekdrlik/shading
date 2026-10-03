@@ -361,6 +361,12 @@ if [ "$ROOT_RC" -ne 0 ] || [ "$ROOT_ACTION" = unreadable ]; then
 fi
 [ "$ROOT_ACTION" = remount ] && RO_ROOT=1
 echo "root on $HOST: ${ROOT_OPTS%%,*} -> $([ "$RO_ROOT" = 1 ] && echo 'remount rw for the swap, back to ro after' || echo 'read-write, no remount')"
+# A cambox (the amd64 relay) always runs read-only (setup-device.sh STEP 18). An rw cambox root is a
+# leftover (the 25.9.2026 cam6/cam7 class): the deploy follows the box and leaves it rw, but says so.
+if [ "$RO_ROOT" = 0 ] && [ "$ARCH" = amd64 ]; then
+  echo "WARNING: the root on $HOST is read-WRITE ($ROOT_OPTS) -- a cambox runs read-only (setup-device.sh STEP 18)." >&2
+  echo "         The deploy leaves it as it is; find the writer ('lsof +L1' / 'fuser -vm /') and run 'mount -o remount,ro /' on $HOST." >&2
+fi
 BOX_DIRTY=1
 if [ "$RESTORE_ACTION" = start ]; then
   if ! ssh_box "$HOST" "systemctl stop $RELAY_UNIT"; then

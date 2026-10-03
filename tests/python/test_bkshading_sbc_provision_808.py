@@ -263,14 +263,16 @@ def test_provision_is_enable_only():
     assert "enable --now" not in s, "enable --now would live-start (not enable-only)"
 
 
-def _fake_systemctl(record_path):
+def _fake_systemctl(record_path, fail_on=None):
     d = tempfile.mkdtemp()
     p = os.path.join(d, "systemctl")
+    fail = ('if [ "$1" = "%s" ]; then exit 1; fi\n' % fail_on) if fail_on else ""
     with open(p, "w", encoding="utf-8") as f:
         f.write(
             "#!/usr/bin/env bash\n"
             'printf "%%s\\n" "$*" >> "%s"\n'
             'if [ "$1" = "is-enabled" ]; then echo enabled; fi\n' % record_path
+            + fail
         )
     os.chmod(p, 0o755)
     return p
@@ -345,11 +347,11 @@ def _sbc_paths(root):
 
 def _run_provision(mode, root, bin_machine=AARCH64, make_bin=True, net_ifaces=None,
                    root_opts=None, root_uuid=ROOT_UUID, fstab_text=ARMBIAN_FSTAB,
-                   persistent_dropin=True, cambox=False):
+                   persistent_dropin=True, cambox=False, systemctl_fail_on=None):
     sysd = os.path.join(root, "systemd-system")
     binp = os.path.join(root, "bin", "bkshading-relay")
     calls = os.path.join(root, "systemctl-calls.log")
-    sc = _fake_systemctl(calls)
+    sc = _fake_systemctl(calls, fail_on=systemctl_fail_on)
     paths = _sbc_paths(root)
     if make_bin:
         os.makedirs(os.path.dirname(binp), exist_ok=True)
@@ -594,6 +596,23 @@ def test_install_on_a_ro_root_remounts_rw_then_back_ro():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_install_failure_on_a_ro_root_still_puts_it_back_read_only():
+    # A re-run on the read-only root remounts rw for its own writes. When a step fails midway
+    # (here `systemctl enable`), the EXIT trap must still remount ro -- never a root left rw.
+    for fail_on in ("enable", "mask"):
+        root = tempfile.mkdtemp()
+        try:
+            r, calls, _b = _run_provision("--install", root, root_opts=RO_OPTS,
+                                          systemctl_fail_on=fail_on)
+            assert r.returncode != 0, (fail_on, r.stdout, r.stderr)
+            log = _read(_sbc_paths(root)["mount_log"]).splitlines()
+            assert log == ["-o remount,rw /", "-o remount,ro /"], (fail_on, log)
+            # the D-Bus-activated writers are stopped before the ro remount (the EBUSY class)
+            assert "stop packagekit unattended-upgrades" in _read(calls), _read(calls)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+
 def test_install_refuses_an_unreadable_root():
     for opts, uuid in (("", ROOT_UUID), (RW_OPTS, "")):
         root = tempfile.mkdtemp()
@@ -803,6 +822,7 @@ def test_fake_deploy_to_a_rw_root_sbc_never_remounts():
     assert "sha256sum" in calls, "must byte-verify"
     assert "remount,rw" not in calls and "remount,ro" not in calls, \
         "an rw root (a board before its first ro reboot) is never remounted"
+    assert "WARNING" not in r.stderr, "an rw SBC root before its ro reboot is normal:\n" + r.stderr
     assert "systemctl start" not in calls and "systemctl restart" not in calls, \
         "deploy is enable-only"
 
@@ -826,7 +846,8 @@ def test_fake_deploy_refuses_an_unreadable_root_before_touching_the_sbc():
 
 
 def test_no_doc_or_usage_line_still_passes_the_removed_flag():
-    for f in (SCRIPT, DEPLOY_SCRIPT, README, os.path.join(REPO, ".claude", "rules", "bkshading.md")):
+    for f in (SCRIPT, DEPLOY_SCRIPT, README, os.path.join(REPO, ".claude", "rules", "bkshading.md"),
+              os.path.join(REPO, ".claude", "rules", "bkshading-sbc.md")):
         assert "--no-remount" not in _read(f), "%s still mentions the removed flag" % f
 
 

@@ -120,6 +120,9 @@ ROOT_WAS_RO=0
 restore_root_mode() {
   [ "$ROOT_WAS_RO" = 1 ] || return 0
   ROOT_WAS_RO=0
+  # An apt call during the install can D-Bus-activate PackageKit, whose open database blocks the
+  # ro remount with EBUSY (the setup-device.sh restore_root_mode incident) -- stop the writers first.
+  "$SYSTEMCTL" stop packagekit unattended-upgrades 2>/dev/null || true
   if "$MOUNT" -o remount,ro /; then
     echo "  root back to read-only"
   else

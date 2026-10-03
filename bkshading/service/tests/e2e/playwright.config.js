@@ -1,7 +1,9 @@
 // @ts-check
-// Playwright config for the bkshading operator-panel E2E (issue 1304). Two webServers, both
-// managed + torn down by Playwright: the stdlib stub relay and the built bkshading service
-// (pointed at the stub via e2e-config.toml). Chromium only, one worker — keep the CI budget small.
+// Playwright config for the bkshading operator-panel E2E (issue 1304). Three webServers, all
+// managed + torn down by Playwright: the stdlib stub relay, the built bkshading service (pointed at
+// the stub via e2e-config.toml), and a second service instance with one preview camera whose NDI
+// feed is absent (e2e-preview-config.toml, issue 808). Chromium only, one worker — keep the CI
+// budget small.
 const path = require("path");
 const { defineConfig, devices } = require("@playwright/test");
 
