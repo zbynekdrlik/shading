@@ -924,7 +924,10 @@ def test_wifi_constants_pin_the_design():
     assert _lib_call("bkshading_sbc_wpa_unit").strip() == "wpa_supplicant@wlan0.service"
     assert _lib_call("bkshading_sbc_wpa_conf_name").strip() == "wpa_supplicant-wlan0.conf"
     assert _lib_call("bkshading_sbc_wpa_ctrl_dir").strip() == "/run/wpa_supplicant"
-    assert _lib_call("bkshading_sbc_wpa_key_mgmt").strip() == "WPA-PSK WPA-PSK-SHA256 SAE"
+    assert _lib_call("bkshading_sbc_wpa_key_mgmt").strip() == "WPA-PSK WPA-PSK-SHA256"
+    # main ROZHODNUTÉ 5973115530: no SAE -- the conf carries the hex PSK, which WPA3 cannot use,
+    # and newlevel.media is a WPA2/WPA3 transition network where listing SAE can keep the board off.
+    assert "SAE" not in _lib_call("bkshading_sbc_wpa_key_mgmt")
     assert _lib_call("bkshading_sbc_wpa_ieee80211w").strip() == "1"
     assert _lib_call("bkshading_sbc_bgscan_line").strip() == BGSCAN_LINE
     assert _lib_call("bkshading_sbc_wifi_heal_miss_limit").strip() == "3"
@@ -938,7 +941,7 @@ def test_wpa_conf_text_shape():
     assert "ctrl_interface=/run/wpa_supplicant" in lines
     assert "country=SK" in lines
     block = lines[lines.index("network={"):]
-    assert block[:7] == ["network={", 'ssid="newlevel.media"', "key_mgmt=WPA-PSK WPA-PSK-SHA256 SAE",
+    assert block[:7] == ["network={", 'ssid="newlevel.media"', "key_mgmt=WPA-PSK WPA-PSK-SHA256",
                          "ieee80211w=1", BGSCAN_LINE, "psk=" + psk, "}"], block
     assert not any(ln.startswith("#psk") for ln in lines)
     # no regulatory domain in the YAML -> no country line, never a guessed one
@@ -1129,7 +1132,7 @@ def test_install_migrates_the_netplan_wifi_into_its_own_supplicant_conf():
         assert "ctrl_interface=/run/wpa_supplicant" in lines
         assert "country=SK" in lines, "the country comes from the netplan regulatory-domain"
         assert 'ssid="newlevel.media"' in lines
-        assert "key_mgmt=WPA-PSK WPA-PSK-SHA256 SAE" in lines and "ieee80211w=1" in lines
+        assert "key_mgmt=WPA-PSK WPA-PSK-SHA256" in lines and "ieee80211w=1" in lines
         assert BGSCAN_LINE in lines
         assert "psk=" + _expected_psk() in lines, "the PSK must equal wpa_passphrase's derivation"
         assert WIFI_PASS not in conf and "#psk" not in conf, "never the plaintext passphrase"
@@ -1885,7 +1888,7 @@ def test_install_rerun_compares_the_wifi_identity_not_the_conf_text():
         os.rename(os.path.join(np, WIFI_YAML_NAME + ".bak"), os.path.join(np, WIFI_YAML_NAME))
         conf = _read(paths["wpa_conf"]).replace(
             "# Written by", "# (an older header)\n# Written by").replace(
-            "key_mgmt=WPA-PSK WPA-PSK-SHA256 SAE", "key_mgmt=WPA-PSK")
+            "key_mgmt=WPA-PSK WPA-PSK-SHA256", "key_mgmt=WPA-PSK")
         with open(paths["wpa_conf"], "w") as f:
             f.write(conf)
         r2, _c2, _b2 = _run_provision("--install", root)
@@ -1895,7 +1898,7 @@ def test_install_rerun_compares_the_wifi_identity_not_the_conf_text():
         # ... and --check names the drift from the lib's settings (non-secret lines only)
         c, _c3, _b3 = _run_provision("--check", root)
         assert c.returncode == 1, c.stdout
-        assert re.search(r"FAIL: .*wpa_supplicant-wlan0\.conf.*key_mgmt=WPA-PSK WPA-PSK-SHA256 SAE",
+        assert re.search(r"FAIL: .*wpa_supplicant-wlan0\.conf.*key_mgmt=WPA-PSK WPA-PSK-SHA256",
                          c.stderr), c.stderr
         assert _expected_psk() not in c.stdout + c.stderr
     finally:
