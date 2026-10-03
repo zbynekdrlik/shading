@@ -471,6 +471,14 @@ if name == "modprobe":
     if "-r" in args:
         if os.path.isdir(live):
             os.rename(live, gone)
+        if st.get("term_heal_on_unload") and not st.get("term_sent"):
+            # the heal pass is ended right here, between the unload and the load (systemd's
+            # SIGTERM at TimeoutStartSec): modprobe's parent is `timeout`, whose parent is the heal
+            st["term_sent"] = True
+            save()
+            with open("/proc/%d/stat" % os.getppid()) as f:
+                heal_pid = int(f.read().rsplit(")", 1)[1].split()[1])
+            os.kill(heal_pid, 15)
         sys.exit(0)
     if st.get("modprobe_load_rc"):
         sys.exit(int(st["modprobe_load_rc"]))
@@ -1448,6 +1456,139 @@ def test_heal_starts_a_stopped_supplicant_without_a_driver_reload():
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_heal_driver_plan_table():
+    # What the stuck rung can do with the WiFi driver: $1 the module behind wlan0 (empty = none
+    # known), $2 modprobe present, $3 wlan0 present.
+    table = [
+        ("sprdwl_ng", "yes", "yes", "reload"),       # loaded: unload + load
+        ("sprdwl_ng", "yes", "no", "load"),          # wlan0 gone = the module is not loaded
+        ("sprdwl_ng", "no", "yes", "no-modprobe"),
+        ("sprdwl_ng", "no", "no", "no-modprobe"),
+        ("", "yes", "yes", "builtin"),               # wlan0 with no module link
+        ("", "no", "yes", "builtin"),
+        ("", "yes", "no", "unknown"),                # wlan0 gone and no module name recorded
+        ("../evil", "yes", "yes", "builtin"),        # not a module name: none
+        ("a b", "yes", "no", "unknown"),
+    ]
+    for mod, has_modprobe, iface, want in table:
+        got = _lib_call('bkshading_sbc_wifi_heal_driver_plan "$A" "$B" "$C"',
+                        env={"A": mod, "B": has_modprobe, "C": iface}).strip()
+        assert got == want, (mod, has_modprobe, iface, got, want)
+
+
+def _seed_driver_module(env, name):
+    os.makedirs(env["BKSHADING_WIFI_HEAL_STATE_DIR"], exist_ok=True)
+    with open(os.path.join(env["BKSHADING_WIFI_HEAL_STATE_DIR"], "driver-module"), "w") as f:
+        f.write(name + "\n")
+
+
+def _driver_acts(env):
+    return [t for t in _heal_tools(env)
+            if t.startswith(("systemctl stop", "systemctl start", "modprobe"))]
+
+
+def test_heal_persists_the_driver_module_while_wlan0_has_it():
+    tmp = tempfile.mkdtemp()
+    try:
+        env = _heal_env(tmp, _net_state(), driver_module="sprdwl_ng")
+        assert _heal_pass(env).returncode == 0
+        assert _read(os.path.join(env["BKSHADING_WIFI_HEAL_STATE_DIR"], "driver-module")) \
+            .strip() == "sprdwl_ng"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_heal_loads_a_remembered_driver_when_wlan0_is_gone():
+    # wlan0 and its module link are gone (an earlier pass unloaded the module and its load
+    # failed): the remembered name loads the driver (no -r of a module that is not loaded).
+    tmp = tempfile.mkdtemp()
+    try:
+        env = _heal_env(tmp, _net_state(wpa_state=None, on_reload={"wpa_state": "COMPLETED"}),
+                        extra_tools=("journalctl", "modprobe"), driver_module="sprdwl_ng",
+                        iface_present=False)
+        _seed_driver_module(env, "sprdwl_ng")
+        for _ in range(3):
+            r = _heal_pass(env)
+            assert r.returncode == 0, (r.stdout, r.stderr)
+        assert _driver_acts(env) == ["systemctl stop wpa_supplicant@wlan0.service",
+                                     "modprobe sprdwl_ng",
+                                     "systemctl start wpa_supplicant@wlan0.service"], _heal_tools(env)
+        assert re.search(r"load the WiFi driver sprdwl_ng \(wlan0 was gone\) on wlan0 after 3 stuck "
+                         r"passes .*result=ok", r.stdout), r.stdout
+        assert "built-in" not in r.stdout
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_heal_loads_the_driver_before_it_starts_a_stopped_supplicant_without_wlan0():
+    tmp = tempfile.mkdtemp()
+    try:
+        env = _heal_env(tmp, _net_state(wpa_active=False), extra_tools=("journalctl", "modprobe"),
+                        driver_module="sprdwl_ng", iface_present=False)
+        _seed_driver_module(env, "sprdwl_ng")
+        r = _heal_pass(env)
+        assert r.returncode == 0, (r.stdout, r.stderr)
+        assert _driver_acts(env) == ["modprobe sprdwl_ng",
+                                     "systemctl start wpa_supplicant@wlan0.service"], _heal_tools(env)
+        assert re.search(r"load the WiFi driver sprdwl_ng and start wpa_supplicant@wlan0\.service on "
+                         r"wlan0 \(it was inactive; wlan0 was gone\); .*result=ok", r.stdout), r.stdout
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_heal_recovers_from_a_driver_load_that_failed_after_the_unload():
+    # The review's red case: `modprobe -r` ran, the load failed -- wlan0 and its module link are
+    # gone. The next pass must still know the module and load it, never "a built-in driver".
+    tmp = tempfile.mkdtemp()
+    try:
+        state = _net_state(wpa_state="DISCONNECTED", reachable=False, driver_failed=1,
+                           modprobe_load_rc=1,
+                           on_reload={"wpa_state": "COMPLETED", "reachable": True,
+                                      "driver_failed": 0})
+        env = _heal_env(tmp, state, extra_tools=("journalctl", "modprobe"),
+                        driver_module="sprdwl_ng")
+        for _ in range(2):
+            assert _heal_pass(env).returncode == 0
+        r3 = _heal_pass(env)
+        assert r3.returncode == 1 and "result=FAILED" in r3.stdout, (r3.stdout, r3.stderr)
+        assert not os.path.isdir(os.path.join(env["BKSHADING_WIFI_HEAL_SYSFS_NET"], "wlan0"))
+        _set_state(env, modprobe_load_rc=0)
+        r4 = _heal_pass(env)
+        assert r4.returncode == 0, (r4.stdout, r4.stderr)
+        assert "load the WiFi driver sprdwl_ng" in r4.stdout and "built-in" not in r4.stdout, r4.stdout
+        assert "result=ok" in r4.stdout, r4.stdout
+        assert os.path.isdir(os.path.join(env["BKSHADING_WIFI_HEAL_SYSFS_NET"], "wlan0"))
+        assert _get_state(env)["wpa_active"] is True
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_heal_finishes_the_reload_when_the_pass_is_killed_in_the_middle():
+    # systemd ends a pass at TimeoutStartSec with SIGTERM. Between `modprobe -r` and the start the
+    # board has no driver and no supplicant: the reload's trap loads the module and starts the
+    # supplicant before the pass exits.
+    tmp = tempfile.mkdtemp()
+    try:
+        state = _net_state(wpa_state="DISCONNECTED", reachable=False, driver_failed=1,
+                           term_heal_on_unload=True,
+                           on_reload={"wpa_state": "COMPLETED", "reachable": True,
+                                      "driver_failed": 0})
+        env = _heal_env(tmp, state, extra_tools=("journalctl", "modprobe"),
+                        driver_module="sprdwl_ng")
+        for _ in range(2):
+            assert _heal_pass(env).returncode == 0
+        r = _heal_pass(env)
+        assert r.returncode == 143, (r.returncode, r.stdout, r.stderr)
+        assert "in the middle of the driver reload" in r.stderr, r.stderr
+        assert _driver_acts(env) == ["systemctl stop wpa_supplicant@wlan0.service",
+                                     "modprobe -r sprdwl_ng", "modprobe sprdwl_ng",
+                                     "systemctl start wpa_supplicant@wlan0.service"], _heal_tools(env)
+        assert os.path.isdir(os.path.join(env["BKSHADING_WIFI_HEAL_SYSFS_NET"], "wlan0"))
+        assert _get_state(env)["wpa_active"] is True
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_heal_refused_count_ignores_other_supplicant_lines():
     text = "\n".join([
         "wlan0: CTRL-EVENT-SCAN-STARTED",
@@ -1815,7 +1956,7 @@ def test_heal_units_match_the_lib():
         assert not re.search(r"\b(reboot|shutdown|poweroff|ifdown|ip link set)\b", ln), ln
 
 
-def _heal_env(tmp, state, extra_tools=(), driver_module=None):
+def _heal_env(tmp, state, extra_tools=(), driver_module=None, iface_present=True):
     stubdir = os.path.join(tmp, "stubs")
     _write_tool_stubs(stubdir, names=("wpa_cli", "ip", "ping", "systemctl") + tuple(extra_tools))
     # PATH is the stub dir ONLY (ci-testing-gotchas, issue 1371): a missing stub can never fall
@@ -1834,7 +1975,7 @@ def _heal_env(tmp, state, extra_tools=(), driver_module=None):
         "FAKE_JOURNAL_SINCE": "-%ds" % (int(_lib_call("bkshading_sbc_wifi_heal_interval_s")) + 5),
         "BKSHADING_WIFI_HEAL_STATE_DIR": os.path.join(tmp, "run"),
         "BKSHADING_WIFI_HEAL_SETTLE_S": "1",
-        "BKSHADING_WIFI_HEAL_SYSFS_NET": _fake_wifi_sysfs(tmp, driver_module),
+        "BKSHADING_WIFI_HEAL_SYSFS_NET": _fake_wifi_sysfs(tmp, driver_module, iface_present),
     }
 
 
@@ -1853,9 +1994,11 @@ def _get_state(env):
         return json.load(f)
 
 
-def _fake_wifi_sysfs(tmp, driver_module):
+def _fake_wifi_sysfs(tmp, driver_module, iface_present=True):
     """A fake /sys/class/net with wlan0, whose device/driver/module links to a dir named after
-    the driver module (sprdwl_ng on the Orange Pi Zero 2W) -- or no module link (a built-in driver)."""
+    the driver module (sprdwl_ng on the Orange Pi Zero 2W) -- or no module link (a built-in driver).
+    iface_present=False: the module is unloaded, wlan0 is gone (kept aside as .wlan0-unloaded, which
+    the modprobe stub brings back on a load)."""
     net = os.path.join(tmp, "sys-class-net")
     dev = os.path.join(tmp, "sys-devices", "wlan0-dev")
     drv = os.path.join(tmp, "sys-bus", "drivers", "wlan-driver")
@@ -1869,6 +2012,8 @@ def _fake_wifi_sysfs(tmp, driver_module):
         mod = os.path.join(tmp, "sys-module", driver_module)
         os.makedirs(mod, exist_ok=True)
         os.symlink(mod, os.path.join(drv, "module"))
+    if not iface_present:
+        os.rename(os.path.join(net, "wlan0"), os.path.join(net, ".wlan0-unloaded"))
     return net
 
 
