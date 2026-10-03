@@ -209,6 +209,10 @@ install_ro_root() {  # $1 = root UUID, $2 = root fstype
     "$SYSTEMCTL" mask "$unit"
     echo "  masked $unit (it would write onto the read-only root)"
   done
+
+  mkdir -p "$(dirname "$LOGROTATE_DROPIN")"
+  bkshading_sbc_logrotate_dropin_content >"$LOGROTATE_DROPIN"
+  echo "  logrotate keeps its state in /run ($LOGROTATE_DROPIN)"
 }
 
 # --- The WiFi takeover + heal (issue 808, design 5972548198) ---
@@ -226,6 +230,7 @@ WIFI_DHCP=""
 WIFI_CONF_TEXT=""
 WIFI_SUMMARY=""
 WIFI_DROPIN="$UNIT_DIR/$(bkshading_sbc_wpa_restart_dropin_path)"
+LOGROTATE_DROPIN="$UNIT_DIR/$(bkshading_sbc_logrotate_dropin_path)"
 WIFI_NETWORKD_FILE="$NETWORKD_DIR/$(bkshading_sbc_networkd_wifi_name)"
 WIFI_HEAL_LIBS="bkshading-sbc-runtime.sh bkshading-sbc-wifi-probe.sh"
 NETPLAN_OTHER_DIRS="${BKSHADING_SBC_NETPLAN_OTHER_DIRS:-/run/netplan /lib/netplan}"
@@ -756,6 +761,13 @@ do_check() {
       rc=1
     fi
   done
+  # (6c) logrotate keeps its state off the read-only root (the drop-in --install writes)
+  if [ -r "$LOGROTATE_DROPIN" ] && [ "$(<"$LOGROTATE_DROPIN")" = "$(bkshading_sbc_logrotate_dropin_content)" ]; then
+    echo "OK: logrotate keeps its state in /run ($LOGROTATE_DROPIN)"
+  else
+    echo "FAIL: $LOGROTATE_DROPIN missing or differs -- logrotate would fail on the read-only root; re-run --install" >&2
+    rc=1
+  fi
 
   if [ "$rc" -ne 0 ]; then
     cat >&2 <<MSG

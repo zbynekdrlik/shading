@@ -207,6 +207,23 @@ bkshading_sbc_stale_journald_dropins() { printf '%s\n' 10-persistent.conf; }
 #   /etc/fake-hwclock.data on a read-only root (the second read-only boot of handheld-1 went
 #   `degraded` on it). The boot-time fake-hwclock-load only READS the file and stays; NTP sets the
 #   real time right after boot.
+# logrotate keeps its state in /var/lib/logrotate/status, on the read-only root: Armbian's daily
+# logrotate.service failed with "error opening state file ... Read-only file system" and left
+# handheld-1 `degraded` (4.10.2026 00:47). Armbian's unit also runs armbian-ramlog as its
+# ExecStartPre/Post (masked here). The drop-in keeps the state in /run (tmpfs: a lost state after a
+# reboot only means one early rotation) and drops the ramlog steps. Path relative to the unit dir.
+bkshading_sbc_logrotate_dropin_path() { printf '%s\n' logrotate.service.d/99-bkshading-ro-root.conf; }
+bkshading_sbc_logrotate_dropin_content() {
+  printf '%s\n' \
+    "# Written by scripts/bkshading-provision-sbc.sh --install (issue 808): the root is read-only," \
+    "# so logrotate keeps its state in /run, and the armbian-ramlog steps (the unit is masked) go." \
+    "[Service]" \
+    "ExecStartPre=" \
+    "ExecStartPost=" \
+    "ExecStart=" \
+    "ExecStart=/usr/sbin/logrotate --state /run/logrotate.status /etc/logrotate.conf"
+}
+
 bkshading_sbc_masked_units() {
   printf '%s\n' armbian-ramlog.service systemd-networkd-persistent-storage.service \
     fake-hwclock-save.service fake-hwclock-save.timer

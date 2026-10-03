@@ -67,6 +67,11 @@ the relay/cloudflared provisioning canon but with two deliberate deltas + one go
     `degraded`; live on handheld-1, 3.10.2026 — networkd keeps its state in /run without it), and
     `fake-hwclock-save` + its hourly timer (cannot write `/etc/fake-hwclock.data`; the boot-time
     `fake-hwclock-load` only reads it and stays);
+  - writes `logrotate.service.d/99-bkshading-ro-root.conf`: logrotate keeps its state in
+    `/run/logrotate.status` and Armbian's armbian-ramlog ExecStartPre/Post go (live 4.10.2026: the
+    daily logrotate failed on `/var/lib/logrotate/status` and left the board `degraded`); `--check`
+    grades it byte-for-byte. Not yet checked on the camboxes: their logrotate also runs on a
+    read-only root (every 15 min since issue 679) with the state under `/var/lib`;
   - on a root that is already ro (a re-run), remounts rw for its own writes and back;
   - reads the root first (an unreadable root refuses untouched) and refuses on a cambox
     (`/usr/local/bin/camera-box` present), whose root is `setup-device.sh`'s.
