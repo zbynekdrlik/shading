@@ -69,7 +69,8 @@ set -euo pipefail
 #              the WiFi link is up + wpa_supplicant@wlan0 enabled + the bgscan line in its conf +
 #              the heal installed and its timer enabled + the DHCP gateway answers a ping (the WiFi
 #              rows are SKIPPED on a wired box with no wl* interface, e.g. a cambox) + the root
-#              filesystem is read-only; 0 if all OK, 1 + remediation.
+#              filesystem is read-only + the root writers (bkshading_sbc_masked_units) masked;
+#              0 if all OK, 1 + remediation.
 #   --install  install gphoto2 (if missing), install + enable the (reused) relay unit, take the
 #              WiFi over from netplan + install the heal (a wl* board), write the read-only fstab +
 #              volatile journald + mask the root writers; enable-only, effective at the next
@@ -742,6 +743,19 @@ do_check() {
       rc=1
       ;;
   esac
+  # (6b) the units that would write onto the read-only root are masked (the root rows' rule: every
+  #      SBC, wired or WiFi). `is-enabled` prints "masked" (and exits 1) for a masked unit, also for
+  #      one the image does not ship (`mask` links it to /dev/null all the same).
+  local unit
+  for unit in $(bkshading_sbc_masked_units); do
+    en="$("$SYSTEMCTL" is-enabled "$unit" 2>/dev/null || true)"
+    if [ "$en" = masked ]; then
+      echo "OK: $unit masked"
+    else
+      echo "FAIL: $unit not masked (is-enabled=${en:-<none>}) -- it would write onto the read-only root; re-run --install" >&2
+      rc=1
+    fi
+  done
 
   if [ "$rc" -ne 0 ]; then
     cat >&2 <<MSG
