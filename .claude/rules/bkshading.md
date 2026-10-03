@@ -105,8 +105,8 @@ checklist (meaningful once the camera is physically cabled to the relay box).
 ## M2 — live camera preview (issue 808, `bkshading/service/src/preview/**`)
 Owner architecture: the cambox publishes ONE NDI stream (strih OBS + this service both consume it);
 the service subscribes to the NDI **low-bandwidth** variant, decimates to ~3 fps, JPEG-encodes, and
-serves the latest frame at `GET /api/cameras/<id>/preview.jpg`; the web UI reloads an `<img>` a few
-times a second. Structure: a `PreviewSource` trait behind which the **default stub** (test pattern,
+serves the latest frame at `GET /api/cameras/<id>/preview.jpg`; the web UI fetches it a few
+times a second while the feed is live (next bullet list). Structure: a `PreviewSource` trait behind which the **default stub** (test pattern,
 CI-safe, no libndi) and a `#[cfg(feature="ndi")]` real receiver live; pure CI-tested stages
 (`frame`/`pattern`/`decimate`/`encode`/`convert`/`store`) + runtime glue (`source`/`worker` — one OS
 thread per camera, NOT tokio, since NDI capture is a blocking FFI call). Feature `ndi` is OFF by
@@ -133,7 +133,36 @@ was reused.
 - The feature-gated path gets its OWN CI step: `cargo clippy -p bkshading --features ndi
   --all-targets -- -D warnings` (libloading is a RUNTIME load, so it compiles without libndi).
 - Decimation runs on a MONOTONIC `Instant` (not wall clock — immune to an NTP backward step); the
-  store's `updated_ms` stays wall clock for diagnostics.
+  store's `updated_ms` stays wall clock (`store::wall_clock_ms`), the clock freshness is judged on.
+
+### A preview is shown only while its frame is FRESH — 204, `previewLive`, no frozen frame (issue 808, 3.10.2026)
+The panel used to reload an `<img>` at 3 Hz against an endpoint that answered `503` until a frame
+existed: with cam1 powered off after a production, Chromium logged a console error every ~1.6 s.
+And the store kept the LAST frame forever (nobody clears it when the NDI feed ends), so a stopped
+feed stayed on screen frozen as if live.
+- **Freshness is a READ decision, never a store clear.** `PreviewFrame::is_fresh(now_ms,
+  max_age_ms)` / `PreviewStore::get_fresh` / `is_live`; the raw frame stays for diagnostics.
+- **The bound** is `PreviewConfig::max_frame_age_ms()` = max(`PREVIEW_MAX_AGE_FLOOR_MS` 3000,
+  `PREVIEW_MAX_AGE_FRAME_PERIODS` 5 × the decimator period, 2 × `capture_timeout_ms`). At the
+  defaults the 3 s floor wins. A backward wall-clock step reads as age 0 (live), never an underflow.
+- **The endpoint never answers 4xx/5xx for a known camera.** The pure `http::preview_response`:
+  - a fresh frame → `200 image/jpeg`;
+  - no frame, a stale frame, or a camera without `ndi_preview` → `204 No Content`;
+  - an unknown camera id → `404`, the only error status.
+  Every known-camera answer is `no-store`. Chromium logs every 4xx/5xx resource load as a console
+  error (the E2E gotcha below), so a non-error "no picture" status is the only console-clean shape.
+- **`CameraView.preview_live` (`previewLive`, serde default false) gates the panel.** The pump and
+  `/api/cameras` read it from the store after the relay polls. `camera_view(cam, state,
+  preview_live)` stays pure and never reports a params-only camera live. The issue-1337 immediate
+  per-camera push carries the current view's flag over, since the relay does not know the preview.
+- **The panel loader** (`web/app.js` `refreshPreviews` / `loadPreview` / `showPreviewPlaceholder`):
+  - fetch only while `previewLive` AND the panel has contact (`isConnected`);
+  - `fetch(no-store)` → blob → object URL, revoking the previous one; one request in flight per block;
+  - a 204 / a failed fetch / a push that turns the feed off → the placeholder, with the `<img>` src
+    attribute REMOVED (fires no error event) and the URL revoked.
+  The placeholder says "NDI preview — čakám…" before any frame and "NDI preview — obraz sa
+  zastavil, čakám…" after a live feed stopped. Never point an `<img>` straight at a polled
+  endpoint that can answer 4xx/5xx again.
 
 ### M2 follow-up — cross-platform libndi discovery + provisioning (issue 1157)
 The M2 receiver copied `src/ndi.rs`'s `NdiLib::load()` VERBATIM, which is Linux-only (`libndi.so*`
@@ -304,11 +333,34 @@ the relay/cloudflared provisioning canon but with two deliberate deltas + one go
   2026-09-04 on cam1+cam2 for the issue-1228 `Restart=on-failure`/`RestartSec=5` unit (cam2 had
   drifted on an older `Restart=always`/3 provisioning). Symptom of forgetting this: repo unit and
   `systemctl cat` disagree after a green release.
-- **Deploy uses `bkshading-deploy-relay.sh --arch arm64 --no-remount`.** `--arch arm64` fetches the
-  `bkshading-relay-linux-arm64` artifact; `--no-remount` skips the read-only-root swap (a cambox
-  appliance has a ro root; a **stock arm64 SBC image — Raspberry Pi OS / Debian / Armbian — root is
-  read-WRITE** — remounting it ro is wrong). The default (no flags) is still amd64 + ro-root remount
-  (cambox), byte-unchanged.
+- **The SBC root goes READ-ONLY, the same as the camboxes (ROZHODNUTÉ 5948648089, design
+  5971558113).** The box is unplugged after each ~3 h use; a power cut mid-write can corrupt the
+  microSD root. `--install` (enable-only, effective at the next reboot):
+  - writes `ro_root_fstab_text` from `scripts/lib/ro-root.sh`: the cambox root line + the cambox
+    tmpfs set, the board's own other mounts kept verbatim (a Pi OS `/boot/firmware`), the original
+    saved ONCE to `fstab.bak`;
+  - makes journald volatile (`99-bkshading-volatile.conf`, `Storage=volatile`) after removing the
+    bench-debug `10-persistent.conf`; a single-partition SBC has no journal partition;
+  - masks `armbian-ramlog`;
+  - on a root that is already ro (a re-run), remounts rw for its own writes and back;
+  - reads the root first (an unreadable root refuses untouched) and refuses on a cambox
+    (`/usr/local/bin/camera-box` present), whose root is `setup-device.sh`'s.
+  `--check` grades the root: `ro` = OK, `rw` = FAIL "reboot after --install".
+- **ONE read-only canon for every Linux box: `scripts/lib/ro-root.sh`.** `setup-device.sh` STEP 18
+  writes its root line and every tmpfs line through it, per line, because the cambox fstab also
+  carries the EFI line and the issue-1309 journal-partition line between `/var/log` and `/var/tmp`.
+  The cambox fstab stays byte-identical: `tests/python/test_ro_root_808.py` runs the lifted STEP 18
+  heredoc against the golden `tests/fixtures/ro_root_fstab_808/`. `ro_root_mount_mode` is the same
+  first-token reading as `root_mount_is_readonly`, parity-pinned. Change a tmpfs line in the LIB,
+  and only on purpose: it changes every cambox at its next provisioning.
+- **Deploy uses `bkshading-deploy-relay.sh --arch arm64`.** `--arch arm64` fetches the
+  `bkshading-relay-linux-arm64` artifact. The remount follows the TARGET's own root
+  (`bkshading_deploy_root_opts_cmd` = `findmnt -no OPTIONS /` with a `/proc/mounts` fallback, decided
+  by the pure `bkshading_deploy_root_remount_action`):
+  - `ro` → the `remount,rw → swap → remount,ro` cycle (every cambox, a read-only SBC);
+  - `rw` → no remount (a board before its first read-only reboot);
+  - anything else → refuse before the box is touched, exactly like an unreadable relay state.
+  One path for cambox and SBC; the old per-deploy flag is gone (an unknown argument now).
 - **CROSS-BUILD GOTCHA — only the RELAY cross-builds to aarch64 trivially; the SERVICE does NOT.**
   The relay is pure Rust (axum/tokio/serde/clap; **no reqwest/rustls/ring, no libndi** on the relay
   side), so the CI `bkshading` job cross-compiles it for `aarch64-unknown-linux-gnu` with just
@@ -355,6 +407,17 @@ The code lane ships the provisioning + `--check`; these live-hardware steps are 
    host, OTG-C = 5 V-in. **Pi Zero 2 W:** micro-USB OTG = host, separate micro-USB = 5 V-in.
 5. **End-to-end** — deploy the aarch64 relay, `--install`, reboot, add the `handheld-N` record, and
    confirm the strih `bkshading` service sees the handheld live (params-only block).
+6. **Read-only root (the final bench step, owner ruling 5948648089)** — copy the current `scripts/`
+   dir (the new `lib/ro-root.sh` comes with it), rerun `--install` and reboot the board. Then:
+   - `findmnt -no OPTIONS /` starts with `ro`;
+   - `systemctl --failed` is empty;
+   - `--check` is all OK (the root row included);
+   - the relay reads the camera and a kelvin write round-trips;
+   - a relay redeploy logs `root on <host>: ro -> remount rw for the swap, back to ro after`.
+   A unit that writes `/var/lib` at start fails on a ro root (`provisioning-scripts.md`, the
+   `StateDirectory=` section): fix it in the SBC provisioning, never by leaving the root rw.
+   The microSD card is an ordinary brand A1 card, never an endurance card (ruling 5948648089:
+   ~3 h of use a week, so wear is no argument).
 
 
 ## Service DEPLOY path onto strih (Windows) — issue 808 (repeatable, mirrors the relay canon)
@@ -1219,3 +1282,15 @@ itself is UNVERIFIED in code lanes — if the shell path never completes it sile
 - Reproduce a panel E2E locally with ZERO builds: `python3 -m http.server 8799 --directory
   bkshading/service/web` + the Playwright MCP `browser_run_code_unsafe` with the test's own init
   script + route (the banner logic, routes and console gate all run without the Rust service).
+  Or run the spec itself: `npm install @playwright/test@1.58.2` in a scratch dir (its chromium
+  revision 1208 is already cached on dev1), copy `panel.spec.js` + `fixtures/` there, and give it a
+  config whose only webServer is that static server; set `PREVIEW_SVC_BASE_URL` for the preview
+  tests. Run the same spec against the pre-fix `web/` (exported from git) to see it RED.
+- **The preview tests use a SECOND service instance** (issue 808): `e2e-preview-config.toml` on
+  `:8782`, one camera WITH `ndi_preview` whose feed is absent (CI's `--features ndi` build loads no
+  libndi). The issue-1304 tests keep their one params-only camera on `:8780`. A second camera in the
+  shared config would make their unscoped `[data-role="aperture-inc"]` locators match two blocks
+  (strict-mode violation). The preview spec addresses `:8782` by absolute URL.
+- **A JPEG fixture trips the staging secret scanner** (`block-sensitive-staging.sh` reads its bytes
+  as a high-entropy blob), whether inlined as base64 or committed as a binary file. It is not a
+  secret: stage it with `# airuleset:secret-ok <what it is>` on the `git add`.
