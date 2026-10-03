@@ -60,7 +60,9 @@ STUCK_LIMIT="$(bkshading_sbc_wifi_heal_stuck_limit)"
 SYSFS_NET="${BKSHADING_WIFI_HEAL_SYSFS_NET:-/sys/class/net}"
 LAST_ACTION_FILE="$STATE_DIR/last-action"
 JOURNAL_CURSOR_FILE="$STATE_DIR/journal-cursor"
+DRIVER_MODULE_FILE="$STATE_DIR/driver-module"
 SYSTEMCTL_TIMEOUT_S=20
+IFACE_WAIT_S=15
 
 snapshot() { bkshading_sbc_wifi_snapshot wpa_cli "$CTRL_DIR" "$IFACE" "$TOOL_TIMEOUT_S"; }
 
@@ -71,6 +73,66 @@ journal_cursor_to_end() {
   rm -f "$JOURNAL_CURSOR_FILE"
   timeout "$TOOL_TIMEOUT_S" journalctl -u "$WPA_UNIT" "--cursor-file=$JOURNAL_CURSOR_FILE" -n 1 \
     -o cat --no-pager >/dev/null 2>&1 || true
+}
+
+# The driver module behind wlan0 (sprdwl_ng on the Orange Pi Zero 2W), read from its sysfs link
+# with bash builtins (cd + pwd -P) and remembered in /run whenever the link resolves. Once a reload
+# has unloaded the module (its load then failed, or the pass was killed in between), wlan0 and its
+# link are gone, and only the remembered name can load the driver again. Prints the name, or
+# nothing: no link while wlan0 exists = a built-in driver; no link, no wlan0 and nothing
+# remembered = unknown.
+driver_module() {
+  local link="$SYSFS_NET/$IFACE/device/driver/module" m="" saved=""
+  if [ -e "$link" ]; then
+    if m="$(cd "$link" 2>/dev/null && pwd -P)"; then m="${m##*/}"; else m=""; fi
+  fi
+  if [ -r "$DRIVER_MODULE_FILE" ]; then saved="$(<"$DRIVER_MODULE_FILE")"; fi
+  if bkshading_sbc_wifi_heal_module_name_ok "$m"; then
+    if [ "$m" != "$saved" ]; then
+      printf '%s\n' "$m" >"$DRIVER_MODULE_FILE.tmp.$$"
+      mv -f "$DRIVER_MODULE_FILE.tmp.$$" "$DRIVER_MODULE_FILE"
+    fi
+    printf '%s\n' "$m"
+  elif [ ! -e "$SYSFS_NET/$IFACE" ] && bkshading_sbc_wifi_heal_module_name_ok "$saved"; then
+    printf '%s\n' "$saved"
+  fi
+}
+
+# Wait up to IFACE_WAIT_S for wlan0 after a driver load (the driver creates it while it probes,
+# a moment after modprobe returns). Returns 1 when it did not come.
+wait_for_iface() {
+  local i
+  for ((i = 0; i < IFACE_WAIT_S; i++)); do
+    [ -e "$SYSFS_NET/$IFACE" ] && break
+    sleep 1
+  done
+  [ -e "$SYSFS_NET/$IFACE" ]
+}
+
+# Load the driver module $mod (load only: a no-op when it is loaded) and wait for wlan0. Returns 1
+# when the load failed or wlan0 did not come back.
+load_driver() {
+  timeout "$SYSTEMCTL_TIMEOUT_S" modprobe "$mod" || return 1
+  wait_for_iface
+}
+
+# Armed only between the supplicant stop and its start in a reload-driver pass. A pass ended there
+# (systemd's SIGTERM at TimeoutStartSec, a `systemctl stop` of the heal, a failing command) would
+# leave the board without its driver or its supplicant until a later pass noticed. The trap loads
+# the module (when the plan has one) and starts the supplicant before the pass exits. Further
+# TERM/INT run a no-op handler meanwhile (a handler, not SIG_IGN, so the children it starts stay
+# killable by their own `timeout`).
+# shellcheck disable=SC2317  # called only from the reload's traps
+reload_interrupted() {
+  set +e
+  trap ':' TERM INT
+  trap - EXIT
+  echo "bkshading-wifi-heal: ERROR: the pass ended in the middle of the driver reload ($1) -- loading the driver and starting $WPA_UNIT before it exits" >&2
+  if [ "$plan" = reload ] || [ "$plan" = load ]; then
+    load_driver || echo "bkshading-wifi-heal: ERROR: loading $mod failed or $IFACE did not come back" >&2
+  fi
+  timeout "$SYSTEMCTL_TIMEOUT_S" systemctl start "$WPA_UNIT" \
+    || echo "bkshading-wifi-heal: ERROR: starting $WPA_UNIT failed" >&2
 }
 
 # After an action: wait for the NEW association, then print its snapshot. A COMPLETED read counts
@@ -100,6 +162,10 @@ if [ -n "$missing" ]; then
 fi
 
 mkdir -p "$STATE_DIR"
+mod="$(driver_module)"
+plan=""
+has_modprobe=no
+if command -v modprobe >/dev/null 2>&1; then has_modprobe=yes; fi
 prev=0
 if [ -r "$MISSES_FILE" ]; then
   prev="$(<"$MISSES_FILE")"
@@ -216,10 +282,23 @@ case "$action" in
     ;;
   start)
     # The supplicant unit is stopped (inactive / failed), not hung: start it, no driver reload. The
-    # journal cursor moves to the end first, so the next pass judges the new supplicant only.
+    # journal cursor moves to the end first, so the next pass judges the new supplicant only. When
+    # wlan0 is gone (a reload whose load failed), the remembered driver module is loaded first.
     label="start $WPA_UNIT"
     detail="it was $unit_word; no driver reload"
     result=ok
+    if [ ! -e "$SYSFS_NET/$IFACE" ]; then
+      plan="$(bkshading_sbc_wifi_heal_driver_plan "$mod" "$has_modprobe" no)"
+      case "$plan" in
+        load)
+          label="load the WiFi driver $mod and start $WPA_UNIT"
+          detail="it was $unit_word; $IFACE was gone"
+          load_driver || result=FAILED
+          ;;
+        no-modprobe) detail="it was $unit_word; $IFACE is gone and modprobe is not found" ;;
+        *) detail="it was $unit_word; $IFACE is gone and its driver module is unknown" ;;
+      esac
+    fi
     journal_cursor_to_end
     timeout "$SYSTEMCTL_TIMEOUT_S" systemctl start "$WPA_UNIT" || result=FAILED
     [ "$result" = ok ] || rc=1
@@ -229,35 +308,38 @@ case "$action" in
       "$label" "$IFACE" "$detail" "$a_bssid" "$a_rssi" "$a_state" "$result"
     ;;
   reload-driver)
-    # The driver module behind wlan0 (sprdwl_ng on the Orange Pi Zero 2W); none = a built-in driver.
-    mod=""
-    modlink="$SYSFS_NET/$IFACE/device/driver/module"
-    if [ -e "$modlink" ]; then
-      # resolve the symlink with bash itself (cd + pwd -P), keep the last path part
-      mod="$(cd "$modlink" 2>/dev/null && pwd -P || true)"
-      mod="${mod##*/}"
-    fi
+    # The driver module behind wlan0 (driver_module above): reload it when it is loaded, load it
+    # alone when wlan0 is gone, else the supplicant restart alone.
+    iface_present=no
+    if [ -e "$SYSFS_NET/$IFACE" ]; then iface_present=yes; fi
+    plan="$(bkshading_sbc_wifi_heal_driver_plan "$mod" "$has_modprobe" "$iface_present")"
+    case "$plan" in
+      reload) label="reload the WiFi driver $mod" ;;
+      load) label="load the WiFi driver $mod ($IFACE was gone)" ;;
+      no-modprobe) label="restart $WPA_UNIT (no driver reload: modprobe not found)" ;;
+      builtin) label="restart $WPA_UNIT (no driver reload: a built-in driver)" ;;
+      *) label="restart $WPA_UNIT (no driver reload: $IFACE is gone and its driver module is unknown)" ;;
+    esac
     result=ok
+    trap 'reload_interrupted SIGTERM; exit 143' TERM
+    trap 'reload_interrupted SIGINT; exit 130' INT
+    trap 'reload_interrupted "exit $?"' EXIT
     timeout "$SYSTEMCTL_TIMEOUT_S" systemctl stop "$WPA_UNIT" || result=FAILED
     # the old supplicant wrote its last refusals until the stop returned: the next pass judges the
     # reloaded driver on the lines written from here on
     journal_cursor_to_end
-    if [ -n "$mod" ] && command -v modprobe >/dev/null 2>&1; then
-      label="reload the WiFi driver $mod"
-      if ! { timeout "$SYSTEMCTL_TIMEOUT_S" modprobe -r "$mod" && timeout "$SYSTEMCTL_TIMEOUT_S" modprobe "$mod"; }; then
-        result=FAILED
-      fi
-      # the module re-creates the interface; give it a moment before the supplicant binds to it
-      for ((i = 0; i < 15; i++)); do
-        [ -e "$SYSFS_NET/$IFACE" ] && break
-        sleep 1
-      done
-    elif [ -n "$mod" ]; then
-      label="restart $WPA_UNIT (no driver reload: modprobe not found)"
-    else
-      label="restart $WPA_UNIT (no driver reload: a built-in driver)"
-    fi
+    case "$plan" in
+      reload)
+        if ! timeout "$SYSTEMCTL_TIMEOUT_S" modprobe -r "$mod"; then
+          result=FAILED
+        elif ! load_driver; then
+          result=FAILED
+        fi
+        ;;
+      load) load_driver || result=FAILED ;;
+    esac
     timeout "$SYSTEMCTL_TIMEOUT_S" systemctl start "$WPA_UNIT" || result=FAILED
+    trap - TERM INT EXIT
     [ "$result" = ok ] || rc=1
     read -r a_bssid a_rssi a_state <<<"$(settled_snapshot "$b_bssid")"
     printf '%s\n' "$label" >"$LAST_ACTION_FILE"
