@@ -276,11 +276,16 @@ def _fake_systemctl(record_path, fail_on=None, disabled_units=()):
         'if [ "$1" = "is-enabled" ] && [ "$2" = "%s" ]; then echo disabled; exit 1; fi\n' % u
         for u in disabled_units
     )
+    # issue 808 --check masked rows: a unit this fake masked earlier answers like a real masked
+    # unit ("masked", exit 1)
+    masked = ('if [ "$1" = "is-enabled" ] && grep -qxF "mask $2" "%s"; then echo masked; exit 1; fi\n'
+              % record_path)
     with open(p, "w", encoding="utf-8") as f:
         f.write(
             "#!/usr/bin/env bash\n"
             'printf "%%s\\n" "$*" >> "%s"\n' % record_path
             + disabled
+            + masked
             + 'if [ "$1" = "is-enabled" ]; then echo enabled; fi\n'
             + fail
         )
@@ -925,6 +930,29 @@ def test_install_masks_the_fake_hwclock_save_service_and_its_timer():
         assert "mask fake-hwclock-load.service" not in log, "the boot-time load only reads"
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+def test_check_requires_the_read_only_root_writers_masked():
+    # --install masks the units that would write onto the read-only root; --check never looked.
+    # Graded on every SBC, a WiFi handheld and a wired board alike (the root rows' rule).
+    units = _lib_call("bkshading_sbc_masked_units").split()
+    assert units, "the lib names the units --install masks"
+    for net in ({"wlan0": "up", "eth0": "up"}, {"eth0": "up"}):
+        root = tempfile.mkdtemp()
+        try:
+            r, _c, _b = _run_provision("--install", root, net_ifaces=net)
+            assert r.returncode == 0, (net, r.stdout, r.stderr)
+            r2, _c2, _b2 = _run_provision("--check", root, net_ifaces=net)
+            assert r2.returncode == 0, (net, r2.stdout, r2.stderr)
+            for unit in units:
+                assert "OK: %s masked" % unit in r2.stdout, (net, unit, r2.stdout)
+            r3, _c3, _b3 = _run_provision("--check", root, net_ifaces=net,
+                                          disabled_units=("fake-hwclock-save.timer",))
+            assert r3.returncode == 1, (net, r3.stdout, r3.stderr)
+            assert re.search(r"FAIL: fake-hwclock-save\.timer not masked \(is-enabled=disabled\)"
+                             r".*re-run --install", r3.stderr), (net, r3.stderr)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
 
 def test_install_on_a_ro_root_remounts_rw_then_back_ro():
