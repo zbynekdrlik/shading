@@ -402,7 +402,9 @@ function wire(el, id) {
       img.classList.add("ready");
       if (ph) ph.hidden = true;
       el.dataset.previewSeen = "1"; // a frame was shown -> a later stop says "obraz sa zastavil"
-      el.dataset.previewShownAt = String(Date.now()); // the timeout keep-window reads this
+      // the timeout keep-window reads this; performance.now() is monotonic (a wall-clock step
+      // on the viewing device can never make a frame look younger than it is)
+      el.dataset.previewShownAt = String(performance.now());
     });
     img.addEventListener("error", () => showPreviewPlaceholder(el));
   }
@@ -428,6 +430,7 @@ function showPreviewPlaceholder(el) {
     URL.revokeObjectURL(el.previewUrl);
     el.previewUrl = null;
   }
+  delete el.dataset.previewShownAt; // no frame on screen -> nothing for the keep-window to keep
   if (ph) {
     ph.textContent = el.dataset.previewSeen === "1" ? PREVIEW_STOPPED_TEXT : PREVIEW_WAIT_TEXT;
     ph.hidden = false;
@@ -473,8 +476,10 @@ async function loadPreview(id, el) {
   } catch (e) {
     // Only a timeout, on a feed still live with contact, keeps a frame painted moments ago; the
     // next fetch replaces it or, once it is older than the keep-window, drops it.
-    const shownAgo = Date.now() - Number(el.dataset.previewShownAt || 0);
-    if (timedOut && el.dataset.previewLive === "1" && isConnected() && shownAgo < PREVIEW_KEEP_ON_TIMEOUT_MS) {
+    const shownAt = el.dataset.previewShownAt;
+    const young =
+      shownAt !== undefined && performance.now() - Number(shownAt) < PREVIEW_KEEP_ON_TIMEOUT_MS;
+    if (timedOut && young && el.dataset.previewLive === "1" && isConnected()) {
       return;
     }
     // Otherwise (the block dropped to its placeholder, a longer stall, or the service is

@@ -164,8 +164,11 @@ feed stayed on screen frozen as if live.
     whenever the block drops to its placeholder (an aborted fetch logs nothing in Chromium), and a
     frame that arrives after contact was lost is not painted. A fetch that only TIMED OUT, on a
     feed still live with contact, keeps a frame painted less than `PREVIEW_KEEP_ON_TIMEOUT_MS` (3 s)
-    ago, so one slow request never flashes "obraz sa zastavil". `panel.spec.js` pins the abort with a
-    route that holds the first request 4 s (a second request must arrive within 3.5 s).
+    ago (stamped with the monotonic `performance.now()`), so one slow request never flashes "obraz
+    sa zastavil", and the freeze stays bounded. `panel.spec.js` pins both: a route that holds the
+    first request 8 s (a second must arrive within 6 s, polled every 100 ms -- the default
+    `expect.poll` intervals stop before the deadline), and a stall after a frame (the frame survives
+    the first timeout, the stopped placeholder follows).
   The placeholder says "NDI preview — čakám…" before any frame and "NDI preview — obraz sa
   zastavil, čakám…" after a live feed stopped. Never point an `<img>` straight at a polled
   endpoint that can answer 4xx/5xx again.

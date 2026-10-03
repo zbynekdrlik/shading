@@ -429,9 +429,9 @@ test("a hung preview fetch is aborted after its timeout, frees the block for the
   });
   page.on("pageerror", (err) => problems.push(`pageerror: ${err.message}`));
 
-  // The feed is live, but the first preview request hangs for 4 s (a half-open link). The panel's
+  // The feed is live, but the first preview request hangs for 8 s (a half-open link). The panel's
   // 2 s fetch timeout must abort it (an aborted fetch logs nothing) and free the block's single
-  // in-flight slot, so a second request arrives while the first one is still held.
+  // in-flight slot, so a second request arrives (~2.7 s) long before the first one would answer.
   let hang = true;
   let previewHits = 0;
   await page.addInitScript(DISABLE_WS);
@@ -445,7 +445,7 @@ test("a hung preview fetch is aborted after its timeout, frees the block for the
   await page.route(PREVIEW_URL_RE, async (route) => {
     previewHits += 1;
     if (hang) {
-      await new Promise((resolve) => setTimeout(resolve, 4000));
+      await new Promise((resolve) => setTimeout(resolve, 8000));
       try {
         await route.fulfill({ status: 200, contentType: "image/jpeg", body: PREVIEW_JPEG });
       } catch (e) {
@@ -460,8 +460,10 @@ test("a hung preview fetch is aborted after its timeout, frees the block for the
   const img = page.locator('[data-role="preview-img"]');
   const placeholder = page.locator('[data-role="preview-placeholder"]');
 
-  // A second request while the first is still held = the timeout freed the slot.
-  await expect.poll(() => previewHits, { timeout: 3500 }).toBeGreaterThanOrEqual(2);
+  // A second request while the first is still held (8 s) = the timeout freed the slot.
+  await expect
+    .poll(() => previewHits, { timeout: 6000, intervals: [100] })
+    .toBeGreaterThanOrEqual(2);
   await expect(placeholder).toBeVisible();
   await expect(placeholder).toHaveText("NDI preview — čakám…");
   await expect(img).not.toHaveClass(/ready/);
@@ -470,6 +472,64 @@ test("a hung preview fetch is aborted after its timeout, frees the block for the
   hang = false;
   await expect(img).toHaveClass(/ready/, { timeout: 8000 });
   await expect(placeholder).toBeHidden();
+
+  expect(problems, `console problems: ${problems.join(" | ")}`).toEqual([]);
+});
+
+test("a timed-out fetch keeps a frame younger than 3 s, then the stall drops it to the stopped placeholder, console clean (issue 808)", async ({
+  page,
+}) => {
+  const problems = [];
+  page.on("console", (msg) => {
+    const t = msg.type();
+    if (t === "error" || t === "warning") problems.push(`${t}: ${msg.text()}`);
+  });
+  page.on("pageerror", (err) => problems.push(`pageerror: ${err.message}`));
+
+  // Frames arrive until the link stalls: from then on every preview request is held 8 s. The
+  // first held request times out (2 s) while the last frame is ~2.3 s old -- that frame must stay
+  // (no flash of the stopped placeholder). The next held request times out when the frame is
+  // over 3 s old -- then the stopped placeholder must show (a bounded freeze, never a frozen frame).
+  let stall = false;
+  let held = 0;
+  await page.addInitScript(DISABLE_WS);
+  await page.route("**/api/cameras", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(makeFixture({ hasPreview: true, previewLive: true })),
+    })
+  );
+  await page.route(PREVIEW_URL_RE, async (route) => {
+    if (stall) {
+      held += 1;
+      await new Promise((resolve) => setTimeout(resolve, 8000));
+      try {
+        await route.fulfill({ status: 200, contentType: "image/jpeg", body: PREVIEW_JPEG });
+      } catch (e) {
+        // the page aborted this request already
+      }
+      return;
+    }
+    return route.fulfill({ status: 200, contentType: "image/jpeg", body: PREVIEW_JPEG });
+  });
+
+  await page.goto(`${PREVIEW_SVC}/`);
+  const img = page.locator('[data-role="preview-img"]');
+  const placeholder = page.locator('[data-role="preview-placeholder"]');
+  await expect(img).toHaveClass(/ready/, { timeout: 10000 });
+
+  stall = true;
+  // A second held request means the first one already timed out: the young frame is still shown.
+  await expect.poll(() => held, { timeout: 6000, intervals: [100] }).toBeGreaterThanOrEqual(2);
+  expect(
+    await img.evaluate((e) => e.classList.contains("ready")),
+    "a frame younger than 3 s survives one timed-out fetch"
+  ).toBe(true);
+  // The second held request times out with the frame over 3 s old: the stopped placeholder.
+  await expect(placeholder).toBeVisible({ timeout: 6000 });
+  await expect(placeholder).toHaveText("NDI preview — obraz sa zastavil, čakám…");
+  await expect(img).not.toHaveClass(/ready/);
 
   expect(problems, `console problems: ${problems.join(" | ")}`).toEqual([]);
 });
