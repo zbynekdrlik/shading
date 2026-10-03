@@ -137,7 +137,9 @@ def test_heal_docs_name_the_stuck_rung_exception():
     # COMPLETED -- the stuck rung (a refusing driver, a stopped or hung supplicant) does.
     stale = {
         HEAL_SERVICE: ["Never acts while wpa_state is not COMPLETED"],
-        HEAL_SCRIPT: ["while it is not COMPLETED it does nothing"],
+        HEAL_SCRIPT: ["while it is not COMPLETED it does nothing",
+                      # the trap loads nothing on a start pass without a driver step (review 4)
+                      "each after the restore trap loaded the driver and\n# queued"],
         README: ["never while\n  the supplicant is still connecting", "never while the supplicant is still connecting"],
         LIB: ["the heal does nothing while wpa_state is\n# not COMPLETED",
               "the WiFi heal only acts on a COMPLETED link",
