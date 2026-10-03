@@ -571,24 +571,31 @@ bkshading_sbc_wifi_heal_stuck_decide() {
   printf '%s\n' "none 0"
 }
 
-# A kernel module name as modprobe takes it (letters, digits, _ and -). The driver module the heal
-# reads from sysfs, or from its own file in /run, must look like one before it reaches modprobe.
-bkshading_sbc_wifi_heal_module_name_ok() { [[ "${1:-}" =~ ^[A-Za-z0-9_-]{1,64}$ ]]; }
+# A kernel module name as modprobe takes it: letters, digits, _ and -, never a leading - (modprobe
+# would read `-r` or `-a` as an option). The driver module the heal reads from sysfs, or from its
+# own file in /run, must look like one before it reaches modprobe.
+bkshading_sbc_wifi_heal_module_name_ok() { [[ "${1:-}" =~ ^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$ ]]; }
 
 # What the stuck rung can do with the WiFi driver. $1 = the driver module behind wlan0 (empty, or
 # anything that is not a module name, = none known), $2 = modprobe present: yes | no, $3 = wlan0
-# present: yes | no. Prints one word:
-#   reload       a module, and wlan0 is there (the module is loaded): unload it, load it
-#   load         a module, and wlan0 is gone: the module is not loaded (a reload whose load failed,
-#                a pass killed after the unload) -- load it only
+# present: yes | no, $4 = the module loaded (/sys/module/<name> exists): yes | no. Prints one word:
+#   reload       a module that is loaded (wlan0 is there, or /sys/module/<name> is): unload it,
+#                load it. A loaded module WITHOUT wlan0 (a load that never brought wlan0 back)
+#                needs the unload too: a second load of a loaded module does nothing.
+#   load         a module that is not loaded (wlan0 and /sys/module/<name> gone: a reload whose
+#                load failed, a pass killed after the unload) -- load it only
 #   no-modprobe  a module, but no modprobe on the board: the supplicant restart alone
 #   builtin      wlan0 is there with no module behind it: a built-in driver, the restart alone
 #   unknown      wlan0 is gone and no module name was ever read: nothing to load
 bkshading_sbc_wifi_heal_driver_plan() {
-  local mod="${1:-}" has_modprobe="${2:-no}" iface="${3:-no}"
+  local mod="${1:-}" has_modprobe="${2:-no}" iface="${3:-no}" loaded="${4:-no}"
   bkshading_sbc_wifi_heal_module_name_ok "$mod" || mod=""
   if [ -n "$mod" ] && [ "$has_modprobe" = yes ]; then
-    if [ "$iface" = yes ]; then printf '%s\n' reload; else printf '%s\n' load; fi
+    if [ "$iface" = yes ] || [ "$loaded" = yes ]; then
+      printf '%s\n' reload
+    else
+      printf '%s\n' load
+    fi
   elif [ -n "$mod" ]; then
     printf '%s\n' no-modprobe
   elif [ "$iface" = yes ]; then

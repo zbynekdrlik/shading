@@ -232,18 +232,30 @@ the relay/cloudflared provisioning canon but with two deliberate deltas + one go
     against the reloaded driver.
   - **After 3 stuck passes** (~60 s) the heal stops the supplicant and runs the pure
     `bkshading_sbc_wifi_heal_driver_plan`, then starts the supplicant:
-    - `reload` (`modprobe -r` + load) while wlan0 is there;
-    - `load` alone when wlan0 is gone;
+    - `reload` (`modprobe -r` + load) while the module is loaded: wlan0 is there, OR
+      `/sys/module/<name>` is. A loaded module WITHOUT wlan0 (a load that never brought wlan0
+      back) must be unloaded first: a second `modprobe` of a loaded module does nothing, so a
+      load-only plan there would leave the board off the WiFi until a reboot (review round 2, red);
+    - `load` alone when the module is not loaded (wlan0 and `/sys/module/<name>` gone);
     - no reload for no-modprobe / a built-in driver / an unknown module.
   - **The module name is remembered in `/run/bkshading-wifi-heal/driver-module`** whenever
     `/sys/class/net/wlan0/device/driver/module` resolves (every pass, bash `cd` + `pwd -P`). Without
     it, a reload whose load failed (wlan0 and its link gone) would read "a built-in driver" on every
-    later pass until a reboot. A stopped supplicant with wlan0 gone gets the remembered module
-    loaded before its start. Both names must pass `bkshading_sbc_wifi_heal_module_name_ok`.
+    later pass until a reboot. It is used only while wlan0 is gone (a wlan0 with no module link is
+    a built-in driver, whatever was remembered). A stopped supplicant with wlan0 gone gets the
+    same plan (load, or reload) before its start. Both names must pass
+    `bkshading_sbc_wifi_heal_module_name_ok` (no leading `-`, which modprobe would read as an option).
   - **A TERM/INT/EXIT trap is armed only from the supplicant stop to its start.** A pass ended
-    there loads the module, waits for wlan0 and starts the supplicant before it exits 143/130. The
-    trap runs a no-op handler for further signals, never SIG_IGN: an ignored TERM is inherited, so
-    `timeout` could no longer kill the children it starts.
+    there (SIGTERM at TimeoutStartSec, Ctrl-C, a command failing under errexit) loads the module,
+    waits for wlan0 and QUEUES the supplicant start with `systemctl start --no-block`. A blocking
+    start would hang: when the heal itself is being stopped (`systemctl stop bkshading-wifi-heal`),
+    systemd runs the heal's stop job before the supplicant's start job, so the start would wait for
+    this very pass. The pass then exits 143 / 130 / the failing status. Further TERM/INT run a no-op
+    handler meanwhile, so a second signal cannot cut the restore short; a handler (unlike SIG_IGN)
+    is not inherited by the commands the trap runs.
+  - **A COMPLETED pass resets the stuck count and drops the journal cursor before the
+    reachability read**, so even a pass that cannot judge reachability (exit 1) ends the stuck
+    stretch.
   - **Every step is bounded** by named lib constants: wpa_cli/journalctl/is-active 3 s,
     systemctl/modprobe 20 s, the wlan0 wait 15 s, the after-read 23 s. The longest pass, a reload,
     is 133 s under `TimeoutStartSec=150`; the trap's 55 s fits `TimeoutStopSec=90`. A test computes
@@ -270,20 +282,32 @@ the relay/cloudflared provisioning canon but with two deliberate deltas + one go
   the heal tests moved out):
   - python stubs for `wpa_cli`/`ip`/`ping`/`systemctl` answer from a JSON state that
     `reassociate`/`restart` update: a delayed roam, a ping exit code, a hanging `wpa_cli`;
-  - `systemctl` models the supplicant unit: `stop` sets it inactive (no wpa_cli answer), `start`
-    refuses while the fake wlan0 is missing (the unit Requires= the device), `is-active` answers;
+  - `systemctl` models the supplicant unit: `stop` sets it inactive (no wpa_cli answer),
+    `is-active` answers. Its `start` fails while the fake wlan0 is missing. That is a
+    simplification: the real unit Requires= the wlan0 device, so a real start waits on the device
+    job until the caller's `timeout` kills the client, and the job stays queued. `start
+    --no-block` only queues, answering 0 at once;
   - the `journalctl` stub serves lines ONLY for the exact calls the heal must make (a `--since`
     read without a cursor, a cursor read, a `-n 1` cursor-to-end), and mixes ordinary supplicant
-    lines into the output. It also fails a cursor it cannot seek like the real journalctl;
-  - the `modprobe` stub moves `<fake sysfs>/wlan0` aside on `-r` and brings it back from a
-    detached process `iface_delay_s` after a load (`modprobe_rc` / `modprobe_load_rc` fail it), so
-    the wait for wlan0 is exercised;
+    lines into the output. Like the real journalctl (probed on systemd 255) it fails a cursor it
+    cannot seek, and its `-n 1` with a cursor present shows the ONE entry after the cursor, so the
+    heal's drop of the cursor before moving it to the end is pinned;
+  - the `modprobe` stub keeps the module in a fake `/sys/module/<name>`
+    (`BKSHADING_WIFI_HEAL_SYSFS_MODULE`). `-r` moves that dir and `<fake sysfs>/wlan0` aside. A
+    load of an unloaded module brings the dir back at once and wlan0 `iface_delay_s` later, from a
+    detached process, so the wait for wlan0 is exercised. A load of a loaded module does nothing,
+    like the real one. `load_no_iface` makes a driver that loads but never creates wlan0;
+    `modprobe_rc` / `modprobe_load_rc` fail it;
   - `BKSHADING_WIFI_HEAL_SYSFS_NET` points the script at that fake `/sys/class/net`, where
-    `wlan0/device/driver/module` links to a dir named after the module;
+    `wlan0/device/driver/module` links to the fake module dir; `BKSHADING_WIFI_HEAL_IFACE_WAIT_S`
+    shortens the wlan0 wait for a test that waits it out;
   - symlinks to `dirname`/`mkdir`/`mv`/`rm`/`sleep`/`timeout` complete the stub dir.
 
-  The trap test lets the modprobe stub SIGTERM the heal's bash (its grandparent, through
-  `timeout`, found in `/proc/<ppid>/stat`) right after `modprobe -r`.
+  The trap tests let the modprobe stub signal the heal's bash (SIGTERM, SIGINT) right after
+  `modprobe -r`. The stub finds that bash among its ancestors by its command line, never a guessed
+  parent, so a mutation that drops the `timeout` wrapper cannot signal the test runner. The EXIT
+  arm is driven by a `systemctl stop` stub that turns the cursor path into a directory, so the
+  heal's next `rm -f` fails under errexit inside the window.
 
   The `wpa_passphrase` stub runs the real binary where it exists (dev1) and emulates it
   exactly elsewhere (the CI runner has none); the PSK assertion uses `hashlib.pbkdf2_hmac`

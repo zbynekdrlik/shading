@@ -25,9 +25,9 @@ set -euo pipefail
 #        and starts the supplicant again (live 3.10.2026: the uwe5622 driver refused every
 #        association, only a sprdwl_ng reload revived it);
 #      - the module name is remembered in /run, so a module unloaded by a reload whose load failed
-#        is still loaded again;
-#      - a trap armed only between the stop and the start loads the module and starts the
-#        supplicant if the pass is ended in between.
+#        is still loaded again, and a module that loaded but never brought wlan0 back is reloaded;
+#      - a trap armed only between the stop and the start loads the module and queues the
+#        supplicant start if the pass is ended in between.
 #      Plain scanning out of range is never stuck.
 # No reboot, no ifdown loop. A first miss, and the first answer after misses or an action, are
 # logged once each. A pass that cannot judge the link (a tool missing, ip or ping failing for
@@ -40,8 +40,9 @@ set -euo pipefail
 # bash builtin; journalctl + modprobe are optional: without journalctl the stuck rung sees only a
 # supplicant that does not answer, without modprobe or with a built-in driver it restarts the
 # supplicant alone). For tests: BKSHADING_WIFI_HEAL_STATE_DIR (default /run/bkshading-wifi-heal),
-# BKSHADING_WIFI_HEAL_SETTLE_S, BKSHADING_WIFI_HEAL_TOOL_TIMEOUT_S, BKSHADING_WIFI_HEAL_SYSFS_NET
-# (default /sys/class/net, where wlan0 and its driver module link are read).
+# BKSHADING_WIFI_HEAL_SETTLE_S, BKSHADING_WIFI_HEAL_TOOL_TIMEOUT_S, BKSHADING_WIFI_HEAL_IFACE_WAIT_S,
+# BKSHADING_WIFI_HEAL_SYSFS_NET (default /sys/class/net, where wlan0 and its driver module link are
+# read), BKSHADING_WIFI_HEAL_SYSFS_MODULE (default /sys/module, where a loaded module has its dir).
 # Exit 0 after a judged pass (also one that acted); 1 when it could not judge, or an action failed
 # (result=FAILED); 143 / 130 when a SIGTERM / SIGINT ended a driver reload (after its trap loaded
 # the driver and started the supplicant).
@@ -71,11 +72,12 @@ MISSES_FILE="$STATE_DIR/misses"
 STUCK_FILE="$STATE_DIR/stuck"
 STUCK_LIMIT="$(bkshading_sbc_wifi_heal_stuck_limit)"
 SYSFS_NET="${BKSHADING_WIFI_HEAL_SYSFS_NET:-/sys/class/net}"
+SYSFS_MODULE="${BKSHADING_WIFI_HEAL_SYSFS_MODULE:-/sys/module}"
 LAST_ACTION_FILE="$STATE_DIR/last-action"
 JOURNAL_CURSOR_FILE="$STATE_DIR/journal-cursor"
 DRIVER_MODULE_FILE="$STATE_DIR/driver-module"
 SYSTEMCTL_TIMEOUT_S="$(bkshading_sbc_wifi_heal_systemctl_timeout_s)"
-IFACE_WAIT_S="$(bkshading_sbc_wifi_heal_iface_wait_s)"
+IFACE_WAIT_S="$(int_or "${BKSHADING_WIFI_HEAL_IFACE_WAIT_S:-}" "$(bkshading_sbc_wifi_heal_iface_wait_s)")"
 
 snapshot() { bkshading_sbc_wifi_snapshot wpa_cli "$CTRL_DIR" "$IFACE" "$TOOL_TIMEOUT_S"; }
 
@@ -129,23 +131,47 @@ load_driver() {
   wait_for_iface
 }
 
+# The stuck rung's driver plan for the board as it is now (bkshading_sbc_wifi_heal_driver_plan):
+# wlan0 present, and the module loaded (/sys/module/<name>).
+driver_plan_now() {
+  local iface=no loaded=no
+  if [ -e "$SYSFS_NET/$IFACE" ]; then iface=yes; fi
+  if [ -n "$mod" ] && [ -d "$SYSFS_MODULE/$mod" ]; then loaded=yes; fi
+  bkshading_sbc_wifi_heal_driver_plan "$mod" "$has_modprobe" "$iface" "$loaded"
+}
+
+# Carry out $plan: reload = unload + load (+ the wait for wlan0), load = load only; any other plan
+# has no driver step. Returns 1 when a step failed.
+apply_driver_plan() {
+  case "$plan" in
+    reload)
+      timeout "$SYSTEMCTL_TIMEOUT_S" modprobe -r "$mod" || return 1
+      load_driver
+      ;;
+    load) load_driver ;;
+    *) return 0 ;;
+  esac
+}
+
 # Armed only between the supplicant stop and its start in a reload-driver pass. A pass ended there
-# (systemd's SIGTERM at TimeoutStartSec, a `systemctl stop` of the heal, a failing command) would
-# leave the board without its driver or its supplicant until a later pass noticed. The trap loads
-# the module (when the plan has one) and starts the supplicant before the pass exits. Further
-# TERM/INT run a no-op handler meanwhile (a handler, not SIG_IGN, so the children it starts stay
-# killable by their own `timeout`).
+# (systemd's SIGTERM at TimeoutStartSec, a `systemctl stop` of the heal, a Ctrl-C, a command that
+# fails under errexit) would leave the board without its driver or its supplicant until a later
+# pass noticed. The trap loads the module (when the plan has one; a no-op when it is loaded) and
+# QUEUES the supplicant start (--no-block): when the heal itself is being stopped, systemd runs its
+# stop job before the supplicant's start job, so a blocking start would wait for this very pass to
+# end. Further TERM/INT run a no-op handler meanwhile, so a second signal cannot cut the restore
+# short; a handler (unlike SIG_IGN) is not inherited by the commands the trap runs.
 # shellcheck disable=SC2317  # called only from the reload's traps
 reload_interrupted() {
   set +e
   trap ':' TERM INT
   trap - EXIT
-  echo "bkshading-wifi-heal: ERROR: the pass ended in the middle of the driver reload ($1) -- loading the driver and starting $WPA_UNIT before it exits" >&2
+  echo "bkshading-wifi-heal: ERROR: the pass ended in the middle of the driver reload ($1) -- loading the driver and queueing the start of $WPA_UNIT before it exits" >&2
   if [ "$plan" = reload ] || [ "$plan" = load ]; then
     load_driver || echo "bkshading-wifi-heal: ERROR: loading $mod failed or $IFACE did not come back" >&2
   fi
-  timeout "$SYSTEMCTL_TIMEOUT_S" systemctl start "$WPA_UNIT" \
-    || echo "bkshading-wifi-heal: ERROR: starting $WPA_UNIT failed" >&2
+  timeout "$SYSTEMCTL_TIMEOUT_S" systemctl start --no-block "$WPA_UNIT" \
+    || echo "bkshading-wifi-heal: ERROR: queueing the start of $WPA_UNIT failed" >&2
 }
 
 # After an action: wait for the NEW association, then print its snapshot. A COMPLETED read counts
@@ -186,7 +212,24 @@ fi
 # A stale or damaged count reads as 0 (the decision does the same); 10# so 08 is never octal.
 if [[ "$prev" =~ ^[0-9]{1,6}$ ]]; then prev=$((10#$prev)); else prev=0; fi
 
+prev_stuck=0
+if [ -r "$STUCK_FILE" ]; then
+  prev_stuck="$(<"$STUCK_FILE")"
+fi
+if [[ "$prev_stuck" =~ ^[0-9]{1,6}$ ]]; then prev_stuck=$((10#$prev_stuck)); else prev_stuck=0; fi
+
 read -r b_bssid b_rssi wpa_state <<<"$(snapshot)"
+if [ "$wpa_state" = COMPLETED ]; then
+  # A working link ends any stuck stretch -- also on a pass that cannot judge reachability below
+  # (it exits 1 there): the stuck count starts over and the journal cursor is dropped, so the next
+  # not-COMPLETED stretch starts at its own pass, never at lines from a working stretch.
+  if [ "$prev_stuck" != 0 ]; then
+    printf '%s\n' 0 >"$STUCK_FILE.tmp.$$"
+    mv -f "$STUCK_FILE.tmp.$$" "$STUCK_FILE"
+    prev_stuck=0
+  fi
+  [ ! -e "$JOURNAL_CURSOR_FILE" ] || rm -f "$JOURNAL_CURSOR_FILE"
+fi
 gw=""
 reachable=no
 if [ "$wpa_state" = COMPLETED ]; then
@@ -211,18 +254,10 @@ mv -f "$MISSES_FILE.tmp.$$" "$MISSES_FILE"
 # The stuck rung (see the header, step 5). Driver-refused associations since the last pass, read
 # from the supplicant journal only while the link is not COMPLETED (journalctl is optional). The
 # read follows a cursor in /run, so every line counts once: --since one interval (+5 s) only when
-# there is no cursor yet. A COMPLETED pass drops the cursor, so the next not-COMPLETED stretch starts
-# at its own pass, never at lines from an hour of a working link. A failed read (a cursor journald
-# no longer has, a hung journalctl) counts 0 and drops the cursor: the next pass reads --since again.
-prev_stuck=0
-if [ -r "$STUCK_FILE" ]; then
-  prev_stuck="$(<"$STUCK_FILE")"
-fi
-if [[ "$prev_stuck" =~ ^[0-9]{1,6}$ ]]; then prev_stuck=$((10#$prev_stuck)); else prev_stuck=0; fi
+# there is no cursor yet (a COMPLETED pass dropped it above). A failed read (a cursor journald no
+# longer has, a hung journalctl) counts 0 and drops the cursor: the next pass reads --since again.
 refused=0
-if [ "$wpa_state" = COMPLETED ]; then
-  [ ! -e "$JOURNAL_CURSOR_FILE" ] || rm -f "$JOURNAL_CURSOR_FILE"
-elif command -v journalctl >/dev/null 2>&1; then
+if [ "$wpa_state" != COMPLETED ] && command -v journalctl >/dev/null 2>&1; then
   journal_args=(-u "$WPA_UNIT" "--cursor-file=$JOURNAL_CURSOR_FILE")
   if [ ! -s "$JOURNAL_CURSOR_FILE" ]; then
     journal_args+=(--since "-$(($(bkshading_sbc_wifi_heal_interval_s) + 5))s")
@@ -294,19 +329,20 @@ case "$action" in
       "$b_bssid" "$b_rssi" "$a_bssid" "$a_rssi" "$a_state" "$result"
     ;;
   start)
-    # The supplicant unit is stopped (inactive / failed), not hung: start it, no driver reload. The
-    # journal cursor moves to the end first, so the next pass judges the new supplicant only. When
-    # wlan0 is gone (a reload whose load failed), the remembered driver module is loaded first.
+    # The supplicant unit is stopped (inactive / failed), not hung: start it, no driver reload. When
+    # wlan0 is gone (a reload whose load failed, or a load that never brought wlan0 back), the
+    # remembered driver module is loaded -- or reloaded, when it is loaded without wlan0 -- first.
+    # The journal cursor then moves to the end, so the next pass judges the new supplicant only.
     label="start $WPA_UNIT"
     detail="it was $unit_word; no driver reload"
     result=ok
     if [ ! -e "$SYSFS_NET/$IFACE" ]; then
-      plan="$(bkshading_sbc_wifi_heal_driver_plan "$mod" "$has_modprobe" no)"
+      plan="$(driver_plan_now)"
       case "$plan" in
-        load)
-          label="load the WiFi driver $mod and start $WPA_UNIT"
+        reload | load)
+          label="$plan the WiFi driver $mod and start $WPA_UNIT"
           detail="it was $unit_word; $IFACE was gone"
-          load_driver || result=FAILED
+          apply_driver_plan || result=FAILED
           ;;
         no-modprobe) detail="it was $unit_word; $IFACE is gone and modprobe is not found" ;;
         *) detail="it was $unit_word; $IFACE is gone and its driver module is unknown" ;;
@@ -322,12 +358,13 @@ case "$action" in
     ;;
   reload-driver)
     # The driver module behind wlan0 (driver_module above): reload it when it is loaded, load it
-    # alone when wlan0 is gone, else the supplicant restart alone.
-    iface_present=no
-    if [ -e "$SYSFS_NET/$IFACE" ]; then iface_present=yes; fi
-    plan="$(bkshading_sbc_wifi_heal_driver_plan "$mod" "$has_modprobe" "$iface_present")"
+    # alone when it is not, else the supplicant restart alone.
+    plan="$(driver_plan_now)"
     case "$plan" in
-      reload) label="reload the WiFi driver $mod" ;;
+      reload)
+        label="reload the WiFi driver $mod"
+        if [ ! -e "$SYSFS_NET/$IFACE" ]; then label="$label ($IFACE was gone)"; fi
+        ;;
       load) label="load the WiFi driver $mod ($IFACE was gone)" ;;
       no-modprobe) label="restart $WPA_UNIT (no driver reload: modprobe not found)" ;;
       builtin) label="restart $WPA_UNIT (no driver reload: a built-in driver)" ;;
@@ -341,16 +378,7 @@ case "$action" in
     # the old supplicant wrote its last refusals until the stop returned: the next pass judges the
     # reloaded driver on the lines written from here on
     journal_cursor_to_end
-    case "$plan" in
-      reload)
-        if ! timeout "$SYSTEMCTL_TIMEOUT_S" modprobe -r "$mod"; then
-          result=FAILED
-        elif ! load_driver; then
-          result=FAILED
-        fi
-        ;;
-      load) load_driver || result=FAILED ;;
-    esac
+    apply_driver_plan || result=FAILED
     timeout "$SYSTEMCTL_TIMEOUT_S" systemctl start "$WPA_UNIT" || result=FAILED
     trap - TERM INT EXIT
     [ "$result" = ok ] || rc=1
