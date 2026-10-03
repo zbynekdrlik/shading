@@ -445,6 +445,16 @@ bkshading_sbc_wifi_heal_settle_s() { printf '%s\n' 15; }
 # socket) must never push a pass past the service's TimeoutStartSec before its action line is out.
 bkshading_sbc_wifi_tool_timeout_s() { printf '%s\n' 3; }
 
+# One systemctl stop/start/restart or modprobe call may take this long. Generous for a supplicant
+# stop (it deauthenticates first) and a module load (the driver loads its firmware), and still a
+# bound: systemd/bkshading-wifi-heal.service's TimeoutStartSec is sized from it (a test computes the
+# longest pass from these constants).
+bkshading_sbc_wifi_heal_systemctl_timeout_s() { printf '%s\n' 20; }
+
+# After a driver load, wait this long for wlan0 to come back: the driver creates the interface
+# while it probes, a moment after modprobe returns (handheld-1: COMPLETED 6 s after the reload).
+bkshading_sbc_wifi_heal_iface_wait_s() { printf '%s\n' 15; }
+
 # Where the heal script + this lib are installed on the board (mirrors the repo layout, so the
 # script's own `$HERE/lib/bkshading-sbc-runtime.sh` resolves unchanged) and the heal units.
 bkshading_sbc_wifi_heal_install_dir() { printf '%s\n' /usr/local/lib/bkshading; }

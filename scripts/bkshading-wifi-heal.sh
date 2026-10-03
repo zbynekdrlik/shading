@@ -61,8 +61,8 @@ SYSFS_NET="${BKSHADING_WIFI_HEAL_SYSFS_NET:-/sys/class/net}"
 LAST_ACTION_FILE="$STATE_DIR/last-action"
 JOURNAL_CURSOR_FILE="$STATE_DIR/journal-cursor"
 DRIVER_MODULE_FILE="$STATE_DIR/driver-module"
-SYSTEMCTL_TIMEOUT_S=20
-IFACE_WAIT_S=15
+SYSTEMCTL_TIMEOUT_S="$(bkshading_sbc_wifi_heal_systemctl_timeout_s)"
+IFACE_WAIT_S="$(bkshading_sbc_wifi_heal_iface_wait_s)"
 
 snapshot() { bkshading_sbc_wifi_snapshot wpa_cli "$CTRL_DIR" "$IFACE" "$TOOL_TIMEOUT_S"; }
 

@@ -12,15 +12,20 @@ After=wpa_supplicant@wlan0.service
 [Service]
 Type=oneshot
 ExecStart=/usr/local/lib/bkshading/bkshading-wifi-heal.sh
-# One pass is a ping burst (at most ~4 s) plus, after an action, up to 15 s waiting for the new
-# association; every wpa_cli call is bounded to 3 s and the supplicant restart to 20 s, so a pass
-# stays well inside 60 s even with a wedged supplicant (the timer never starts a pass while one is
-# still running).
-# A driver reload pass (issue 808 stuck rung) is the longest: stop + modprobe -r + modprobe +
-# up to 15 s for the interface + start (each bounded to 20 s) + up to 15 s settle = under 150 s.
-# A pass killed mid-reload would leave the supplicant stopped (the next passes read it as not
-# answering and reload again), so the bound must cover the whole path.
+# Every step of a pass is bounded (scripts/lib/bkshading-sbc-runtime.sh): each wpa_cli /
+# journalctl / is-active call 3 s, each systemctl / modprobe call 20 s, the wait for wlan0 15 s.
+# The after-read that follows an action takes up to 23 s (the 15 s settle, a 1 s sleep, one more
+# 6 s read, 1 s of SECONDS rounding). A reachability pass with a restart: the before read 6 + the
+# ping burst ~4 + the restart 20 + the after read 23. The longest is a driver reload (issue 808
+# stuck rung): before read 6 + is-active 3 + journal read 3 + stop 20 + journal cursor 3 +
+# modprobe -r 20 + modprobe 20 + wlan0 wait 15 + start 20 + after read 23 = 133 s. A test computes
+# that from the lib constants and pins it under TimeoutStartSec (the timer never starts a pass
+# while one is still running).
+# A pass ended in the middle of a reload (the SIGTERM at that timeout) runs a trap that loads the
+# module and starts the supplicant: modprobe 20 + wlan0 wait 15 + start 20 = 55 s, inside
+# TimeoutStopSec, after which systemd sends SIGKILL.
 TimeoutStartSec=150
+TimeoutStopSec=90
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=bkshading-wifi-heal
