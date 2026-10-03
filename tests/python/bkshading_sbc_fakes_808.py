@@ -68,6 +68,14 @@ def save():
     with open(state_path, "w") as f:
         json.dump(st, f)
 REFUSED = "wlan0: Association request to the driver failed"
+def break_cursor():
+    # a later command in the heal's restore window fails: the cursor path becomes a non-empty dir,
+    # which `rm -f` cannot remove (an errexit inside the armed window)
+    cpath = os.path.join(os.environ["BKSHADING_WIFI_HEAL_STATE_DIR"], "journal-cursor")
+    if os.path.exists(cpath) and not os.path.isdir(cpath):
+        os.remove(cpath)
+    os.makedirs(cpath, exist_ok=True)
+    open(os.path.join(cpath, "x"), "w").close()
 def supplicant_activity():
     # what the supplicant writes to its journal while the board is off the WiFi: ordinary lines,
     # and `driver_failed` driver-refused associations among them (the uwe5622 wedge)
@@ -239,13 +247,7 @@ if name == "systemctl":
         st["wpa_active"] = False
         save()
         if st.get("break_cursor_on_stop"):
-            # the next command in the reload window fails: the cursor path becomes a non-empty dir,
-            # which `rm -f` cannot remove (an errexit inside the stop..start window)
-            cpath = os.path.join(os.environ["BKSHADING_WIFI_HEAL_STATE_DIR"], "journal-cursor")
-            if os.path.exists(cpath) and not os.path.isdir(cpath):
-                os.remove(cpath)
-            os.makedirs(cpath, exist_ok=True)
-            open(os.path.join(cpath, "x"), "w").close()
+            break_cursor()
         sys.exit(0)
     if args[:1] == ["start"]:
         # A simplification of the real unit (Requires= the wlan0 device): a real start waits on the
@@ -263,6 +265,8 @@ if name == "systemctl":
         sys.exit(0 if queued else int(st.get("start_rc", 0)))
     if args[:1] == ["is-active"]:
         # the supplicant unit's word: `unit_word` when the test sets one, else active/inactive
+        if st.get("break_cursor_on_is_active"):
+            break_cursor()
         word = st.get("unit_word") or ("active" if st.get("wpa_active", True) else "inactive")
         print(word)
         sys.exit(0 if word == "active" else 3)

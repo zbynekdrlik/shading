@@ -574,6 +574,26 @@ def test_heal_finishes_the_start_when_the_pass_is_killed_after_the_unload():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_heal_restore_trap_on_a_start_pass_without_a_driver_step():
+    # Every start pass arms the restore trap, also one with wlan0 present (no driver step). A pass
+    # ended inside it (here: a command failing under errexit) only queues the start it was making,
+    # and its message says so -- it loads nothing, so it must not claim to.
+    tmp = tempfile.mkdtemp()
+    try:
+        env = _heal_env(tmp, _net_state(wpa_active=False, break_cursor_on_is_active=True),
+                        extra_tools=("journalctl", "modprobe"), driver_module="sprdwl_ng")
+        r = _heal_pass(env)
+        assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+        assert "in the middle of the driver reload or supplicant start (exit 1)" in r.stderr, r.stderr
+        assert "queueing the start of wpa_supplicant@wlan0.service" in r.stderr, r.stderr
+        assert "loading the driver" not in r.stderr, r.stderr
+        assert _driver_acts(env) == ["systemctl start --no-block wpa_supplicant@wlan0.service"], \
+            _heal_tools(env)
+        assert _get_state(env)["wpa_active"] is True
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_heal_never_uses_a_remembered_module_on_a_board_whose_wlan0_has_none():
     # A remembered name (from a board state that is gone) must not reach modprobe while wlan0
     # exists without a module link: that is a built-in driver.
