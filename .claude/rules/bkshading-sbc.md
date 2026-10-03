@@ -219,7 +219,8 @@ the relay/cloudflared provisioning canon but with two deliberate deltas + one go
   `bkshading_sbc_wifi_heal_stuck_decide` decides each pass (fresh-context review round, 3.10.2026):
   - **A supplicant that does not answer (`?`) is told apart by its unit.** The heal reads
     `systemctl is-active wpa_supplicant@wlan0` only then. `inactive`/`failed` = STOPPED: it is
-    started on that pass, no driver reload, no stuck pass (the supervisor's live
+    started on that pass, no stuck pass, no driver reload while wlan0 is there (with wlan0 gone
+    the remembered module is loaded, or reloaded, first) (the supervisor's live
     `systemctl stop` first read as hung and cost a reload). Any other word, an unreadable one
     included, = running but silent = HUNG = a stuck pass.
   - **A stuck pass** = not COMPLETED and either a driver-refused association in the supplicant
@@ -237,7 +238,9 @@ the relay/cloudflared provisioning canon but with two deliberate deltas + one go
     - `reload` (`modprobe -r` + load) while the module is loaded: wlan0 is there, OR
       `/sys/module/<name>` is. A loaded module WITHOUT wlan0 (a load that never brought wlan0
       back) must be unloaded first: a second `modprobe` of a loaded module does nothing, so a
-      load-only plan there would leave the board off the WiFi until a reboot (review round 2, red);
+      load-only plan there would leave the board off the WiFi until a reboot (review round 2, red).
+      The trade-off: a probe slower than the loading pass's wlan0 wait + its start (15 + 20 s) is
+      unloaded again by the next pass; the live sprdwl_ng probe took 6 s;
     - `load` alone when the module is not loaded (wlan0 and `/sys/module/<name>` gone);
     - no reload for no-modprobe / a built-in driver / an unknown module.
   - **The module name is remembered in `/run/bkshading-wifi-heal/driver-module`** whenever
@@ -247,7 +250,9 @@ the relay/cloudflared provisioning canon but with two deliberate deltas + one go
     a built-in driver, whatever was remembered). A stopped supplicant with wlan0 gone gets the
     same plan (load, or reload) before its start. Both names must pass
     `bkshading_sbc_wifi_heal_module_name_ok` (no leading `-`, which modprobe would read as an option).
-  - **A TERM/INT/EXIT trap is armed only from the supplicant stop to its start.** A pass ended
+  - **A TERM/INT/EXIT trap (`arm_restore_trap`) is armed only from the moment a stuck-rung pass
+    takes the supplicant or the driver down -- the reload's stop, or the start path's driver step
+    (its `modprobe -r`) -- until the supplicant start.** A pass ended
     there (SIGTERM at TimeoutStartSec, Ctrl-C, a command failing under errexit) loads the module,
     waits for wlan0 and QUEUES the supplicant start with `systemctl start --no-block`. A blocking
     start would hang: when the heal itself is being stopped (`systemctl stop bkshading-wifi-heal`),

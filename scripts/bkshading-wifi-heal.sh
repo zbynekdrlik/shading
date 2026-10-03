@@ -17,7 +17,8 @@ set -euo pipefail
 #   4. writes ONE journal line per action naming the BSSID + signal before and after;
 #   5. the STUCK rung, decided by the pure bkshading_sbc_wifi_heal_stuck_decide:
 #      - a supplicant that does not answer while its unit is STOPPED (inactive / failed) is started
-#        at once, no driver reload;
+#        at once: no driver reload while wlan0 is there; with wlan0 gone the remembered module is
+#        loaded, or reloaded, first;
 #      - a pass whose wpa_state is not COMPLETED and whose supplicant journal shows a
 #        driver-refused association since the last pass (read through a journal cursor in /run,
 #        so each line counts once), or whose supplicant does not answer while its unit runs (hung),
@@ -44,8 +45,9 @@ set -euo pipefail
 # BKSHADING_WIFI_HEAL_SYSFS_NET (default /sys/class/net, where wlan0 and its driver module link are
 # read), BKSHADING_WIFI_HEAL_SYSFS_MODULE (default /sys/module, where a loaded module has its dir).
 # Exit 0 after a judged pass (also one that acted); 1 when it could not judge, or an action failed
-# (result=FAILED); 143 / 130 when a SIGTERM / SIGINT ended a driver reload (after its trap loaded
-# the driver and started the supplicant).
+# (result=FAILED); 143 / 130 when a SIGTERM / SIGINT ended a driver reload or start, and the failing
+# status when a command failed inside one -- each after the restore trap loaded the driver and
+# queued the supplicant start.
 # ---------------------------------------------------------------------------------------------
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -153,10 +155,12 @@ apply_driver_plan() {
   esac
 }
 
-# Armed only between the supplicant stop and its start in a reload-driver pass. A pass ended there
-# (systemd's SIGTERM at TimeoutStartSec, a `systemctl stop` of the heal, a Ctrl-C, a command that
-# fails under errexit) would leave the board without its driver or its supplicant until a later
-# pass noticed. The trap loads the module (when the plan has one; a no-op when it is loaded) and
+# Armed (arm_restore_trap) only from the moment a stuck-rung pass takes the supplicant or the
+# driver down -- the reload's stop, or the start path's driver step -- until the supplicant start.
+# A pass ended there (systemd's SIGTERM at TimeoutStartSec, a `systemctl stop` of the heal, a
+# Ctrl-C, a command that fails under errexit) would leave the board without its driver or its
+# supplicant until a later pass noticed. The trap loads the module (when the plan has one; a no-op
+# when it is loaded) and
 # QUEUES the supplicant start (--no-block): when the heal itself is being stopped, systemd runs its
 # stop job before the supplicant's start job, so a blocking start would wait for this very pass to
 # end. Further TERM/INT run a no-op handler meanwhile, so a second signal cannot cut the restore
@@ -172,6 +176,13 @@ reload_interrupted() {
   fi
   timeout "$SYSTEMCTL_TIMEOUT_S" systemctl start --no-block "$WPA_UNIT" \
     || echo "bkshading-wifi-heal: ERROR: queueing the start of $WPA_UNIT failed" >&2
+}
+
+# Arm reload_interrupted for TERM (exit 143), INT (exit 130) and EXIT (the failing status).
+arm_restore_trap() {
+  trap 'reload_interrupted SIGTERM; exit 143' TERM
+  trap 'reload_interrupted SIGINT; exit 130' INT
+  trap 'reload_interrupted "exit $?"' EXIT
 }
 
 # After an action: wait for the NEW association, then print its snapshot. A COMPLETED read counts
@@ -329,10 +340,11 @@ case "$action" in
       "$b_bssid" "$b_rssi" "$a_bssid" "$a_rssi" "$a_state" "$result"
     ;;
   start)
-    # The supplicant unit is stopped (inactive / failed), not hung: start it, no driver reload. When
-    # wlan0 is gone (a reload whose load failed, or a load that never brought wlan0 back), the
-    # remembered driver module is loaded -- or reloaded, when it is loaded without wlan0 -- first.
-    # The journal cursor then moves to the end, so the next pass judges the new supplicant only.
+    # The supplicant unit is stopped (inactive / failed), not hung: start it, no driver reload while
+    # wlan0 is there. When wlan0 is gone (a reload whose load failed, or a load that never brought
+    # wlan0 back), the remembered driver module is loaded -- or reloaded, when it is loaded without
+    # wlan0 -- first, under the same restore trap as a reload. The journal cursor then moves to the
+    # end, so the next pass judges the new supplicant only.
     label="start $WPA_UNIT"
     detail="it was $unit_word; no driver reload"
     result=ok
@@ -342,14 +354,16 @@ case "$action" in
         reload | load)
           label="$plan the WiFi driver $mod and start $WPA_UNIT"
           detail="it was $unit_word; $IFACE was gone"
-          apply_driver_plan || result=FAILED
           ;;
         no-modprobe) detail="it was $unit_word; $IFACE is gone and modprobe is not found" ;;
         *) detail="it was $unit_word; $IFACE is gone and its driver module is unknown" ;;
       esac
     fi
+    arm_restore_trap
+    apply_driver_plan || result=FAILED
     journal_cursor_to_end
     timeout "$SYSTEMCTL_TIMEOUT_S" systemctl start "$WPA_UNIT" || result=FAILED
+    trap - TERM INT EXIT
     [ "$result" = ok ] || rc=1
     read -r a_bssid a_rssi a_state <<<"$(settled_snapshot "$b_bssid")"
     printf '%s (%s)\n' "$label" "$detail" >"$LAST_ACTION_FILE"
@@ -371,9 +385,7 @@ case "$action" in
       *) label="restart $WPA_UNIT (no driver reload: $IFACE is gone and its driver module is unknown)" ;;
     esac
     result=ok
-    trap 'reload_interrupted SIGTERM; exit 143' TERM
-    trap 'reload_interrupted SIGINT; exit 130' INT
-    trap 'reload_interrupted "exit $?"' EXIT
+    arm_restore_trap
     timeout "$SYSTEMCTL_TIMEOUT_S" systemctl stop "$WPA_UNIT" || result=FAILED
     # the old supplicant wrote its last refusals until the stop returned: the next pass judges the
     # reloaded driver on the lines written from here on

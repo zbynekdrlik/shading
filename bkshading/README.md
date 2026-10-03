@@ -208,7 +208,8 @@ params-only block — a handheld has no NDI feed). This milestone provisions the
   one journal line naming the BSSID and signal before and after the new association. While the
   supplicant is still connecting (not COMPLETED) these steps wait, with one exception, the
   **stuck rung**:
-  - a stopped supplicant unit is started at once, with no driver reload;
+  - a stopped supplicant unit is started at once: no driver reload while `wlan0` is there; with
+    `wlan0` gone the remembered driver module is loaded, or reloaded, first;
   - after 3 passes in which the WiFi driver refused associations or a running supplicant did not
     answer, the heal stops the supplicant, does a **driver reload** (the module behind `wlan0`,
     `sprdwl_ng` on the Orange Pi Zero 2W) and starts it again. A refusal is the supplicant journal

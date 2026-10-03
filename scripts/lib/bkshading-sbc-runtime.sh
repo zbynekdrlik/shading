@@ -510,7 +510,8 @@ bkshading_sbc_wifi_heal_decide() {
 # wpa_state is not COMPLETED and either the supplicant journal shows a driver-refused association
 # since the last pass, or the supplicant does not answer ("?") while `systemctl is-active` does not
 # read it stopped. A STOPPED unit (inactive / failed: a manual `systemctl stop`, a start that failed)
-# is simply started again on that pass, no driver reload. Plain scanning out of range is never
+# is simply started again on that pass: no driver reload while wlan0 is there; with wlan0 gone the
+# remembered module is loaded, or reloaded, first. Plain scanning out of range is never
 # stuck (no refusal lines). After this many consecutive stuck passes (3 x 20 s = about a minute)
 # the heal stops the supplicant, reloads the WiFi driver module and starts the supplicant again.
 bkshading_sbc_wifi_heal_stuck_limit() { printf '%s\n' 3; }
@@ -581,7 +582,11 @@ bkshading_sbc_wifi_heal_module_name_ok() { [[ "${1:-}" =~ ^[A-Za-z0-9_][A-Za-z0-
 # present: yes | no, $4 = the module loaded (/sys/module/<name> exists): yes | no. Prints one word:
 #   reload       a module that is loaded (wlan0 is there, or /sys/module/<name> is): unload it,
 #                load it. A loaded module WITHOUT wlan0 (a load that never brought wlan0 back)
-#                needs the unload too: a second load of a loaded module does nothing.
+#                needs the unload too: a second load of a loaded module does nothing. Trade-off:
+#                a probe slower than the loading pass's wlan0 wait + its start (15 + 20 s) is
+#                unloaded again by the next pass, where load-only would have let it finish; the
+#                live sprdwl_ng probe took 6 s, and a load-only plan can leave a board off the
+#                WiFi until a reboot.
 #   load         a module that is not loaded (wlan0 and /sys/module/<name> gone: a reload whose
 #                load failed, a pass killed after the unload) -- load it only
 #   no-modprobe  a module, but no modprobe on the board: the supplicant restart alone
