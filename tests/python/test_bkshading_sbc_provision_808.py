@@ -600,6 +600,23 @@ def test_install_masks_networkd_persistent_storage_on_the_ro_root():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_install_masks_the_fake_hwclock_save_service_and_its_timer():
+    # Live on handheld-1 (3.10.2026, the second boot on the read-only root): Armbian's hourly
+    # fake-hwclock-save.timer ran `fake-hwclock save`, which cannot write /etc/fake-hwclock.data on a
+    # read-only root, and left the board `degraded`. The boot-time load (fake-hwclock-load) only
+    # READS the file and stays; NTP sets the real time right after boot.
+    root = tempfile.mkdtemp()
+    try:
+        r, calls, _b = _run_provision("--install", root)
+        assert r.returncode == 0, (r.stdout, r.stderr)
+        log = _read(calls)
+        assert "mask fake-hwclock-save.service" in log, log
+        assert "mask fake-hwclock-save.timer" in log, log
+        assert "mask fake-hwclock-load.service" not in log, "the boot-time load only reads"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_install_on_a_ro_root_remounts_rw_then_back_ro():
     root = tempfile.mkdtemp()
     try:
