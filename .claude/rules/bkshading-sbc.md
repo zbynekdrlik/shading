@@ -250,9 +250,11 @@ the relay/cloudflared provisioning canon but with two deliberate deltas + one go
     a built-in driver, whatever was remembered). A stopped supplicant with wlan0 gone gets the
     same plan (load, or reload) before its start. Both names must pass
     `bkshading_sbc_wifi_heal_module_name_ok` (no leading `-`, which modprobe would read as an option).
-  - **A TERM/INT/EXIT trap (`arm_restore_trap`) is armed only from the moment a stuck-rung pass
-    takes the supplicant or the driver down -- the reload's stop, or the start path's driver step
-    (its `modprobe -r`) -- until the supplicant start.** A pass ended
+  - **A TERM/INT/EXIT trap (`arm_restore_trap`) is armed from the reload's stop, and on every
+    start pass from its driver step (none while wlan0 is there; a `modprobe -r` when the module is
+    loaded without wlan0), until the supplicant start.** A killed start pass with no driver step
+    only queues the start it was making, and says so (its message names a "driver reload or
+    supplicant start" and mentions loading only when there is a load). A pass ended
     there (SIGTERM at TimeoutStartSec, Ctrl-C, a command failing under errexit) loads the module,
     waits for wlan0 and QUEUES the supplicant start with `systemctl start --no-block`. A blocking
     start would hang: when the heal itself is being stopped (`systemctl stop bkshading-wifi-heal`),

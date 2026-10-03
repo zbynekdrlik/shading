@@ -41,9 +41,10 @@ set -euo pipefail
 # bash builtin; journalctl + modprobe are optional: without journalctl the stuck rung sees only a
 # supplicant that does not answer, without modprobe or with a built-in driver it restarts the
 # supplicant alone). For tests: BKSHADING_WIFI_HEAL_STATE_DIR (default /run/bkshading-wifi-heal),
-# BKSHADING_WIFI_HEAL_SETTLE_S, BKSHADING_WIFI_HEAL_TOOL_TIMEOUT_S, BKSHADING_WIFI_HEAL_IFACE_WAIT_S,
-# BKSHADING_WIFI_HEAL_SYSFS_NET (default /sys/class/net, where wlan0 and its driver module link are
-# read), BKSHADING_WIFI_HEAL_SYSFS_MODULE (default /sys/module, where a loaded module has its dir).
+# BKSHADING_WIFI_HEAL_SETTLE_S, BKSHADING_WIFI_HEAL_TOOL_TIMEOUT_S,
+# BKSHADING_WIFI_HEAL_IFACE_WAIT_S, BKSHADING_WIFI_HEAL_SYSFS_NET (default /sys/class/net, where
+# wlan0 and its driver module link are read), BKSHADING_WIFI_HEAL_SYSFS_MODULE (default
+# /sys/module, where a loaded module has its dir).
 # Exit 0 after a judged pass (also one that acted); 1 when it could not judge, or an action failed
 # (result=FAILED); 143 / 130 when a SIGTERM / SIGINT ended a driver reload or start, and the failing
 # status when a command failed inside one -- each after the restore trap loaded the driver and
@@ -155,22 +156,24 @@ apply_driver_plan() {
   esac
 }
 
-# Armed (arm_restore_trap) only from the moment a stuck-rung pass takes the supplicant or the
-# driver down -- the reload's stop, or the start path's driver step -- until the supplicant start.
-# A pass ended there (systemd's SIGTERM at TimeoutStartSec, a `systemctl stop` of the heal, a
-# Ctrl-C, a command that fails under errexit) would leave the board without its driver or its
-# supplicant until a later pass noticed. The trap loads the module (when the plan has one; a no-op
-# when it is loaded) and
-# QUEUES the supplicant start (--no-block): when the heal itself is being stopped, systemd runs its
-# stop job before the supplicant's start job, so a blocking start would wait for this very pass to
-# end. Further TERM/INT run a no-op handler meanwhile, so a second signal cannot cut the restore
-# short; a handler (unlike SIG_IGN) is not inherited by the commands the trap runs.
-# shellcheck disable=SC2317  # called only from the reload's traps
+# Armed (arm_restore_trap) from the reload's stop, and on every start pass from its driver step
+# (none while wlan0 is there), until the supplicant start. A pass ended there (systemd's SIGTERM at
+# TimeoutStartSec, a `systemctl stop` of the heal, a Ctrl-C, a command that fails under errexit)
+# would leave the board without its driver or its supplicant until a later pass noticed. The trap
+# loads the module when the plan has one (a no-op when it is loaded) and QUEUES the supplicant start
+# (--no-block): when the heal itself is being stopped, systemd runs its stop job before the
+# supplicant's start job, so a blocking start would wait for this very pass to end. A killed start
+# pass with no driver step only queues the start it was making. Further TERM/INT run a no-op handler
+# meanwhile, so a second signal cannot cut the restore short; a handler (unlike SIG_IGN) is not
+# inherited by the commands the trap runs.
+# shellcheck disable=SC2317  # called only from the traps arm_restore_trap sets
 reload_interrupted() {
+  local doing="queueing the start of $WPA_UNIT"
   set +e
   trap ':' TERM INT
   trap - EXIT
-  echo "bkshading-wifi-heal: ERROR: the pass ended in the middle of the driver reload ($1) -- loading the driver and queueing the start of $WPA_UNIT before it exits" >&2
+  if [ "$plan" = reload ] || [ "$plan" = load ]; then doing="loading the driver $mod and $doing"; fi
+  echo "bkshading-wifi-heal: ERROR: the pass ended in the middle of the driver reload or supplicant start ($1) -- $doing before it exits" >&2
   if [ "$plan" = reload ] || [ "$plan" = load ]; then
     load_driver || echo "bkshading-wifi-heal: ERROR: loading $mod failed or $IFACE did not come back" >&2
   fi

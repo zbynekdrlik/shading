@@ -481,7 +481,8 @@ bkshading_sbc_wifi_heal_units() { printf '%s\n' bkshading-wifi-heal.service bksh
 # after every reassociate never reaches the restart tier. A reassociation to a dead AP reads
 # COMPLETED again within one 20 s pass, so the restart still comes in practice. A supplicant that
 # keeps failing to associate is the supplicant working, unless the DRIVER refuses the associations
-# or the supplicant stopped or hung: those are the stuck rung's (bkshading_sbc_wifi_heal_stuck_decide).
+# or the supplicant stopped or hung: those are the stuck rung's
+# (bkshading_sbc_wifi_heal_stuck_decide).
 bkshading_sbc_wifi_heal_decide() {
   local prev="${1:-0}" state="${2:-}" reachable="${3:-}" limit misses
   limit="$(bkshading_sbc_wifi_heal_miss_limit)"
@@ -509,9 +510,9 @@ bkshading_sbc_wifi_heal_decide() {
 # while its unit still runs (hung, not crashed) is the same dead end. So a pass is STUCK when
 # wpa_state is not COMPLETED and either the supplicant journal shows a driver-refused association
 # since the last pass, or the supplicant does not answer ("?") while `systemctl is-active` does not
-# read it stopped. A STOPPED unit (inactive / failed: a manual `systemctl stop`, a start that failed)
-# is simply started again on that pass: no driver reload while wlan0 is there; with wlan0 gone the
-# remembered module is loaded, or reloaded, first. Plain scanning out of range is never
+# read it stopped. A STOPPED unit (inactive / failed: a manual `systemctl stop`, a start that
+# failed) is simply started again on that pass: no driver reload while wlan0 is there; with wlan0
+# gone the remembered module is loaded, or reloaded, first. Plain scanning out of range is never
 # stuck (no refusal lines). After this many consecutive stuck passes (3 x 20 s = about a minute)
 # the heal stops the supplicant, reloads the WiFi driver module and starts the supplicant again.
 bkshading_sbc_wifi_heal_stuck_limit() { printf '%s\n' 3; }
