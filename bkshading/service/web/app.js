@@ -694,6 +694,27 @@ function render(agg) {
       blocks.delete(id);
     }
   }
+  orderBlocks(agg.cameras);
+}
+
+// Owner 4.10.2026: cameras with a live camera first, in config (= number) order, then every other
+// block in config order. The DOM is only touched when that order changes (a camera going online or
+// offline), so a push never moves a block under the operator's finger for nothing.
+function panelOrder(cameras) {
+  const live = (c) => Boolean(c.reachable && c.state && c.state.online);
+  return [...cameras.filter(live), ...cameras.filter((c) => !live(c))].map((c) => c.id);
+}
+
+function orderBlocks(cameras) {
+  const want = panelOrder(cameras);
+  const now = Array.from(grid.children)
+    .filter((el) => el.dataset && el.dataset.id)
+    .map((el) => el.dataset.id);
+  if (want.length === now.length && want.every((id, i) => id === now[i])) return;
+  for (const id of want) {
+    const el = blocks.get(id);
+    if (el) grid.appendChild(el);
+  }
 }
 
 // issue 1343: connection model + LOUD offline banner. The panel is "connected" iff the WS is open
