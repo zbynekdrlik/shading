@@ -55,6 +55,11 @@ class PanelWindow:
         self.url = url
         self._log = log
         self.retry_pending = False
+        # The outage log state: failures since the last good load, the reason last logged, and
+        # whether the load in progress failed (a FINISHED follows a failed load too).
+        self.failures = 0
+        self._logged_reason = None
+        self._load_failed = False
 
         win = Gtk.Window(title=WINDOW_TITLE)
         win.set_default_size(*DEFAULT_SIZE)
@@ -66,6 +71,7 @@ class PanelWindow:
         settings.set_enable_developer_extras(False)
         view.connect("context-menu", self._on_context_menu)
         view.connect("create", self._on_create)
+        view.connect("load-changed", self._on_load_changed)
         view.connect("load-failed", self._on_load_failed)
         view.connect("web-process-terminated", self._on_web_process_terminated)
         win.add(view)
@@ -78,12 +84,25 @@ class PanelWindow:
         self.view.load_uri(self.url)
 
     def _schedule_retry(self, why):
-        """One pending reload at a time: a burst of failures never stacks reloads."""
+        """One pending reload at a time: a burst of failures never stacks reloads. An outage is logged
+        once (and again when its reason changes), never on every reload."""
+        self.failures += 1
+        if why != self._logged_reason:
+            self._logged_reason = why
+            self._log("bkshading-panel-app: %s -- reloading %s every %d s until it loads" % (
+                why, self.url, RETRY_DELAY_S))
         if self.retry_pending:
             return
         self.retry_pending = True
-        self._log("bkshading-panel-app: %s -- reloading %s in %d s" % (why, self.url, RETRY_DELAY_S))
         self._glib.timeout_add_seconds(RETRY_DELAY_S, self._retry)
+
+    def _on_load_changed(self, _view, event):
+        if event == self._webkit.LoadEvent.STARTED:
+            self._load_failed = False
+        elif event == self._webkit.LoadEvent.FINISHED and not self._load_failed and self.failures:
+            self._log("bkshading-panel-app: loaded %s after %d failed attempt(s)" % (self.url, self.failures))
+            self.failures = 0
+            self._logged_reason = None
 
     def _retry(self):
         self.retry_pending = False
@@ -104,6 +123,7 @@ class PanelWindow:
     def _on_load_failed(self, _view, _event, uri, error):
         if is_cancelled_load(error, self._webkit):
             return True
+        self._load_failed = True
         message = getattr(error, "message", None) or str(error)
         self._schedule_retry("load of %s failed (%s)" % (uri, message))
         return True  # handled: no WebKit error page
