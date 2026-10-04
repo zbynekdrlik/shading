@@ -603,3 +603,62 @@ test("a live preview frame is shown, a stopped feed drops to the placeholder and
 
   expect(problems, `console problems: ${problems.join(" | ")}`).toEqual([]);
 });
+
+// Owner 4.10.2026: "v shadingu maju byt online camery na zaciatku podla cisiel, a potom ofline".
+// Cameras with a live camera come first in config (= number) order, then every other block, and the
+// order follows a camera going online/offline on a later push.
+test("online cameras come first in number order, then the offline ones, console clean", async ({ page }) => {
+  const problems = [];
+  page.on("console", (msg) => {
+    const t = msg.type();
+    if (t === "error" || t === "warning") problems.push(`${t}: ${msg.text()}`);
+  });
+  page.on("pageerror", (err) => problems.push(`pageerror: ${err.message}`));
+  await page.addInitScript(DISABLE_WS);
+  await page.route("**/api/**", (route) => route.fulfill({ status: 200, contentType: "text/plain", body: "offline-fixture" }));
+  await page.goto("/");
+  await page.waitForFunction(() => typeof window.render === "function");
+
+  const cam = (id, reachable, online) => ({
+    id,
+    label: id,
+    transport: id.startsWith("handheld") ? "sbc-relay" : "cambox-relay",
+    hasPreview: false,
+    reachable,
+    grabFps: null,
+    grabFpsDesync: false,
+    fpsSync: "unknown",
+    state: reachable
+      ? {
+          online,
+          camera: online ? "USB PTP Class Camera" : null,
+          params: { apertureAv: null, apertureNorm: null, iso: null, kelvin: null, tint: null,
+            shutter: null, fps100: null, sensorFps100: null, focusDistance: null },
+          caps: null,
+          fpsSupported: false,
+          captureFps: null,
+          version: "1.7.0-dev.e2e",
+          notApplied: [],
+        }
+      : null,
+  });
+  const order = () => page.locator("#camera-grid > [data-id]").evaluateAll((els) => els.map((e) => e.dataset.id));
+
+  // cam1 + cam2 + handheld-1 live, cam3 relay up without a camera, cam4 relay down
+  await page.evaluate((agg) => window.render(agg), {
+    version: "1.7.0-dev.e2e",
+    cameras: [cam("cam1", true, true), cam("cam2", true, true), cam("cam3", true, false),
+      cam("cam4", false, false), cam("handheld-1", true, true)],
+  });
+  expect(await order()).toEqual(["cam1", "cam2", "handheld-1", "cam3", "cam4"]);
+
+  // cam1 drops its camera, cam4 comes online: the blocks follow on the next push
+  await page.evaluate((agg) => window.render(agg), {
+    version: "1.7.0-dev.e2e",
+    cameras: [cam("cam1", true, false), cam("cam2", true, true), cam("cam3", true, false),
+      cam("cam4", true, true), cam("handheld-1", true, true)],
+  });
+  expect(await order()).toEqual(["cam2", "cam4", "handheld-1", "cam1", "cam3"]);
+
+  expect(problems, `console problems: ${problems.join(" | ")}`).toEqual([]);
+});
