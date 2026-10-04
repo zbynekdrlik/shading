@@ -1,0 +1,28 @@
+[Unit]
+# issue 1399 -- the bkshading shading panel (bkshading-service.service on :8770) as an app window on
+# strih-lx: a WebKitGTK window titled "Shading" with no browser chrome, scripts/bkshading_panel_app.py.
+# Installed by setup-strih.sh step 16d (scripts/lib/strih-session-apps.sh) under the SAME name the
+# 4.10.2026 hand-made stopgap used, so it replaces that unit; graded by verify-strih.sh item 38.
+Description=strih-lx shading panel app window (bkshading :8770, issue 1399)
+Documentation=https://github.com/zbynekdrlik/camera-box
+# Never give up: the panel must be up whenever the operator session is (owner 4.10.2026).
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# The kiosk's plain Xorg session (the strih-obs-start.sh display); Xlib reads ~/.Xauthority.
+Environment=DISPLAY=:0
+ExecStart=/usr/bin/python3 /usr/local/bin/bkshading_panel_app.py
+# always: a closed window or a crash comes back after RestartSec.
+Restart=always
+RestartSec=3
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bkshading-panel-app
+
+[Install]
+# openbox never reaches graphical-session.target: the kiosk openbox autostart STARTS this unit at
+# every login (the strih-obs.service pattern); the WantedBy only makes `enable` meaningful.
+WantedBy=graphical-session.target
