@@ -258,8 +258,11 @@ impl std::error::Error for FpsNotSettable {}
 /// when that value is one of `fps_choices` (the camera's d006 choices, [`fps_settable`]).
 /// Any other value refuses the WHOLE request with [`FpsNotSettable`] before anything is
 /// planned — a request is applied whole or not at all. The off-speed d007 is never written.
-/// A `shutter` in the same request converts at that NEW project fps (the camera keeps the
-/// angle), otherwise at `fps100`, the camera's current project fps.
+/// The d006 write goes FIRST, so every other value lands at the rate the camera then runs.
+/// `d002` is the shutter ANGLE, so a `shutter` in the same request converts at that NEW
+/// project fps (it arrives after d006), otherwise at `fps100`, the camera's current project
+/// fps. Whether a body keeps the angle or the speed across a rate change does not matter then
+/// (review round 2: that is not verified).
 pub fn plan_writes(
     req: &SetRequest,
     fnumber_choices: &[String],
@@ -280,6 +283,10 @@ pub fn plan_writes(
         None => None,
     };
     let mut out: Vec<(String, String)> = Vec::new();
+    // The project frame rate first: everything below lands while the camera runs the new rate.
+    if let Some(fps100_value) = fps_write {
+        out.push(("d006".to_string(), fps100_value.to_string()));
+    }
     if let Some(norm) = req.aperture_norm {
         let idx = norm_to_choice_index(norm, fnumber_choices.len() as i64);
         if let Some(choice) = fnumber_choices.get(idx as usize) {
@@ -290,8 +297,8 @@ pub fn plan_writes(
         out.push(("iso".to_string(), iso.to_string()));
     }
     if let Some(shutter) = req.shutter {
-        // issue 1402: the camera stores the shutter as an ANGLE (d002), so a shutter set together
-        // with a project-fps write converts at the NEW rate the camera will run at.
+        // issue 1402: d002 is the shutter ANGLE and arrives after the d006 write above, so a
+        // shutter set together with a project-fps write converts at that NEW rate.
         let conv_fps100 = fps_write.unwrap_or(fps100);
         out.push((
             "d002".to_string(),
@@ -303,9 +310,6 @@ pub fn plan_writes(
     }
     if let Some(tint) = req.tint {
         out.push(("d005".to_string(), tint.to_string()));
-    }
-    if let Some(fps100_value) = fps_write {
-        out.push(("d006".to_string(), fps100_value.to_string()));
     }
     Ok(out)
 }

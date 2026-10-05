@@ -1252,8 +1252,8 @@ impl CameraSession {
         //    refresh the burst idle clock.
         merge_written(&mut burst.written, req);
         // issue 1402: an accepted fps write moved the camera's project rate. The rest of this burst
-        // converts the shutter angle at the NEW rate (the camera keeps the angle, d002), never at
-        // the burst-open rate. (plan_writes accepted `fps`, so `fps * 100` is a listed choice.)
+        // converts a shutter to the d002 ANGLE at the NEW rate the camera now runs, never at the
+        // burst-open rate. (plan_writes accepted `fps`, so `fps * 100` is a listed choice.)
         if let (Some(fps), Some(plan)) = (req.fps, burst.plan.as_mut()) {
             if let Some(fps100) = fps.checked_mul(100) {
                 plan.fps100 = fps100;
