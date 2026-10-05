@@ -320,9 +320,11 @@ round, so the proto `mapping.rs` fixtures and the relay `FakeRunner` now carry D
   - the 1402 cases in `relay/tests/relay.rs` and `service/tests/service.rs`;
   - the panel Playwright test `the align-to-grab button is offered only for a grab the camera lists`;
   - `test_app_js_align_button_offered_only_for_a_listed_grab_1402`.
-- **Not changed here (follow-up candidate):** `scripts/camera_test_settings.py` (issue 1371) still
-  reads `d007` as "project fps", for its shutter `1/N s` LOG line only (never set). On cam1 (the
-  4K, the only box it runs on) d006/100 and d007 are both 60.
+- **The E2E test-camera step follows the same mapping** (issue 1402 follow-up, design 5991648511):
+  `scripts/camera_test_settings.py` (issue 1371) reads `d006` (x100) as its project fps, for the
+  shutter `1/N s` LOG line only (never set), and no longer reads `d007`. A production-exposure
+  snapshot saved before the switch carries a whole-fps `context.d007`, read only when `d006` is
+  absent (LEGACY). Detail: `.claude/rules/camera-test-settings.md`.
 - **Deploy + read-back (supervisor; any order is safe):**
   - Why any order is safe: a new relay refuses a `60` write from an old panel (422), and a new
     service offers no button to an old relay (no `fpsChoices`).
