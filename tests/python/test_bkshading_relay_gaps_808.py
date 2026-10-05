@@ -313,7 +313,9 @@ def test_failed_ro_remount_fails_loud_and_names_the_holder():
         assert "OK: relay deployed" not in out, "must never report OK while the root stays read-write"
         assert re.search(r"read-?WRITE|read-write", out, re.I), out
         calls = _read(log)
-        assert "fuser -vm /" in calls and "lsof +L1" in calls, "must gather the holder:\n" + calls
+        assert "processes with a file open for WRITING" in out and "holders of deleted-but-open files" in out, \
+            "the box's own holder listing must reach the operator:\n" + out
+        assert "holder(s): systemd-journal[76355]; bkshading[4242]" in out, out
         assert "bkshading" in out and "4242" in out, "the error must NAME the holder (command + pid):\n" + out
         assert "systemd-journal" in out, "the WRITER is named too (issue 1407):\n" + out
         # issue 1407: a root left writable starts NOTHING -- the relay stays stopped, named.
