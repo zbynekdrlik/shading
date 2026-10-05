@@ -1251,6 +1251,14 @@ impl CameraSession {
         //    pump read while the burst is open confirms the clicks instead of reverting them), and
         //    refresh the burst idle clock.
         merge_written(&mut burst.written, req);
+        // issue 1402: an accepted fps write moved the camera's project rate. The rest of this burst
+        // converts the shutter angle at the NEW rate (the camera keeps the angle, d002), never at
+        // the burst-open rate. (plan_writes accepted `fps`, so `fps * 100` is a listed choice.)
+        if let (Some(fps), Some(plan)) = (req.fps, burst.plan.as_mut()) {
+            if let Some(fps100) = fps.checked_mul(100) {
+                plan.fps100 = fps100;
+            }
+        }
         if let (Some(basis), Some(open)) = (burst.plan.clone(), burst.open_state.clone()) {
             let params = project_shading(&open.params, &burst.written, &basis.fnumber_labels);
             burst.projected = Some(RelayState { params, ..open });

@@ -258,6 +258,8 @@ impl std::error::Error for FpsNotSettable {}
 /// when that value is one of `fps_choices` (the camera's d006 choices, [`fps_settable`]).
 /// Any other value refuses the WHOLE request with [`FpsNotSettable`] before anything is
 /// planned — a request is applied whole or not at all. The off-speed d007 is never written.
+/// A `shutter` in the same request converts at that NEW project fps (the camera keeps the
+/// angle), otherwise at `fps100`, the camera's current project fps.
 pub fn plan_writes(
     req: &SetRequest,
     fnumber_choices: &[String],
@@ -288,9 +290,12 @@ pub fn plan_writes(
         out.push(("iso".to_string(), iso.to_string()));
     }
     if let Some(shutter) = req.shutter {
+        // issue 1402: the camera stores the shutter as an ANGLE (d002), so a shutter set together
+        // with a project-fps write converts at the NEW rate the camera will run at.
+        let conv_fps100 = fps_write.unwrap_or(fps100);
         out.push((
             "d002".to_string(),
-            shutter_denom_to_angle100(shutter, fps100).to_string(),
+            shutter_denom_to_angle100(shutter, conv_fps100).to_string(),
         ));
     }
     if let Some(kelvin) = req.kelvin {
