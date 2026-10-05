@@ -915,18 +915,23 @@ the root stayed read-WRITE (cam6/cam7).
   (`RESTORE_SESSION`), out of the terminal's process group. The test for it needs a fake sshpass
   that handles + forwards SIGINT -- with an empty prefix, the inherited SIG_IGN hides the bug.
   Consequence: the re-run restore can only be stopped with SIGKILL. That is bounded (ConnectTimeout
-  10, ServerAlive ~30 s, the 3x2 s remount loop; the Type=simple unit's `start` returns at once).
+  10, ServerAlive ~30 s, the one verified ro close; the Type=simple unit's `start` returns at once).
   `ssh_box`/`scp_box` carry ServerAliveInterval so a dead connection cannot postpone the restore.
-- **The ro remount is checked:** retried 3x, then FAIL LOUD with the holder named (the pure
-  `bkshading_deploy_ro_holders` over `bkshading_deploy_ro_holder_probe_cmd`: `lsof +L1`, or -- a
-  cambox has no lsof -- the same columns built from /proc) plus `fuser -vm /`, and exit non-zero.
+- **The ro remount is checked** -- since issue 1407 through the ONE shared verified close
+  (`ro_window_close_cmds`, `scripts/lib/ro-window.sh`, `.claude/rules/ro-window.md`), run on the box
+  in ONE ssh call, no retry. The root mode is READ (never the mount exit code alone); a root left
+  writable prints the box's FAIL lines: the writers (`fuser -vm /` filtered to ACCESS `F`, never a
+  `head -n 40` cut) and the deleted-but-open holders (`ro_window_holder_probe_cmd`: `lsof +L1`, or --
+  a cambox has no lsof -- the same columns built from /proc), then one summary line
+  (`ro_window_holders`), and exit non-zero. **A failed close starts nothing: the relay is left
+  STOPPED and says so** (issue 1407 reversed the old "the relay restore still runs").
   The /proc fallback must scan `/proc/<pid>/exe` (a replaced RUNNING binary -- the 25.9. incident --
   is held there, lsof `txt`) and `/proc/<pid>/maps` (`mem`), not only `fd/*`; its PROC_ROOT argument
   lets a test plant a fake tree (substituted with bash `${body//__PROC__/$root}`, never sed). It
   drops `/memfd:`, `/dev/shm/`, `/SYSV` noise (always "(deleted)", never holds /) so it cannot crowd
   the real holder out of the 40-line cap, and turns spaces in a process name into `_` so the lsof
-  columns hold. The remote loop exits only 0 or 1, so any other rc (ssh 255,
-  sshpass 5/6) is reported as an ssh failure, not a busy mount. The relay restore still runs.
+  columns hold. The close exits only 0 or 1, so any other rc (ssh 255, sshpass 5/6) is reported
+  as an ssh failure, not a busy mount.
 - **Run resolution is ONE shared resolver:** `scripts/lib/ci-run-resolve.sh`
   `ci_run_latest_success REPO BRANCH WORKFLOW ARTIFACT [LIMIT=100]`, used by the relay deploy,
   `deploy-fleet.sh`, the setup-device relay `latest` plan and (since #1394) setup-device STEP 3 /

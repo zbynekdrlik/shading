@@ -28,6 +28,20 @@
 _BKSH_MODE_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/bkshading-relay-runtime.sh
 . "$_BKSH_MODE_HERE/bkshading-relay-runtime.sh"
+# shellcheck source=scripts/lib/ro-window.sh
+. "$_BKSH_MODE_HERE/ro-window.sh"   # ro_window_close_cmds -- the ONE verified ro close (issue 1407)
+
+# _bkshading_relay_mode_close MODE CHANGE -> the shared verified close of the enable-state window
+# (issue 1407): the ro remount, the root mode READ, and on a root left writable the FAIL lines
+# naming the writers + `exit 1`. The box names itself at run time (one text serves every roster
+# box). Its LAST FAIL line is the one bkshading_relay_mode_apply relays, so it says what to do.
+_bkshading_relay_mode_close() {  # $1 = rig mode (test|event), $2 = what landed on disk
+  local after=""
+  [ "$1" = event ] && after=", so the relay is NOT started"
+  ro_window_close_cmds "issue 1407" "\$(hostname 2>/dev/null || echo this box)" \
+    "The $2 of $(bkshading_relay_unit_name) is on disk, but this box is left on a writable root$after." \
+    "the root is still read-WRITE: stop that writer, put the root back read-only until 'findmnt -no OPTIONS /' reads ro, then re-run rig-mode.sh $1."
+}
 
 # --- pure remote-text builders --------------------------------------------------------------
 # Each echoes REMOTE bash text (the WHOLE remote command string of an ssh call) with the ONE
@@ -46,11 +60,14 @@ bkshading_relay_mode_stop_cmds() {
   # The persistent enable-state lives under /etc on the cambox's READ-ONLY root (issue 1311, live
   # on the source box 14.9.2026: the change failed 'Read-only file system' behind 2>/dev/null and
   # the unit stayed armed for the next boot). Mirror the painter's ro-persist helper: remount rw,
-  # change, restore ro, READ BACK, and exit non-zero when the state did not land. A box without
-  # the unit (the painter box today) has nothing to persist -> RELAY_ENABLED=not-found, exit 0.
-  # Every `systemctl` line still ENDS with `|| true` (the harness guard): a failed change is captured
-  # into _rm_rc / _rm_missing on that same line and judged by the `if` that follows -- the loud exit 1
-  # never comes from a systemctl line itself.
+  # change, close the window with the ONE verified ro close (issue 1407: a root that does not read
+  # ro again fails loud naming the writers), READ BACK, and exit non-zero when the state did not
+  # land. A box without the unit (the painter box today) has nothing to persist ->
+  # RELAY_ENABLED=not-found, exit 0. Every `systemctl` line still ENDS with `|| true` (the harness
+  # guard): a failed change is captured into _rm_rc / _rm_missing on that same line and judged by
+  # the `if` that follows -- the loud exit 1 never comes from a systemctl line itself.
+  local close
+  close="$(_bkshading_relay_mode_close test disable)"
   cat <<STOP
 systemctl stop $unit 2>/dev/null || true
 _rm_missing=0; systemctl cat $unit >/dev/null 2>&1 || _rm_missing=1 || true
@@ -58,7 +75,7 @@ if [ "\$_rm_missing" -eq 1 ]; then echo "RELAY_ENABLED=not-found"; exit 0; fi
 _rm_rc=0
 if mount -o remount,rw / 2>/dev/null; then
   systemctl disable $unit 2>/dev/null || _rm_rc=\$? || true
-  for _i in 1 2 3; do mount -o remount,ro / 2>/dev/null && break; sleep 2; done
+$close
 else
   _rm_rc=98
 fi
@@ -72,17 +89,20 @@ STOP
 }
 
 # bkshading_relay_mode_start_cmds -> ENABLE + start the relay (EVENT mode). `enable` re-arms it for
-# reboot; `start` brings the shading capability up for the broadcast.
+# reboot; `start` brings the shading capability up for the broadcast. Only the `enable` runs inside
+# the rw window; the start runs AFTER the verified close (issue 1407), so a root that does not read
+# ro again starts nothing.
 bkshading_relay_mode_start_cmds() {
-  local unit
+  local unit close
   unit="$(bkshading_relay_unit_name)"
+  close="$(_bkshading_relay_mode_close event enable)"
   cat <<START
 _rm_missing=0; systemctl cat $unit >/dev/null 2>&1 || _rm_missing=1 || true
 if [ "\$_rm_missing" -eq 1 ]; then echo "RELAY_ENABLED=not-found"; exit 0; fi
 _rm_rc=0
 if mount -o remount,rw / 2>/dev/null; then
   systemctl enable $unit 2>/dev/null || _rm_rc=\$? || true
-  for _i in 1 2 3; do mount -o remount,ro / 2>/dev/null && break; sleep 2; done
+$close
 else
   _rm_rc=98
 fi
@@ -98,13 +118,16 @@ START
 
 # --- thin best-effort ssh orchestrator (the ONE call site rig-mode.sh invokes) --------------
 # bkshading_relay_mode_apply <action:test|event> <cam_pw> [label=ip ...] -> apply the mode's relay
-# state to every box in the roster. Best-effort per box (a bad/unreachable box, or a malformed
-# pair, is skipped and NEVER aborts the caller -- always returns 0). Prints one status line per
+# state to every box in the roster. Per box (a malformed pair is skipped; every box is tried), one
+# status line each. Returns NON-ZERO when any box failed (issue 1311: never a claimed
+# "stopped+disabled" that did not land; issue 1407: a box whose root did not go back read-only is a
+# failure too) -- rig-mode.sh calls it bare under `set -euo pipefail`, so such a failure stops the
+# mode switch at that line, loudly. Prints one status line per
 # box. `sshpass` is the OUTER command with `timeout` INSIDE it (issue 1290: a driver test that
 # stubs `sshpass` as a shell function must be able to intercept it -- `timeout sshpass ...` would
 # exec the real binary and bypass the stub).
 bkshading_relay_mode_apply() {
-  local _failed=0 _out _rc _state
+  local _failed=0 _out _rc _state _holders
   local action="$1" cam_pw="$2"
   shift 2 || return 0
   local cmds verb
@@ -134,7 +157,9 @@ bkshading_relay_mode_apply() {
       root@"$ip" "$cmds" 2>&1)" || _rc=$?
     _state="$(printf '%s\n' "$_out" | grep -oE '^RELAY_ENABLED=.*' | tail -n 1)"
     if [ "$_rc" -ne 0 ]; then
-      echo "    [issue 1311] bkshading-relay $verb on $label ($ip): FAIL (rc=$_rc ${_state:-read-back missing}) -- $(printf '%s\n' "$_out" | grep -E '^FAIL' | tail -n 1)" >&2
+      # issue 1407: a failed ro close lists its writers on the box; this ONE line names them too.
+      _holders="$(ro_window_holders "$_out")"
+      echo "    [issue 1311] bkshading-relay $verb on $label ($ip): FAIL (rc=$_rc ${_state:-read-back missing}) -- $(printf '%s\n' "$_out" | grep -E '^FAIL' | tail -n 1)${_holders:+ (holders: $_holders)}" >&2
       _failed=1
     else
       echo "    [issue 1311] bkshading-relay $verb on $label ($ip) [${_state:-read-back n/a}]"

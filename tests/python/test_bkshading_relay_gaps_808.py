@@ -206,8 +206,29 @@ def _fake_obs_phase2_idle(dirpath):
     )
 
 
+def _box_stubs(tmp, ro_fails):
+    """issue 1407: the box tools the shared ro close (scripts/lib/ro-window.sh) runs. A busy box
+    fails the ro remount, keeps reading rw, and lists a writer and a deleted-but-open holder."""
+    d = os.path.join(tmp, "box-bin")
+    os.makedirs(d, exist_ok=True)
+    busy = "1" if ro_fails else "0"
+    _write_exec(os.path.join(d, "mount"), "#!/usr/bin/env bash\n"
+                f'if [ "{busy}" = 1 ]; then echo "mount: /: mount point is busy." >&2; exit 32; fi\n')
+    _write_exec(os.path.join(d, "findmnt"), "#!/usr/bin/env bash\n"
+                f'if [ "{busy}" = 1 ]; then echo rw,relatime; else echo ro,relatime; fi\n')
+    _write_exec(os.path.join(d, "fuser"), "#!/usr/bin/env bash\n"
+                "echo '                     USER        PID ACCESS COMMAND' >&2\n"
+                "echo '                     root      76355 F.... systemd-journal' >&2\n")
+    _write_exec(os.path.join(d, "lsof"), "#!/usr/bin/env bash\n"
+                'printf "COMMAND PID USER FD TYPE DEVICE SIZE/OFF NLINK NODE NAME\\n'
+                'bkshading 4242 root txt REG 8,2 9000 0 1234 /usr/local/bin/bkshading-relay (deleted)\\n"\n')
+    _write_exec(os.path.join(d, "sync"), "#!/usr/bin/env bash\nexit 0\n")
+    return d
+
+
 def _deploy_env(tmp, remote_sha, was_active="active", ro_fails=False):
-    """Fake ssh answering is-active/sha256sum/test -x/remount/lsof; fake scp. Returns (env, log)."""
+    """Fake ssh answering is-active/sha256sum/test -x, RUNNING the ro close on fake box tools;
+    fake scp. Returns (env, log)."""
     log = os.path.join(tmp, "calls.log")
     ssh = os.path.join(tmp, "fake-ssh")
     body = (
@@ -215,18 +236,17 @@ def _deploy_env(tmp, remote_sha, was_active="active", ro_fails=False):
         'printf "SSH %s\\n" "$*" >> "__LOG__"\n'
         'cmd="${!#}"\n'
         'case "$cmd" in\n'
+        # issue 1407: the ro close is the shared emitter's text -- run it on the fake box.
+        '  *"remount,ro"*) PATH="__BOX__:$PATH" bash -c "$cmd"; exit $? ;;\n'
         '  *"is-active"*) printf "__WAS__\\n" ;;\n'
         # issue 808 slice B: a cambox root is read-only, so the deploy runs its remount cycle.
         '  *"findmnt"*) printf "ro,relatime\\n" ;;\n'
         '  *sha256sum*) printf "__SHA__\\n" ;;\n'
         '  *"test -x"*) printf "yes\\n" ;;\n'
-        '  *"remount,ro"*) [ "__ROFAIL__" = 1 ] && { echo "mount: /: mount point is busy." >&2; exit 1; } ;;\n'
-        '  *"lsof +L1"*) printf "COMMAND PID USER FD TYPE DEVICE SIZE/OFF NLINK NODE NAME\\n'
-        'bkshading 4242 root txt REG 8,2 9000 0 1234 /usr/local/bin/bkshading-relay (deleted)\\n" ;;\n'
         "esac\n"
         "exit 0\n"
     ).replace("__LOG__", log).replace("__SHA__", remote_sha).replace("__WAS__", was_active)
-    body = body.replace("__ROFAIL__", "1" if ro_fails else "0")
+    body = body.replace("__BOX__", _box_stubs(tmp, ro_fails))
     _write_exec(ssh, body)
     scp = os.path.join(tmp, "fake-scp")
     _write_exec(scp, '#!/usr/bin/env bash\nprintf "SCP %s\\n" "$*" >> "' + log + '"\nexit 0\n')
@@ -293,24 +313,28 @@ def test_failed_ro_remount_fails_loud_and_names_the_holder():
         assert "OK: relay deployed" not in out, "must never report OK while the root stays read-write"
         assert re.search(r"read-?WRITE|read-write", out, re.I), out
         calls = _read(log)
-        assert "fuser -vm /" in calls and "lsof +L1" in calls, "must gather the holder:\n" + calls
+        assert "processes with a file open for WRITING" in out and "holders of deleted-but-open files" in out, \
+            "the box's own holder listing must reach the operator:\n" + out
+        assert "holder(s): systemd-journal[76355]; bkshading[4242]" in out, out
         assert "bkshading" in out and "4242" in out, "the error must NAME the holder (command + pid):\n" + out
-        # the relay's previous active state is still restored on the failure path
-        assert "systemctl start bkshading-relay" in calls, calls
+        assert "systemd-journal" in out, "the WRITER is named too (issue 1407):\n" + out
+        # issue 1407: a root left writable starts NOTHING -- the relay stays stopped, named.
+        assert "systemctl start bkshading-relay" not in calls, calls
+        assert "STOPPED" in r.stderr, r.stderr
 
 
 def test_ro_holder_summary_is_pure():
     r = _src(
-        os.path.join(REPO, "scripts", "lib", "bkshading-deploy-runtime.sh"),
-        'bkshading_deploy_ro_holders "$T"',
+        os.path.join(REPO, "scripts", "lib", "ro-window.sh"),
+        'ro_window_deleted_holders "$T"',
         env={"T": "COMMAND PID USER FD TYPE DEVICE SIZE/OFF NLINK NODE NAME\n"
                   "bkshading 4242 root txt REG 8,2 9000 0 1234 /usr/local/bin/bkshading-relay (deleted)\n"
                   "journald 99 root 5w REG 8,2 1 0 55 /var/x (deleted)\n"},
     )
     assert r.returncode == 0, r.stderr
     assert r.stdout.strip() == "bkshading[4242] /usr/local/bin/bkshading-relay; journald[99] /var/x", r.stdout
-    empty = _src(os.path.join(REPO, "scripts", "lib", "bkshading-deploy-runtime.sh"),
-                 'bkshading_deploy_ro_holders ""')
+    empty = _src(os.path.join(REPO, "scripts", "lib", "ro-window.sh"),
+                 'ro_window_deleted_holders ""')
     assert empty.returncode == 0 and empty.stdout.strip() == ""
 
 
@@ -590,7 +614,8 @@ def test_ssh_failure_during_ro_remount_is_reported_as_ssh_not_busy():
         r = _run_deploy(["--host", "10.77.9.66", "--binary", b], env)
         assert r.returncode != 0
         assert "ssh to 10.77.9.66 FAILED during the ro remount" in r.stderr, r.stderr
-        assert "lsof +L1" not in _read(log), "an ssh failure is not a busy mount -- no holder hunt"
+        calls = _read(log)
+        assert "remount,ro" in calls[calls.rfind("SSH "):], "an ssh failure is not a busy mount -- no further call"
 
 
 def test_a_signal_mid_scp_still_restores_ro_root_and_the_relay():
@@ -618,8 +643,8 @@ def test_a_signal_mid_scp_still_restores_ro_root_and_the_relay():
 
 
 def test_holder_probe_names_the_holder_without_lsof():
-    lib = os.path.join(REPO, "scripts", "lib", "bkshading-deploy-runtime.sh")
-    probe = _src(lib, "bkshading_deploy_ro_holder_probe_cmd").stdout
+    lib = os.path.join(REPO, "scripts", "lib", "ro-window.sh")
+    probe = _src(lib, "ro_window_holder_probe_cmd").stdout
     assert "lsof +L1" in probe and "/proc/" in probe and "(deleted)" in probe
     with tempfile.TemporaryDirectory() as tmp:
         for tool in ("readlink", "cat", "sort", "head", "tr", "grep", "awk"):
@@ -630,7 +655,7 @@ def test_holder_probe_names_the_holder_without_lsof():
         assert r.returncode == 0, r.stderr
         assert r.stdout.startswith("COMMAND PID"), "the /proc fallback emits lsof columns:\n" + r.stdout
         # whatever it finds parses with the pure holder summary (no crash, one line)
-        s = _src(lib, 'bkshading_deploy_ro_holders "$T"', env={"T": r.stdout})
+        s = _src(lib, 'ro_window_deleted_holders "$T"', env={"T": r.stdout})
         assert s.returncode == 0 and "\n" not in s.stdout.strip()
 
 
@@ -768,11 +793,12 @@ def test_ssh_transport_rc_other_than_1_is_not_a_busy_mount():
                                       ssh_extra='  *"remount,ro"*) exit 5 ;;\n')
         r = _run_deploy(["--host", "10.77.9.66", "--binary", b], env)
         assert r.returncode != 0 and "FAILED during the ro remount (rc 5)" in r.stderr, r.stderr
-        assert "lsof +L1" not in _read(log)
+        calls = _read(log)
+        assert "remount,ro" in calls[calls.rfind("SSH "):], calls
 
 
 def test_holder_probe_names_an_exe_held_binary_from_a_fake_proc_tree():
-    lib = os.path.join(REPO, "scripts", "lib", "bkshading-deploy-runtime.sh")
+    lib = os.path.join(REPO, "scripts", "lib", "ro-window.sh")
     with tempfile.TemporaryDirectory() as tmp:
         proc = os.path.join(tmp, "proc")
         pid = os.path.join(proc, "4242")
@@ -796,10 +822,10 @@ def test_holder_probe_names_an_exe_held_binary_from_a_fake_proc_tree():
         for tool in ("readlink", "cat", "sort", "head", "awk", "tr", "grep"):
             os.symlink(subprocess.run(["bash", "-c", "command -v " + tool], capture_output=True,
                                       text=True, check=True).stdout.strip(), os.path.join(bindir, tool))
-        probe = _src(lib, 'bkshading_deploy_ro_holder_probe_cmd "$R"', env={"R": proc}).stdout
+        probe = _src(lib, 'ro_window_holder_probe_cmd "$R"', env={"R": proc}).stdout
         r = subprocess.run(["/bin/bash", "-c", probe], capture_output=True, text=True, env={"PATH": bindir})
         assert r.returncode == 0, r.stderr
-        s = _src(lib, 'bkshading_deploy_ro_holders "$T"', env={"T": r.stdout}).stdout.strip()
+        s = _src(lib, 'ro_window_deleted_holders "$T"', env={"T": r.stdout}).stdout.strip()
         assert "bkshading-relay[4242] /usr/local/bin/bkshading-relay" in s, (s, r.stdout)
         assert "/usr/lib/libold.so" in s and "/var/log/x" in s, s
         assert "libfine" not in s and "memfd" not in s, s
