@@ -118,8 +118,11 @@ START
 
 # --- thin best-effort ssh orchestrator (the ONE call site rig-mode.sh invokes) --------------
 # bkshading_relay_mode_apply <action:test|event> <cam_pw> [label=ip ...] -> apply the mode's relay
-# state to every box in the roster. Best-effort per box (a bad/unreachable box, or a malformed
-# pair, is skipped and NEVER aborts the caller -- always returns 0). Prints one status line per
+# state to every box in the roster. Per box (a malformed pair is skipped; every box is tried), one
+# status line each. Returns NON-ZERO when any box failed (issue 1311: never a claimed
+# "stopped+disabled" that did not land; issue 1407: a box whose root did not go back read-only is a
+# failure too) -- rig-mode.sh calls it bare under `set -euo pipefail`, so such a failure stops the
+# mode switch at that line, loudly. Prints one status line per
 # box. `sshpass` is the OUTER command with `timeout` INSIDE it (issue 1290: a driver test that
 # stubs `sshpass` as a shell function must be able to intercept it -- `timeout sshpass ...` would
 # exec the real binary and bypass the stub).
