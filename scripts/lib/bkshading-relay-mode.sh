@@ -22,14 +22,17 @@
 # ROSTER is passed IN by the caller (rig-mode.sh derives the source box + cam2 -- the SAME two
 # boxes the #808 E2E pause targets), NEVER a literal box list embedded here.
 #
-# Source-only: the only top-level statement besides function defs is sourcing
-# bkshading-relay-runtime.sh for the ONE source-of-truth relay unit name (bkshading_relay_unit_name)
+# Source-only: the only top-level statements besides function defs source the sibling libs -- the
+# ONE source-of-truth relay unit name (bkshading-relay-runtime.sh, bkshading_relay_unit_name), the ONE
+# verified ro close (ro-window.sh) and the ONE EVENT Discord-note writer (event-mode-discord-confirm.sh)
 # -- mirrors bkshading-e2e-pause.sh's own top-level sibling-lib source.
 _BKSH_MODE_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/bkshading-relay-runtime.sh
 . "$_BKSH_MODE_HERE/bkshading-relay-runtime.sh"
 # shellcheck source=scripts/lib/ro-window.sh
 . "$_BKSH_MODE_HERE/ro-window.sh"   # ro_window_close_cmds -- the ONE verified ro close (issue 1407)
+# shellcheck source=scripts/lib/event-mode-discord-confirm.sh
+. "$_BKSH_MODE_HERE/event-mode-discord-confirm.sh"   # event_mode_discord_note_add, the ONE note writer
 
 # _bkshading_relay_mode_close MODE CHANGE -> the shared verified close of the enable-state window
 # (issue 1407): the ro remount, the root mode READ, and on a root left writable the FAIL lines
@@ -121,13 +124,24 @@ START
 # state to every box in the roster. Per box (a malformed pair is skipped; every box is tried), one
 # status line each. Returns NON-ZERO when any box failed (issue 1311: never a claimed
 # "stopped+disabled" that did not land; issue 1407: a box whose root did not go back read-only is a
-# failure too) -- rig-mode.sh calls it bare under `set -euo pipefail`, so such a failure stops the
-# mode switch at that line, loudly. Prints one status line per
-# box. `sshpass` is the OUTER command with `timeout` INSIDE it (issue 1290: a driver test that
-# stubs `sshpass` as a shell function must be able to intercept it -- `timeout sshpass ...` would
-# exec the real binary and bypass the stub).
+# failure too). rig-mode.sh records that rc and goes on through every remaining step of the mode
+# switch (the issue-868 pattern, issue 1407 design addendum item 1: under `set -e` a bare call left
+# a measurement burn ON going into a production), then folds it into its exit status at the end.
+# It also sets two lists in the CALLER's shell, both empty when every box landed:
+# BKSHADING_RELAY_MODE_FAILED = one `label (ip)[ [writers: ...]]` entry per failed box, `, `-joined
+# (the writers a failed ro close named), and BKSHADING_RELAY_MODE_FAILED_BOXES = the same boxes as
+# `label (ip)` only. A third, BKSHADING_RELAY_MODE_WINDOW_FAILED, holds one `ip<TAB>kind<TAB>entry`
+# line per box whose rw window itself failed, for the TEST painter-box stop below: kind `root-rw`
+# (its own verified ro close failed, the root stayed read-WRITE) or `rw-refused` (the box refused
+# the rw remount, rc=98). The report helpers name the boxes long after their FAIL lines scrolled by.
+# `sshpass` is the OUTER command with
+# `timeout` INSIDE it (issue 1290: a driver test that stubs `sshpass` as a shell function must be
+# able to intercept it -- `timeout sshpass ...` would exec the real binary and bypass the stub).
 bkshading_relay_mode_apply() {
-  local _failed=0 _out _rc _state _holders
+  BKSHADING_RELAY_MODE_FAILED=""
+  BKSHADING_RELAY_MODE_FAILED_BOXES=""
+  BKSHADING_RELAY_MODE_WINDOW_FAILED=""
+  local _failed=0 _out _rc _state _holders _entry
   local action="$1" cam_pw="$2"
   shift 2 || return 0
   local cmds verb
@@ -160,10 +174,114 @@ bkshading_relay_mode_apply() {
       # issue 1407: a failed ro close lists its writers on the box; this ONE line names them too.
       _holders="$(ro_window_holders "$_out")"
       echo "    [issue 1311] bkshading-relay $verb on $label ($ip): FAIL (rc=$_rc ${_state:-read-back missing}) -- $(printf '%s\n' "$_out" | grep -E '^FAIL' | tail -n 1)${_holders:+ (holders: $_holders)}" >&2
+      _entry="$label ($ip)${_holders:+ [writers: $_holders]}"
+      BKSHADING_RELAY_MODE_FAILED="${BKSHADING_RELAY_MODE_FAILED:+$BKSHADING_RELAY_MODE_FAILED, }$_entry"
+      BKSHADING_RELAY_MODE_FAILED_BOXES="${BKSHADING_RELAY_MODE_FAILED_BOXES:+$BKSHADING_RELAY_MODE_FAILED_BOXES, }$label ($ip)"
+      if ro_window_close_failed "$_out"; then
+        BKSHADING_RELAY_MODE_WINDOW_FAILED+="$ip"$'\t'"root-rw"$'\t'"$_entry"$'\n'
+      elif _bkshading_relay_mode_rw_refused "$_out"; then
+        BKSHADING_RELAY_MODE_WINDOW_FAILED+="$ip"$'\t'"rw-refused"$'\t'"$_entry"$'\n'
+      fi
       _failed=1
     else
       echo "    [issue 1311] bkshading-relay $verb on $label ($ip) [${_state:-read-back n/a}]"
     fi
   done
   [ "${_failed:-0}" -eq 0 ]
+}
+
+# --- the rig-mode caller's report of a failed relay step (issue 1407 design addendum item 1) ---
+# rig-mode.sh keeps going after a failed apply (the issue-868 pattern) and reports it in three
+# places, all naming the boxes the apply recorded. Each helper is a report, never a gate: it prints
+# nothing for rc 0 and always returns 0; the caller folds the rc into its own exit.
+
+# _bkshading_relay_mode_failed_boxes -> the failed boxes with the writers a failed ro close named,
+# or a pointer to the per-box FAIL lines when the apply recorded none.
+_bkshading_relay_mode_failed_boxes() {
+  printf '%s' "${BKSHADING_RELAY_MODE_FAILED:-a relay box (see its [issue 1311] FAIL line above)}"
+}
+
+# bkshading_relay_mode_warn_continue MODE RC -> the loud WARNING (stderr) right after a failed apply:
+# which boxes failed, that the switch goes on through its remaining steps, and that it will still
+# exit non-zero.
+bkshading_relay_mode_warn_continue() {  # $1 = rig mode (test|event), $2 = the apply's rc
+  local mode="${1:-?}" rc="${2:-0}" rest="its remaining steps"
+  [ "$rc" = 0 ] && return 0
+  case "$mode" in
+    event) rest="the burn-OFF, the strih NDI mapping and the EVENT contract, so no measurement burn is left ON" ;;
+    test) rest="the painter, the burns and the chain checks" ;;
+  esac
+  echo "WARNING [issue 1407]: the bkshading relay step FAILED (rc=$rc) on $(_bkshading_relay_mode_failed_boxes) -- continuing through $rest; rig-mode $mode will still exit non-zero." >&2
+  return 0
+}
+
+# bkshading_relay_mode_result MODE RC -> the RESULT line (stderr) at the end of a mode whose relay
+# step failed: the boxes and their writers, what that leaves, and what to do.
+bkshading_relay_mode_result() {  # $1 = rig mode (test|event), $2 = the apply's rc
+  local mode="${1:-?}" rc="${2:-0}" state="its relay state did not land"
+  [ "$rc" = 0 ] && return 0
+  # A failed box can still have the relay running (the start runs after a failed enable) or still
+  # armed, so the line says what is NOT confirmed, never more.
+  case "$mode" in
+    event) state="its shading relay may not be running for the broadcast, or not armed for a reboot" ;;
+    test) state="its shading relay may still be running, or armed for a reboot" ;;
+  esac
+  echo "RESULT: rig-mode $mode -- the bkshading relay step FAILED (issue 1407, rc=$rc) on $(_bkshading_relay_mode_failed_boxes): $state. A box listed with writers still has a read-WRITE root (stop the writer, put the root back read-only until 'findmnt -no OPTIONS /' reads ro). Every other step of the switch ran. Fix the box (its [issue 1311] FAIL line above says why), then re-run rig-mode.sh $mode." >&2
+  return 0
+}
+
+# _bkshading_relay_mode_rw_refused OUTPUT -> 0 when a box's relay output says the box REFUSED the rw
+# remount: the stop/start text sets _rm_rc=98 when `mount -o remount,rw /` fails and prints
+# `... persist did not land (rc=98 ...)` (issue 1407, decision 5997211658 Q3). A plain pattern match,
+# no pipe, so it is safe in a condition under the caller's pipefail.
+_bkshading_relay_mode_rw_refused() {  # $1 = the box's captured relay output
+  case "${1:-}" in
+    *"persist did not land (rc=98 "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# bkshading_relay_mode_painter_window_stop MODE PAINTER_IP -> 0, with the RESULT line on stderr, when
+# the last apply found the PAINTER box's rw window itself broken; 1 and nothing printed otherwise.
+# Two cases, both decided (issue 1407): its root stayed read-WRITE, i.e. its own verified ro close
+# failed (decision 5996845165 Q1 = B, writers named when fuser/lsof found any), or it REFUSED the rw
+# remount, rc=98, e.g. a filesystem forced read-only on errors or a failing stick (decision 5997211658
+# Q3). rig-mode's TEST stops right there, before the painter launch: the painter handoff needs a
+# working rw window on that same root, so it can only fail, and going on would stop the running
+# painter and leave cam2 dark with no dead-man. TEST is development, so stopping strands nothing on
+# air. Every other relay failure (the source box, an unreachable box) keeps the record-and-fold;
+# EVENT never stops here (a burn left on air is the worse fault).
+bkshading_relay_mode_painter_window_stop() {  # $1 = rig mode, $2 = the painter box ip
+  local mode="${1:-?}" ip="${2:-}" row_ip="" row_kind="" row_entry="" kind="" entry="" what="" fix=""
+  [ -n "$ip" ] || return 1
+  while IFS=$'\t' read -r row_ip row_kind row_entry; do
+    if [ "$row_ip" = "$ip" ]; then kind="$row_kind"; entry="$row_entry"; fi
+  done <<<"${BKSHADING_RELAY_MODE_WINDOW_FAILED:-}"
+  case "$kind" in
+    root-rw)
+      what="whose root stayed read-WRITE"
+      fix="Put that root back read-only (stop the writer until 'findmnt -no OPTIONS /' reads ro)"
+      ;;
+    rw-refused)
+      what="which REFUSED the read-write remount (rc=98: a filesystem forced read-only on errors, or a failing stick)"
+      fix="Check that box first (dmesg for I/O errors, 'findmnt -no OPTIONS /'; never reboot a cambox remotely)"
+      ;;
+    *) return 1 ;;
+  esac
+  echo "RESULT: rig-mode $mode -- STOPPED before the painter launch: the bkshading relay step FAILED (issue 1407) on the painter box $entry, $what. The painter handoff needs a working rw window on that root, so it would fail and leave cam2 dark with no dead-man: the painter, the burns and the chain checks did not run, and the running painter was left as it is (decisions 5996845165, 5997211658). $fix, then re-run rig-mode.sh $mode. The relay step failed on: $(_bkshading_relay_mode_failed_boxes)." >&2
+  return 0
+}
+
+# bkshading_relay_mode_discord_note MSG_FILE RC -> on a failed relay step, put one plain-Slovak
+# warning line at the TOP of the EVENT Discord confirmation (MSG_FILE, the issue-724 message), so the
+# owner's phone never reads a clean confirmation alone while the run exits non-zero. It names the
+# boxes only (no process names) and claims nothing the contract below it decides. Written by the ONE
+# shared event_mode_discord_note_add (scripts/lib/event-mode-discord-confirm.sh, sourced above);
+# never fails the caller.
+bkshading_relay_mode_discord_note() {  # $1 = the confirmation message file, $2 = the apply's rc
+  local msg="${1:-}" rc="${2:-0}"
+  [ "$rc" = 0 ] && return 0
+  [ -n "$msg" ] && [ -f "$msg" ] || return 0
+  event_mode_discord_note_add "$msg" "⚠️ Shading sa nepodarilo nastaviť na: ${BKSHADING_RELAY_MODE_FAILED_BOXES:-jednom z camboxov}. Shading tejto kamery počas vysielania nemusí fungovať. Ostatné kroky prepnutia prebehli, výsledok kontroly je nižšie. Napíš Claudovi, nech box skontroluje." top
+  return 0
 }
