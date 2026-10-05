@@ -314,8 +314,8 @@ fn apply_writes_expected_gphoto2_config() {
         iso: Some(800),
         kelvin: Some(6500),
         tint: Some(10),
-        shutter: Some(50),   // @ the project 25fps -> d002 angle 18000
-        fps: Some(30),       // 3000 is one of the camera's d006 choices
+        shutter: Some(50), // @ the NEW project 30fps (issue 1402) -> d002 angle 21600
+        fps: Some(30),     // 3000 is one of the camera's d006 choices
         auto_wb: Some(true), // dropped (no PTP equivalent)
     };
     let n = session.apply(&req).expect("apply ok");
@@ -323,7 +323,8 @@ fn apply_writes_expected_gphoto2_config() {
     let writes = recorded.lock().unwrap().clone();
     assert!(writes.contains(&("f-number".into(), "f/8.0".into())));
     assert!(writes.contains(&("iso".into(), "800".into())));
-    assert!(writes.contains(&("d002".into(), "18000".into())));
+    // issue 1402: the shutter set together with the fps converts at the NEW project rate.
+    assert!(writes.contains(&("d002".into(), "21600".into())));
     assert!(writes.contains(&("d004".into(), "6500".into())));
     assert!(writes.contains(&("d005".into(), "10".into())));
     // issue 1402: the project fps goes to d006 (x100); the off-speed d007 is never written.

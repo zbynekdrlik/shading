@@ -390,14 +390,16 @@ fn plan_writes_maps_every_field() {
         iso: Some(800),
         kelvin: Some(6500),
         tint: Some(10),
-        shutter: Some(50),   // at 2500 -> angle 18000
+        shutter: Some(50),   // at the NEW 30.00 (issue 1402) -> angle 21600
         fps: Some(30),       // 3000 is one of the camera's d006 choices
         auto_wb: Some(true), // no PTP equivalent -> dropped
     };
     let writes = plan_writes(&req, &choices, 2500, &BMPCC_D006_CHOICES).expect("30 is listed");
     assert!(writes.contains(&("f-number".to_string(), "f/8.0".to_string())));
     assert!(writes.contains(&("iso".to_string(), "800".to_string())));
-    assert!(writes.contains(&("d002".to_string(), "18000".to_string())));
+    // issue 1402: the shutter set together with the fps converts at the NEW project rate (the
+    // camera keeps the angle): 1/50 at 30.00 = 216 deg, not 180 deg at the old 25.00.
+    assert!(writes.contains(&("d002".to_string(), "21600".to_string())));
     assert!(writes.contains(&("d004".to_string(), "6500".to_string())));
     assert!(writes.contains(&("d005".to_string(), "10".to_string())));
     // issue 1402: the project fps is d006 (x100); the off-speed d007 is never written.
