@@ -1,5 +1,5 @@
-//! Pure PTP <-> wire mapping for a Blackmagic Pocket Cinema Camera 4K (gphoto2
-//! 2.5.28, firmware 8.1).
+//! Pure PTP <-> wire mapping for the Blackmagic Pocket Cinema Camera 4K and 6K
+//! (gphoto2 2.5.28, firmware 8.1).
 //!
 //! Ported byte-for-byte from the dev2 bkshading MVP `pybridge/mapping.py`, which
 //! itself mirrors the verified Kotlin `PtpMapping.kt` gphoto2 semantics. Keeping the
@@ -8,21 +8,31 @@
 //! (per the camera-box Tier-0 build policy, issue 557) compilable/runnable with a
 //! standalone `rustc --test` when cargo build is unavailable locally.
 //!
-//! The `mapping.py` KDoc's "Verified PTP facts" carry over unchanged:
+//! The PTP facts (the `mapping.py` KDoc's list, with the frame-rate pair corrected by
+//! issue 1402 from live reads of both bodies in the fleet):
 //!   - `iso`       RADIO, plain integer values (100..25600, camera clamps)
 //!   - `f-number`  RADIO, choice strings like `f/5.2`
 //!   - `d002`      shutter angle x100, RANGE 173..36000 (18000 = 180 deg)
 //!   - `d004`      WB Kelvin (RANGE)
 //!   - `d005`      tint (MENU -50..50)
-//!   - `d006`      sensor fps x100 (MENU, e.g. 2500 = 25.00 fps) — readback only
-//!   - `d007`      project fps (plain int 5..60) — the settable frame rate
+//!   - `d006`      PROJECT fps x100 (MENU of the camera's own timebases, e.g. `6000` =
+//!     60.00 fps) — the rate the camera records and outputs, and the only settable
+//!     frame rate. Its choices on both bodies are `8, 2398, 2400, 2500, 2997, 3000,
+//!     5000, 5994` (`8` is a non-rate entry); the current `6000` is NOT one of them.
+//!   - `d007`      OFF-SPEED (sensor) fps, a plain int (RANGE 5..60) — readback only
+//!
+//! The MVP had `d006` and `d007` the other way round. It went unnoticed while both
+//! read the same rate, until the Pocket 6K on handheld-1 ran a project 60 with an
+//! off-speed 50 (issue 1402).
 
 // d002's documented gphoto2 RANGE.
 pub const SHUTTER_ANGLE_MIN: i64 = 173;
 pub const SHUTTER_ANGLE_MAX: i64 = 36000;
 
-/// Fallback fps x100 (25.00 fps) for the tiny startup window before the first poll
-/// cycle has learned the camera's real d006 — matches PtpTransport.kt's DEFAULT_FPS100.
+/// Fallback fps x100 (25.00 fps) for the shutter angle <-> denominator conversion in the
+/// tiny startup window before the first poll cycle has learned the camera's real project
+/// fps (d006) — matches PtpTransport.kt's DEFAULT_FPS100. Never reported as the camera's
+/// fps: `ShadingParams.fps100` stays `None` until d006 is read.
 pub const DEFAULT_FPS100: i64 = 2500;
 
 /// Values below this are treated as gphoto2 junk/placeholder ISO Choice entries
@@ -35,8 +45,10 @@ pub const STANDARD_SHUTTER_DENOMS: [i64; 23] = [
     1250, 1600, 2000,
 ];
 
-// Fallback fps/kelvin ranges when a camera's d007/d004 RANGE has no parseable
-// Bottom/Top — matches the web UI's own hardcoded slider bounds.
+// Fallback ranges when a camera's d007 (OFF-SPEED fps) / d004 (Kelvin) RANGE has no
+// parseable Bottom/Top — matches the web UI's own hardcoded slider bounds. The fps pair
+// bounds the off-speed rate only; the settable PROJECT rates are the d006 choices
+// ([`parse_fps100_choices`], issue 1402).
 pub const FPS_MIN_FALLBACK: i64 = 5;
 pub const FPS_MAX_FALLBACK: i64 = 60;
 pub const KELVIN_MIN_FALLBACK: i64 = 2500;
@@ -303,8 +315,34 @@ pub fn parse_iso_choices(output: &str) -> Vec<i64> {
     values
 }
 
-/// Extracts `(Bottom, Top)` from a RANGE property's `get-config` output (d007 fps,
-/// d004 Kelvin), or `None` if either bound line is missing/unparseable.
+/// The camera's PROJECT-fps choices x100, from the d006 MENU block (issue 1402): every
+/// `Choice: N value` line's integer value, in choice-index order. Kept VERBATIM as the
+/// camera lists them — nothing is rounded, filtered or invented — so the `8` non-rate
+/// entry both BMPCC bodies list first stays in (it is one of the camera's own choices,
+/// and a refused write names the list exactly as the camera reports it). An unparseable
+/// label is dropped. Empty when the camera exposes no d006 (or a RANGE block is passed).
+pub fn parse_fps100_choices(output: &str) -> Vec<i64> {
+    let mut pairs: Vec<(i64, i64)> = output
+        .lines()
+        .filter_map(parse_choice_line)
+        .filter_map(|(n, label)| label.trim().parse::<i64>().ok().map(|v| (n, v)))
+        .collect();
+    pairs.sort_by_key(|p| p.0);
+    pairs.into_iter().map(|(_, v)| v).collect()
+}
+
+/// Whether the PROJECT fps (d006) can be set to `wanted_fps100` (fps x100) — the ONE
+/// rule both the relay's `fps` write and the service's "align to grab" offer use
+/// (issue 1402): the camera exposes d006 (non-empty `fps_choices`) AND `wanted_fps100`
+/// is EXACTLY one of its choices. A value the camera does not list (`6000` on the BMPCC) is
+/// never settable: it is not rounded to a neighbour (`5994`) and never redirected to the
+/// off-speed d007. A non-positive value never is.
+pub fn fps_settable(fps_choices: &[i64], wanted_fps100: i64) -> bool {
+    wanted_fps100 > 0 && fps_choices.contains(&wanted_fps100)
+}
+
+/// Extracts `(Bottom, Top)` from a RANGE property's `get-config` output (d007 off-speed
+/// fps, d004 Kelvin), or `None` if either bound line is missing/unparseable.
 pub fn parse_range(output: &str) -> Option<(i64, i64)> {
     let mut bottom: Option<i64> = None;
     let mut top: Option<i64> = None;

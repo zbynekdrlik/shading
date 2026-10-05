@@ -658,10 +658,13 @@ function updateBlock(el, cam) {
     if (mismatch) {
       warnEl.textContent = `⚠ kamera ${camFps == null ? "?" : camFps.toFixed(2)} ≠ grab ${grab}`;
     }
-    // The align button appears only when there is a mismatch to fix AND it is actionable
-    // (camera online and its project fps is settable). Server-truth: after the write the next
+    // The align button appears only when there is a mismatch to fix AND the camera would take
+    // the write: online, and the grab rate x100 is one of the camera's own d006 project-fps
+    // choices — `cam.fpsAlignSettable`, decided by the service from the shared proto rule
+    // (issue 1402). A grab the camera does not list (60 on a BMPCC: 6000 is not a d006 choice)
+    // gets no button: the relay would refuse that write. Server-truth: after the write the next
     // poll re-reads the camera and the warning/button clear on their own.
-    const settable = online && cam.state && cam.state.fpsSupported;
+    const settable = Boolean(online && cam.fpsAlignSettable === true);
     setBtn.hidden = !(mismatch && settable);
     setBtn.textContent = `Zosúladiť s grab (${grab})`;
   }

@@ -7,6 +7,7 @@
 
 use std::time::{Duration, Instant};
 
+use bkshading_proto::mapping::fps_settable;
 use bkshading_proto::wire::{
     resolve_grab, summarize_set_request, Aggregate, CameraView, FpsSync, RelayState, SetRequest,
 };
@@ -37,6 +38,19 @@ pub fn camera_view(
     let reported_capture = state.as_ref().and_then(|s| s.capture_fps);
     let resolution = resolve_grab(cam.grab_fps, reported_capture);
     let fps_sync = FpsSync::classify(camera_fps100, resolution.effective);
+    // issue 1402: offer the explicit "align to grab" write only when the camera would TAKE it —
+    // the grab x100 is exactly one of its d006 project-fps choices (the SAME `fps_settable` rule
+    // the relay's write refusal uses). A 60 grab on a BMPCC (6000 is not a d006 choice), no
+    // caps (offline / an older relay without the choice list) or no grab -> no offer.
+    let fps_align_settable = match (
+        resolution.effective,
+        state.as_ref().and_then(|s| s.caps.as_ref()),
+    ) {
+        (Some(grab), Some(caps)) => grab
+            .checked_mul(100)
+            .is_some_and(|wanted| fps_settable(&caps.fps_choices, wanted)),
+        _ => false,
+    };
     // A camera is preview-capable iff it has an NDI source configured (a handheld without a
     // feed has none -> params-only block); it is preview-LIVE only while that is true AND the
     // store holds a fresh frame (issue 808).
@@ -51,6 +65,7 @@ pub fn camera_view(
         grab_fps: resolution.effective,
         grab_fps_desync: resolution.desync,
         fps_sync,
+        fps_align_settable,
         state,
     }
 }

@@ -13,6 +13,7 @@ use axum::{
     routing::{get, put},
     Router,
 };
+use bkshading_proto::read::FpsNotSettable;
 use bkshading_proto::wire::{RelayState, SetRequest};
 
 use crate::transport::{ApplyOutcome, CameraSession};
@@ -69,8 +70,20 @@ async fn set_params(
             StatusCode::ACCEPTED,
             Json(serde_json::json!({ "queued": true })),
         )),
-        // A gphoto2 error (camera unplugged / busy) is an upstream failure, not our bug.
-        Ok(Err(e)) => Err((StatusCode::BAD_GATEWAY, e.to_string())),
+        Ok(Err(e)) => Err((set_error_status(&e), e.to_string())),
         Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+/// The HTTP status a failed `PUT /api/params` answers with. A `fps` the camera's d006 does not list
+/// (issue 1402, [`FpsNotSettable`]) is the CLIENT's error, decided before anything reached the
+/// camera: `422 Unprocessable Entity`, with the named message listing the camera's own choices.
+/// Every other failure is a gphoto2 error (camera unplugged / busy), an upstream failure, not our
+/// bug: `502 Bad Gateway`. Pure, so the mapping is unit-tested without an HTTP server.
+pub fn set_error_status(e: &anyhow::Error) -> StatusCode {
+    if e.is::<FpsNotSettable>() {
+        StatusCode::UNPROCESSABLE_ENTITY
+    } else {
+        StatusCode::BAD_GATEWAY
     }
 }

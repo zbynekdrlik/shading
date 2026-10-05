@@ -21,9 +21,9 @@ use crate::wire::{CameraCaps, SetRequest, ShadingParams};
 /// both a fully-dropped write and the off-grid case (a current f-number like cam1's f/4 that sits
 /// below a 4.5-minimum grid readback-snaps to a different nearest choice than the requested on-grid
 /// one); an empty `fnumber_choices` means "cannot judge" (never a false flag). ISO / SHUTTER /
-/// KELVIN / TINT / FPS are compared BY VALUE against the readback (`fps` written as project fps vs
-/// the readback `fps100 = fps*100`); a `None` readback for a written key flags it (the camera did
-/// not report the value it should now hold).
+/// KELVIN / TINT / FPS are compared BY VALUE against the readback (`fps` is written to d006 as
+/// `fps*100` and compared with the readback `fps100`, the d006 project fps, issue 1402); a `None`
+/// readback for a written key flags it (the camera did not report the value it should now hold).
 ///
 /// Only keys PRESENT in `written` are compared — an unwritten key never appears. Pure — no IO, no
 /// camera; exhaustively rustc/Tier-0 testable.
@@ -86,10 +86,12 @@ pub struct RawConfigs {
     pub kelvin: String,
     /// `d005` — tint (MENU -50..50).
     pub tint: String,
-    /// `d006` — sensor fps x100 (readback only).
-    pub sensor_fps: String,
-    /// `d007` — project fps (settable, 5..60).
+    /// `d006` — PROJECT fps x100: a MENU of the camera's own timebases (`Current: 6000`,
+    /// `Choice: N 2398` …). The rate the camera records and outputs, and the only settable
+    /// frame rate (issue 1402).
     pub project_fps: String,
+    /// `d007` — OFF-SPEED (sensor) fps, a plain int (RANGE 5..60). Readback only.
+    pub sensor_fps: String,
     /// `d003` — manual focus DISTANCE (RANGE, ~0=closest..65536=infinite). The only
     /// focus-related property the BMPCC's PTP space documents (issue 1238); read
     /// best-effort by the relay, so an empty block (a camera that does not answer it)
@@ -109,17 +111,19 @@ fn current_i64(block: &str) -> Option<i64> {
 
 /// Builds `(ShadingParams, CameraCaps)` from the raw gphoto2 config blocks.
 ///
-/// M1 fps-source choice (documented, refined against the live camera in M2): the working
-/// `fps100` for the shutter angle<->denominator conversion is the **project fps** (d007)
-/// x100 when known, else the **sensor fps** (d006, already x100), else [`DEFAULT_FPS100`].
-/// `sensor_fps100` is reported verbatim from d006 for exact off-speed readback.
+/// Frame rates (issue 1402, read live on both BMPCC bodies in the fleet): `fps100` is the
+/// **project fps** = the d006 MENU `Current:` (already x100). It is what the camera records
+/// and outputs, what the shutter angle <-> denominator conversion runs at, and what the
+/// issue-809 sync compares against the grab. `sensor_fps100` is the **off-speed fps** = the
+/// d007 RANGE `Current:` x100, a diagnostic only. The two never stand in for each other: with
+/// no d006 the project fps is `None` (not known), never the off-speed rate — reporting the
+/// off-speed rate as the project rate is exactly the issue-1402 bug. The conversion then runs
+/// at [`DEFAULT_FPS100`] for that cycle.
 pub fn params_and_caps(raw: &RawConfigs) -> (ShadingParams, CameraCaps) {
-    let sensor_fps100 = current_i64(&raw.sensor_fps);
-    let project_fps = current_i64(&raw.project_fps);
-    let fps100 = project_fps
-        .map(|f| f * 100)
-        .or(sensor_fps100)
-        .unwrap_or(DEFAULT_FPS100);
+    let project_fps100 = current_i64(&raw.project_fps);
+    // checked: a junk Current must degrade to "not known", never panic a read.
+    let sensor_fps100 = current_i64(&raw.sensor_fps).and_then(|f| f.checked_mul(100));
+    let fps100 = project_fps100.unwrap_or(DEFAULT_FPS100);
 
     // Aperture: current f-number -> AV + normalised position within the choices.
     // Use the PARSEABLE-ONLY choice list as the single canonical basis (issue 1304): the readback
@@ -171,13 +175,14 @@ pub fn params_and_caps(raw: &RawConfigs) -> (ShadingParams, CameraCaps) {
         kelvin,
         tint,
         shutter,
-        fps100: project_fps.map(|f| f * 100).or(sensor_fps100),
+        fps100: project_fps100,
         sensor_fps100,
         focus_distance,
     };
 
+    // The OFF-SPEED d007 RANGE bounds; the settable PROJECT rates are `fps_choices` below.
     let (fps_min, fps_max) =
-        parse_range(&raw.project_fps).unwrap_or((FPS_MIN_FALLBACK, FPS_MAX_FALLBACK));
+        parse_range(&raw.sensor_fps).unwrap_or((FPS_MIN_FALLBACK, FPS_MAX_FALLBACK));
     let (kelvin_min, kelvin_max) =
         parse_range(&raw.kelvin).unwrap_or((KELVIN_MIN_FALLBACK, KELVIN_MAX_FALLBACK));
     let caps = CameraCaps {
@@ -192,6 +197,9 @@ pub fn params_and_caps(raw: &RawConfigs) -> (ShadingParams, CameraCaps) {
             .filter_map(|c| parse_fnumber(c))
             .collect(),
         shutter_choices: shutter_choices_for_fps(fps100),
+        // issue 1402: the d006 project-fps choices, verbatim — the list a `fps` write must hit
+        // exactly (`fps_settable`), carried to the service for its "align to grab" offer.
+        fps_choices: parse_fps100_choices(&raw.project_fps),
         fps_min,
         fps_max,
         kelvin_min,
@@ -201,20 +209,74 @@ pub fn params_and_caps(raw: &RawConfigs) -> (ShadingParams, CameraCaps) {
     (params, caps)
 }
 
-/// Whether the project fps (d007) is settable on this camera — the RANGE parsed a
-/// Bottom/Top, i.e. the property is exposed.
+/// Whether the camera exposes its PROJECT fps — the d006 MENU answered with a `Current:` or
+/// a choice list (issue 1402). Exposed is not "settable to any rate": a `fps` write is
+/// accepted only for a value in the d006 choices ([`fps_settable`]). The off-speed d007
+/// RANGE alone does not count — it is not the rate a `fps` write sets.
 pub fn fps_supported(raw: &RawConfigs) -> bool {
-    parse_range(&raw.project_fps).is_some() || current_i64(&raw.project_fps).is_some()
+    current_i64(&raw.project_fps).is_some() || !parse_fps100_choices(&raw.project_fps).is_empty()
 }
+
+/// A `fps` write the camera cannot take (issue 1402): `fps * 100` is not one of the camera's
+/// own d006 project-fps choices. [`plan_writes`] returns it BEFORE planning anything, so the
+/// whole request is refused and nothing reaches the camera. The rate is never rounded to a
+/// neighbour (60 is not written as 5994) and never redirected to the off-speed d007. The relay
+/// answers it as a client error (422) carrying this message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FpsNotSettable {
+    /// The requested project fps, as sent (plain fps, e.g. `60`).
+    pub fps: i64,
+    /// The camera's own d006 choices (x100), verbatim — empty when it exposes no d006.
+    pub choices: Vec<i64>,
+}
+
+impl std::fmt::Display for FpsNotSettable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let wanted = self
+            .fps
+            .checked_mul(100)
+            .map_or_else(|| "out of range".to_string(), |v| v.to_string());
+        let choices: Vec<String> = self.choices.iter().map(|c| c.to_string()).collect();
+        write!(
+            f,
+            "fps-not-settable: fps {} ({} x100) is not one of the camera's d006 project-fps \
+             choices [{}] (x100); refused, never rounded to a neighbour, never written to d007",
+            self.fps,
+            wanted,
+            choices.join(", ")
+        )
+    }
+}
+
+impl std::error::Error for FpsNotSettable {}
 
 /// Plans the gphoto2 `set-config` writes for a [`SetRequest`] as ordered
 /// `(config-key, value-string)` pairs — pure; the relay executes them. `auto_wb` has no
 /// PTP equivalent on the USB path and is silently dropped (matching the MVP box-side).
+///
+/// `fps` (issue 1402) is written to the PROJECT fps d006 as exactly `fps * 100`, and only
+/// when that value is one of `fps_choices` (the camera's d006 choices, [`fps_settable`]).
+/// Any other value refuses the WHOLE request with [`FpsNotSettable`] before anything is
+/// planned — a request is applied whole or not at all. The off-speed d007 is never written.
 pub fn plan_writes(
     req: &SetRequest,
     fnumber_choices: &[String],
     fps100: i64,
-) -> Vec<(String, String)> {
+    fps_choices: &[i64],
+) -> Result<Vec<(String, String)>, FpsNotSettable> {
+    // Decide the fps write FIRST, so a refused rate leaves the plan empty.
+    let fps_write = match req.fps {
+        Some(fps) => match fps.checked_mul(100) {
+            Some(wanted) if fps_settable(fps_choices, wanted) => Some(wanted),
+            _ => {
+                return Err(FpsNotSettable {
+                    fps,
+                    choices: fps_choices.to_vec(),
+                })
+            }
+        },
+        None => None,
+    };
     let mut out: Vec<(String, String)> = Vec::new();
     if let Some(norm) = req.aperture_norm {
         let idx = norm_to_choice_index(norm, fnumber_choices.len() as i64);
@@ -237,8 +299,8 @@ pub fn plan_writes(
     if let Some(tint) = req.tint {
         out.push(("d005".to_string(), tint.to_string()));
     }
-    if let Some(fps) = req.fps {
-        out.push(("d007".to_string(), fps.to_string()));
+    if let Some(fps100_value) = fps_write {
+        out.push(("d006".to_string(), fps100_value.to_string()));
     }
-    out
+    Ok(out)
 }
