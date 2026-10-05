@@ -124,7 +124,7 @@ START
 # stubs `sshpass` as a shell function must be able to intercept it -- `timeout sshpass ...` would
 # exec the real binary and bypass the stub).
 bkshading_relay_mode_apply() {
-  local _failed=0 _out _rc _state
+  local _failed=0 _out _rc _state _holders
   local action="$1" cam_pw="$2"
   shift 2 || return 0
   local cmds verb
@@ -154,7 +154,9 @@ bkshading_relay_mode_apply() {
       root@"$ip" "$cmds" 2>&1)" || _rc=$?
     _state="$(printf '%s\n' "$_out" | grep -oE '^RELAY_ENABLED=.*' | tail -n 1)"
     if [ "$_rc" -ne 0 ]; then
-      echo "    [issue 1311] bkshading-relay $verb on $label ($ip): FAIL (rc=$_rc ${_state:-read-back missing}) -- $(printf '%s\n' "$_out" | grep -E '^FAIL' | tail -n 1)" >&2
+      # issue 1407: a failed ro close lists its writers on the box; this ONE line names them too.
+      _holders="$(ro_window_holders "$_out")"
+      echo "    [issue 1311] bkshading-relay $verb on $label ($ip): FAIL (rc=$_rc ${_state:-read-back missing}) -- $(printf '%s\n' "$_out" | grep -E '^FAIL' | tail -n 1)${_holders:+ (holders: $_holders)}" >&2
       _failed=1
     else
       echo "    [issue 1311] bkshading-relay $verb on $label ($ip) [${_state:-read-back n/a}]"

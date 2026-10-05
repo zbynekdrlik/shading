@@ -195,7 +195,7 @@ scp_box() { "${SSHPASS_PREFIX[@]}" "$SCP_BIN" -o StrictHostKeyChecking=no -o Con
 # holder (ro_window_holders). Any other rc is the transport (ssh 255, sshpass 5/6): reported as such.
 remount_ro_checked() {
   [ "$RO_ROOT" = 1 ] || return 0
-  local rc=0 out
+  local rc=0 out holders
   out="$(ssh_box "$1" "$(ro_window_close_cmds "issue 1407" "$1" \
     "The relay binary is in place, but the box is left on a writable root, so nothing is started on it." \
     "stop that writer on $1, then put the root back read-only until 'findmnt -no OPTIONS /' reads ro (never leave a cambox root rw).")" 2>&1)" || rc=$?
@@ -207,7 +207,8 @@ remount_ro_checked() {
     return 1
   fi
   printf '%s\n' "${out:-<no output>}" | sed 's/^/       /' >&2
-  echo "ERROR: the ro remount FAILED on $1 -- the box root stays read-WRITE; holder(s): $(ro_window_holders "$out")" >&2
+  holders="$(ro_window_holders "$out")"
+  echo "ERROR: the ro remount FAILED on $1 -- the box root stays read-WRITE; holder(s): ${holders:-none named}" >&2
   return 1
 }
 
