@@ -121,12 +121,19 @@ START
 # state to every box in the roster. Per box (a malformed pair is skipped; every box is tried), one
 # status line each. Returns NON-ZERO when any box failed (issue 1311: never a claimed
 # "stopped+disabled" that did not land; issue 1407: a box whose root did not go back read-only is a
-# failure too) -- rig-mode.sh calls it bare under `set -euo pipefail`, so such a failure stops the
-# mode switch at that line, loudly. Prints one status line per
-# box. `sshpass` is the OUTER command with `timeout` INSIDE it (issue 1290: a driver test that
-# stubs `sshpass` as a shell function must be able to intercept it -- `timeout sshpass ...` would
-# exec the real binary and bypass the stub).
+# failure too). rig-mode.sh records that rc and goes on through every remaining step of the mode
+# switch (the issue-868 pattern, issue 1407 design addendum item 1: under `set -e` a bare call left
+# a measurement burn ON going into a production), then folds it into its exit status at the end.
+# It also sets two lists in the CALLER's shell, both empty when every box landed:
+# BKSHADING_RELAY_MODE_FAILED = one `label (ip)[ [writers: ...]]` entry per failed box, `, `-joined
+# (the writers a failed ro close named), and BKSHADING_RELAY_MODE_FAILED_BOXES = the same boxes as
+# `label (ip)` only. The report helpers below name the boxes from them long after their FAIL lines
+# scrolled by. `sshpass` is the OUTER command with
+# `timeout` INSIDE it (issue 1290: a driver test that stubs `sshpass` as a shell function must be
+# able to intercept it -- `timeout sshpass ...` would exec the real binary and bypass the stub).
 bkshading_relay_mode_apply() {
+  BKSHADING_RELAY_MODE_FAILED=""
+  BKSHADING_RELAY_MODE_FAILED_BOXES=""
   local _failed=0 _out _rc _state _holders
   local action="$1" cam_pw="$2"
   shift 2 || return 0
@@ -160,10 +167,70 @@ bkshading_relay_mode_apply() {
       # issue 1407: a failed ro close lists its writers on the box; this ONE line names them too.
       _holders="$(ro_window_holders "$_out")"
       echo "    [issue 1311] bkshading-relay $verb on $label ($ip): FAIL (rc=$_rc ${_state:-read-back missing}) -- $(printf '%s\n' "$_out" | grep -E '^FAIL' | tail -n 1)${_holders:+ (holders: $_holders)}" >&2
+      BKSHADING_RELAY_MODE_FAILED="${BKSHADING_RELAY_MODE_FAILED:+$BKSHADING_RELAY_MODE_FAILED, }$label ($ip)${_holders:+ [writers: $_holders]}"
+      BKSHADING_RELAY_MODE_FAILED_BOXES="${BKSHADING_RELAY_MODE_FAILED_BOXES:+$BKSHADING_RELAY_MODE_FAILED_BOXES, }$label ($ip)"
       _failed=1
     else
       echo "    [issue 1311] bkshading-relay $verb on $label ($ip) [${_state:-read-back n/a}]"
     fi
   done
   [ "${_failed:-0}" -eq 0 ]
+}
+
+# --- the rig-mode caller's report of a failed relay step (issue 1407 design addendum item 1) ---
+# rig-mode.sh keeps going after a failed apply (the issue-868 pattern) and reports it in three
+# places, all naming the boxes the apply recorded. Each helper is a report, never a gate: it prints
+# nothing for rc 0 and always returns 0; the caller folds the rc into its own exit.
+
+# _bkshading_relay_mode_failed_boxes -> the failed boxes with the writers a failed ro close named,
+# or a pointer to the per-box FAIL lines when the apply recorded none.
+_bkshading_relay_mode_failed_boxes() {
+  printf '%s' "${BKSHADING_RELAY_MODE_FAILED:-a relay box (see its [issue 1311] FAIL line above)}"
+}
+
+# bkshading_relay_mode_warn_continue MODE RC -> the loud WARNING (stderr) right after a failed apply:
+# which boxes failed, that the switch goes on through its remaining steps, and that it will still
+# exit non-zero.
+bkshading_relay_mode_warn_continue() {  # $1 = rig mode (test|event), $2 = the apply's rc
+  local mode="${1:-?}" rc="${2:-0}" rest="its remaining steps"
+  [ "$rc" = 0 ] && return 0
+  case "$mode" in
+    event) rest="the burn-OFF, the strih NDI mapping and the EVENT contract, so no measurement burn is left ON" ;;
+    test) rest="the painter, the burns and the chain checks" ;;
+  esac
+  echo "WARNING [issue 1407]: the bkshading relay step FAILED (rc=$rc) on $(_bkshading_relay_mode_failed_boxes) -- continuing through $rest; rig-mode $mode will still exit non-zero." >&2
+  return 0
+}
+
+# bkshading_relay_mode_result MODE RC -> the RESULT line (stderr) at the end of a mode whose relay
+# step failed: the boxes and their writers, what that leaves, and what to do.
+bkshading_relay_mode_result() {  # $1 = rig mode (test|event), $2 = the apply's rc
+  local mode="${1:-?}" rc="${2:-0}" state="its relay state did not land"
+  [ "$rc" = 0 ] && return 0
+  case "$mode" in
+    event) state="its shading relay is NOT running for the broadcast" ;;
+    test) state="its shading relay is NOT confirmed stopped and disabled" ;;
+  esac
+  echo "RESULT: rig-mode $mode -- the bkshading relay step FAILED (issue 1407, rc=$rc) on $(_bkshading_relay_mode_failed_boxes): $state. A box listed with writers still has a read-WRITE root (stop the writer, put the root back read-only until 'findmnt -no OPTIONS /' reads ro). Every other step of the switch ran. Fix the box (its [issue 1311] FAIL line above says why), then re-run rig-mode.sh $mode." >&2
+  return 0
+}
+
+# bkshading_relay_mode_discord_note MSG_FILE RC -> on a failed relay step, put one plain-Slovak
+# warning line at the TOP of the EVENT Discord confirmation (MSG_FILE, the issue-724 message), so the
+# owner's phone never reads a clean confirmation alone while the run exits non-zero. Same shape as
+# the issue-1371 restore note: the line goes on top, else it is appended; never fails the caller.
+bkshading_relay_mode_discord_note() {  # $1 = the confirmation message file, $2 = the apply's rc
+  local msg="${1:-}" rc="${2:-0}" line body tmp
+  [ "$rc" = 0 ] && return 0
+  [ -n "$msg" ] && [ -f "$msg" ] || return 0
+  line="⚠️ Shading sa nepodarilo zapnúť na: ${BKSHADING_RELAY_MODE_FAILED_BOXES:-jednom z camboxov}. Shading tejto kamery počas vysielania nemusí fungovať. Zvyšok prepnutia prebehol (burny vypnuté, mapovanie, kontrola). Napíš Claudovi, nech box skontroluje."
+  if body="$(cat "$msg" 2>/dev/null)"; then
+    tmp="$msg.relay-note.$$"
+    if { printf '%s\n\n%s\n' "$line" "$body" >"$tmp"; } 2>/dev/null && mv -f "$tmp" "$msg" 2>/dev/null; then
+      return 0
+    fi
+    rm -f "$tmp" 2>/dev/null || true
+  fi
+  { printf '\n%s\n' "$line" >>"$msg"; } 2>/dev/null || true
+  return 0
 }
