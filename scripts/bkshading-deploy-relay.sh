@@ -27,8 +27,10 @@ set -euo pipefail
 # a stopped relay (the TEST-mode default, issue 1311) stays stopped — the deploy never STARTS a relay
 # that was not running and never `enable`s it (enable-state is setup-device.sh / rig-mode.sh's job).
 # Swapping under a running relay left the replaced binary deleted-but-open, the final `remount,ro`
-# failed "busy", and the old script swallowed it (cam6/cam7 root stayed read-WRITE); the ro remount
-# now FAILS LOUD (non-zero, naming the holder via `lsof +L1` / `fuser -vm /`). USB / USB-Ethernet transports only —
+# failed "busy", and the old script swallowed it (cam6/cam7 root stayed read-WRITE); the ro close is
+# now the ONE shared verified close (scripts/lib/ro-window.sh, issue 1407): the root mode is READ,
+# and a root left writable FAILS LOUD naming the writers + the deleted-but-open holders, and the
+# relay is NOT started again on it. USB / USB-Ethernet transports only —
 # no wireless-pairing transport (owner hard rule). Per approval-scope.md the binary deploy + the ro-root remount it
 # performs are the standing-approved WORK — this script does NOT ask permission and does NOT gate on
 # "is it off-air"; the operator who runs it guards live timing. It does NOT reboot the host.
@@ -78,6 +80,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/ci-run-resolve.sh" # ci_run_latest_success() — the ONE newest-successful-run resolver (shared with deploy-fleet.sh)
 # shellcheck source=scripts/lib/stray-session-check.sh
 . "$HERE/lib/stray-session-check.sh" # stray_session_check_assert() — the ONE shared rig-busy guard
+# shellcheck source=scripts/lib/ro-window.sh
+. "$HERE/lib/ro-window.sh" # ro_window_close_cmds / ro_window_holders — the ONE verified ro close (issue 1407)
 
 RELAY_DEST="$(bkshading_relay_bin_path)"     # /usr/local/bin/bkshading-relay (one source of truth)
 RELAY_UNIT="$(bkshading_relay_unit_name)"    # bkshading-relay.service (one source of truth)
@@ -180,30 +184,30 @@ RESTORE_SESSION=()
 ssh_box() { "${RESTORE_SESSION[@]}" "${SSHPASS_PREFIX[@]}" "$SSH_BIN" -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 "root@$1" "$2"; }
 scp_box() { "${SSHPASS_PREFIX[@]}" "$SCP_BIN" -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 "$2" "root@$1:$3"; }
 
-# issue 808 (cam6/cam7, 25.9.2026): the ro remount used to be `mount -o remount,ro / 2>/dev/null;
-# true || true` -- a "busy" failure was SWALLOWED, the script printed OK and the box root stayed
-# read-WRITE. Now it is retried (a just-stopped relay can take a moment to release its files) and a
-# final failure FAILS LOUD: it names the holder (`lsof +L1` = deleted-but-still-open files, the real
-# blocker; `fuser -vm /` for the full picture) and returns non-zero, so the caller exits non-zero.
+# issue 808 (cam6/cam7, 25.9.2026): the ro remount used to be swallowed (`2>/dev/null; true`), the
+# script printed OK and the box root stayed read-WRITE. issue 1407: the close is now the ONE shared
+# verified close (scripts/lib/ro-window.sh), run on the box in ONE ssh call: the ro remount, the root
+# mode READ (never the mount exit code alone), and on a root left writable the FAIL lines naming the
+# WRITERS (`fuser -vm /` filtered to ACCESS F -- the old `| head -n 40` cut a high-PID writer off
+# behind PID 1 and the kernel threads) and the deleted-but-open holders, then `exit 1`. No retry: a
+# writer that keeps / busy keeps it busy on every retry (a stopped relay has closed its files once
+# `systemctl stop` returned). The box's FAIL lines are printed, then one summary line naming every
+# holder (ro_window_holders). Any other rc is the transport (ssh 255, sshpass 5/6): reported as such.
 remount_ro_checked() {
   [ "$RO_ROOT" = 1 ] || return 0
-  local rc=0 fu lo holders
-  ssh_box "$1" "for _i in 1 2 3; do mount -o remount,ro / && exit 0; sleep 2; done; exit 1" || rc=$?
+  local rc=0 out
+  out="$(ssh_box "$1" "$(ro_window_close_cmds "issue 1407" "$1" \
+    "The relay binary is in place, but the box is left on a writable root, so nothing is started on it." \
+    "stop that writer on $1, then put the root back read-only until 'findmnt -no OPTIONS /' reads ro (never leave a cambox root rw).")" 2>&1)" || rc=$?
   [ "$rc" -eq 0 ] && return 0
   if [ "$rc" -ne 1 ]; then
-    # The remote loop exits only 0 or 1, so any other rc is the transport (ssh 255, sshpass 5/6).
+    # The close exits only 0 or 1, so any other rc is the transport (ssh 255, sshpass 5/6).
     echo "ERROR: ssh to $1 FAILED during the ro remount (rc $rc) -- the root may still be read-WRITE;" >&2
     echo "       reach the box and check 'findmnt -no OPTIONS /' (it must say ro) by hand." >&2
     return 1
   fi
-  fu="$(ssh_box "$1" "fuser -vm / 2>&1 | head -n 40" 2>/dev/null || true)"
-  lo="$(ssh_box "$1" "$(bkshading_deploy_ro_holder_probe_cmd)" 2>/dev/null || true)"
-  holders="$(bkshading_deploy_ro_holders "$lo")"
-  echo "ERROR: mount -o remount,ro / FAILED on $1 -- the box root stays read-WRITE." >&2
-  echo "       holder(s) of deleted-but-open files (lsof +L1 / /proc fd scan): ${holders:-<none reported>}" >&2
-  echo "       fuser -vm / on $1:" >&2
-  printf '%s\n' "${fu:-<no output>}" | sed 's/^/         /' >&2
-  echo "       Fix: stop that holder, then run 'mount -o remount,ro /' on $1 (never leave a cambox root rw)." >&2
+  printf '%s\n' "${out:-<no output>}" | sed 's/^/       /' >&2
+  echo "ERROR: the ro remount FAILED on $1 -- the box root stays read-WRITE; holder(s): $(ro_window_holders "$out")" >&2
   return 1
 }
 
@@ -220,11 +224,16 @@ restore_relay() {
 }
 
 # finish_box HOST -> the ro remount (checked) THEN the relay restore; non-zero when either failed.
+# issue 1407: a root that does not read ro again (or could not be read) starts NOTHING -- the relay
+# stays stopped and says so; it is started by hand once the root is read-only again.
 finish_box() {
-  local rc=0
-  remount_ro_checked "$1" || rc=1
-  restore_relay "$1" || rc=1
-  return "$rc"
+  if ! remount_ro_checked "$1"; then
+    if [ "$RESTORE_ACTION" = start ]; then
+      echo "ERROR: leaving $RELAY_UNIT STOPPED on $1 -- its root is not verified read-only (nothing starts on a writable root); start it by hand once the root reads ro" >&2
+    fi
+    return 1
+  fi
+  restore_relay "$1"
 }
 
 # finish_once -> finish_box for $HOST exactly once, and only after the box was touched (BOX_DIRTY=1
@@ -297,7 +306,7 @@ LOCAL_SHA="$(sha256sum "$BINARY" | awk '{print $1}')"
 
 # --- dry-run: print the plan, touch nothing ---
 if [ "$DRY_RUN" -eq 1 ]; then
-  STEPS="rig-busy guard  ->  read the relay state + the root mode (findmnt -no OPTIONS /)  ->  stop the relay if active  ->  [read-only root] mount -o remount,rw /  ->  scp (staged $RELAY_STAGE)  ->  chmod +x + atomic mv  ->  sha256 byte-verify  ->  [read-only root] mount -o remount,ro / (FAIL LOUD naming the holder if busy)  ->  start the relay again if it was active"
+  STEPS="rig-busy guard  ->  read the relay state + the root mode (findmnt -no OPTIONS /)  ->  stop the relay if active  ->  [read-only root] mount -o remount,rw /  ->  scp (staged $RELAY_STAGE)  ->  chmod +x + atomic mv  ->  sha256 byte-verify  ->  [read-only root] mount -o remount,ro / + the root mode READ (a root left writable FAILS LOUD naming the writers, nothing started)  ->  start the relay again if it was active"
   cat <<PLAN
 DRY-RUN — bkshading relay deploy plan:
   host           : $HOST
