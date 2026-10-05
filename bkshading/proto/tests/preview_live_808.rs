@@ -17,6 +17,7 @@ fn view(preview_live: bool) -> CameraView {
         grab_fps: None,
         grab_fps_desync: false,
         fps_sync: FpsSync::Unknown,
+        fps_align_settable: false,
         state: None,
     }
 }

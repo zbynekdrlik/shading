@@ -2,7 +2,7 @@
 
 use bkshading::aggregator::{aggregate_with_camera_update, camera_view};
 use bkshading::config::ServiceConfig;
-use bkshading_proto::wire::{Aggregate, FpsSync, RelayState, ShadingParams, Transport};
+use bkshading_proto::wire::{Aggregate, CameraCaps, FpsSync, RelayState, ShadingParams, Transport};
 
 const EXAMPLE: &str = "\
 bind = \"0.0.0.0:8770\"
@@ -431,6 +431,105 @@ fn fps_alert_transitions_logs_grab_config_desync_once() {
         fps_alert_transitions(&mut state, &desync).is_empty(),
         "chronic desync silent"
     );
+}
+
+// --- issue 1402: the align button is offered only for a grab the camera lists -------------------
+
+/// The d006 project-fps choices both BMPCC bodies in the fleet report (x100, verbatim).
+const BMPCC_D006: [i64; 8] = [8, 2398, 2400, 2500, 2997, 3000, 5000, 5994];
+
+/// An online relay state with a project fps (x100), an off-speed fps (x100), the d006 choices, and
+/// optionally a box capture rate.
+fn online_state_with_choices(
+    fps100: i64,
+    sensor_fps100: i64,
+    fps_choices: &[i64],
+    capture_fps: Option<i64>,
+) -> RelayState {
+    RelayState {
+        caps: Some(CameraCaps {
+            iso_choices: vec![400],
+            fnumber_choices: vec![],
+            shutter_choices: vec![120],
+            fps_choices: fps_choices.to_vec(),
+            fps_min: 5,
+            fps_max: 60,
+            kelvin_min: 2500,
+            kelvin_max: 10000,
+        }),
+        params: ShadingParams {
+            fps100: Some(fps100),
+            sensor_fps100: Some(sensor_fps100),
+            ..Default::default()
+        },
+        ..online_state_with_fps_and_capture(Some(fps100), capture_fps)
+    }
+}
+
+#[test]
+fn camera_view_offers_align_only_when_the_grab_is_a_listed_choice_1402() {
+    let cfg = ServiceConfig::from_toml_str(CAM1_GRAB60).unwrap();
+    let cam = &cfg.cameras[0];
+
+    // cam3 today, read right: the 6K runs 60.00 (d006), off-speed 50 (d007), grab 60 -> Synced,
+    // and 6000 is not one of its d006 choices -> no align offer (and nothing to align anyway).
+    let v = camera_view(
+        cam,
+        Some(online_state_with_choices(6000, 5000, &BMPCC_D006, None)),
+        false,
+    );
+    assert_eq!(v.fps_sync, FpsSync::Synced);
+    assert!(!v.fps_align_settable, "6000 is not a listed d006 choice");
+
+    // A camera at 50.00 against the 60 grab is a real mismatch, but the camera would REFUSE a
+    // 6000 write -> the warning stays, the button is not offered.
+    let v = camera_view(
+        cam,
+        Some(online_state_with_choices(5000, 5000, &BMPCC_D006, None)),
+        false,
+    );
+    assert_eq!(v.fps_sync, FpsSync::Mismatch);
+    assert!(!v.fps_align_settable, "a refused write is never offered");
+
+    // The box grabs 50 (live capture rate) and the camera runs 25.00: 5000 IS listed -> offered.
+    let v = camera_view(
+        cam,
+        Some(online_state_with_choices(2500, 2500, &BMPCC_D006, Some(50))),
+        false,
+    );
+    assert_eq!(v.grab_fps, Some(50));
+    assert_eq!(v.fps_sync, FpsSync::Mismatch);
+    assert!(
+        v.fps_align_settable,
+        "grab 50 x100 = 5000 is a listed choice"
+    );
+
+    // An older relay sends no choices -> nothing settable -> no offer (its fps write would go to
+    // the off-speed d007).
+    let v = camera_view(
+        cam,
+        Some(online_state_with_choices(2500, 2500, &[], Some(50))),
+        false,
+    );
+    assert!(!v.fps_align_settable);
+
+    // No caps (camera offline / not read) or no relay at all -> no offer.
+    let v = camera_view(cam, Some(online_state_with_fps100(Some(2500))), false);
+    assert!(!v.fps_align_settable);
+    assert!(!camera_view(cam, None, false).fps_align_settable);
+}
+
+#[test]
+fn camera_view_without_a_grab_never_offers_align_1402() {
+    let cfg = ServiceConfig::from_toml_str(EXAMPLE).unwrap();
+    // handheld-1 carries no grab_fps and its relay reports no capture rate -> nothing to align to.
+    let v = camera_view(
+        &cfg.cameras[1],
+        Some(online_state_with_choices(2500, 5000, &BMPCC_D006, None)),
+        false,
+    );
+    assert_eq!(v.grab_fps, None);
+    assert!(!v.fps_align_settable);
 }
 
 // --- issue 1305: installable web app (PWA) assets + routes -------------------

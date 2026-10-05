@@ -119,6 +119,18 @@ def test_app_js_align_button_sends_grab_fps_without_autowrite():
     assert "{ fps:" not in js[ub:], "updateBlock must never write fps (no auto-write)"
 
 
+def test_app_js_align_button_offered_only_for_a_listed_grab_1402():
+    # issue 1402: the align button is offered only when the camera would TAKE the write — the
+    # service's `fpsAlignSettable` (the grab x100 is one of the camera's d006 project-fps choices,
+    # decided by the shared proto rule). `fpsSupported` alone (d006 exposed) offered a 60 fps
+    # write the relay refuses: 6000 is not in the BMPCC's d006 list.
+    js = _read("app.js")
+    ub = js.index("function updateBlock(")
+    body = js[ub:]
+    assert "cam.fpsAlignSettable" in body, "the button obeys the service's fpsAlignSettable"
+    assert "fpsSupported" not in js, "the button no longer gates on fpsSupported"
+
+
 def test_index_and_js_surface_grab_config_desync():
     # issue 809 remainder: the panel surfaces when the static grab_fps config disagrees with the
     # box's live capture rate (a silent desync after a capture-mode change).

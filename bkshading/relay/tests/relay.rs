@@ -7,7 +7,10 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, bail, Result};
+use axum::http::StatusCode;
+use bkshading_proto::read::FpsNotSettable;
 use bkshading_proto::wire::SetRequest;
+use bkshading_relay::http::set_error_status;
 use bkshading_relay::transport::{
     build_get_config_many_args, gphoto2_stderr_tail, parse_capture_fps_env, parse_first_model,
     parse_min_read_interval_env, read_is_fresh, split_config_blocks, split_focus_and_summary,
@@ -804,4 +807,162 @@ fn stderr_tail_trims_long_and_keeps_short() {
     let tail = gphoto2_stderr_tail(&long);
     assert!(tail.starts_with('…'));
     assert_eq!(tail.chars().count(), 201); // ellipsis + 200 chars
+}
+
+// --- issue 1402: the fps write sets d006 to a LISTED choice; anything else is refused -----------
+
+/// A [`FakeRunner`] that RECORDS every `set_config` and COUNTS read cycles (`auto_detect` runs
+/// once per real read, incl. the burst-open plan read), for the issue-1402 write-refusal tests.
+struct WriteRecorder {
+    inner: FakeRunner,
+    detects: Arc<AtomicUsize>,
+    writes: Arc<Mutex<Vec<(String, String)>>>,
+}
+
+impl Gphoto2Runner for WriteRecorder {
+    fn auto_detect(&self) -> Result<String> {
+        self.detects.fetch_add(1, Ordering::SeqCst);
+        self.inner.auto_detect()
+    }
+    fn get_config(&self, key: &str) -> Result<String> {
+        self.inner.get_config(key)
+    }
+    fn set_config(&self, key: &str, value: &str) -> Result<()> {
+        self.writes
+            .lock()
+            .unwrap()
+            .push((key.to_string(), value.to_string()));
+        Ok(())
+    }
+}
+
+type Recorded = Arc<Mutex<Vec<(String, String)>>>;
+
+/// A session over the Pocket 6K's real d006/d007 (cam3 on handheld-1, issue 1402 body): project
+/// 60.00 (not one of its d006 choices), off-speed 50.
+fn pocket_6k_session() -> (CameraSession, Arc<AtomicUsize>, Recorded) {
+    let detects = Arc::new(AtomicUsize::new(0));
+    let writes: Recorded = Arc::new(Mutex::new(Vec::new()));
+    let inner = FakeRunner::full_camera()
+        .with_config(
+            "d006",
+            "Current: 6000\nChoice: 0 8\nChoice: 1 2398\nChoice: 2 2400\nChoice: 3 2500\nChoice: 4 2997\nChoice: 5 3000\nChoice: 6 5000\nChoice: 7 5994\nEND",
+        )
+        .with_config("d007", "Current: 50\nBottom: 5\nTop: 60\nEND");
+    let session = CameraSession::new(
+        Box::new(WriteRecorder {
+            inner,
+            detects: detects.clone(),
+            writes: writes.clone(),
+        }),
+        "1.7.0-dev.762",
+    );
+    (session, detects, writes)
+}
+
+#[test]
+fn pocket_6k_state_reads_the_project_fps_from_d006_1402() {
+    let (session, _, _) = pocket_6k_session();
+    let st = session.read_state();
+    assert!(st.online);
+    assert_eq!(st.params.fps100, Some(6000), "the camera runs 60.00");
+    assert_eq!(st.params.sensor_fps100, Some(5000), "off-speed 50 x100");
+    assert!(st.fps_supported, "d006 is exposed");
+    assert_eq!(
+        st.caps.unwrap().fps_choices,
+        vec![8, 2398, 2400, 2500, 2997, 3000, 5000, 5994]
+    );
+}
+
+#[test]
+fn a_60_fps_set_is_refused_named_and_writes_nothing_1402() {
+    let (session, detects, writes) = pocket_6k_session();
+    let err = match session.submit(&SetRequest {
+        fps: Some(60),
+        ..Default::default()
+    }) {
+        Err(e) => e,
+        Ok(_) => panic!("6000 is not a d006 choice: the SET must be refused"),
+    };
+    let refused = err
+        .downcast_ref::<FpsNotSettable>()
+        .expect("the refusal is the named FpsNotSettable error");
+    assert_eq!(refused.fps, 60);
+    assert_eq!(
+        refused.choices,
+        vec![8, 2398, 2400, 2500, 2997, 3000, 5000, 5994]
+    );
+    assert!(err.to_string().contains("5994"), "lists the choices: {err}");
+    // Nothing reached the camera: not d006 rounded to 5994, not d007.
+    assert!(
+        writes.lock().unwrap().is_empty(),
+        "a refused SET writes nothing"
+    );
+    // The relay answers it as a client error (422), not as a camera failure (502).
+    assert_eq!(set_error_status(&err), StatusCode::UNPROCESSABLE_ENTITY);
+
+    // The single-flight gate is idle again and the refused opening SET left no stale plan behind:
+    // the next SET runs and plans from a FRESH read of the camera.
+    let reads_after_refusal = detects.load(Ordering::SeqCst);
+    let outcome = session
+        .submit(&SetRequest {
+            fps: Some(50),
+            ..Default::default()
+        })
+        .expect("5000 is a listed choice");
+    assert!(matches!(outcome, ApplyOutcome::Applied { count: 1, .. }));
+    assert_eq!(
+        detects.load(Ordering::SeqCst),
+        reads_after_refusal + 1,
+        "the burst after a refused opening SET re-reads the camera"
+    );
+    assert_eq!(
+        writes.lock().unwrap().clone(),
+        vec![("d006".to_string(), "5000".to_string())],
+        "a listed rate is written to d006, x100, exactly"
+    );
+}
+
+#[test]
+fn a_refused_fps_inside_an_open_burst_keeps_the_burst_1402() {
+    let (session, detects, writes) = pocket_6k_session();
+    // Opens the burst (one plan read).
+    session
+        .submit(&SetRequest {
+            iso: Some(800),
+            ..Default::default()
+        })
+        .expect("iso ok");
+    let reads_in_burst = detects.load(Ordering::SeqCst);
+    // A refused fps mid-burst: no write, and the open burst keeps its plan.
+    assert!(session
+        .submit(&SetRequest {
+            fps: Some(60),
+            ..Default::default()
+        })
+        .is_err());
+    session
+        .submit(&SetRequest {
+            tint: Some(5),
+            ..Default::default()
+        })
+        .expect("tint ok");
+    assert_eq!(
+        detects.load(Ordering::SeqCst),
+        reads_in_burst,
+        "no extra read: the burst plan survived the refusal"
+    );
+    assert_eq!(
+        writes.lock().unwrap().clone(),
+        vec![
+            ("iso".to_string(), "800".to_string()),
+            ("d005".to_string(), "5".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn set_error_status_keeps_a_camera_failure_a_bad_gateway_1402() {
+    let camera_err = anyhow!("gphoto2 set-config d004 failed: PTP I/O error");
+    assert_eq!(set_error_status(&camera_err), StatusCode::BAD_GATEWAY);
 }

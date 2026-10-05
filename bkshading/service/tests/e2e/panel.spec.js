@@ -662,3 +662,92 @@ test("online cameras come first in number order, then the offline ones, console 
 
   expect(problems, `console problems: ${problems.join(" | ")}`).toEqual([]);
 });
+
+// issue 1402: on every BMPCC, d006 is the PROJECT fps (a MENU of the camera's own timebases, x100)
+// and d007 the OFF-SPEED fps. The "Zosúladiť s grab" button is offered only when the camera would
+// take the write: the service's `fpsAlignSettable` (grab x100 is one of the camera's d006 choices).
+// cam3 (the Pocket 6K) at 60.00 against a 60 grab is Synced -> no button; a camera at 50.00
+// against the 60 grab is a real mismatch, but 6000 is not a d006 choice -> the warning, no button;
+// a camera at 25.00 against a 50 grab (5000 IS listed) gets the button, and its click sends
+// `{fps: 50}`. A camera whose view lacks `fpsAlignSettable` (an older service) never gets it, even
+// with `fpsSupported`.
+test("the align-to-grab button is offered only for a grab the camera lists, console clean (issue 1402)", async ({
+  page,
+}) => {
+  const problems = [];
+  page.on("console", (msg) => {
+    const t = msg.type();
+    if (t === "error" || t === "warning") problems.push(`${t}: ${msg.text()}`);
+  });
+  page.on("pageerror", (err) => problems.push(`pageerror: ${err.message}`));
+  await page.addInitScript(DISABLE_WS);
+  const puts = [];
+  await page.route("**/api/**", (route) => {
+    const req = route.request();
+    if (req.method() === "PUT") puts.push({ url: req.url(), body: req.postDataJSON() });
+    return route.fulfill({ status: 200, contentType: "text/plain", body: "offline-fixture" });
+  });
+  await page.goto("/");
+  await page.waitForFunction(() => typeof window.render === "function");
+
+  const BMPCC_D006 = [8, 2398, 2400, 2500, 2997, 3000, 5000, 5994];
+  const view = ({ fps100, sensorFps100, grabFps, fpsSync, fpsAlignSettable }) => {
+    const v = {
+      id: "cam3",
+      label: "Cam 3",
+      transport: "sbc-relay",
+      hasPreview: false,
+      reachable: true,
+      grabFps,
+      grabFpsDesync: false,
+      fpsSync,
+      state: {
+        online: true,
+        camera: "Blackmagic Design Pocket Cinema Camera 6K",
+        params: { apertureAv: 4.78, apertureNorm: 2.0 / 3.0, iso: 400, kelvin: 5600, tint: 0,
+          shutter: 120, fps100, sensorFps100, focusDistance: null },
+        caps: { isoChoices: [100, 200, 400, 800], fNumberChoices: [2.8, 4.0, 5.2, 8.0],
+          shutterChoices: [60, 100, 120, 125], fpsChoices: BMPCC_D006, fpsMin: 5, fpsMax: 60,
+          kelvinMin: 2500, kelvinMax: 10000 },
+        fpsSupported: true,
+        captureFps: null,
+        version: "1.7.0-dev.e2e",
+        notApplied: [],
+      },
+    };
+    if (fpsAlignSettable !== undefined) v.fpsAlignSettable = fpsAlignSettable;
+    return { version: "1.7.0-dev.e2e", cameras: [v] };
+  };
+  const show = (opts) => page.evaluate((agg) => window.render(agg), view(opts));
+  const fpsVal = page.locator('[data-role="fps-val"]');
+  const warn = page.locator('[data-role="fps-warn"]');
+  const btn = page.locator('[data-role="fps-set-grab"]');
+
+  // cam3 read right: project 60.00 (d006), off-speed 50 (d007), grab 60 -> synced, no button.
+  await show({ fps100: 6000, sensorFps100: 5000, grabFps: 60, fpsSync: "synced", fpsAlignSettable: false });
+  await expect(fpsVal).toHaveText("60.00");
+  await expect(warn).toBeHidden();
+  await expect(btn).toBeHidden();
+
+  // A real mismatch the camera cannot be aligned to (6000 is not a d006 choice): warning, no button.
+  await show({ fps100: 5000, sensorFps100: 5000, grabFps: 60, fpsSync: "mismatch", fpsAlignSettable: false });
+  await expect(warn).toBeVisible();
+  await expect(warn).toHaveText("⚠ kamera 50.00 ≠ grab 60");
+  await expect(btn).toBeHidden();
+
+  // An older service view without fpsAlignSettable: never offered, even with fpsSupported.
+  await show({ fps100: 5000, sensorFps100: 5000, grabFps: 60, fpsSync: "mismatch" });
+  await expect(warn).toBeVisible();
+  await expect(btn).toBeHidden();
+
+  // A grab the camera lists (50 -> 5000): the button is offered and its click sends {fps: 50}.
+  await show({ fps100: 2500, sensorFps100: 2500, grabFps: 50, fpsSync: "mismatch", fpsAlignSettable: true });
+  await expect(btn).toBeVisible();
+  await expect(btn).toHaveText("Zosúladiť s grab (50)");
+  await btn.click();
+  await expect.poll(() => puts.length).toBe(1);
+  expect(puts[0].url).toContain("/api/cameras/cam3/params");
+  expect(puts[0].body).toEqual({ fps: 50 });
+
+  expect(problems, `console problems: ${problems.join(" | ")}`).toEqual([]);
+});
