@@ -192,6 +192,39 @@ fn a_listed_fps_writes_exactly_that_d006_choice_1402() {
 }
 
 #[test]
+fn a_shutter_planned_with_an_fps_write_converts_at_the_new_project_fps_1402() {
+    // The camera stores the shutter as an ANGLE (d002). A request setting the project fps to 50.00
+    // AND a 1/100 shutter must convert at the NEW rate: 180 deg = 18000, never at the old 25.00
+    // (9000 = 1/200 once the camera runs 50).
+    let req = SetRequest {
+        shutter: Some(100),
+        fps: Some(50),
+        ..Default::default()
+    };
+    let w = plan_writes(&req, &[], 2500, &BMPCC_D006).expect("5000 is listed");
+    assert!(
+        w.contains(&("d002".to_string(), "18000".to_string())),
+        "{w:?}"
+    );
+    assert!(
+        w.contains(&("d006".to_string(), "5000".to_string())),
+        "{w:?}"
+    );
+    // Without an fps write the shutter still converts at the camera's current project fps.
+    let w = plan_writes(
+        &SetRequest {
+            shutter: Some(100),
+            ..Default::default()
+        },
+        &[],
+        2500,
+        &BMPCC_D006,
+    )
+    .expect("no fps");
+    assert_eq!(w, vec![("d002".to_string(), "9000".to_string())]);
+}
+
+#[test]
 fn a_60_fps_write_is_refused_with_a_named_error_listing_the_choices_1402() {
     let err = plan_writes(&fps_req(60), &[], 6000, &BMPCC_D006).expect_err("6000 is not listed");
     assert_eq!(

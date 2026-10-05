@@ -841,14 +841,20 @@ type Recorded = Arc<Mutex<Vec<(String, String)>>>;
 /// A session over the Pocket 6K's real d006/d007 (cam3 on handheld-1, issue 1402 body): project
 /// 60.00 (not one of its d006 choices), off-speed 50.
 fn pocket_6k_session() -> (CameraSession, Arc<AtomicUsize>, Recorded) {
+    recorder_session(
+        FakeRunner::full_camera()
+            .with_config(
+                "d006",
+                "Current: 6000\nChoice: 0 8\nChoice: 1 2398\nChoice: 2 2400\nChoice: 3 2500\nChoice: 4 2997\nChoice: 5 3000\nChoice: 6 5000\nChoice: 7 5994\nEND",
+            )
+            .with_config("d007", "Current: 50\nBottom: 5\nTop: 60\nEND"),
+    )
+}
+
+/// A recording session over any [`FakeRunner`] camera (issue 1402).
+fn recorder_session(inner: FakeRunner) -> (CameraSession, Arc<AtomicUsize>, Recorded) {
     let detects = Arc::new(AtomicUsize::new(0));
     let writes: Recorded = Arc::new(Mutex::new(Vec::new()));
-    let inner = FakeRunner::full_camera()
-        .with_config(
-            "d006",
-            "Current: 6000\nChoice: 0 8\nChoice: 1 2398\nChoice: 2 2400\nChoice: 3 2500\nChoice: 4 2997\nChoice: 5 3000\nChoice: 6 5000\nChoice: 7 5994\nEND",
-        )
-        .with_config("d007", "Current: 50\nBottom: 5\nTop: 60\nEND");
     let session = CameraSession::new(
         Box::new(WriteRecorder {
             inner,
@@ -957,6 +963,38 @@ fn a_refused_fps_inside_an_open_burst_keeps_the_burst_1402() {
         vec![
             ("iso".to_string(), "800".to_string()),
             ("d005".to_string(), "5".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn a_shutter_after_an_fps_write_in_the_same_burst_converts_at_the_new_rate_1402() {
+    // full_camera(): project 25.00 (d006 2500, the BMPCC choice list), off-speed 50. The camera
+    // stores the shutter as an ANGLE (d002), so once the burst set the project fps to 50.00, a
+    // 1/100 shutter is 180 deg = 18000. Converting at the burst-open 25.00 wrote 9000 (1/200 at 50).
+    let (session, detects, writes) = recorder_session(FakeRunner::full_camera());
+    session
+        .submit(&SetRequest {
+            fps: Some(50),
+            ..Default::default()
+        })
+        .expect("5000 is a listed choice");
+    session
+        .submit(&SetRequest {
+            shutter: Some(100),
+            ..Default::default()
+        })
+        .expect("shutter ok");
+    assert_eq!(
+        detects.load(Ordering::SeqCst),
+        1,
+        "one burst, one plan read"
+    );
+    assert_eq!(
+        writes.lock().unwrap().clone(),
+        vec![
+            ("d006".to_string(), "5000".to_string()),
+            ("d002".to_string(), "18000".to_string()),
         ]
     );
 }
