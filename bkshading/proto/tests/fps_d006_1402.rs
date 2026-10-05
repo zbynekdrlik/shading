@@ -193,9 +193,9 @@ fn a_listed_fps_writes_exactly_that_d006_choice_1402() {
 
 #[test]
 fn a_shutter_planned_with_an_fps_write_converts_at_the_new_project_fps_1402() {
-    // The camera stores the shutter as an ANGLE (d002). A request setting the project fps to 50.00
-    // AND a 1/100 shutter must convert at the NEW rate: 180 deg = 18000, never at the old 25.00
-    // (9000 = 1/200 once the camera runs 50).
+    // d002 is the shutter ANGLE, written after d006 (next test), so the camera reads it at the NEW
+    // project rate. A request setting the project fps to 50.00 AND a 1/100 shutter must therefore
+    // convert at 50.00: 180 deg = 18000, never at the old 25.00 (9000 = 1/200 at 50).
     let req = SetRequest {
         shutter: Some(100),
         fps: Some(50),
@@ -222,6 +222,31 @@ fn a_shutter_planned_with_an_fps_write_converts_at_the_new_project_fps_1402() {
     )
     .expect("no fps");
     assert_eq!(w, vec![("d002".to_string(), "9000".to_string())]);
+}
+
+#[test]
+fn the_project_fps_is_written_before_every_other_value_1402() {
+    // Review round 2: whether a BMPCC keeps the shutter ANGLE or the shutter SPEED across a project
+    // frame-rate change is not verified. Writing d006 FIRST makes the d002 angle (converted at the
+    // new rate) land while the camera already runs that rate, so it is right either way, and every
+    // other value lands at the rate the camera then runs.
+    let req = SetRequest {
+        aperture_norm: Some(0.0),
+        iso: Some(800),
+        kelvin: Some(5600),
+        tint: Some(0),
+        shutter: Some(100),
+        fps: Some(50),
+        auto_wb: None,
+    };
+    let labels = ["f/2.8".to_string(), "f/4.0".to_string()];
+    let w = plan_writes(&req, &labels, 2500, &BMPCC_D006).expect("5000 is listed");
+    assert_eq!(
+        w[0],
+        ("d006".to_string(), "5000".to_string()),
+        "the frame rate goes first: {w:?}"
+    );
+    assert_eq!(w.len(), 6, "{w:?}");
 }
 
 #[test]

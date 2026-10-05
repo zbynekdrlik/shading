@@ -397,8 +397,8 @@ fn plan_writes_maps_every_field() {
     let writes = plan_writes(&req, &choices, 2500, &BMPCC_D006_CHOICES).expect("30 is listed");
     assert!(writes.contains(&("f-number".to_string(), "f/8.0".to_string())));
     assert!(writes.contains(&("iso".to_string(), "800".to_string())));
-    // issue 1402: the shutter set together with the fps converts at the NEW project rate (the
-    // camera keeps the angle): 1/50 at 30.00 = 216 deg, not 180 deg at the old 25.00.
+    // issue 1402: the shutter set together with the fps converts at the NEW project rate (d002 is
+    // written after d006): 1/50 at 30.00 = 216 deg, not 180 deg at the old 25.00.
     assert!(writes.contains(&("d002".to_string(), "21600".to_string())));
     assert!(writes.contains(&("d004".to_string(), "6500".to_string())));
     assert!(writes.contains(&("d005".to_string(), "10".to_string())));

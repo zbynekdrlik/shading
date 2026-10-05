@@ -970,9 +970,9 @@ fn a_refused_fps_inside_an_open_burst_keeps_the_burst_1402() {
 
 #[test]
 fn a_shutter_after_an_fps_write_in_the_same_burst_converts_at_the_new_rate_1402() {
-    // full_camera(): project 25.00 (d006 2500, the BMPCC choice list), off-speed 50. The camera
-    // stores the shutter as an ANGLE (d002), so once the burst set the project fps to 50.00, a
-    // 1/100 shutter is 180 deg = 18000. Converting at the burst-open 25.00 wrote 9000 (1/200 at 50).
+    // full_camera(): project 25.00 (d006 2500, the BMPCC choice list), off-speed 50. d002 is the
+    // shutter ANGLE and the camera already runs 50.00 when it arrives (the earlier SET wrote d006),
+    // so a 1/100 shutter is 180 deg = 18000. Converting at the burst-open 25.00 wrote 9000.
     let (session, detects, writes) = recorder_session(FakeRunner::full_camera());
     session
         .submit(&SetRequest {
