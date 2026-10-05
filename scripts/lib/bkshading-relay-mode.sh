@@ -242,7 +242,7 @@ bkshading_relay_mode_painter_root_rw_stop() {  # $1 = rig mode, $2 = the painter
     if [ "$row_ip" = "$ip" ]; then entry="$row_entry"; fi
   done <<<"${BKSHADING_RELAY_MODE_ROOT_RW:-}"
   [ -n "$entry" ] || return 1
-  echo "RESULT: rig-mode $mode -- STOPPED before the painter launch: the bkshading relay step FAILED (issue 1407) on the painter box $entry, whose root stayed read-WRITE. The painter handoff closes its own rw window on that root, so it would fail and leave cam2 dark with no dead-man: the painter, the burns and the chain checks did not run, and the running painter was left as it is (decision 5996845165). Put that root back read-only (stop the writer until 'findmnt -no OPTIONS /' reads ro), then re-run rig-mode.sh $mode." >&2
+  echo "RESULT: rig-mode $mode -- STOPPED before the painter launch: the bkshading relay step FAILED (issue 1407) on the painter box $entry, whose root stayed read-WRITE. The painter handoff closes its own rw window on that root, so it would fail and leave cam2 dark with no dead-man: the painter, the burns and the chain checks did not run, and the running painter was left as it is (decision 5996845165). Put that root back read-only (stop the writer until 'findmnt -no OPTIONS /' reads ro), then re-run rig-mode.sh $mode. The relay step failed on: $(_bkshading_relay_mode_failed_boxes)." >&2
   return 0
 }
 
