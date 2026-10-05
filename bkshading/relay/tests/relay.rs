@@ -47,8 +47,14 @@ impl FakeRunner {
             "Current: 5600\nBottom: 2500\nTop: 10000\nEND".into(),
         );
         configs.insert("d005".into(), "Current: 0\nEND".into());
-        configs.insert("d006".into(), "Current: 2500\nEND".into());
-        configs.insert("d007".into(), "Current: 25\nBottom: 5\nTop: 60\nEND".into());
+        // issue 1402: d006 = the PROJECT fps MENU (x100) with the BMPCC's own choice list, d007 =
+        // the OFF-SPEED fps RANGE. Project 25.00 and off-speed 50 DIFFER on purpose, so a
+        // d006<->d007 swap (positional or semantic) changes what the relay reports.
+        configs.insert(
+            "d006".into(),
+            "Current: 2500\nChoice: 0 8\nChoice: 1 2398\nChoice: 2 2400\nChoice: 3 2500\nChoice: 4 2997\nChoice: 5 3000\nChoice: 6 5000\nChoice: 7 5994\nEND".into(),
+        );
+        configs.insert("d007".into(), "Current: 50\nBottom: 5\nTop: 60\nEND".into());
         FakeRunner {
             detect: AUTO_DETECT.into(),
             configs,
@@ -119,11 +125,14 @@ fn read_state_reports_online_camera() {
         st.camera.as_deref(),
         Some("Blackmagic Design Pocket Cinema Camera 4K")
     );
+    // issue 1402: d006 is the PROJECT fps (x100), d007 the OFF-SPEED fps -- distinct values in the
+    // fake, so a positional (issue 1229 batch order) or semantic swap fails below.
     assert_eq!(st.params.iso, Some(400));
     assert_eq!(st.params.kelvin, Some(5600)); // d004
     assert_eq!(st.params.tint, Some(0)); // d005 -- distinct from d006 to catch a positional swap
-    assert_eq!(st.params.sensor_fps100, Some(2500)); // d006 -- ditto; issue 1229 batch order
-    assert_eq!(st.params.shutter, Some(50)); // d002 18000 @ 25fps -> 1/50
+    assert_eq!(st.params.fps100, Some(2500)); // d006 Current 2500
+    assert_eq!(st.params.sensor_fps100, Some(5000)); // d007 Current 50 x100
+    assert_eq!(st.params.shutter, Some(50)); // d002 18000 @ the PROJECT 25fps -> 1/50
     assert!(st.fps_supported);
     // issue 1238: full_camera() deliberately omits d003, so the best-effort focus-distance read
     // degrades to None WITHOUT breaking the online state — the RED/GREEN guard against reading
@@ -137,6 +146,11 @@ fn read_state_reports_online_camera() {
     for (got, want) in caps.fnumber_choices.iter().zip([2.8, 4.0, 5.2, 8.0]) {
         assert!((got - want).abs() < 1e-9, "fnumber choice {got} != {want}");
     }
+    // issue 1402: the d006 project-fps choices reach the service verbatim (x100, the `8` kept).
+    assert_eq!(
+        caps.fps_choices,
+        vec![8, 2398, 2400, 2500, 2997, 3000, 5000, 5994]
+    );
     assert_eq!(st.version, "1.7.0-dev.516");
 }
 
@@ -297,8 +311,8 @@ fn apply_writes_expected_gphoto2_config() {
         iso: Some(800),
         kelvin: Some(6500),
         tint: Some(10),
-        shutter: Some(50), // @ 25fps -> d002 angle 18000
-        fps: Some(30),
+        shutter: Some(50),   // @ the project 25fps -> d002 angle 18000
+        fps: Some(30),       // 3000 is one of the camera's d006 choices
         auto_wb: Some(true), // dropped (no PTP equivalent)
     };
     let n = session.apply(&req).expect("apply ok");
@@ -309,7 +323,9 @@ fn apply_writes_expected_gphoto2_config() {
     assert!(writes.contains(&("d002".into(), "18000".into())));
     assert!(writes.contains(&("d004".into(), "6500".into())));
     assert!(writes.contains(&("d005".into(), "10".into())));
-    assert!(writes.contains(&("d007".into(), "30".into())));
+    // issue 1402: the project fps goes to d006 (x100); the off-speed d007 is never written.
+    assert!(writes.contains(&("d006".into(), "3000".into())));
+    assert!(!writes.iter().any(|(k, _)| k == "d007"));
     assert!(!writes.iter().any(|(k, _)| k.contains("wb")));
 }
 
