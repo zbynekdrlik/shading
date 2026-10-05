@@ -301,10 +301,12 @@ round, so the proto `mapping.rs` fixtures and the relay `FakeRunner` now carry D
   - A refused SET inside an open write-burst keeps the burst plan; one that would have OPENED the
     burst drops the basis read for it.
   - It never drops other clients' queued SETs (only a real camera error aborts the FIFO).
-- **The shutter angle converts at the project fps the camera WILL run at** (review round 1): the
-  camera keeps the shutter as an angle (d002), so a `shutter` in the same request as an accepted
-  `fps` write converts at that new rate, and an accepted `fps` write updates the write-burst plan's
-  `fps100` for the rest of the burst.
+- **The project fps goes first; the shutter angle converts at the rate the camera then runs**
+  (review rounds 1-2). `plan_writes` plans d006 BEFORE every other value. `d002` is the shutter
+  ANGLE, so a `shutter` in the same request converts at the new rate and arrives while the camera
+  already runs it. An accepted `fps` write also updates the write-burst plan's `fps100` for the
+  rest of the burst. Whether a BMPCC keeps the angle or the speed across a rate change is NOT
+  verified; with d006 first it does not matter.
 - **The panel offers "Zosúladiť s grab" only when `CameraView.fpsAlignSettable`** (`fpsAlignSettable`,
   serde default false). The service sets it from the same `fps_settable` with `grab*100` and the
   relay's `caps.fpsChoices`. With the camera at 6000 and the grab at 60 there is no mismatch, so no
