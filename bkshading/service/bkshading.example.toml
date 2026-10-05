@@ -23,8 +23,10 @@ transport = "cambox-relay"
 address = "cam1.lan:8771"
 ndi_preview = "CAM1 (usb)"    # NDI source name (preview is an M1 placeholder; real feed = M2)
 grab_fps = 60                 # box grabs this cam at 60 fps (issue 809) — the panel warns if
-                              # the camera's project fps drifts off 60, and offers an explicit
-                              # "align to grab" button (never an automatic write). Omit for a
+                              # the camera's project fps (d006) drifts off 60. An explicit
+                              # "align to grab" button (never an automatic write) is offered only
+                              # when grab x100 is one of the camera's d006 choices — never for 60
+                              # on a BMPCC, whose list has no 6000 (issue 1402). Omit for a
                               # camera whose grab rate you don't want compared.
 
 # Handheld cameras (×3) on a separately powered zero-class arm64 SBC with WiFi (device-agnostic:

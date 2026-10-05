@@ -276,8 +276,9 @@ on both bodies:
 
 Both list the same d006 choices `8, 2398, 2400, 2500, 2997, 3000, 5000, 5994`. `8` is a non-rate
 entry, and **the current `6000` is NOT a choice**. The swap stayed invisible while both properties
-read the same rate. The old test fixtures (d006 `2500`, d007 `25`) read the same either way round,
-so the fixtures now carry DIFFERENT currents (project 25.00, off-speed 50).
+read the same rate. The old fps-test fixtures (d006 `2500`, d007 `25`) read the same either way
+round, so the proto `mapping.rs` fixtures and the relay `FakeRunner` now carry DIFFERENT currents
+(project 25.00, off-speed 50). `relay/tests/burst_1337.rs` keeps 2500/25: no fps test reads it.
 
 - **The ONE shared mapping (`bkshading/proto`), per the main's design 5979166692:**
   - `fps100` = d006 Current. It drives the shutter angle <-> denominator conversion and the
@@ -300,6 +301,10 @@ so the fixtures now carry DIFFERENT currents (project 25.00, off-speed 50).
   - A refused SET inside an open write-burst keeps the burst plan; one that would have OPENED the
     burst drops the basis read for it.
   - It never drops other clients' queued SETs (only a real camera error aborts the FIFO).
+- **The shutter angle converts at the project fps the camera WILL run at** (review round 1): the
+  camera keeps the shutter as an angle (d002), so a `shutter` in the same request as an accepted
+  `fps` write converts at that new rate, and an accepted `fps` write updates the write-burst plan's
+  `fps100` for the rest of the burst.
 - **The panel offers "Zosúladiť s grab" only when `CameraView.fpsAlignSettable`** (`fpsAlignSettable`,
   serde default false). The service sets it from the same `fps_settable` with `grab*100` and the
   relay's `caps.fpsChoices`. With the camera at 6000 and the grab at 60 there is no mismatch, so no
