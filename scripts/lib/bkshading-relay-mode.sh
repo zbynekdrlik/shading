@@ -22,14 +22,17 @@
 # ROSTER is passed IN by the caller (rig-mode.sh derives the source box + cam2 -- the SAME two
 # boxes the #808 E2E pause targets), NEVER a literal box list embedded here.
 #
-# Source-only: the only top-level statement besides function defs is sourcing
-# bkshading-relay-runtime.sh for the ONE source-of-truth relay unit name (bkshading_relay_unit_name)
+# Source-only: the only top-level statements besides function defs source the sibling libs -- the
+# ONE source-of-truth relay unit name (bkshading-relay-runtime.sh, bkshading_relay_unit_name), the ONE
+# verified ro close (ro-window.sh) and the ONE EVENT Discord-note writer (event-mode-discord-confirm.sh)
 # -- mirrors bkshading-e2e-pause.sh's own top-level sibling-lib source.
 _BKSH_MODE_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/bkshading-relay-runtime.sh
 . "$_BKSH_MODE_HERE/bkshading-relay-runtime.sh"
 # shellcheck source=scripts/lib/ro-window.sh
 . "$_BKSH_MODE_HERE/ro-window.sh"   # ro_window_close_cmds -- the ONE verified ro close (issue 1407)
+# shellcheck source=scripts/lib/event-mode-discord-confirm.sh
+. "$_BKSH_MODE_HERE/event-mode-discord-confirm.sh"   # event_mode_discord_note_add, the ONE note writer
 
 # _bkshading_relay_mode_close MODE CHANGE -> the shared verified close of the enable-state window
 # (issue 1407): the ro remount, the root mode READ, and on a root left writable the FAIL lines
@@ -207,9 +210,11 @@ bkshading_relay_mode_warn_continue() {  # $1 = rig mode (test|event), $2 = the a
 bkshading_relay_mode_result() {  # $1 = rig mode (test|event), $2 = the apply's rc
   local mode="${1:-?}" rc="${2:-0}" state="its relay state did not land"
   [ "$rc" = 0 ] && return 0
+  # A failed box can still have the relay running (the start runs after a failed enable) or still
+  # armed, so the line says what is NOT confirmed, never more.
   case "$mode" in
-    event) state="its shading relay is NOT running for the broadcast" ;;
-    test) state="its shading relay is NOT confirmed stopped and disabled" ;;
+    event) state="its shading relay may not be running for the broadcast, or not armed for a reboot" ;;
+    test) state="its shading relay may still be running, or armed for a reboot" ;;
   esac
   echo "RESULT: rig-mode $mode -- the bkshading relay step FAILED (issue 1407, rc=$rc) on $(_bkshading_relay_mode_failed_boxes): $state. A box listed with writers still has a read-WRITE root (stop the writer, put the root back read-only until 'findmnt -no OPTIONS /' reads ro). Every other step of the switch ran. Fix the box (its [issue 1311] FAIL line above says why), then re-run rig-mode.sh $mode." >&2
   return 0
@@ -217,20 +222,14 @@ bkshading_relay_mode_result() {  # $1 = rig mode (test|event), $2 = the apply's 
 
 # bkshading_relay_mode_discord_note MSG_FILE RC -> on a failed relay step, put one plain-Slovak
 # warning line at the TOP of the EVENT Discord confirmation (MSG_FILE, the issue-724 message), so the
-# owner's phone never reads a clean confirmation alone while the run exits non-zero. Same shape as
-# the issue-1371 restore note: the line goes on top, else it is appended; never fails the caller.
+# owner's phone never reads a clean confirmation alone while the run exits non-zero. It names the
+# boxes only (no process names) and claims nothing the contract below it decides. Written by the ONE
+# shared event_mode_discord_note_add (scripts/lib/event-mode-discord-confirm.sh, sourced above);
+# never fails the caller.
 bkshading_relay_mode_discord_note() {  # $1 = the confirmation message file, $2 = the apply's rc
-  local msg="${1:-}" rc="${2:-0}" line body tmp
+  local msg="${1:-}" rc="${2:-0}"
   [ "$rc" = 0 ] && return 0
   [ -n "$msg" ] && [ -f "$msg" ] || return 0
-  line="⚠️ Shading sa nepodarilo zapnúť na: ${BKSHADING_RELAY_MODE_FAILED_BOXES:-jednom z camboxov}. Shading tejto kamery počas vysielania nemusí fungovať. Zvyšok prepnutia prebehol (burny vypnuté, mapovanie, kontrola). Napíš Claudovi, nech box skontroluje."
-  if body="$(cat "$msg" 2>/dev/null)"; then
-    tmp="$msg.relay-note.$$"
-    if { printf '%s\n\n%s\n' "$line" "$body" >"$tmp"; } 2>/dev/null && mv -f "$tmp" "$msg" 2>/dev/null; then
-      return 0
-    fi
-    rm -f "$tmp" 2>/dev/null || true
-  fi
-  { printf '\n%s\n' "$line" >>"$msg"; } 2>/dev/null || true
+  event_mode_discord_note_add "$msg" "⚠️ Shading sa nepodarilo nastaviť na: ${BKSHADING_RELAY_MODE_FAILED_BOXES:-jednom z camboxov}. Shading tejto kamery počas vysielania nemusí fungovať. Ostatné kroky prepnutia prebehli, výsledok kontroly je nižšie. Napíš Claudovi, nech box skontroluje." top
   return 0
 }
