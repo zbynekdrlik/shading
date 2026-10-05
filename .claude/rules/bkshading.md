@@ -615,8 +615,11 @@ business running (and polling the shared bus) while measurements run.
   the issue-808 E2E pause + `EVENT_ASSERT_TARGETS` use — the resolved source box
   (`${RIG_SOURCE_BOX}=$RIG_SOURCE_IP`) + `cam2=$PAINTER_IP`. The unit name is the ONE source of
   truth `bkshading_relay_unit_name` (from `bkshading-relay-runtime.sh`). Every systemctl line is
-  `|| true`-tolerant and the ssh loop is best-effort per box (a bad/unreachable box never aborts
-  the switch).
+  `|| true`-tolerant and the ssh loop tries every box. A box whose state did not land (unreachable,
+  persist not landed, or since issue 1407 a root that did not close read-only) makes the apply
+  return non-zero, and rig-mode RECORDS that rc: it warns by name, runs every remaining step of the
+  switch (EVENT's burn-OFF, mapping and contract; TEST's painter steps) and exits non-zero at the
+  end, naming the box and its writers (the issue-868 pattern, `.claude/rules/ro-window.md`).
 - **This makes the issue-808 E2E pause/restore a TRUE no-op in TEST mode:** with the relay already
   stopped+disabled, `bkshading_e2e_pause_stop_cmds` reads `systemctl is-active`=false AND (in steady
   state) no `/run/bkshading-e2e-paused` marker → `was-active=0` → `bkshading_e2e_pause_restore_cmds`
