@@ -46,6 +46,9 @@ class StopCmdsBehaviour(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             log = os.path.join(d, "calls.log")
             _fake_bin(d, "mount", f'echo "mount $*" >> "{log}"\n')
+            # issue 1407: the window's close READS the root mode; the box's root reads ro again.
+            _fake_bin(d, "findmnt", 'echo "ro,relatime"\n')
+            _fake_bin(d, "sync", ":\n")
             state = os.path.join(d, "state")
             with open(state, "w") as fh:
                 fh.write("enabled\n")
