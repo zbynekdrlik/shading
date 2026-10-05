@@ -17,7 +17,7 @@ use bkshading_proto::mapping::{
     DEFAULT_FPS100,
 };
 use bkshading_proto::read::{
-    fps_supported, not_applied_keys, params_and_caps, plan_writes, RawConfigs,
+    fps_supported, not_applied_keys, params_and_caps, plan_writes, FpsNotSettable, RawConfigs,
 };
 use bkshading_proto::wire::{
     summarize_set_request, RelayState, SetQueue, SetRequest, ShadingParams, SubmitAction,
@@ -468,10 +468,11 @@ pub fn parse_min_read_interval_env(raw: Option<String>) -> Option<u64> {
 
 /// The seven CORE shading config keys read together in ONE gphoto2 invocation (issue 1229). Their
 /// ORDER is the wire contract for [`split_config_blocks`]'s positional mapping in `read_raw`, and
-/// matches the field order they are assigned to in [`RawConfigs`]. The best-effort `d003` focus
-/// distance (issue 1238) is deliberately NOT here — it is read as a separate call so a camera that
-/// does not answer it can never abort the core batch (which would wrongly degrade the read to
-/// offline). `d001`-style undiscovered keys are not read.
+/// matches the field order they are assigned to in [`RawConfigs`] (`d006` = the PROJECT fps,
+/// `d007` = the OFF-SPEED fps, issue 1402). The best-effort `d003` focus distance (issue 1238) is
+/// deliberately NOT here — it is read as a separate call so a camera that does not answer it can
+/// never abort the core batch (which would wrongly degrade the read to offline). `d001`-style
+/// undiscovered keys are not read.
 pub const CORE_CONFIG_KEYS: [&str; 7] = ["iso", "f-number", "d002", "d004", "d005", "d006", "d007"];
 
 /// Builds the gphoto2 argv for reading many config keys in ONE process (issue 1229):
@@ -563,16 +564,26 @@ pub fn project_shading(
     p
 }
 
+/// The write-plan basis a burst reads ONCE at open (issue 1337): the parseable f-number labels,
+/// the project fps x100 the shutter angle converts at, and the camera's d006 project-fps choices a
+/// `fps` write must hit exactly (issue 1402).
+#[derive(Debug, Clone)]
+struct PlanBasis {
+    fnumber_labels: Vec<String>,
+    fps100: i64,
+    fps_choices: Vec<i64>,
+}
+
 /// The relay's write-burst session state (issue 1337) — behind ONE mutex on the [`CameraSession`].
 /// Holds the burst lifecycle [`BurstState`], the persistent `gphoto2 --shell` child while a burst
-/// is open, and the plan basis (f-number labels + fps100) captured by the ONE read at burst open so
-/// every subsequent write in the burst is planned WITHOUT a pre-write read.
+/// is open, and the [`PlanBasis`] captured by the ONE read at burst open so every subsequent write
+/// in the burst is planned WITHOUT a pre-write read.
 #[derive(Default)]
 struct BurstSession {
     state: BurstState,
     shell: Option<Gphoto2Shell>,
-    /// `(fnumber_labels, fps100)` read once at burst open; `None` between bursts (re-read next open).
-    plan: Option<(Vec<String>, i64)>,
+    /// The plan basis read once at burst open; `None` between bursts (re-read next open).
+    plan: Option<PlanBasis>,
     /// The full [`RelayState`] read at burst open — the base the PUT-response state projects the
     /// burst's writes onto (so the panel gets an immediate confirmation with the camera's real
     /// caps/model). `None` between bursts.
@@ -739,7 +750,8 @@ impl CameraSession {
         // panic-freedom, and the field arity ONE construct that also moves each block into its field
         // with no per-block clone; a wrong length hands the Vec back and degrades to a failed read
         // (-> offline), the same fail-safe as before.
-        let [iso, fnumber, shutter_angle, kelvin, tint, sensor_fps, project_fps]: [String; 7] =
+        // issue 1402: d006 is the PROJECT fps, d007 the OFF-SPEED fps (CORE_CONFIG_KEYS order).
+        let [iso, fnumber, shutter_angle, kelvin, tint, project_fps, sensor_fps]: [String; 7] =
             core.try_into().map_err(|v: Vec<String>| {
                 anyhow::anyhow!(
                     "get_config_many returned {} blocks, expected {}",
@@ -762,8 +774,8 @@ impl CameraSession {
             shutter_angle,
             kelvin,
             tint,
-            sensor_fps,
             project_fps,
+            sensor_fps,
             focus_distance,
             summary,
         })
@@ -969,9 +981,11 @@ impl CameraSession {
         // `params_and_caps` uses for the readback `aperture_norm` and the caps `fnumber_choices`
         // the panel steps over. Using the unfiltered `parse_choices` here would desync the count.
         let fnumber_choices = parse_fnumber_labels(&raw.fnumber);
-        let (params, _) = params_and_caps(&raw);
+        let (params, caps) = params_and_caps(&raw);
         let fps100 = params.fps100.unwrap_or(DEFAULT_FPS100);
-        let writes = plan_writes(req, &fnumber_choices, fps100);
+        // issue 1402: a `fps` the camera's d006 does not list refuses the whole request here,
+        // before any write — the lock guard drops WITHOUT invalidating (nothing was written).
+        let writes = plan_writes(req, &fnumber_choices, fps100, &caps.fps_choices)?;
         let n = writes.len();
         // Run the writes, then INVALIDATE the cache whether they ALL succeed OR one fails partway.
         // A mid-apply gphoto2 error (camera busy / unplugged — the handler maps it to 502) still
@@ -1037,8 +1051,21 @@ impl CameraSession {
             armed: true,
         };
         let mut total_applied = 0usize;
+        // issue 1402: THIS caller's own SET refused (a `fps` the camera's d006 does not list).
+        // Returned after the drain, as the caller's answer (the handler maps it to a 422).
+        let mut own_refusal: Option<anyhow::Error> = None;
+        let mut own_set = true;
         loop {
             match self.burst_apply(&mut burst, &current) {
+                Err(e) if e.is::<FpsNotSettable>() => {
+                    // A refused fps is the CLIENT's error, decided before any write: the camera
+                    // is untouched and the burst plan still holds, so the queued follow-ups (other
+                    // clients' SETs, already acknowledged) still run in order. `burst_apply`
+                    // logged the refusal; only the caller's own SET answers with it.
+                    if own_set {
+                        own_refusal = Some(e);
+                    }
+                }
                 Err(e) => {
                     // A CLI-write failure (real camera error): drop the in-flight state AND the
                     // whole queued FIFO — writes planned against a now-uncertain camera must not run
@@ -1046,25 +1073,27 @@ impl CameraSession {
                     guard.disarm_and_abort();
                     return Err(e);
                 }
-                Ok(applied) => {
-                    total_applied += applied;
-                    let next = self
-                        .set_queue
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .finish();
-                    match next {
-                        Some(r) => {
-                            tracing::info!("draining queued shading SET (FIFO, in order)");
-                            current = r;
-                        }
-                        None => {
-                            guard.armed = false; // clean completion — finish() idled the gate
-                            break;
-                        }
-                    }
+                Ok(applied) => total_applied += applied,
+            }
+            own_set = false;
+            let next = self
+                .set_queue
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .finish();
+            match next {
+                Some(r) => {
+                    tracing::info!("draining queued shading SET (FIFO, in order)");
+                    current = r;
+                }
+                None => {
+                    guard.armed = false; // clean completion — finish() idled the gate
+                    break;
                 }
             }
+        }
+        if let Some(refused) = own_refusal {
+            return Err(refused);
         }
         // Build the PUT-response state from the burst's running PROJECTED state (issue 1343 item 0:
         // the burst-open read with EVERY write applied so far projected onto it, maintained by
@@ -1094,15 +1123,20 @@ impl CameraSession {
     /// lock. A CLI-path write failure is a real camera error and propagates (→ 502).
     fn burst_apply(&self, burst: &mut BurstSession, req: &SetRequest) -> Result<usize> {
         // 1. Plan basis: read the camera ONCE at burst open (detect + core batch + focus/summary =
-        //    the normal 3-session read, NOT one per write), caching the f-number choices + fps100
-        //    AND the full state to project the response onto. Subsequent writes in the burst pay NO
-        //    read. A read failure (absent/busy camera) propagates -> 502, exactly like `apply`.
+        //    the normal 3-session read, NOT one per write), caching the PlanBasis (f-number labels,
+        //    fps100, the d006 fps choices) AND the full state to project the response onto.
+        //    Subsequent writes in the burst pay NO read. A read failure (absent/busy camera)
+        //    propagates -> 502, exactly like `apply`.
         if burst.plan.is_none() {
             let camera = self.detect();
             let raw = self.read_raw()?;
             let (params, caps) = params_and_caps(&raw);
-            let fps100 = params.fps100.unwrap_or(DEFAULT_FPS100);
-            let labels = parse_fnumber_labels(&raw.fnumber);
+            let basis = PlanBasis {
+                fnumber_labels: parse_fnumber_labels(&raw.fnumber),
+                fps100: params.fps100.unwrap_or(DEFAULT_FPS100),
+                // issue 1402: the d006 project-fps choices a `fps` write must hit exactly.
+                fps_choices: caps.fps_choices.clone(),
+            };
             let open_state = RelayState {
                 online: camera.is_some(),
                 camera,
@@ -1113,18 +1147,38 @@ impl CameraSession {
                 version: self.version.clone(),
                 not_applied: Vec::new(),
             };
-            burst.plan = Some((labels, fps100));
+            burst.plan = Some(basis);
             burst.open_state = Some(open_state);
             // issue 1343: a fresh burst starts a fresh write accumulation (the previous burst's
             // writes were consumed at its idle-close). Reset here on the FIRST set of a burst.
             burst.written = SetRequest::default();
             burst.projected = None; // item 0: no projection until the first write of this burst
         }
-        let (labels, fps100) = burst
+        let basis = burst
             .plan
             .clone()
             .expect("burst.plan set immediately above");
-        let writes = plan_writes(req, &labels, fps100);
+        let writes = match plan_writes(req, &basis.fnumber_labels, basis.fps100, &basis.fps_choices)
+        {
+            Ok(writes) => writes,
+            Err(refused) => {
+                // issue 1402: a `fps` the camera's d006 does not list refuses the whole SET before
+                // ANY write or burst-state change — never rounded to a neighbour, never sent to
+                // the off-speed d007. Inside an open burst the plan stays (the camera is
+                // untouched). If this SET would have OPENED the burst, drop the basis read for it,
+                // so no plan outlives a burst that never opened (the next burst re-reads).
+                tracing::warn!(
+                    error = %refused,
+                    set = %summarize_set_request(req),
+                    "shading SET refused before any write (issue 1402)"
+                );
+                if !matches!(burst.state, BurstState::Open { .. }) {
+                    burst.plan = None;
+                    burst.open_state = None;
+                }
+                return Err(anyhow::Error::new(refused));
+            }
+        };
         let n = writes.len();
         // 2. Burst state machine: this SET arrived (opens the burst on the first set).
         let now = self.clock.now_ms();
@@ -1197,8 +1251,16 @@ impl CameraSession {
         //    pump read while the burst is open confirms the clicks instead of reverting them), and
         //    refresh the burst idle clock.
         merge_written(&mut burst.written, req);
-        if let (Some((labels, _)), Some(open)) = (burst.plan.clone(), burst.open_state.clone()) {
-            let params = project_shading(&open.params, &burst.written, &labels);
+        // issue 1402: an accepted fps write moved the camera's project rate. The rest of this burst
+        // converts a shutter to the d002 ANGLE at the NEW rate the camera now runs, never at the
+        // burst-open rate. (plan_writes accepted `fps`, so `fps * 100` is a listed choice.)
+        if let (Some(fps), Some(plan)) = (req.fps, burst.plan.as_mut()) {
+            if let Some(fps100) = fps.checked_mul(100) {
+                plan.fps100 = fps100;
+            }
+        }
+        if let (Some(basis), Some(open)) = (burst.plan.clone(), burst.open_state.clone()) {
+            let params = project_shading(&open.params, &burst.written, &basis.fnumber_labels);
             burst.projected = Some(RelayState { params, ..open });
         }
         let now2 = self.clock.now_ms();

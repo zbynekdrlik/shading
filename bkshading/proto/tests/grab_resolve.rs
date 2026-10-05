@@ -159,6 +159,7 @@ fn camera_view_carries_grab_fps_desync_camel_case() {
         grab_fps: Some(50),
         grab_fps_desync: true,
         fps_sync: FpsSync::Mismatch,
+        fps_align_settable: false,
         state: None,
     };
     let json = serde_json::to_string(&view).unwrap();

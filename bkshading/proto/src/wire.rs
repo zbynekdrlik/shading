@@ -39,9 +39,14 @@ pub struct ShadingParams {
     pub tint: Option<i64>,
     /// Shutter speed as a denominator (e.g. `500` == 1/500 s).
     pub shutter: Option<i64>,
-    /// Project fps x100 (settable; d007).
+    /// PROJECT fps x100 — the d006 MENU `Current:` (issue 1402: d006 is the project rate on
+    /// every BMPCC in the fleet). The rate the camera records and outputs; it drives the
+    /// shutter angle <-> denominator conversion and the issue-809 comparison with the grab.
+    /// Settable only to one of [`CameraCaps::fps_choices`]. `None` when d006 is not read —
+    /// never the off-speed rate.
     pub fps100: Option<i64>,
-    /// Sensor fps x100 (readback only; d006).
+    /// OFF-SPEED (sensor) fps x100 — the d007 RANGE `Current:` (a plain int 5..60) x100.
+    /// Readback / diagnostic only: never compared with the grab, never written.
     pub sensor_fps100: Option<i64>,
     /// Manual focus DISTANCE — raw gphoto2 `d003` (RANGE, ~0 = closest .. ~65536 = infinite
     /// on the BMPCC 4K). `None` when the camera does not report it this cycle. This is the
@@ -88,6 +93,17 @@ pub struct CameraCaps {
     #[serde(default, rename = "fNumberChoices")]
     pub fnumber_choices: Vec<f64>,
     pub shutter_choices: Vec<i64>,
+    /// The camera's PROJECT-fps choices x100 — the d006 MENU list, verbatim and in the
+    /// camera's order (issue 1402; both BMPCC bodies: `8, 2398, 2400, 2500, 2997, 3000,
+    /// 5000, 5994`, where `8` is a non-rate entry and the current `6000` is not listed). A
+    /// `fps` write is accepted only for one of these ([`crate::mapping::fps_settable`]); the
+    /// service offers "align to grab" only when `grab * 100` is one of them.
+    /// `#[serde(default)]`: an older relay that does not send it reads as empty, so nothing is
+    /// settable and no align is offered (its own `fps` write went to the off-speed d007).
+    #[serde(default)]
+    pub fps_choices: Vec<i64>,
+    /// The OFF-SPEED (d007) RANGE bounds — not the settable project rates (those are
+    /// [`CameraCaps::fps_choices`]).
     pub fps_min: i64,
     pub fps_max: i64,
     pub kelvin_min: i64,
@@ -105,7 +121,9 @@ pub struct RelayState {
     pub camera: Option<String>,
     pub params: ShadingParams,
     pub caps: Option<CameraCaps>,
-    /// Whether the project fps is settable (d007 present) on this camera.
+    /// Whether the camera exposes its PROJECT fps (the d006 MENU, issue 1402). Exposed is not
+    /// "settable to any rate": a `fps` write is accepted only for a value in
+    /// [`CameraCaps::fps_choices`].
     pub fps_supported: bool,
     /// The box's own capture-mode fps, reported by the relay from its `CAMERA_BOX_CAPTURE_FPS`
     /// environment (the relay runs on the cambox, so it reads the SAME rate the appliance
@@ -160,7 +178,9 @@ pub struct SetRequest {
     pub tint: Option<i64>,
     /// Shutter denominator (e.g. `500` == 1/500 s).
     pub shutter: Option<i64>,
-    /// Project fps (d007).
+    /// PROJECT fps, plain (e.g. `50`). Written to d006 as `fps * 100`, and only when that is
+    /// one of the camera's [`CameraCaps::fps_choices`]; any other value refuses the whole
+    /// request (issue 1402). Never written to the off-speed d007.
     pub fps: Option<i64>,
     /// Trigger auto white balance (no PTP equivalent — ignored on the USB path).
     pub auto_wb: Option<bool>,
@@ -188,11 +208,11 @@ impl FpsSync {
     /// Classifies a camera's reported project fps (`ShadingParams.fps100`, i.e. fps x100)
     /// against the box's configured grab fps (plain fps, e.g. `60`). Pure — the single
     /// source of truth for the sync verdict, shared by the service and covered by unit
-    /// tests. Compares the PROJECT fps (d007), because that is exactly what the "align to
-    /// grab" write changes and what the camera's HDMI output follows; `sensor_fps100`
-    /// (off-speed d006) stays a separate diagnostic. A non-positive value on either side
-    /// (an unread property, a misconfigured `grab_fps = 0`) is treated as "not known" and
-    /// yields [`FpsSync::Unknown`] rather than a false mismatch.
+    /// tests. Compares the PROJECT fps (d006, issue 1402), because that is exactly what the
+    /// "align to grab" write changes and what the camera's HDMI output follows;
+    /// `sensor_fps100` (off-speed d007) stays a separate diagnostic. A non-positive value on
+    /// either side (an unread property, a misconfigured `grab_fps = 0`) is treated as "not
+    /// known" and yields [`FpsSync::Unknown`] rather than a false mismatch.
     pub fn classify(camera_fps100: Option<i64>, grab_fps: Option<i64>) -> FpsSync {
         match (camera_fps100, grab_fps) {
             (Some(cam), Some(grab)) if cam > 0 && grab > 0 => {
@@ -243,6 +263,14 @@ pub struct CameraView {
     /// reported project fps against the EFFECTIVE `grab_fps`. Drives the panel's warning +
     /// align button.
     pub fps_sync: FpsSync,
+    /// The explicit "align to grab" write can be offered (issue 1402): the camera reports its
+    /// d006 project-fps choices and `grab_fps * 100` is EXACTLY one of them
+    /// ([`crate::mapping::fps_settable`], the same rule the relay's write refusal uses). False
+    /// with no grab, no caps, or a grab the camera does not list (a 60 grab on a BMPCC: `6000`
+    /// is not a d006 choice) — the relay would refuse that write, so the panel offers no button.
+    /// `#[serde(default)]`: a view from an older service reads as false (no button).
+    #[serde(default)]
+    pub fps_align_settable: bool,
     /// Live state from the relay, when reachable.
     pub state: Option<RelayState>,
 }

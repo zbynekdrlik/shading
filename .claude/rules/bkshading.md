@@ -239,11 +239,13 @@ never load on its own ship target.
 
 ## Camera fps ↔ box grab-mode sync (issue 809)
 The camera FRAME-RATE get/set ALREADY EXISTS from M1 — do NOT add a new message pair. It flows
-through the general shading path: `ShadingParams.fps100` (project fps d007 x100) + `sensor_fps100`
-(d006 readback) on the GET side, and `SetRequest.fps` → `read::plan_writes` → gphoto2 `d007` on the
-SET side; the relay reads d006/d007 in `read_state`, `RelayState.fps_supported` reports whether d007
-is exposed. #809 added only the grab-mode SYNC LAYER on top of that (duplicating the get/set would
-break the one-source-of-truth the owner flagged in the MVP):
+through the general shading path: `ShadingParams.fps100` (PROJECT fps = d006, already x100) +
+`sensor_fps100` (OFF-SPEED fps = d007 x100) on the GET side, and `SetRequest.fps` →
+`read::plan_writes` → gphoto2 `d006 = fps*100` (a listed choice only) on the SET side; the relay
+reads d006/d007 in `read_state`, `RelayState.fps_supported` reports whether d006 is exposed and
+`CameraCaps.fps_choices` carries its choice list. The d006/d007 meaning was swapped until issue 1402
+(next subsection). #809 added only the grab-mode SYNC LAYER on top of that (duplicating the get/set
+would break the one-source-of-truth the owner flagged in the MVP):
 - proto: `FpsSync {Unknown,Synced,Mismatch}` + pure `FpsSync::classify(camera_fps100, grab_fps)`
   (kebab-case wire: `"unknown"/"synced"/"mismatch"`); `CameraView` gains `grab_fps` + `fps_sync`.
 - service: `CameraConfig.grab_fps: Option<i64>` (per-camera box grab mode, `60` for cam1); the
@@ -252,12 +254,93 @@ break the one-source-of-truth the owner flagged in the MVP):
   button that issues the existing `SetRequest.fps`. NEVER an auto-write — a camera-side format
   change can interrupt recording (owner constraint); the button lives only in the click handler,
   never in `updateBlock` (which runs every poll). Test `test_app_js_align_button_...` pins that.
-- The sync compares PROJECT fps (d007), NOT sensor fps (d006): d007 is exactly what the align write
-  changes and what the camera's HDMI output follows; `sensor_fps100` stays an off-speed diagnostic.
+  Since issue 1402 the button is offered only when `CameraView.fpsAlignSettable` is set (below).
+- The sync compares the PROJECT fps (d006), NOT the off-speed fps (d007): d006 is exactly what the
+  align write changes and what the camera's HDMI output follows; `sensor_fps100` stays an off-speed
+  diagnostic.
 - `grab_fps` is a plain integer for now (the rig is integer-genlock 60). A fractional NTSC grab
   (59.94/29.97) would classify Mismatch against an integer and needs a new representation — deferred
   scope, not a bug. Deriving grab from the box's live capture_fps (vs a static config field) is the
   follow-up.
+
+### d006 = the PROJECT fps, d007 = the OFF-SPEED fps, on every BMPCC in the fleet (issue 1402, 4.10.2026)
+The owner saw cam3 (the Pocket 6K on handheld-1) show `fps 50.00` and the issue-809 warning
+`kamera 50.00 ≠ grab 60` with the "Zosúladiť s grab (60)" button, while the camera ran 60. The MVP
+mapping had the two frame-rate properties swapped. Live `gphoto2 --get-config d006 --get-config d007`
+on both bodies:
+
+| body | d006 (MENU, x100) | d007 (RANGE 5..60, plain) |
+|---|---|---|
+| Pocket 6K, handheld-1 (cam3 block) | Current 6000 | Current 50 |
+| Pocket 4K, cam1 | Current 6000 | Current 60 |
+
+Both list the same d006 choices `8, 2398, 2400, 2500, 2997, 3000, 5000, 5994`. `8` is a non-rate
+entry, and **the current `6000` is NOT a choice**. The swap stayed invisible while both properties
+read the same rate. The old fps-test fixtures (d006 `2500`, d007 `25`) read the same either way
+round, so the proto `mapping.rs` fixtures and the relay `FakeRunner` now carry DIFFERENT currents
+(project 25.00, off-speed 50). `relay/tests/burst_1337.rs` keeps 2500/25: no fps test reads it.
+
+- **The ONE shared mapping (`bkshading/proto`), per the main's design 5979166692:**
+  - `fps100` = d006 Current. It drives the shutter angle <-> denominator conversion and the
+    issue-809 comparison. No d006 → `None`, never the off-speed rate; the conversion then runs at
+    `DEFAULT_FPS100` for that cycle.
+  - `sensorFps100` = d007 Current x100, a diagnostic only.
+  - `caps.fpsChoices` = the d006 list verbatim (`parse_fps100_choices`, the `8` kept).
+  - `caps.fpsMin`/`fpsMax` stay the off-speed d007 RANGE bounds.
+  - `RawConfigs.project_fps` holds the d006 block and `sensor_fps` the d007 block. `read_raw`
+    destructures them from `CORE_CONFIG_KEYS` order.
+- **`fps_settable(choices, wanted_fps100)`** (`mapping.rs`) = d006 present AND `wanted` is EXACTLY a
+  listed choice. It is the one rule behind both the relay's write and the service's offer.
+- **The `fps` write sets d006 to exactly `fps*100`, only for a listed choice.** Anything else, `60`
+  included, makes `plan_writes` refuse the WHOLE request with the named `FpsNotSettable` error
+  (`fps-not-settable: fps 60 (6000 x100) is not one of the camera's d006 project-fps choices [8,
+  2398, …] …`) before anything is planned. It is never rounded to a neighbour (`5994`) and never
+  redirected to d007.
+  - The relay answers it **422** (`http::set_error_status`); a gphoto2 failure stays 502. The
+    service logs the relay body and answers the panel 502.
+  - A refused SET inside an open write-burst keeps the burst plan; one that would have OPENED the
+    burst drops the basis read for it.
+  - It never drops other clients' queued SETs (only a real camera error aborts the FIFO).
+- **The project fps goes first; the shutter angle converts at the rate the camera then runs**
+  (review rounds 1-2). `plan_writes` plans d006 BEFORE every other value. `d002` is the shutter
+  ANGLE, so a `shutter` in the same request converts at the new rate and arrives while the camera
+  already runs it. An accepted `fps` write also updates the write-burst plan's `fps100` for the
+  rest of the burst. Whether a BMPCC keeps the angle or the speed across a rate change is NOT
+  verified; with d006 first it does not matter.
+- **The panel offers "Zosúladiť s grab" only when `CameraView.fpsAlignSettable`** (`fpsAlignSettable`,
+  serde default false). The service sets it from the same `fps_settable` with `grab*100` and the
+  relay's `caps.fpsChoices`. With the camera at 6000 and the grab at 60 there is no mismatch, so no
+  button. A camera at 50.00 against a 60 grab warns but gets no button, because 6000 is not a
+  choice: the 60 project rate is set on the camera itself, by design (approach 3 of the design, a
+  raw unlisted write, is refused until a bench test proves it). An older relay without `fpsChoices`
+  never gets the button.
+- **Tests** (both real choice lists, the 6000-not-listed case, the `8` entry, and every integer fps
+  0..=240 → only 24/25/30/50 written):
+  - `proto/tests/fps_d006_1402.rs`;
+  - the 1402 cases in `relay/tests/relay.rs` and `service/tests/service.rs`;
+  - the panel Playwright test `the align-to-grab button is offered only for a grab the camera lists`;
+  - `test_app_js_align_button_offered_only_for_a_listed_grab_1402`.
+- **Not changed here (follow-up candidate):** `scripts/camera_test_settings.py` (issue 1371) still
+  reads `d007` as "project fps", for its shutter `1/N s` LOG line only (never set). On cam1 (the
+  4K, the only box it runs on) d006/100 and d007 are both 60.
+- **Deploy + read-back (supervisor; any order is safe):**
+  - Why any order is safe: a new relay refuses a `60` write from an old panel (422), and a new
+    service offers no button to an old relay (no `fpsChoices`).
+  - Every relay deploy is rig-busy gated and restores the relay's previous state.
+  1. **handheld-1 (cam3 block)**: `scripts/bkshading-deploy-relay.sh --host <handheld-1> --arch arm64`
+     (the arm64 SBC path, `bkshading-sbc.md`). Read back
+     `curl -s http://handheld-1.lan:8771/api/state`: `params.fps100 = 6000`,
+     `params.sensorFps100 = 5000`, `caps.fpsChoices = [8,2398,2400,2500,2997,3000,5000,5994]`.
+  2. **cam1, cam2 cambox relays**: `scripts/bkshading-deploy-relay.sh --host <cam>`, only outside a
+     production and NEVER while an E2E holds the rig lease (read
+     `http://10.77.9.200:8890/rig-lease.json` first; no relay touch while it is held). In rig TEST mode
+     the relay on the source box and cam2 is stopped+disabled (issue 1311), and the deploy keeps it
+     stopped. Read cam1 back when its relay runs (EVENT mode, outside a production):
+     `params.fps100 = 6000`, `params.sensorFps100 = 6000`.
+  3. **The service on strih-lx**: the issue-1353 path (the `bkshading-service-linux-amd64` artifact,
+     `setup-strih.sh` step 16c or the binary placed by hand, `systemctl restart bkshading-service`).
+     Then check `/api/version` and the panel DOM version. The cam3 block shows `fps 60.00`, no
+     `kamera … ≠ grab` warning and no "Zosúladiť s grab" button.
 
 
 ## Relay focus-distance exposure + the honest focus/exposure-MODE constraint (issue 1238)
@@ -279,7 +362,9 @@ ignores the new key), so relay/service/panel interoperate across versions with n
   (https://www.tal.org/tutorials/blackmagic-pocket-cinema-camera-usb-control-over-ptp) + the MVP
   `mapping.rs` "Verified PTP facts". The documented properties are `iso`, `f-number`, and
   `d001`(unknown RANGE 30–5000), `d002`(shutter angle), **`d003`(manual focus DISTANCE)**,
-  `d004`(WB Kelvin), `d005`(tint), `d006`(sensor fps), `d007`(project fps),
+  `d004`(WB Kelvin), `d005`(tint), `d006`(PROJECT fps x100, MENU), `d007`(OFF-SPEED fps,
+  RANGE 5..60) — this list, taken from the MVP mapping, had d006/d007 swapped until issue 1402
+  corrected it from live reads of both bodies,
   `d008`(unknown MENU 2/0), `d009`(unknown ro 0), `d00a`(unknown ro 0). The standard PTP
   `focusmode`(0x500A)/`expprogram`(0x500E) are absent. So `d003` distance is the ONLY honest
   focus signal — its presence confirms manual focus control is reachable, and a value that is

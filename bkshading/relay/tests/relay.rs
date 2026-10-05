@@ -7,7 +7,10 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, bail, Result};
+use axum::http::StatusCode;
+use bkshading_proto::read::FpsNotSettable;
 use bkshading_proto::wire::SetRequest;
+use bkshading_relay::http::set_error_status;
 use bkshading_relay::transport::{
     build_get_config_many_args, gphoto2_stderr_tail, parse_capture_fps_env, parse_first_model,
     parse_min_read_interval_env, read_is_fresh, split_config_blocks, split_focus_and_summary,
@@ -47,8 +50,14 @@ impl FakeRunner {
             "Current: 5600\nBottom: 2500\nTop: 10000\nEND".into(),
         );
         configs.insert("d005".into(), "Current: 0\nEND".into());
-        configs.insert("d006".into(), "Current: 2500\nEND".into());
-        configs.insert("d007".into(), "Current: 25\nBottom: 5\nTop: 60\nEND".into());
+        // issue 1402: d006 = the PROJECT fps MENU (x100) with the BMPCC's own choice list, d007 =
+        // the OFF-SPEED fps RANGE. Project 25.00 and off-speed 50 DIFFER on purpose, so a
+        // d006<->d007 swap (positional or semantic) changes what the relay reports.
+        configs.insert(
+            "d006".into(),
+            "Current: 2500\nChoice: 0 8\nChoice: 1 2398\nChoice: 2 2400\nChoice: 3 2500\nChoice: 4 2997\nChoice: 5 3000\nChoice: 6 5000\nChoice: 7 5994\nEND".into(),
+        );
+        configs.insert("d007".into(), "Current: 50\nBottom: 5\nTop: 60\nEND".into());
         FakeRunner {
             detect: AUTO_DETECT.into(),
             configs,
@@ -119,11 +128,14 @@ fn read_state_reports_online_camera() {
         st.camera.as_deref(),
         Some("Blackmagic Design Pocket Cinema Camera 4K")
     );
+    // issue 1402: d006 is the PROJECT fps (x100), d007 the OFF-SPEED fps -- distinct values in the
+    // fake, so a positional (issue 1229 batch order) or semantic swap fails below.
     assert_eq!(st.params.iso, Some(400));
     assert_eq!(st.params.kelvin, Some(5600)); // d004
     assert_eq!(st.params.tint, Some(0)); // d005 -- distinct from d006 to catch a positional swap
-    assert_eq!(st.params.sensor_fps100, Some(2500)); // d006 -- ditto; issue 1229 batch order
-    assert_eq!(st.params.shutter, Some(50)); // d002 18000 @ 25fps -> 1/50
+    assert_eq!(st.params.fps100, Some(2500)); // d006 Current 2500
+    assert_eq!(st.params.sensor_fps100, Some(5000)); // d007 Current 50 x100
+    assert_eq!(st.params.shutter, Some(50)); // d002 18000 @ the PROJECT 25fps -> 1/50
     assert!(st.fps_supported);
     // issue 1238: full_camera() deliberately omits d003, so the best-effort focus-distance read
     // degrades to None WITHOUT breaking the online state — the RED/GREEN guard against reading
@@ -137,6 +149,11 @@ fn read_state_reports_online_camera() {
     for (got, want) in caps.fnumber_choices.iter().zip([2.8, 4.0, 5.2, 8.0]) {
         assert!((got - want).abs() < 1e-9, "fnumber choice {got} != {want}");
     }
+    // issue 1402: the d006 project-fps choices reach the service verbatim (x100, the `8` kept).
+    assert_eq!(
+        caps.fps_choices,
+        vec![8, 2398, 2400, 2500, 2997, 3000, 5000, 5994]
+    );
     assert_eq!(st.version, "1.7.0-dev.516");
 }
 
@@ -297,8 +314,8 @@ fn apply_writes_expected_gphoto2_config() {
         iso: Some(800),
         kelvin: Some(6500),
         tint: Some(10),
-        shutter: Some(50), // @ 25fps -> d002 angle 18000
-        fps: Some(30),
+        shutter: Some(50), // @ the NEW project 30fps (issue 1402) -> d002 angle 21600
+        fps: Some(30),     // 3000 is one of the camera's d006 choices
         auto_wb: Some(true), // dropped (no PTP equivalent)
     };
     let n = session.apply(&req).expect("apply ok");
@@ -306,10 +323,13 @@ fn apply_writes_expected_gphoto2_config() {
     let writes = recorded.lock().unwrap().clone();
     assert!(writes.contains(&("f-number".into(), "f/8.0".into())));
     assert!(writes.contains(&("iso".into(), "800".into())));
-    assert!(writes.contains(&("d002".into(), "18000".into())));
+    // issue 1402: the shutter set together with the fps converts at the NEW project rate.
+    assert!(writes.contains(&("d002".into(), "21600".into())));
     assert!(writes.contains(&("d004".into(), "6500".into())));
     assert!(writes.contains(&("d005".into(), "10".into())));
-    assert!(writes.contains(&("d007".into(), "30".into())));
+    // issue 1402: the project fps goes to d006 (x100); the off-speed d007 is never written.
+    assert!(writes.contains(&("d006".into(), "3000".into())));
+    assert!(!writes.iter().any(|(k, _)| k == "d007"));
     assert!(!writes.iter().any(|(k, _)| k.contains("wb")));
 }
 
@@ -788,4 +808,200 @@ fn stderr_tail_trims_long_and_keeps_short() {
     let tail = gphoto2_stderr_tail(&long);
     assert!(tail.starts_with('…'));
     assert_eq!(tail.chars().count(), 201); // ellipsis + 200 chars
+}
+
+// --- issue 1402: the fps write sets d006 to a LISTED choice; anything else is refused -----------
+
+/// A [`FakeRunner`] that RECORDS every `set_config` and COUNTS read cycles (`auto_detect` runs
+/// once per real read, incl. the burst-open plan read), for the issue-1402 write-refusal tests.
+struct WriteRecorder {
+    inner: FakeRunner,
+    detects: Arc<AtomicUsize>,
+    writes: Arc<Mutex<Vec<(String, String)>>>,
+}
+
+impl Gphoto2Runner for WriteRecorder {
+    fn auto_detect(&self) -> Result<String> {
+        self.detects.fetch_add(1, Ordering::SeqCst);
+        self.inner.auto_detect()
+    }
+    fn get_config(&self, key: &str) -> Result<String> {
+        self.inner.get_config(key)
+    }
+    fn set_config(&self, key: &str, value: &str) -> Result<()> {
+        self.writes
+            .lock()
+            .unwrap()
+            .push((key.to_string(), value.to_string()));
+        Ok(())
+    }
+}
+
+type Recorded = Arc<Mutex<Vec<(String, String)>>>;
+
+/// A session over the Pocket 6K's real d006/d007 (cam3 on handheld-1, issue 1402 body): project
+/// 60.00 (not one of its d006 choices), off-speed 50.
+fn pocket_6k_session() -> (CameraSession, Arc<AtomicUsize>, Recorded) {
+    recorder_session(
+        FakeRunner::full_camera()
+            .with_config(
+                "d006",
+                "Current: 6000\nChoice: 0 8\nChoice: 1 2398\nChoice: 2 2400\nChoice: 3 2500\nChoice: 4 2997\nChoice: 5 3000\nChoice: 6 5000\nChoice: 7 5994\nEND",
+            )
+            .with_config("d007", "Current: 50\nBottom: 5\nTop: 60\nEND"),
+    )
+}
+
+/// A recording session over any [`FakeRunner`] camera (issue 1402).
+fn recorder_session(inner: FakeRunner) -> (CameraSession, Arc<AtomicUsize>, Recorded) {
+    let detects = Arc::new(AtomicUsize::new(0));
+    let writes: Recorded = Arc::new(Mutex::new(Vec::new()));
+    let session = CameraSession::new(
+        Box::new(WriteRecorder {
+            inner,
+            detects: detects.clone(),
+            writes: writes.clone(),
+        }),
+        "1.7.0-dev.762",
+    );
+    (session, detects, writes)
+}
+
+#[test]
+fn pocket_6k_state_reads_the_project_fps_from_d006_1402() {
+    let (session, _, _) = pocket_6k_session();
+    let st = session.read_state();
+    assert!(st.online);
+    assert_eq!(st.params.fps100, Some(6000), "the camera runs 60.00");
+    assert_eq!(st.params.sensor_fps100, Some(5000), "off-speed 50 x100");
+    assert!(st.fps_supported, "d006 is exposed");
+    assert_eq!(
+        st.caps.unwrap().fps_choices,
+        vec![8, 2398, 2400, 2500, 2997, 3000, 5000, 5994]
+    );
+}
+
+#[test]
+fn a_60_fps_set_is_refused_named_and_writes_nothing_1402() {
+    let (session, detects, writes) = pocket_6k_session();
+    let err = match session.submit(&SetRequest {
+        fps: Some(60),
+        ..Default::default()
+    }) {
+        Err(e) => e,
+        Ok(_) => panic!("6000 is not a d006 choice: the SET must be refused"),
+    };
+    let refused = err
+        .downcast_ref::<FpsNotSettable>()
+        .expect("the refusal is the named FpsNotSettable error");
+    assert_eq!(refused.fps, 60);
+    assert_eq!(
+        refused.choices,
+        vec![8, 2398, 2400, 2500, 2997, 3000, 5000, 5994]
+    );
+    assert!(err.to_string().contains("5994"), "lists the choices: {err}");
+    // Nothing reached the camera: not d006 rounded to 5994, not d007.
+    assert!(
+        writes.lock().unwrap().is_empty(),
+        "a refused SET writes nothing"
+    );
+    // The relay answers it as a client error (422), not as a camera failure (502).
+    assert_eq!(set_error_status(&err), StatusCode::UNPROCESSABLE_ENTITY);
+
+    // The single-flight gate is idle again and the refused opening SET left no stale plan behind:
+    // the next SET runs and plans from a FRESH read of the camera.
+    let reads_after_refusal = detects.load(Ordering::SeqCst);
+    let outcome = session
+        .submit(&SetRequest {
+            fps: Some(50),
+            ..Default::default()
+        })
+        .expect("5000 is a listed choice");
+    assert!(matches!(outcome, ApplyOutcome::Applied { count: 1, .. }));
+    assert_eq!(
+        detects.load(Ordering::SeqCst),
+        reads_after_refusal + 1,
+        "the burst after a refused opening SET re-reads the camera"
+    );
+    assert_eq!(
+        writes.lock().unwrap().clone(),
+        vec![("d006".to_string(), "5000".to_string())],
+        "a listed rate is written to d006, x100, exactly"
+    );
+}
+
+#[test]
+fn a_refused_fps_inside_an_open_burst_keeps_the_burst_1402() {
+    let (session, detects, writes) = pocket_6k_session();
+    // Opens the burst (one plan read).
+    session
+        .submit(&SetRequest {
+            iso: Some(800),
+            ..Default::default()
+        })
+        .expect("iso ok");
+    let reads_in_burst = detects.load(Ordering::SeqCst);
+    // A refused fps mid-burst: no write, and the open burst keeps its plan.
+    assert!(session
+        .submit(&SetRequest {
+            fps: Some(60),
+            ..Default::default()
+        })
+        .is_err());
+    session
+        .submit(&SetRequest {
+            tint: Some(5),
+            ..Default::default()
+        })
+        .expect("tint ok");
+    assert_eq!(
+        detects.load(Ordering::SeqCst),
+        reads_in_burst,
+        "no extra read: the burst plan survived the refusal"
+    );
+    assert_eq!(
+        writes.lock().unwrap().clone(),
+        vec![
+            ("iso".to_string(), "800".to_string()),
+            ("d005".to_string(), "5".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn a_shutter_after_an_fps_write_in_the_same_burst_converts_at_the_new_rate_1402() {
+    // full_camera(): project 25.00 (d006 2500, the BMPCC choice list), off-speed 50. d002 is the
+    // shutter ANGLE and the camera already runs 50.00 when it arrives (the earlier SET wrote d006),
+    // so a 1/100 shutter is 180 deg = 18000. Converting at the burst-open 25.00 wrote 9000.
+    let (session, detects, writes) = recorder_session(FakeRunner::full_camera());
+    session
+        .submit(&SetRequest {
+            fps: Some(50),
+            ..Default::default()
+        })
+        .expect("5000 is a listed choice");
+    session
+        .submit(&SetRequest {
+            shutter: Some(100),
+            ..Default::default()
+        })
+        .expect("shutter ok");
+    assert_eq!(
+        detects.load(Ordering::SeqCst),
+        1,
+        "one burst, one plan read"
+    );
+    assert_eq!(
+        writes.lock().unwrap().clone(),
+        vec![
+            ("d006".to_string(), "5000".to_string()),
+            ("d002".to_string(), "18000".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn set_error_status_keeps_a_camera_failure_a_bad_gateway_1402() {
+    let camera_err = anyhow!("gphoto2 set-config d004 failed: PTP I/O error");
+    assert_eq!(set_error_status(&camera_err), StatusCode::BAD_GATEWAY);
 }
