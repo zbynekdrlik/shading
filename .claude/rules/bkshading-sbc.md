@@ -90,9 +90,9 @@ the relay/cloudflared provisioning canon but with two deliberate deltas + one go
   lifted STEP 18 heredoc against the golden `tests/fixtures/ro_root_fstab_808/`. The root reading
   is `ro_root_mount_mode`: setup-device's `root_mount_is_readonly` calls it, verify-device.sh keeps
   its own copy (parity-pinned). Change a tmpfs line in the LIB, and only on purpose: it changes
-  every cambox at its next provisioning. NOT covered: the image builders. `create-usb-linux.sh`
-  writes the first-boot (rw) fstab that STEP 18 later replaces; `build-image.sh`'s overlay image
-  still carries its own tmpfs set.
+  every cambox at its next provisioning. The image builders write through it too (issue 1400):
+  `create-usb-linux.sh`'s first-boot (rw) fstab takes the canon `/var/cache` line, and
+  `build-image.sh`'s overlay image the whole tmpfs set (details: `provisioning-scripts.md`).
 - **Deploy uses `bkshading-deploy-relay.sh --arch arm64`.** `--arch arm64` fetches the
   `bkshading-relay-linux-arm64` artifact. The remount follows the TARGET's own root
   (`bkshading_deploy_root_opts_cmd` = `findmnt -no OPTIONS /` with a `/proc/mounts` fallback, decided
