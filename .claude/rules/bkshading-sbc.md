@@ -72,9 +72,12 @@ the relay/cloudflared provisioning canon but with two deliberate deltas + one go
     `/run/logrotate.status` and Armbian's armbian-ramlog ExecStartPre/Post go (live 4.10.2026: the
     daily logrotate failed on `/var/lib/logrotate/status` and left the board `degraded`); `--check`
     grades it byte-for-byte. A lost state after a reboot means no time-based rotation in that boot
-    (/var/log is a tmpfs anyway; size rules still apply). The camboxes run logrotate on a read-only
-    root too (every 15 min since issue 679, state under `/var/lib`): tracked on #1394 (comment
-    5974629330), to read when they are powered on;
+    (/var/log is a tmpfs anyway; size rules still apply). Since issue 1394 the `[Service]` base of
+    this drop-in is the shared ro-root canon (`ro_root_logrotate_dropin_service`, the camboxes write
+    the same base); the SBC adds only its two ramlog resets and its file stays byte-identical. The
+    camboxes ran logrotate on a read-only root too (every 15 min since issue 679, state under
+    `/var/lib`), fixed by issue 1394 (`provisioning-scripts.md`; first tracked in its comment
+    5974629330);
   - on a root that is already ro (a re-run), remounts rw for its own writes and back;
   - reads the root first (an unreadable root refuses untouched) and refuses on a cambox
     (`/usr/local/bin/camera-box` present), whose root is `setup-device.sh`'s.
