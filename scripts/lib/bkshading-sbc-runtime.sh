@@ -219,15 +219,19 @@ bkshading_sbc_stale_journald_dropins() { printf '%s\n' 10-persistent.conf; }
 # relative to the unit dir; the first cut's name (99-) is removed by --install.
 bkshading_sbc_logrotate_dropin_path() { printf '%s\n' logrotate.service.d/zz-bkshading-ro-root.conf; }
 bkshading_sbc_logrotate_legacy_dropin_path() { printf '%s\n' logrotate.service.d/99-bkshading-ro-root.conf; }
+# The [Service] base (the ExecStart override) is the shared read-only-root canon,
+# scripts/lib/ro-root.sh (issue 1394): the camboxes write the same base. The SBC adds only its two
+# Armbian ramlog resets, so the file stays byte-identical to the issue-808 one (pinned by
+# tests/python/test_cambox_ro_units_1394.py). ro-root.sh is sourced HERE, on first use, never at
+# load time: this lib is installed ALONE onto the board for the WiFi heal (WIFI_HEAL_LIBS in
+# bkshading-provision-sbc.sh), and the heal never calls this function.
 bkshading_sbc_logrotate_dropin_content() {
+  # shellcheck source=scripts/lib/ro-root.sh
+  command -v ro_root_logrotate_dropin_service >/dev/null 2>&1 || . "${BASH_SOURCE[0]%/*}/ro-root.sh"
   printf '%s\n' \
     "# Written by scripts/bkshading-provision-sbc.sh --install (issue 808): the root is read-only," \
-    "# so logrotate keeps its state in /run, and the armbian-ramlog steps (the unit is masked) go." \
-    "[Service]" \
-    "ExecStartPre=" \
-    "ExecStartPost=" \
-    "ExecStart=" \
-    "ExecStart=/usr/sbin/logrotate --state /run/logrotate.status /etc/logrotate.conf"
+    "# so logrotate keeps its state in /run, and the armbian-ramlog steps (the unit is masked) go."
+  ro_root_logrotate_dropin_service "ExecStartPre=" "ExecStartPost="
 }
 
 bkshading_sbc_masked_units() {
