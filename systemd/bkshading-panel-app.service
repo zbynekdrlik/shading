@@ -1,9 +1,9 @@
 [Unit]
 # issue 1399 -- the bkshading shading panel (bkshading-service.service on :8770) as an app window on
-# strih-lx: a WebKitGTK window titled "Shading" with no browser chrome, scripts/bkshading_panel_app.py.
+# strih-snv: a WebKitGTK window titled "Shading" with no browser chrome, scripts/bkshading_panel_app.py.
 # Installed by setup-strih.sh step 16d (scripts/lib/strih-session-apps.sh) under the SAME name the
 # 4.10.2026 hand-made stopgap used, so it replaces that unit; graded by verify-strih.sh item 38.
-Description=strih-lx shading panel app window (bkshading :8770, issue 1399)
+Description=strih-snv shading panel app window (bkshading :8770, issue 1399)
 Documentation=https://github.com/zbynekdrlik/camera-box
 # Never give up: the panel must be up whenever the operator session is (owner 4.10.2026).
 StartLimitIntervalSec=0

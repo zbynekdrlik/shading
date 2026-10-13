@@ -339,7 +339,7 @@ round, so the proto `mapping.rs` fixtures and the relay `FakeRunner` now carry D
      the relay on the source box and cam2 is stopped+disabled (issue 1311), and the deploy keeps it
      stopped. Read cam1 back when its relay runs (EVENT mode, outside a production):
      `params.fps100 = 6000`, `params.sensorFps100 = 6000`.
-  3. **The service on strih-lx**: the issue-1353 path (the `bkshading-service-linux-amd64` artifact,
+  3. **The service on strih-snv**: the issue-1353 path (the `bkshading-service-linux-amd64` artifact,
      `setup-strih.sh` step 16c or the binary placed by hand, `systemctl restart bkshading-service`).
      Then check `/api/version` and the panel DOM version. The cam3 block shows `fps 60.00`, no
      `kamera … ≠ grab` warning and no "Zosúladiť s grab" button.
@@ -411,9 +411,9 @@ root, the supervisor bench checklist) lives in its own rule. It auto-loads on th
 ## Service DEPLOY path onto strih (Windows) — issue 808 (repeatable, mirrors the relay canon)
 
 **Retired default (issue 1317 part 3):** the Windows strih PC this section targets is GONE (M4
-cut-over); the service now runs on the Linux strih-lx as a systemd unit (the issue-1353 section
+cut-over); the service now runs on the Linux strih-snv as a systemd unit (the issue-1353 section
 below). `bkshading-deploy-service.sh` therefore has NO default `--host` (it used to be 10.77.9.202,
-now strih-lx's address) and refuses a linux-genlock fleet address via `obs_fleet_refuse_linux_target`,
+now strih-snv's address) and refuses a linux-genlock fleet address via `obs_fleet_refuse_linux_target`,
 naming `setup-strih.sh` step 16c. It stays usable for an explicit Windows box.
 
 The `bkshading-windows` CI job release-builds + uploads the deployable service as
@@ -454,7 +454,7 @@ CI / the .sh / the .ps1 cannot drift (`tests/python/test_bkshading_deploy_servic
   provisioning + live NDI-preview verify already noted above.
 
 
-## Service DEPLOY path onto strih (Linux notebook strih-lx) — issue 1353 (the post-M4 sibling of the Windows path)
+## Service DEPLOY path onto strih (Linux notebook strih-snv) — issue 1353 (the post-M4 sibling of the Windows path)
 
 Post-M4 the notebook IS the strih, so the service is PROVISIONED (not "deployed" ad-hoc) as a systemd
 unit — the `setup-strih.sh` / `verify-strih.sh` / `strih-provision.sh` machinery, not a bespoke
@@ -509,7 +509,7 @@ the printer — parity-tested), `setup-strih.sh` step **"16c"** (lettered, TOTAL
   binary). The install is robust to any zip nesting (`find -type f -name bkshading` / `-type d -name
   web`). The bundle-state step-9 curl+`GH_TOKEN` is the raw-FILE precedent; a CI artifact needs the
   artifacts API, not the raw endpoint.
-- **UNVERIFIED (supervisor rig steps):** the LIVE `setup-strih.sh` run on strih-lx (10.77.9.202) +
+- **UNVERIFIED (supervisor rig steps):** the LIVE `setup-strih.sh` run on strih-snv (10.77.9.202) +
   `verify-strih.sh` green + STARTING the service (`systemctl start bkshading-service`) + the owner's
   panel acceptance on `http://strih.lan:8770/` (development = one camera on cam1) with the PC off.
 
