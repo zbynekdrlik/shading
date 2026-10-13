@@ -262,7 +262,7 @@ shading_https_cf_ini_content() {
 # byte-identical to the single-name invocation (no --expand / --cert-name — shading is untouched).
 shading_https_certbot_argv() {
   local hostname="$1" email="$2" ini="$3" prop="$4" aliases="${5:-}"
-  local args=(
+  local cb_args=(
     certonly
     --dns-cloudflare
     --dns-cloudflare-credentials "$ini"
@@ -272,18 +272,18 @@ shading_https_certbot_argv() {
   local a
   # shellcheck disable=SC2086  # intentional word-split of the space-separated alias list
   for a in $aliases; do
-    args+=(-d "$a")
+    cb_args+=(-d "$a")
   done
   if [ -n "$aliases" ]; then
-    args+=(--expand --cert-name "$hostname")
+    cb_args+=(--expand --cert-name "$hostname")
   fi
-  args+=(
+  cb_args+=(
     --non-interactive
     --agree-tos
     -m "$email"
     --no-eff-email
   )
-  printf '%s\n' "${args[@]}"
+  printf '%s\n' "${cb_args[@]}"
 }
 
 # --- Pure decision helper: the --check verdict classifier ---
