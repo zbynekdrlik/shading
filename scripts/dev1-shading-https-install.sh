@@ -28,7 +28,7 @@ set -euo pipefail
 #                                         [--hostname H] [--upstream URL] [--lan-ip IP]
 #                                         [--alias NAME]... [--email ADDR] [--dry-run]
 #     --site       which front to provision (default shading = the bkshading panel; interkom = the
-#                  strih-lx intercom hub + phone PWA, issue 1345 M3b — adds the /janus WS proxy).
+#                  strih-snv intercom hub + phone PWA, issue 1345 M3b — adds the /janus WS proxy).
 #                  The per-site host/upstream/alias defaults apply unless overridden.
 #     --hostname   public DNS name (PRIMARY / cert-keyed) the panel is served at (default per --site)
 #     --upstream   the panel origin the proxy forwards to (default per --site)
@@ -84,7 +84,7 @@ DEPLOY_HOOK="${SHADING_HTTPS_DEPLOY_HOOK:-$(shading_https_deploy_hook_path)}"
 MODE="--check"
 DRY_RUN=0
 # issue 1345 M3b: which site to provision. `shading` (default) = the bkshading panel front, existing
-# behaviour unchanged; `interkom` = the strih-lx intercom hub + phone PWA front (adds the /janus WS
+# behaviour unchanged; `interkom` = the strih-snv intercom hub + phone PWA front (adds the /janus WS
 # proxy). Explicit --hostname/--upstream still win over the per-site defaults.
 SITE="shading"
 HOST_OVERRIDDEN=0
@@ -191,8 +191,8 @@ if [ "$SITE" = "interkom" ]; then
   # issue 1345 M4: default the crew production aliases only when none were given (flag or env).
   if [ "$ALIASES_FROM_FLAG" = 0 ] && [ -z "$ALIASES" ]; then ALIASES="$(interkom_https_aliases)"; fi
   EXTRA_LOCATIONS="$(interkom_https_janus_location)"
-  FRONTED="the strih-lx intercom hub + phone PWA (issue 1345)"
-  SERVED="the strih-lx intercom hub"
+  FRONTED="the strih-snv intercom hub + phone PWA (issue 1345)"
+  SERVED="the strih-snv intercom hub"
   SITE_AVAILABLE="${SHADING_HTTPS_SITE_AVAILABLE:-/etc/nginx/sites-available/$(interkom_https_site_name)}"
   SITE_ENABLED="${SHADING_HTTPS_SITE_ENABLED:-/etc/nginx/sites-enabled/$(interkom_https_site_name)}"
 fi

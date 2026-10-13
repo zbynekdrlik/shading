@@ -149,14 +149,14 @@ EOF
 
 # --- issue 1345 M3b: the SECOND site — interkom.newlevel.media (the phone PWA + the Janus /janus WS
 # proxy). Same dev1 nginx TLS front, DNS-only A record to the same dev1 LAN IP; the upstream is the
-# strih-lx intercom hub, and a dedicated /janus location proxies the phone's WebRTC signalling to
+# strih-snv intercom hub, and a dedicated /janus location proxies the phone's WebRTC signalling to
 # the Janus WebSocket API. KEEP IN SYNC with scripts/nginx/interkom.newlevel.media.conf (the python
 # test cross-checks equality). ---
 
 # The PRIMARY (cert-keyed) DNS name of the interkom front (A record -> the same dev1 LAN IP as
 # shading). This is the name the Let's Encrypt cert is keyed on (--cert-name + the live cert path)
 # and the FIRST name in server_name; the crew production names are ALIASES (below). It is
-# interkom-lx.newlevel.media — the strih-lx notebook's own name and what the live --expand keyed the
+# interkom-lx.newlevel.media — the strih-snv notebook's own name and what the live --expand keyed the
 # 3-SAN cert on (issue 1345 M4). Never a bare `interkom` — that is an alias, not the cert primary.
 interkom_https_hostname() { printf '%s\n' interkom-lx.newlevel.media; }
 
@@ -166,12 +166,12 @@ interkom_https_hostname() { printf '%s\n' interkom-lx.newlevel.media; }
 # + one certbot `-d` each). Adding a crew name later = append it here.
 interkom_https_aliases() { printf '%s\n' 'interkom.newlevel.media interkom-snv.newlevel.media'; }
 
-# The upstream the proxy forwards `/` to — the strih-lx intercom hub (its axum bind :8790). Uses the
+# The upstream the proxy forwards `/` to — the strih-snv intercom hub (its axum bind :8790). Uses the
 # router-resolvable strih.lan identity (the notebook took the strih identity; strih.lan -> 10.77.9.202
 # today) so the upstream follows future box swaps without a code change — NEVER the retired 10.77.9.203.
 interkom_https_upstream() { printf '%s\n' http://strih.lan:8790; }
 
-# The upstream the `/janus` location forwards to — Janus's WebSocket API on strih-lx (:8188), via the
+# The upstream the `/janus` location forwards to — Janus's WebSocket API on strih-snv (:8188), via the
 # same resolvable strih.lan identity (never the retired 10.77.9.203).
 interkom_https_janus_upstream() { printf '%s\n' http://strih.lan:8188; }
 
@@ -210,8 +210,8 @@ interkom_https_site_content() {
     "$(interkom_https_hostname)" \
     "$(interkom_https_upstream)" \
     "$(interkom_https_janus_location)" \
-    "the strih-lx intercom hub + phone PWA (issue 1345)" \
-    "the strih-lx intercom hub" \
+    "the strih-snv intercom hub + phone PWA (issue 1345)" \
+    "the strih-snv intercom hub" \
     "$(interkom_https_aliases)"
 }
 

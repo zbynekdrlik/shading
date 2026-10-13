@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""bkshading-panel-app (issue 1399): the shading panel as an app window on strih-lx.
+"""bkshading-panel-app (issue 1399): the shading panel as an app window on strih-snv.
 
 WHY (owner, 4.10.2026: "na strih nb ma po starte bezat shading appka" and "nevie to byt pekna pwa
 appka lebo tam v prehliadacoch je ta hnusna horna lista, a stale tak vyskakuju nejake blbosti"): the

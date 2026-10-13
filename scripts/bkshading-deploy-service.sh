@@ -35,7 +35,7 @@ set -euo pipefail
 #             [--binary <bkshading.exe> | --run <ci.yml run id>] [--config-seed <path>]
 #             [--install-dir <C:\dir>] [--keepalive-minutes <N>] [--execute]
 #   --host <ip>            the Windows box to install on (REQUIRED -- issue 1317 part 3). The Windows
-#                          strih PC this defaulted to is RETIRED; the service runs on the Linux strih-lx
+#                          strih PC this defaulted to is RETIRED; the service runs on the Linux strih-snv
 #                          now, provisioned by setup-strih.sh step 16c as a systemd unit (issue 1353),
 #                          so a linux-genlock fleet address is refused by the fleet class gate.
 #   --user <name>          ssh user (default newlevel); also the C:\Users\<name> staging home.
@@ -121,11 +121,11 @@ done
 # shellcheck source=scripts/lib/obs-fleet.sh
 . "$HERE/lib/obs-fleet.sh"
 if [ -z "$HOST" ]; then
-  echo "ERROR: --host <windows-box> is required -- the Windows strih PC is RETIRED (issue 1317); on strih-lx the service is a systemd unit installed by setup-strih.sh step 16c" >&2
+  echo "ERROR: --host <windows-box> is required -- the Windows strih PC is RETIRED (issue 1317); on strih-snv the service is a systemd unit installed by setup-strih.sh step 16c" >&2
   exit 2
 fi
 if ! obs_fleet_refuse_linux_target "$HOST" "bkshading-deploy-service.sh"; then
-  echo "       on strih-lx the bkshading service is provisioned by setup-strih.sh step 16c (systemd unit bkshading-service.service, issue 1353)" >&2
+  echo "       on strih-snv the bkshading service is provisioned by setup-strih.sh step 16c (systemd unit bkshading-service.service, issue 1353)" >&2
   exit 2
 fi
 
