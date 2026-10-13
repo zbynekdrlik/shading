@@ -77,6 +77,11 @@ shading_https_cert_dir() { printf '%s\n' "/etc/letsencrypt/live/${1:-$(shading_h
 #   $1 hostname (PRIMARY name — server_name-first + cert paths + certbot --cert-name)
 #   $2 upstream URL (proxy_pass)   $3 extra locations (opt)   $4 fronted label   $5 served label
 #   $6 aliases (opt, space-separated extra server_name SANs on the SAME cert — issue 1345 M4)
+#   $7 ssl_certificate path (opt, default /etc/letsencrypt/live/<hostname>/fullchain.pem)
+#   $8 ssl_certificate_key path (opt, default /etc/letsencrypt/live/<hostname>/privkey.pem)
+#   $9 header comment block (opt, default the dev1 header below) -- issue 1399: a strih box renders
+#      its OWN front (scripts/lib/strih-https.sh) with its own header and, until its Let's Encrypt
+#      certificate exists, the hand-copied /etc/nginx/ssl pair.
 # The committed scripts/nginx/shading.newlevel.media.conf is exactly this with the live defaults and
 # NO extra ($3 empty) / NO aliases ($6 empty) — the python test asserts BOTH the empty-extra shading
 # render and the interkom render equal their committed files, so nothing drifts. NO secret appears
@@ -94,8 +99,14 @@ shading_https_site_content() {
   # $6 (issue 1345 M4): space-separated ALIAS names appended to server_name in BOTH blocks (empty ⇒
   # byte-identical single-name render). The cert paths + certbot --cert-name stay keyed on $hostname.
   local aliases="${6:-}"
+  local cert="${7:-/etc/letsencrypt/live/${hostname}/fullchain.pem}"
+  local key="${8:-/etc/letsencrypt/live/${hostname}/privkey.pem}"
+  local header="${9:-}"
   local conf_name="${hostname}.conf"
-  cat <<EOF
+  if [ -n "$header" ]; then
+    printf '%s\n' "$header"
+  else
+    cat <<EOF
 # scripts/nginx/${conf_name} — LAN-only HTTPS front for ${fronted}
 # (camera-box issue 808; owner ruling 17.9.2026: HTTPS over the LAN, never the internet). Rendered
 # by scripts/lib/shading-https.sh (shading_https_site_content); deployed to dev1 by
@@ -103,6 +114,9 @@ shading_https_site_content() {
 #
 # Browser (strih/stream/mobile on the LAN) -> DNS ${hostname} = $(shading_https_lan_ip) (dev1 LAN,
 # DNS-only / not proxied) -> dev1 nginx :443 (Let's Encrypt cert, DNS-01) -> ${upstream} (${served}). Traffic stays on the LAN; the internet is used only for the DNS lookup + cert renewal.
+EOF
+  fi
+  cat <<EOF
 
 server {
     listen 80;
@@ -120,8 +134,8 @@ server {
     listen [::]:443 ssl http2;
     server_name ${hostname}${aliases:+ $aliases};
 
-    ssl_certificate     /etc/letsencrypt/live/${hostname}/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/${hostname}/privkey.pem;
+    ssl_certificate     ${cert};
+    ssl_certificate_key ${key};
 
     location / {
         proxy_pass ${upstream};
@@ -216,12 +230,17 @@ interkom_https_site_content() {
 }
 
 # Render the certbot renewal deploy hook (reloads nginx after a cert renewal). Mode 755 at install.
+#   $1 what the cert serves (opt, default shading.newlevel.media)
+#   $2 who installs it (opt, default scripts/dev1-shading-https-install.sh)
+#   $3 the camera-box issue (opt, default 808)
+# With no argument the text is the dev1 hook, byte for byte; a strih box passes its own (issue 1399).
 shading_https_deploy_hook_content() {
-  cat <<'EOF'
+  local what="${1:-shading.newlevel.media}" by="${2:-scripts/dev1-shading-https-install.sh}" issue="${3:-808}"
+  cat <<EOF
 #!/bin/sh
 # /etc/letsencrypt/renewal-hooks/deploy/nginx-reload.sh — reload nginx after a cert renewal so the
-# fresh shading.newlevel.media cert is picked up. Installed by scripts/dev1-shading-https-install.sh
-# (camera-box issue 808). certbot.timer runs the renewal; this hook fires on a successful deploy.
+# fresh ${what} cert is picked up. Installed by ${by}
+# (camera-box issue ${issue}). certbot.timer runs the renewal; this hook fires on a successful deploy.
 set -e
 systemctl reload nginx
 EOF
