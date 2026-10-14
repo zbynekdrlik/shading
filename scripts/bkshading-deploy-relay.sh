@@ -46,6 +46,7 @@ set -euo pipefail
 #   --binary <path>   deploy an already-downloaded CI relay binary (skips gh download).
 #   --dry-run         print the plan and touch no box (no ssh/scp; without --binary it still
 #                     downloads the CI artifact read-only, to show its sha256).
+#   (exit 6)          the rig lease is held by a live E2E (issue 1371): no deploy, no bypass.
 #   --force-live      BYPASS the rig-busy guard and deploy even while a broadcast is live. Supervisor
 #                     override ONLY, logged loudly — a relay deploy/restart during live production can
 #                     fork-wedge the cambox (gphoto2 PTP on the shared xHCI bus, 2026-09-13 #1229).
@@ -80,6 +81,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/ci-run-resolve.sh" # ci_run_latest_success() — the ONE newest-successful-run resolver (shared with deploy-fleet.sh)
 # shellcheck source=scripts/lib/stray-session-check.sh
 . "$HERE/lib/stray-session-check.sh" # stray_session_check_assert() — the ONE shared rig-busy guard
+# shellcheck source=scripts/lib/rig-lease.sh
+. "$HERE/lib/rig-lease.sh"  # issue 1371: the rig lease an E2E holds while it owns the camboxes
 # shellcheck source=scripts/lib/ro-window.sh
 . "$HERE/lib/ro-window.sh" # ro_window_close_cmds / ro_window_holders — the ONE verified ro close (issue 1407)
 
@@ -320,6 +323,17 @@ DRY-RUN — bkshading relay deploy plan:
   next step      : $PROVISION_HINT
 PLAN
   exit 0
+fi
+
+# --- rig-lease PREFLIGHT (issue 1371, 14.10.2026): NEVER touch a cambox while an E2E holds the rig
+# lease. A live holder (holder.json present, heartbeat fresh, its run not known finished) owns the
+# camboxes: it pauses the relay, records, restores. A deploy in that window remounts the root and
+# swaps the binary under the run (it happened on cam5 during run 38579117744). --force-live is a
+# BROADCAST override only and does NOT bypass this; wait for the release. RIG_LEASE_DIR is the
+# shared lib's seam (tests point it at a scratch dir).
+if ! rig_lease_is_stale "${RIG_LEASE_STALE_SECS:-5400}"; then
+  echo "ERROR: the rig lease is held by $(rig_lease_holder_summary) -- an E2E owns the camboxes; no relay deploy to $HOST until it releases (re-run then). --force-live does not bypass the lease." >&2
+  exit 6
 fi
 
 # --- rig-busy PREFLIGHT (2026-09-13 escalation): NEVER deploy a cambox relay while a broadcast may
