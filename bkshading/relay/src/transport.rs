@@ -661,6 +661,11 @@ pub struct CameraSession {
     /// line per transition (online -> offline and back), so the journal records a camera
     /// coming/going without per-read-cycle noise.
     last_online: Mutex<Option<bool>>,
+    /// The camera model the last successful detect found (issue 1371). `gphoto2 --auto-detect`
+    /// enumerates EVERY USB device on the box, the capture grabber included, and on cam5 that
+    /// sweep every read cycle knocked the grabber's capture phase out of lock. A read cycle reuses
+    /// this and detects again only at the first read and after a failed read.
+    detected: Mutex<Option<String>>,
     /// Single-flight FIFO gate for shading writes (issue 1309 single-flight; issue 1337 FIFO).
     /// `submit` funnels every `PUT /api/params` through it so a burst of SETs never forks a second
     /// gphoto2; the in-flight worker drains the FIFO queue IN ORDER (20 clicks = 20 moves).
@@ -688,6 +693,7 @@ impl CameraSession {
             clock: Box::new(InstantClock::new()),
             read_cache: Mutex::new(None),
             last_online: Mutex::new(None),
+            detected: Mutex::new(None),
             set_queue: Mutex::new(SetQueue::default()),
             burst: Mutex::new(BurstSession::default()),
             gphoto2_binary: String::new(),
@@ -736,6 +742,28 @@ impl CameraSession {
             .auto_detect()
             .ok()
             .and_then(|o| parse_first_model(&o))
+    }
+
+    /// The camera for a read cycle (issue 1371): the cached model from an earlier detect, else ONE
+    /// `gphoto2 --auto-detect` (cached when it finds a camera). [`Self::forget_detected`] clears it
+    /// after a failed read, so a camera that went away is detected again on the next cycle.
+    fn camera_for_read(&self) -> Option<String> {
+        let mut cached = self
+            .detected
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if cached.is_none() {
+            *cached = self.detect();
+        }
+        cached.clone()
+    }
+
+    /// Drops the cached camera model after a failed read (issue 1371).
+    fn forget_detected(&self) {
+        *self
+            .detected
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 
     fn read_raw(&self) -> Result<RawConfigs> {
@@ -885,9 +913,10 @@ impl CameraSession {
         state
     }
 
-    /// The real (un-throttled) read cycle (issue 1229): `detect()` (one `gphoto2 --auto-detect`) +
-    /// `read_raw()` (ONE batched multi `--get-config` for the seven shading keys + one best-effort
-    /// `--get-config d003`) = THREE USB-PTP sessions, coalesced down from the pre-fix nine.
+    /// The real (un-throttled) read cycle (issue 1229): the camera (issue 1371: the cached model,
+    /// else one `gphoto2 --auto-detect`) + `read_raw()` (ONE batched multi `--get-config` for the
+    /// seven shading keys + one best-effort `--get-config d003 --summary`) = TWO USB-PTP sessions on
+    /// a steady cycle, THREE on the first read and after a failed one (pre-1229: nine).
     /// A detect miss or a gphoto2 read error degrades to an offline [`RelayState`], the
     /// server-is-truth model. Reached only through [`read_state`](Self::read_state)'s floor.
     fn read_state_uncached(&self) -> RelayState {
@@ -899,7 +928,7 @@ impl CameraSession {
     /// Builds the current [`RelayState`] from one real read cycle (the old `read_state_uncached`
     /// body), WITHOUT the transition-log side effect (issue 1309 kept the two concerns separate).
     fn compute_state(&self) -> RelayState {
-        let camera = self.detect();
+        let camera = self.camera_for_read();
         if camera.is_none() {
             // The box capture rate is known even with no camera — report it (issue 809).
             return RelayState {
@@ -923,11 +952,14 @@ impl CameraSession {
                     not_applied: Vec::new(),
                 }
             }
-            Err(_) => RelayState {
-                camera,
-                capture_fps: self.capture_fps,
-                ..RelayState::offline(self.version.clone())
-            },
+            Err(_) => {
+                self.forget_detected();
+                RelayState {
+                    camera,
+                    capture_fps: self.capture_fps,
+                    ..RelayState::offline(self.version.clone())
+                }
+            }
         }
     }
 
@@ -1128,8 +1160,8 @@ impl CameraSession {
         //    Subsequent writes in the burst pay NO read. A read failure (absent/busy camera)
         //    propagates -> 502, exactly like `apply`.
         if burst.plan.is_none() {
-            let camera = self.detect();
-            let raw = self.read_raw()?;
+            let camera = self.camera_for_read();
+            let raw = self.read_raw().inspect_err(|_| self.forget_detected())?;
             let (params, caps) = params_and_caps(&raw);
             let basis = PlanBasis {
                 fnumber_labels: parse_fnumber_labels(&raw.fnumber),
