@@ -469,12 +469,14 @@ fn apply_invalidates_read_cache_1229() {
             auto_wb: None,
         })
         .expect("apply ok");
+    // `apply` reads the camera itself before it writes (one core batch); count from here.
+    let after_write = reads.load(Ordering::SeqCst);
 
     // Same instant, but the write invalidated the cache -> fresh read.
     let _ = session.read_state();
     assert_eq!(
         reads.load(Ordering::SeqCst),
-        2,
+        after_write + 1,
         "a successful write must invalidate the read cache"
     );
 }
@@ -538,11 +540,14 @@ fn apply_failed_write_also_invalidates_read_cache_1229() {
         "a failing set_config must propagate the error"
     );
 
+    // `apply` read the camera itself before its write failed (one core batch); count from here.
+    let after_write = reads.load(Ordering::SeqCst);
+
     // Same instant, but the failed write must have invalidated the cache -> fresh read.
     let _ = session.read_state();
     assert_eq!(
         reads.load(Ordering::SeqCst),
-        2,
+        after_write + 1,
         "a partially-failed write must also invalidate the read cache"
     );
 }
