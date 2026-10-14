@@ -761,6 +761,7 @@ def _fake_deploy_env(tmp, remote_sha, root_opts=RW_OPTS):
         "BKSHADING_DEPLOY_SCP": fake_scp,
         "BKSHADING_DEPLOY_SSHPASS_PREFIX": "",
         "BKSHADING_DEPLOY_OBS_PHASE2_DIR": tmp,
+        "RIG_LEASE_DIR": os.path.join(tmp, "no-rig-lease"),  # issue 1371: no holder
     }
     return env, log
 
