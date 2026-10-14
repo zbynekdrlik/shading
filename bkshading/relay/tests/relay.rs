@@ -925,21 +925,25 @@ fn stderr_tail_trims_long_and_keeps_short() {
 
 // --- issue 1402: the fps write sets d006 to a LISTED choice; anything else is refused -----------
 
-/// A [`FakeRunner`] that RECORDS every `set_config` and COUNTS read cycles (`auto_detect` runs
-/// once per real read, incl. the burst-open plan read), for the issue-1402 write-refusal tests.
+/// A [`FakeRunner`] that RECORDS every `set_config` and COUNTS read cycles (the core
+/// `get_config_many` batch runs once per real read, incl. the burst-open plan read; since issue
+/// 1371 the detect runs only at the first read), for the issue-1402 write-refusal tests.
 struct WriteRecorder {
     inner: FakeRunner,
-    detects: Arc<AtomicUsize>,
+    read_cycles: Arc<AtomicUsize>,
     writes: Arc<Mutex<Vec<(String, String)>>>,
 }
 
 impl Gphoto2Runner for WriteRecorder {
     fn auto_detect(&self) -> Result<String> {
-        self.detects.fetch_add(1, Ordering::SeqCst);
         self.inner.auto_detect()
     }
     fn get_config(&self, key: &str) -> Result<String> {
         self.inner.get_config(key)
+    }
+    fn get_config_many(&self, keys: &[&str]) -> Result<Vec<String>> {
+        self.read_cycles.fetch_add(1, Ordering::SeqCst);
+        keys.iter().map(|k| self.inner.get_config(k)).collect()
     }
     fn set_config(&self, key: &str, value: &str) -> Result<()> {
         self.writes
@@ -967,17 +971,17 @@ fn pocket_6k_session() -> (CameraSession, Arc<AtomicUsize>, Recorded) {
 
 /// A recording session over any [`FakeRunner`] camera (issue 1402).
 fn recorder_session(inner: FakeRunner) -> (CameraSession, Arc<AtomicUsize>, Recorded) {
-    let detects = Arc::new(AtomicUsize::new(0));
+    let read_cycles = Arc::new(AtomicUsize::new(0));
     let writes: Recorded = Arc::new(Mutex::new(Vec::new()));
     let session = CameraSession::new(
         Box::new(WriteRecorder {
             inner,
-            detects: detects.clone(),
+            read_cycles: read_cycles.clone(),
             writes: writes.clone(),
         }),
         "1.7.0-dev.762",
     );
-    (session, detects, writes)
+    (session, read_cycles, writes)
 }
 
 #[test]
@@ -996,7 +1000,7 @@ fn pocket_6k_state_reads_the_project_fps_from_d006_1402() {
 
 #[test]
 fn a_60_fps_set_is_refused_named_and_writes_nothing_1402() {
-    let (session, detects, writes) = pocket_6k_session();
+    let (session, read_cycles, writes) = pocket_6k_session();
     let err = match session.submit(&SetRequest {
         fps: Some(60),
         ..Default::default()
@@ -1023,7 +1027,7 @@ fn a_60_fps_set_is_refused_named_and_writes_nothing_1402() {
 
     // The single-flight gate is idle again and the refused opening SET left no stale plan behind:
     // the next SET runs and plans from a FRESH read of the camera.
-    let reads_after_refusal = detects.load(Ordering::SeqCst);
+    let reads_after_refusal = read_cycles.load(Ordering::SeqCst);
     let outcome = session
         .submit(&SetRequest {
             fps: Some(50),
@@ -1032,7 +1036,7 @@ fn a_60_fps_set_is_refused_named_and_writes_nothing_1402() {
         .expect("5000 is a listed choice");
     assert!(matches!(outcome, ApplyOutcome::Applied { count: 1, .. }));
     assert_eq!(
-        detects.load(Ordering::SeqCst),
+        read_cycles.load(Ordering::SeqCst),
         reads_after_refusal + 1,
         "the burst after a refused opening SET re-reads the camera"
     );
@@ -1045,7 +1049,7 @@ fn a_60_fps_set_is_refused_named_and_writes_nothing_1402() {
 
 #[test]
 fn a_refused_fps_inside_an_open_burst_keeps_the_burst_1402() {
-    let (session, detects, writes) = pocket_6k_session();
+    let (session, read_cycles, writes) = pocket_6k_session();
     // Opens the burst (one plan read).
     session
         .submit(&SetRequest {
@@ -1053,7 +1057,7 @@ fn a_refused_fps_inside_an_open_burst_keeps_the_burst_1402() {
             ..Default::default()
         })
         .expect("iso ok");
-    let reads_in_burst = detects.load(Ordering::SeqCst);
+    let reads_in_burst = read_cycles.load(Ordering::SeqCst);
     // A refused fps mid-burst: no write, and the open burst keeps its plan.
     assert!(session
         .submit(&SetRequest {
@@ -1068,7 +1072,7 @@ fn a_refused_fps_inside_an_open_burst_keeps_the_burst_1402() {
         })
         .expect("tint ok");
     assert_eq!(
-        detects.load(Ordering::SeqCst),
+        read_cycles.load(Ordering::SeqCst),
         reads_in_burst,
         "no extra read: the burst plan survived the refusal"
     );
@@ -1086,7 +1090,7 @@ fn a_shutter_after_an_fps_write_in_the_same_burst_converts_at_the_new_rate_1402(
     // full_camera(): project 25.00 (d006 2500, the BMPCC choice list), off-speed 50. d002 is the
     // shutter ANGLE and the camera already runs 50.00 when it arrives (the earlier SET wrote d006),
     // so a 1/100 shutter is 180 deg = 18000. Converting at the burst-open 25.00 wrote 9000.
-    let (session, detects, writes) = recorder_session(FakeRunner::full_camera());
+    let (session, read_cycles, writes) = recorder_session(FakeRunner::full_camera());
     session
         .submit(&SetRequest {
             fps: Some(50),
@@ -1100,7 +1104,7 @@ fn a_shutter_after_an_fps_write_in_the_same_burst_converts_at_the_new_rate_1402(
         })
         .expect("shutter ok");
     assert_eq!(
-        detects.load(Ordering::SeqCst),
+        read_cycles.load(Ordering::SeqCst),
         1,
         "one burst, one plan read"
     );
