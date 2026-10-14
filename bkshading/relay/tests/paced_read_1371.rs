@@ -83,7 +83,35 @@ fn fake_shell(dir: &Path, error_keys: &[&str]) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
+    wait_until_executable(&path);
+    // The probe run above logged a pid; the tests count only the shells the relay starts.
+    let _ = std::fs::remove_file(dir.join("pids.log"));
     path
+}
+
+/// Runs the freshly written script once (stdin closed, so it exits at once) until exec stops failing
+/// with ETXTBSY: a child another test thread forked while this file was open for writing holds the
+/// write handle until it execs, and an exec in that window fails "Text file busy" (CI, 14.10.2026:
+/// the relay then fell back to the CLI read and the paced-read assertions failed).
+fn wait_until_executable(path: &Path) {
+    for _ in 0..100 {
+        match std::process::Command::new(path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+        {
+            Ok(_) => return,
+            Err(e) if e.raw_os_error() == Some(26) => {
+                std::thread::sleep(std::time::Duration::from_millis(20))
+            }
+            Err(e) => panic!("cannot run the fake shell {}: {e}", path.display()),
+        }
+    }
+    panic!(
+        "the fake shell {} stayed busy (ETXTBSY) for 2 s",
+        path.display()
+    );
 }
 
 fn shell_commands(dir: &Path) -> Vec<String> {
