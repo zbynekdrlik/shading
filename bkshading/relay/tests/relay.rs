@@ -333,26 +333,29 @@ fn apply_writes_expected_gphoto2_config() {
     assert!(!writes.iter().any(|(k, _)| k.contains("wb")));
 }
 
-/// A [`Gphoto2Runner`] that COUNTS its `auto_detect` invocations (via a shared atomic), so a test
-/// can assert how many real USB-PTP READ CYCLES a sequence of `/api/state` calls actually
-/// triggered. `read_state` calls `auto_detect` exactly once per uncached read cycle (before the
-/// coalesced core `get_config_many` batch + the best-effort `d003`), so its count is the read-cycle
-/// proxy — used by the min-interval-floor tests (issue 1229). It deliberately does NOT override
-/// `get_config_many`, so a floor test measures read CYCLES, not USB sessions per read (that is the
-/// separate `SessionCountingRunner`).
+/// A [`Gphoto2Runner`] that COUNTS its real READ CYCLES (via a shared atomic), so a test can assert
+/// how many USB-PTP read cycles a sequence of `/api/state` calls actually triggered. Every uncached
+/// read cycle runs exactly ONE coalesced core `get_config_many` batch (issue 1229), so that batch is
+/// the read-cycle proxy used by the min-interval-floor tests. It used to count `auto_detect`, but
+/// since issue 1371 a read cycle reuses the detected camera and detects only at the first read and
+/// after a failed read, so the detect no longer marks every cycle. The batch is counted ONCE and
+/// read from the inner fake directly, so a floor test measures read CYCLES, not USB sessions per
+/// read (that is the separate `SessionCountingRunner`).
 struct CountingRunner {
     inner: FakeRunner,
-    detect_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Gphoto2Runner for CountingRunner {
     fn auto_detect(&self) -> Result<String> {
-        self.detect_calls
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.inner.auto_detect()
     }
     fn get_config(&self, key: &str) -> Result<String> {
         self.inner.get_config(key)
+    }
+    fn get_config_many(&self, keys: &[&str]) -> Result<Vec<String>> {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        keys.iter().map(|k| self.inner.get_config(k)).collect()
     }
     fn set_config(&self, key: &str, value: &str) -> Result<()> {
         self.inner.set_config(key, value)
@@ -367,13 +370,13 @@ fn read_state_burst_coalesces_to_one_gphoto2_read_1229() {
     // #663 self-heal USB reset every 600 s (~10 s frozen picture, live during production).
     // The relay must coalesce a rapid burst of `/api/state` reads into AT MOST ONE real gphoto2
     // read (served from a min-interval-floored cache). With the default floor (>=10 s), five
-    // reads in the same instant must trigger exactly ONE auto-detect. On the pre-fix code (no
+    // reads in the same instant must trigger exactly ONE core read batch. On the pre-fix code (no
     // cache/floor) this triggers five -> the test is RED until the floor lands.
-    let detect_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let session = CameraSession::new(
         Box::new(CountingRunner {
             inner: FakeRunner::full_camera(),
-            detect_calls: detect_calls.clone(),
+            reads: reads.clone(),
         }),
         "1.7.0-dev.516",
     );
@@ -381,7 +384,7 @@ fn read_state_burst_coalesces_to_one_gphoto2_read_1229() {
         let _ = session.read_state();
     }
     assert_eq!(
-        detect_calls.load(std::sync::atomic::Ordering::SeqCst),
+        reads.load(std::sync::atomic::Ordering::SeqCst),
         1,
         "a burst of 5 rapid /api/state reads must hit gphoto2 at most once (min-interval floor)"
     );
@@ -402,12 +405,12 @@ fn read_state_reads_again_after_floor_elapses_1229() {
     // The floor caps the read RATE: within `min_read_interval_ms` of the last read, `/api/state`
     // is cached (no gphoto2); once the floor elapses, the next read hits gphoto2 again — so a
     // panel left open still gets fresh readback, just at most once per floor on the shared bus.
-    let detect_calls = Arc::new(AtomicUsize::new(0));
+    let reads = Arc::new(AtomicUsize::new(0));
     let clock = Arc::new(AtomicU64::new(0));
     let session = CameraSession::new(
         Box::new(CountingRunner {
             inner: FakeRunner::full_camera(),
-            detect_calls: detect_calls.clone(),
+            reads: reads.clone(),
         }),
         "1.7.0-dev.516",
     )
@@ -415,12 +418,12 @@ fn read_state_reads_again_after_floor_elapses_1229() {
     .with_clock(Box::new(FakeClock(clock.clone())));
 
     let _ = session.read_state(); // t=0 -> real read #1
-    assert_eq!(detect_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
 
     clock.store(9_999, Ordering::SeqCst); // still within the floor
     let _ = session.read_state();
     assert_eq!(
-        detect_calls.load(Ordering::SeqCst),
+        reads.load(Ordering::SeqCst),
         1,
         "within the floor -> served from cache, no gphoto2"
     );
@@ -428,7 +431,7 @@ fn read_state_reads_again_after_floor_elapses_1229() {
     clock.store(10_000, Ordering::SeqCst); // floor elapsed (>=)
     let _ = session.read_state();
     assert_eq!(
-        detect_calls.load(Ordering::SeqCst),
+        reads.load(Ordering::SeqCst),
         2,
         "floor elapsed -> a fresh real read"
     );
@@ -439,12 +442,12 @@ fn apply_invalidates_read_cache_1229() {
     // A write (SetRequest) is user-initiated and rare, so it stays per-invocation; but after it
     // succeeds the cached read is stale, so the NEXT /api/state must read fresh (even inside the
     // same floor window) so the panel reflects the change instead of the pre-write cache.
-    let detect_calls = Arc::new(AtomicUsize::new(0));
+    let reads = Arc::new(AtomicUsize::new(0));
     let clock = Arc::new(AtomicU64::new(0));
     let session = CameraSession::new(
         Box::new(CountingRunner {
             inner: FakeRunner::full_camera(),
-            detect_calls: detect_calls.clone(),
+            reads: reads.clone(),
         }),
         "1.7.0-dev.516",
     )
@@ -453,7 +456,7 @@ fn apply_invalidates_read_cache_1229() {
 
     let _ = session.read_state(); // real read #1
     let _ = session.read_state(); // cached (same instant)
-    assert_eq!(detect_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
 
     session
         .apply(&SetRequest {
@@ -470,26 +473,30 @@ fn apply_invalidates_read_cache_1229() {
     // Same instant, but the write invalidated the cache -> fresh read.
     let _ = session.read_state();
     assert_eq!(
-        detect_calls.load(Ordering::SeqCst),
+        reads.load(Ordering::SeqCst),
         2,
         "a successful write must invalidate the read cache"
     );
 }
 
 /// A runner whose `set_config` always FAILS (camera busy/unplugged mid-apply), so a test can
-/// prove a partially-failed write still invalidates the cache. Detect + get_config succeed.
+/// prove a partially-failed write still invalidates the cache. Detect + reads succeed; `reads`
+/// counts the core read batches (one per real read cycle).
 struct FailWriteRunner {
     inner: FakeRunner,
-    detect_calls: Arc<AtomicUsize>,
+    reads: Arc<AtomicUsize>,
 }
 
 impl Gphoto2Runner for FailWriteRunner {
     fn auto_detect(&self) -> Result<String> {
-        self.detect_calls.fetch_add(1, Ordering::SeqCst);
         self.inner.auto_detect()
     }
     fn get_config(&self, key: &str) -> Result<String> {
         self.inner.get_config(key)
+    }
+    fn get_config_many(&self, keys: &[&str]) -> Result<Vec<String>> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        keys.iter().map(|k| self.inner.get_config(k)).collect()
     }
     fn set_config(&self, _key: &str, _value: &str) -> Result<()> {
         bail!("camera busy (simulated mid-apply failure)")
@@ -501,12 +508,12 @@ fn apply_failed_write_also_invalidates_read_cache_1229() {
     // Review finding (issue 1229): a write that FAILS partway still leaves the camera dirty
     // (earlier writes landed), so the cached pre-write snapshot is stale and must NOT be served
     // for up to a floor. A partially-failed apply must invalidate the cache too, not only success.
-    let detect_calls = Arc::new(AtomicUsize::new(0));
+    let reads = Arc::new(AtomicUsize::new(0));
     let clock = Arc::new(AtomicU64::new(0));
     let session = CameraSession::new(
         Box::new(FailWriteRunner {
             inner: FakeRunner::full_camera(),
-            detect_calls: detect_calls.clone(),
+            reads: reads.clone(),
         }),
         "1.7.0-dev.516",
     )
@@ -515,7 +522,7 @@ fn apply_failed_write_also_invalidates_read_cache_1229() {
 
     let _ = session.read_state(); // real read #1 populates the cache
     let _ = session.read_state(); // cached (same instant)
-    assert_eq!(detect_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
 
     let res = session.apply(&SetRequest {
         aperture_norm: None,
@@ -534,9 +541,115 @@ fn apply_failed_write_also_invalidates_read_cache_1229() {
     // Same instant, but the failed write must have invalidated the cache -> fresh read.
     let _ = session.read_state();
     assert_eq!(
-        detect_calls.load(Ordering::SeqCst),
+        reads.load(Ordering::SeqCst),
         2,
         "a partially-failed write must also invalidate the read cache"
+    );
+}
+
+/// A [`Gphoto2Runner`] that counts its `gphoto2 --auto-detect` runs AND its core read batches,
+/// and whose reads fail while `fail_reads` is set (a camera that went away mid-session). Issue 1371:
+/// the detect enumerates every USB device on the box, the capture grabber included, so the relay
+/// must not run it on every read cycle.
+struct DetectCountingRunner {
+    inner: FakeRunner,
+    detects: Arc<AtomicUsize>,
+    reads: Arc<AtomicUsize>,
+    fail_reads: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Gphoto2Runner for DetectCountingRunner {
+    fn auto_detect(&self) -> Result<String> {
+        self.detects.fetch_add(1, Ordering::SeqCst);
+        self.inner.auto_detect()
+    }
+    fn get_config(&self, key: &str) -> Result<String> {
+        self.inner.get_config(key)
+    }
+    fn get_config_many(&self, keys: &[&str]) -> Result<Vec<String>> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        if self.fail_reads.load(Ordering::SeqCst) {
+            bail!("PTP I/O error (simulated: camera gone)");
+        }
+        keys.iter().map(|k| self.inner.get_config(k)).collect()
+    }
+    fn set_config(&self, key: &str, value: &str) -> Result<()> {
+        self.inner.set_config(key, value)
+    }
+}
+
+#[test]
+fn read_cycle_detects_once_and_again_only_after_a_failed_read_1371() {
+    // Issue 1371: every 10 s read cycle ran `gphoto2 --auto-detect`, which sweeps the whole USB
+    // bus. On cam5 that sweep shares bus 4 with the Cam Link and knocked the capture phase tracker
+    // out of lock (~45 % of the time vs ~14 % with the relay stopped). The relay keeps the detected
+    // camera: ONE detect at the first read, none on later cycles, one again after a failed read.
+    // Pre-fix every read cycle detects, so the second assert reads 3 -> RED.
+    let detects = Arc::new(AtomicUsize::new(0));
+    let reads = Arc::new(AtomicUsize::new(0));
+    let fail_reads = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let clock = Arc::new(AtomicU64::new(0));
+    let session = CameraSession::new(
+        Box::new(DetectCountingRunner {
+            inner: FakeRunner::full_camera(),
+            detects: detects.clone(),
+            reads: reads.clone(),
+            fail_reads: fail_reads.clone(),
+        }),
+        "1.7.0-dev.516",
+    )
+    .with_min_read_interval_ms(10_000)
+    .with_clock(Box::new(FakeClock(clock.clone())));
+
+    let st = session.read_state(); // t=0 -> first read cycle
+    assert!(st.online);
+    assert_eq!(detects.load(Ordering::SeqCst), 1, "the first read detects");
+
+    clock.store(10_000, Ordering::SeqCst);
+    assert!(session.read_state().online);
+    clock.store(20_000, Ordering::SeqCst);
+    let st = session.read_state();
+    assert!(st.online);
+    assert_eq!(
+        reads.load(Ordering::SeqCst),
+        3,
+        "three real read cycles ran"
+    );
+    assert_eq!(
+        detects.load(Ordering::SeqCst),
+        1,
+        "later read cycles reuse the detected camera, no USB-wide detect"
+    );
+    assert_eq!(
+        st.camera.as_deref(),
+        Some("Blackmagic Design Pocket Cinema Camera 4K"),
+        "the cached model is still reported"
+    );
+
+    // The camera goes away: the read fails, the state goes offline, the cache is dropped.
+    fail_reads.store(true, Ordering::SeqCst);
+    clock.store(30_000, Ordering::SeqCst);
+    assert!(
+        !session.read_state().online,
+        "a failed read reports offline"
+    );
+    assert_eq!(detects.load(Ordering::SeqCst), 1);
+
+    // It comes back: the next cycle detects again, exactly once.
+    fail_reads.store(false, Ordering::SeqCst);
+    clock.store(40_000, Ordering::SeqCst);
+    assert!(session.read_state().online);
+    assert_eq!(
+        detects.load(Ordering::SeqCst),
+        2,
+        "the cycle after a failed read detects again"
+    );
+    clock.store(50_000, Ordering::SeqCst);
+    assert!(session.read_state().online);
+    assert_eq!(
+        detects.load(Ordering::SeqCst),
+        2,
+        "and then reuses it again"
     );
 }
 
