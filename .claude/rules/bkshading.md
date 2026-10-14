@@ -719,9 +719,14 @@ NOT a physical or lifecycle change.
   RED at 9 on the pre-fix path), `split_config_blocks`/`build_get_config_many_args` are pure and
   unit-tested + rustc-replicated, and a `CoalescingFakeRunner` (join stdout → split, mirroring the
   real `Gphoto2Cli`) proves a coalesced read yields byte-identical state to the per-key path.
-- **What is NOT reduced (deferred, not dropped):** the `--auto-detect` presence probe stays a
-  separate session (folding it needs caching the port + deriving presence from the batch — a bigger
-  change, not this lane); and the residual "one 3-session read/floor can still occasionally clip the
+- **The `--auto-detect` runs once, not per cycle (issue 1371, 14.10.2026).** It enumerates EVERY
+  USB device on the box, and on cam5 (BMPCC + Cam Link on bus 4) the per-cycle sweep pushed the
+  camera-box capture phase tracker into a re-seed ~45 % of the time (relay stopped ~14 %).
+  `CameraSession::camera_for_read` keeps the detected model; `forget_detected` drops it when a read
+  fails, so the next cycle detects again. A steady read is 2 sessions (core batch + d003/summary),
+  3 at the first read and after a failure. The floor tests count the core `get_config_many` batch
+  as their read-cycle proxy (the detect no longer marks every cycle).
+- **What is NOT reduced (deferred, not dropped):** the residual "one 3-session read/floor can still occasionally clip the
   isochronous stream" is bounded far lower but not provably zero on a single shared controller — the
   final clean-watch A/B (relay-on steady vs off) is a supervisor live-verify step (blocked in this
   lane by an in-progress E2E, which itself pauses the relay). If that watch still shows dips, the
