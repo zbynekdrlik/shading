@@ -726,6 +726,23 @@ NOT a physical or lifecycle change.
   fails, so the next cycle detects again. A steady read is 2 sessions (core batch + d003/summary),
   3 at the first read and after a failure. The floor tests count the core `get_config_many` batch
   as their read-cycle proxy (the detect no longer marks every cycle).
+- **Reads go through ONE persistent, PACED `gphoto2 --shell` (issue 1371, 14.10.2026).** cam5 measured:
+  usbmon showed one CLI read cycle = ~250 BMPCC transfers in two 4-6 ms bursts (`gphoto2 --debug`:
+  Open session, Device info, Storage IDs, Object handles = the card listing, 7x property desc, Close
+  session); during each burst the Cam Link on the same root port fell +3..+16 ms behind, its frame
+  timestamps stepped late and camera-box re-seeded its capture phase ~7x/min. One shell reading one
+  key every 120 ms brought it to the no-relay baseline (~2/min). `uvcvideo hwtimestamps=1` did NOT
+  help (no usable device clock on the Cam Link). So `read_raw` sends `PACED_READ_KEYS` (the 7 core
+  keys + `5007` + `d003`) through `Gphoto2Shell::get_config` (reads to `END`; a `***` line =
+  `Ok(None)`, best-effort for `5007`/`d003`, an error for a core key), `READ_PACING_MS` (100) apart;
+  a cycle takes ~1 s, under the service's 1.5 s poll timeout. `5007` is the raw F-Number MENU
+  (`Current: 400` = f/4.00), `RawConfigs.fnumber_raw`, preferred over the `--summary` raw, so the
+  summary dump is gone from the paced path. The shell lives in `BurstSession.shell`, opened by the
+  first read, shared with write bursts, NOT closed at the burst idle-close. Any shell error / wedge
+  kills it and THAT cycle reads over the CLI (`read_raw_cli`, unchanged); the next cycle opens a
+  fresh one. With no gphoto2 binary configured (the fake-runner tests) every read is the CLI path.
+  Tests: `bkshading/relay/tests/paced_read_1371.rs` (a fake `gphoto2 --shell` script). The E2E
+  test-camera step refuses while the relay is active, so the held session never meets it.
 - **What is NOT reduced (deferred, not dropped):** the residual "one 3-session read/floor can still occasionally clip the
   isochronous stream" is bounded far lower but not provably zero on a single shared controller — the
   final clean-watch A/B (relay-on steady vs off) is a supervisor live-verify step (blocked in this

@@ -103,6 +103,12 @@ pub struct RawConfigs {
     /// camera's first enumerated stop (`Current: (null)`). Empty when unavailable — the aperture
     /// then simply falls back to the RADIO `Current:` (i.e. the pre-1306 behaviour), never a crash.
     pub summary: String,
+    /// `gphoto2 --get-config 5007` block (issue 1371): the PTP F-Number property itself, a MENU
+    /// whose `Current:` is the raw aperture x100 (`Current: 400` = f/4.00) even when the `f-number`
+    /// RADIO prints `Current: (null)` for a lens open below the first enumerated stop. The relay's
+    /// paced read takes it in place of the `--summary` dump (one property instead of every
+    /// property in one burst). Empty when unavailable; preferred over `summary` when present.
+    pub fnumber_raw: String,
 }
 
 fn current_i64(block: &str) -> Option<i64> {
@@ -133,10 +139,13 @@ pub fn params_and_caps(raw: &RawConfigs) -> (ShadingParams, CameraCaps) {
     // The RADIO `Current:` only when it names a real f-number; libgphoto2 prints `Current: (null)`
     // (-> parse_fnumber None) when the lens is open below the camera's first enumerated stop.
     let current_label = parse_current(&raw.fnumber).filter(|c| parse_fnumber(c).is_some());
-    // Fall back to the `--summary` raw (0x5007 value / 100) when the RADIO current is absent —
-    // the only honest current-aperture signal in the off-grid case (issue 1306).
-    let summary_fnumber =
-        parse_summary_fnumber_raw(&raw.summary).map(|raw_x100| raw_x100 as f64 / 100.0);
+    // Fall back to the raw 0x5007 value / 100 when the RADIO current is absent — the only honest
+    // current-aperture signal in the off-grid case (issue 1306). The `5007` property block (issue
+    // 1371, the relay's paced read) wins over the `--summary` line; a non-positive raw is no value.
+    let summary_fnumber = current_i64(&raw.fnumber_raw)
+        .filter(|raw_x100| *raw_x100 > 0)
+        .or_else(|| parse_summary_fnumber_raw(&raw.summary))
+        .map(|raw_x100| raw_x100 as f64 / 100.0);
     let current_fnumber_value = current_label
         .as_deref()
         .and_then(parse_fnumber)

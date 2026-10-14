@@ -475,6 +475,25 @@ pub fn parse_min_read_interval_env(raw: Option<String>) -> Option<u64> {
 /// undiscovered keys are not read.
 pub const CORE_CONFIG_KEYS: [&str; 7] = ["iso", "f-number", "d002", "d004", "d005", "d006", "d007"];
 
+/// The PTP F-Number property as its own config key (issue 1371): a MENU whose `Current:` is the raw
+/// aperture x100, present even when the `f-number` RADIO reads `(null)` (an off-grid lens). The
+/// paced read takes it instead of the `--summary` dump.
+pub const FNUMBER_RAW_KEY: &str = "5007";
+
+/// The keys one PACED read cycle sends through the persistent shell, in this order (issue 1371):
+/// the seven [`CORE_CONFIG_KEYS`], then the best-effort [`FNUMBER_RAW_KEY`] and
+/// [`FOCUS_DISTANCE_KEY`] (an error answer for those two is an empty block, never a failed read).
+pub const PACED_READ_KEYS: [&str; 9] = [
+    "iso", "f-number", "d002", "d004", "d005", "d006", "d007", "5007", "d003",
+];
+
+/// The gap between two keys of a paced read (issue 1371). Measured on cam5 (BMPCC + Cam Link on
+/// one USB 3 root port): today's two gphoto2 processes per cycle put ~250 transfers on the port in
+/// 4-6 ms bursts and the Cam Link's frame timestamps stepped +3..+16 ms late, re-seeding the
+/// camera-box capture phase ~7x a minute; one key every 120 ms through one session brought it to
+/// the no-relay baseline. A cycle of 9 keys takes ~1 s, under the service's 1.5 s poll timeout.
+pub const READ_PACING_MS: u64 = 100;
+
 /// Builds the gphoto2 argv for reading many config keys in ONE process (issue 1229):
 /// `["--get-config", k1, "--get-config", k2, …]`. A single `gphoto2` invocation with this argv
 /// opens the camera ONCE (one USB open/enumerate/close) and reads every key in that one PTP
@@ -575,8 +594,9 @@ struct PlanBasis {
 }
 
 /// The relay's write-burst session state (issue 1337) — behind ONE mutex on the [`CameraSession`].
-/// Holds the burst lifecycle [`BurstState`], the persistent `gphoto2 --shell` child while a burst
-/// is open, and the [`PlanBasis`] captured by the ONE read at burst open so every subsequent write
+/// Holds the burst lifecycle [`BurstState`], the persistent `gphoto2 --shell` child (since issue
+/// 1371 the session's camera channel for paced reads AND write bursts, kept open between bursts),
+/// and the [`PlanBasis`] captured by the ONE read at burst open so every subsequent write
 /// in the burst is planned WITHOUT a pre-write read.
 #[derive(Default)]
 struct BurstSession {
@@ -766,7 +786,78 @@ impl CameraSession {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 
-    fn read_raw(&self) -> Result<RawConfigs> {
+    /// One real read of the camera's config (issue 1371): through the persistent, PACED shell when
+    /// a gphoto2 binary is configured (one key every [`READ_PACING_MS`], the shell kept open in
+    /// `shell` for the next cycle and for write bursts), else the CLI path. A shell that fails or
+    /// wedges is killed and that cycle reads over the CLI instead, so a broken shell never loses a
+    /// read; the next cycle opens a fresh one. The caller holds the burst lock, so the shell and a
+    /// CLI gphoto2 never run against the camera at once.
+    fn read_raw(&self, shell: &mut Option<Gphoto2Shell>) -> Result<RawConfigs> {
+        if !self.gphoto2_binary.is_empty() {
+            match self.read_raw_paced(shell) {
+                Ok(raw) => return Ok(raw),
+                Err(e) => {
+                    tracing::warn!(error = %e, "paced shell read failed; shell closed, CLI read this cycle");
+                    if let Some(sh) = shell.take() {
+                        sh.close();
+                    }
+                }
+            }
+        }
+        self.read_raw_cli()
+    }
+
+    /// The paced read (issue 1371): opens the shell when none is open, then sends
+    /// [`PACED_READ_KEYS`] one at a time, [`READ_PACING_MS`] apart. A core key without an answer
+    /// is an error (the caller falls back to the CLI); the best-effort `5007` / `d003` answer empty.
+    fn read_raw_paced(&self, shell: &mut Option<Gphoto2Shell>) -> Result<RawConfigs> {
+        if shell.is_none() {
+            *shell = Some(Gphoto2Shell::open(&self.gphoto2_binary)?);
+            tracing::info!("shading camera shell opened (paced reads + write bursts)");
+        }
+        let sh = shell.as_mut().expect("shell opened immediately above");
+        let started = Instant::now();
+        let mut blocks: Vec<String> = Vec::with_capacity(PACED_READ_KEYS.len());
+        for (i, key) in PACED_READ_KEYS.iter().enumerate() {
+            if i > 0 {
+                std::thread::sleep(Duration::from_millis(READ_PACING_MS));
+            }
+            match sh.get_config(key)? {
+                Some(block) => blocks.push(block),
+                None if *key == FNUMBER_RAW_KEY || *key == FOCUS_DISTANCE_KEY => {
+                    blocks.push(String::new())
+                }
+                None => anyhow::bail!("gphoto2 --shell answered get-config {key} with an error"),
+            }
+        }
+        tracing::info!(
+            keys = PACED_READ_KEYS.len(),
+            pacing_ms = READ_PACING_MS,
+            duration_ms = started.elapsed().as_millis() as u64,
+            "gphoto2 paced shell read"
+        );
+        let [iso, fnumber, shutter_angle, kelvin, tint, project_fps, sensor_fps, fnumber_raw, focus_distance]: [String; 9] =
+            blocks.try_into().map_err(|v: Vec<String>| {
+                anyhow::anyhow!("paced read returned {} blocks, expected {}", v.len(), PACED_READ_KEYS.len())
+            })?;
+        Ok(RawConfigs {
+            iso,
+            fnumber,
+            shutter_angle,
+            kelvin,
+            tint,
+            project_fps,
+            sensor_fps,
+            focus_distance,
+            summary: String::new(),
+            fnumber_raw,
+        })
+    }
+
+    /// The CLI read (issue 1229): the seven core keys in ONE gphoto2 process + the best-effort
+    /// `d003 --summary` session. Used when no gphoto2 binary is configured for the shell (the fake
+    /// runners of the tests) and for one cycle after the paced shell failed.
+    fn read_raw_cli(&self) -> Result<RawConfigs> {
         // issue 1229: read the seven CORE shading keys in ONE gphoto2 invocation (ONE USB-PTP
         // session), not one session per key. `get_config_many` returns exactly one block per key,
         // in `CORE_CONFIG_KEYS` order, or an `Err` (spawn/exit/count mismatch) that propagates via
@@ -806,6 +897,7 @@ impl CameraSession {
             sensor_fps,
             focus_distance,
             summary,
+            fnumber_raw: String::new(),
         })
     }
 
@@ -846,9 +938,8 @@ impl CameraSession {
         let force_read = match action {
             BurstAction::CloseShellFinalRead => {
                 burst.state = next_state;
-                if let Some(shell) = burst.shell.take() {
-                    shell.close();
-                }
+                // issue 1371: the shell stays open (it is the paced read channel too); only the
+                // burst's plan and projection end here.
                 burst.plan = None;
                 burst.open_state = None;
                 burst.projected = None; // issue 1343 item 0: the authoritative read below supersedes it
@@ -884,7 +975,7 @@ impl CameraSession {
                 }
             }
         }
-        let mut state = self.read_state_uncached();
+        let mut state = self.read_state_uncached(&mut burst.shell);
         // issue 1343: on the burst idle-close read, flag every written key the camera did NOT
         // apply (compared against this authoritative readback). Only meaningful when the camera is
         // online and reported its caps (the aperture comparison needs the choice grid); an offline
@@ -913,21 +1004,21 @@ impl CameraSession {
         state
     }
 
-    /// The real (un-throttled) read cycle (issue 1229): the camera (issue 1371: the cached model,
-    /// else one `gphoto2 --auto-detect`) + `read_raw()` (ONE batched multi `--get-config` for the
-    /// seven shading keys + one best-effort `--get-config d003 --summary`) = TWO USB-PTP sessions on
-    /// a steady cycle, THREE on the first read and after a failed one (pre-1229: nine).
+    /// The real (un-throttled) read cycle: the camera (issue 1371: the cached model, else one
+    /// `gphoto2 --auto-detect`) + `read_raw` (issue 1371: the nine keys through the persistent
+    /// shell, one every [`READ_PACING_MS`]; the CLI's batched core read + `d003 --summary` when no
+    /// shell is configured or the shell failed this cycle).
     /// A detect miss or a gphoto2 read error degrades to an offline [`RelayState`], the
     /// server-is-truth model. Reached only through [`read_state`](Self::read_state)'s floor.
-    fn read_state_uncached(&self) -> RelayState {
-        let state = self.compute_state();
+    fn read_state_uncached(&self, shell: &mut Option<Gphoto2Shell>) -> RelayState {
+        let state = self.compute_state(shell);
         self.note_online_transition(&state);
         state
     }
 
     /// Builds the current [`RelayState`] from one real read cycle (the old `read_state_uncached`
     /// body), WITHOUT the transition-log side effect (issue 1309 kept the two concerns separate).
-    fn compute_state(&self) -> RelayState {
+    fn compute_state(&self, shell: &mut Option<Gphoto2Shell>) -> RelayState {
         let camera = self.camera_for_read();
         if camera.is_none() {
             // The box capture rate is known even with no camera — report it (issue 809).
@@ -936,7 +1027,7 @@ impl CameraSession {
                 ..RelayState::offline(self.version.clone())
             };
         }
-        match self.read_raw() {
+        match self.read_raw(shell) {
             Ok(raw) => {
                 let (params, caps) = params_and_caps(&raw);
                 RelayState {
@@ -1008,7 +1099,7 @@ impl CameraSession {
         // fps here would plan a wrong d002 shutter angle and write a wrong exposure to a live
         // camera on a partial read (the handler maps this error to 502). This top `read_raw()?`
         // early-return drops the lock guard WITHOUT invalidating — correct: nothing was written.
-        let raw = self.read_raw()?;
+        let raw = self.read_raw_cli()?;
         // issue 1304: the write index basis is the PARSEABLE-only f-number list — the SAME basis
         // `params_and_caps` uses for the readback `aperture_norm` and the caps `fnumber_choices`
         // the panel steps over. Using the unfiltered `parse_choices` here would desync the count.
@@ -1161,7 +1252,9 @@ impl CameraSession {
         //    propagates -> 502, exactly like `apply`.
         if burst.plan.is_none() {
             let camera = self.camera_for_read();
-            let raw = self.read_raw().inspect_err(|_| self.forget_detected())?;
+            let raw = self
+                .read_raw(&mut burst.shell)
+                .inspect_err(|_| self.forget_detected())?;
             let (params, caps) = params_and_caps(&raw);
             let basis = PlanBasis {
                 fnumber_labels: parse_fnumber_labels(&raw.fnumber),

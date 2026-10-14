@@ -164,6 +164,7 @@ fn full_raw() -> RawConfigs {
         sensor_fps: D007_BLOCK.to_string(),
         focus_distance: D003_BLOCK.to_string(),
         summary: String::new(),
+        fnumber_raw: String::new(),
     }
 }
 
@@ -304,6 +305,47 @@ fn empty_fnumber_block_yields_no_choices_1304() {
     // never a fabricated entry. The panel then disables the aperture +/- step.
     let (_params, caps) = params_and_caps(&RawConfigs::default());
     assert!(caps.fnumber_choices.is_empty());
+}
+
+#[test]
+fn aperture_from_the_5007_block_when_current_null_1371() {
+    // Issue 1371: the relay's paced read takes `gphoto2 --get-config 5007` (the raw F-Number MENU)
+    // instead of the --summary dump. cam5's live block, with the RADIO current (null) for its
+    // off-grid f/4 lens and choices from f/4.5: the 5007 raw 400 gives f/4.0, the slider snaps
+    // to the nearest choice (index 0), exactly like the summary path.
+    let raw = RawConfigs {
+        fnumber: "Label: F-Number\nType: RADIO\nCurrent: (null)\nChoice: 0 f/0.19\nChoice: 1 f/0\nChoice: 2 f/4.5\nChoice: 3 f/4.8\nChoice: 4 f/5.6\nEND".to_string(),
+        fnumber_raw: "Label: F-Number\nReadonly: 0\nType: MENU\nCurrent: 400\nChoice: 0 19\nChoice: 1 0\nEND".to_string(),
+        // A stale/different summary must lose to the 5007 block.
+        summary: "F-Number(0x5007): ... value: f/8 (800)".to_string(),
+        ..Default::default()
+    };
+    let (params, caps) = params_and_caps(&raw);
+    let av = params.aperture_av.expect("aperture_av from the 5007 raw");
+    assert!(
+        (av - 2.0 * 4.0f64.log2()).abs() < 1e-9,
+        "f/4.0 -> AV 4.0, got {av}"
+    );
+    assert_eq!(
+        params.aperture_norm,
+        Some(0.0),
+        "nearest choice f/4.5 = index 0"
+    );
+    assert_eq!(caps.fnumber_choices, vec![4.5, 4.8, 5.6]);
+
+    // A 5007 block with no usable value (0 / missing) falls back to the summary line.
+    for block in ["Label: F-Number\nType: MENU\nCurrent: 0\nEND", ""] {
+        let raw = RawConfigs {
+            fnumber_raw: block.to_string(),
+            summary: "F-Number(0x5007): ... value: f/2 (200)".to_string(),
+            ..raw.clone()
+        };
+        let av = params_and_caps(&raw)
+            .0
+            .aperture_av
+            .expect("summary fallback");
+        assert!((av - 2.0).abs() < 1e-9, "f/2 -> AV 2, got {av}");
+    }
 }
 
 #[test]

@@ -155,7 +155,43 @@ pub fn shell_set_config_command(key: &str, value: &str) -> String {
     format!("set-config {key}={value}")
 }
 
-/// A persistent `gphoto2 --shell` child used ONLY inside a write burst (issue 1337). Best-effort:
+/// What one `gphoto2 --shell` output line means while a `get-config` answer is read (issue 1371).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShellReadLine {
+    /// `Label: …`: the first line of the config block.
+    Start,
+    /// `END`: the last line of the config block.
+    End,
+    /// `*** Error …`: gphoto2 refused the key; no block follows.
+    Error,
+    /// Anything else: the echoed command or the prompt before the block, a body line inside it.
+    Other,
+}
+
+/// Classifies one `gphoto2 --shell` line for a `get-config` read (issue 1371). Pure, Tier-0 tested.
+/// Only a `***` line is an error here: a block's own body may contain any word, and the echoed
+/// command (`get-config d002`) and the prompt (`gphoto2: {/root} /> …`) are ignored.
+pub fn shell_read_line(line: &str) -> ShellReadLine {
+    let l = line.trim();
+    if l.starts_with("Label:") {
+        ShellReadLine::Start
+    } else if l == "END" {
+        ShellReadLine::End
+    } else if l.starts_with("***") {
+        ShellReadLine::Error
+    } else {
+        ShellReadLine::Other
+    }
+}
+
+/// The `gphoto2 --shell` command that reads one config key (issue 1371); its answer is the same
+/// `Label:` … `END` block `gphoto2 --get-config <key>` prints.
+pub fn shell_get_config_command(key: &str) -> String {
+    format!("get-config {key}")
+}
+
+/// A persistent `gphoto2 --shell` child: the relay's camera channel for paced reads (issue 1371)
+/// and for write bursts (issue 1337). Best-effort:
 /// every method that can fail returns `Err`, and the caller (`CameraSession`) kills the child and
 /// falls the current set back to a per-invocation CLI write. Never holds a lock across an unbounded
 /// wait — reads are bounded by [`WRITE_SESSION_WEDGE_MS`].
@@ -265,6 +301,43 @@ impl Gphoto2Shell {
                 Err(RecvTimeoutError::Disconnected) => {
                     bail!("gphoto2 --shell exited during set-config {key}={value}");
                 }
+            }
+        }
+    }
+
+    /// Reads ONE config key through the persistent shell (issue 1371): writes `get-config <key>` and
+    /// collects the answer from its `Label:` line to its `END` line. `Ok(None)` = gphoto2 answered
+    /// with an error line (the camera does not have that key; the shell itself is fine). `Err` = the
+    /// shell exited or gave no `END` within [`WRITE_SESSION_WEDGE_MS`]: the caller kills it.
+    pub fn get_config(&mut self, key: &str) -> Result<Option<String>> {
+        writeln!(self.stdin, "{}", shell_get_config_command(key))
+            .with_context(|| format!("write to {} --shell", self.binary))?;
+        self.stdin
+            .flush()
+            .with_context(|| format!("flush {} --shell", self.binary))?;
+        let deadline = Instant::now() + Duration::from_millis(WRITE_SESSION_WEDGE_MS);
+        let mut block: Option<Vec<String>> = None;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                bail!("gphoto2 --shell get-config {key} wedged (no END in {WRITE_SESSION_WEDGE_MS} ms)");
+            }
+            let line = match self.lines.recv_timeout(remaining) {
+                Ok(line) => line,
+                Err(RecvTimeoutError::Timeout) => continue, // the deadline check above bails
+                Err(RecvTimeoutError::Disconnected) => {
+                    bail!("gphoto2 --shell exited during get-config {key}")
+                }
+            };
+            match (shell_read_line(&line), block.as_mut()) {
+                (ShellReadLine::Error, None) => return Ok(None),
+                (ShellReadLine::Start, None) => block = Some(vec![line]),
+                (ShellReadLine::End, Some(b)) => {
+                    b.push(line);
+                    return Ok(Some(b.join("\n")));
+                }
+                (_, Some(b)) => b.push(line),
+                (_, None) => {} // the echoed command / the prompt before the block
             }
         }
     }
