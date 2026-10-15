@@ -200,7 +200,7 @@ def test_dry_run_is_default_and_touches_nothing():
 
 def test_missing_host_is_refused_no_windows_strih_default_1317():
     # issue 1317 part 3: the default used to be the Windows strih PC at 10.77.9.202 -- RETIRED at
-    # the M4 cut-over; that address is the Linux strih-lx now. No --host = a usage error, never a
+    # the M4 cut-over; that address is the Linux strih-snv now. No --host = a usage error, never a
     # silent aim at the Linux box.
     with tempfile.TemporaryDirectory() as tmp:
         fake_bin = os.path.join(tmp, EXE_NAME)
@@ -214,14 +214,14 @@ def test_missing_host_is_refused_no_windows_strih_default_1317():
 
 def test_linux_strih_lx_host_is_refused_even_with_execute_1317():
     # The Windows Task-Scheduler install must never be aimed at a linux-genlock fleet box: on
-    # strih-lx the service is a systemd unit installed by setup-strih.sh step 16c (issue 1353).
+    # strih-snv the service is a systemd unit installed by setup-strih.sh step 16c (issue 1353).
     with tempfile.TemporaryDirectory() as tmp:
         fake_bin = os.path.join(tmp, EXE_NAME)
         open(fake_bin, "w").close()
         seed = os.path.join(tmp, "seed.toml")
         open(seed, "w").close()
         env, log = _fake_env(tmp, "x")
-        for host in ("10.77.9.202", "strih-lx"):
+        for host in ("10.77.9.202", "strih-snv"):
             for extra in ([], ["--execute"]):
                 r = _run_script(["--host", host, "--binary", fake_bin, "--config-seed", seed] + extra,
                                 env=env)

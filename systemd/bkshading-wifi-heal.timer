@@ -1,0 +1,17 @@
+[Unit]
+# Fires one bkshading-wifi-heal pass every 20 s (issue 808): 3 misses = about 60 s of a dead link
+# before a reassociate. The interval is bkshading_sbc_wifi_heal_interval_s in
+# scripts/lib/bkshading-sbc-runtime.sh (a test pins the two equal). The first pass waits 60 s after
+# boot so the first association + DHCP are not counted as misses.
+Description=Run the bkshading handheld WiFi heal every 20 s (issue 808)
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Timer]
+OnBootSec=60s
+OnUnitActiveSec=20s
+# The default AccuracySec is 1 min, which would stretch a 20 s cadence to a minute.
+AccuracySec=1s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

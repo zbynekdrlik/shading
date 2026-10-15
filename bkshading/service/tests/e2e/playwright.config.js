@@ -1,18 +1,24 @@
 // @ts-check
-// Playwright config for the bkshading operator-panel E2E (issue 1304). Two webServers, both
-// managed + torn down by Playwright: the stdlib stub relay and the built bkshading service
-// (pointed at the stub via e2e-config.toml). Chromium only, one worker — keep the CI budget small.
+// Playwright config for the bkshading operator-panel E2E (issue 1304). Three webServers, all
+// managed + torn down by Playwright: the stdlib stub relay, the built bkshading service (pointed at
+// the stub via e2e-config.toml), and a second service instance with one preview camera whose NDI
+// feed is absent (e2e-preview-config.toml, issue 808). Chromium only, one worker — keep the CI
+// budget small.
 const path = require("path");
 const { defineConfig, devices } = require("@playwright/test");
 
 const STUB_PORT = 8781;
 const SVC_PORT = 8780;
+// issue 808: a second service instance with ONE preview camera whose NDI feed is absent
+// (e2e-preview-config.toml); panel.spec.js addresses it by absolute URL.
+const PREVIEW_SVC_PORT = 8782;
 const BIN = process.env.BKSHADING_BIN;
 if (!BIN) {
   throw new Error("BKSHADING_BIN must point to the built bkshading service binary");
 }
 const stub = path.resolve(__dirname, "..", "stub_relay.py");
 const config = path.resolve(__dirname, "e2e-config.toml");
+const previewConfig = path.resolve(__dirname, "e2e-preview-config.toml");
 
 module.exports = defineConfig({
   testDir: ".",
@@ -35,6 +41,12 @@ module.exports = defineConfig({
     {
       command: `${BIN} --config ${config}`,
       url: `http://127.0.0.1:${SVC_PORT}/api/version`,
+      reuseExistingServer: false,
+      timeout: 30000,
+    },
+    {
+      command: `${BIN} --config ${previewConfig}`,
+      url: `http://127.0.0.1:${PREVIEW_SVC_PORT}/api/version`,
       reuseExistingServer: false,
       timeout: 30000,
     },

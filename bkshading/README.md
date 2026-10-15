@@ -46,7 +46,16 @@ remote. Implements the owner architecture decided 2026-08-20 (issue 808 comments
 - Live NDI camera preview into each 4+4 block's top area (replaces the M1 placeholder). The
   service subscribes to each configured camera's NDI **low-bandwidth** stream, decimates to a
   few fps, JPEG-encodes, and serves the latest frame at `GET /api/cameras/<id>/preview.jpg`;
-  the web UI reloads an `<img>` a few times a second.
+  the web UI fetches it a few times a second.
+- **Only a FRESH frame is ever shown (issue 808).** A frame older than
+  `PreviewConfig::max_frame_age_ms()` (max of 3 s, five preview frame periods, two capture
+  timeouts) counts as stale: the feed stopped. The endpoint answers a missing or stale frame with
+  `204 No Content` (+ `no-store`), never a 4xx/5xx; only an unknown camera id is `404`. Each camera
+  view carries `previewLive`, and the panel fetches a preview only while it is set (fetch → blob →
+  object URL, the previous URL revoked). Otherwise it shows its placeholder: "NDI preview —
+  čakám…" before any frame, "NDI preview — obraz sa zastavil, čakám…" after a live feed stopped.
+  So a powered-off preview camera logs nothing in the browser console and never shows a frozen
+  frame as live.
 - A `PreviewSource` seam: the default (and CI) source is a **stub test pattern**, so the
   service compiles and runs with no libndi and no camera. The real libndi receiver (bandwidth
   LOWEST, mirroring the appliance `src/ndi.rs`) is behind `--features ndi`, **off by default**
@@ -177,12 +186,57 @@ params-only block — a handheld has no NDI feed). This milestone provisions the
   aarch64** (an ELF `e_machine` read — a mis-deployed amd64 binary is caught here, not at reboot
   with an opaque `Exec format error`) + **the WiFi link is up** (reads `/sys/class/net/wl*/operstate`
   — band-agnostic; a wired box with no `wl*` interface, e.g. a cambox, SKIPs this check, never
-  FAILs; a down link FAILs with a `nmcli device wifi connect …` join remediation).
-- **Deploy the ARM relay:** `scripts/bkshading-deploy-relay.sh --host <sbc> --arch arm64
-  --no-remount` — `--arch arm64` fetches the `bkshading-relay-linux-arm64` artifact; `--no-remount`
-  skips the read-only-root swap (a cambox appliance has a read-only root; a stock arm64 SBC image —
-  Raspberry Pi OS / Debian / Armbian — root is read-write). The scp + sha256 byte-verify +
-  ENABLE-ONLY discipline is otherwise identical to the cambox path.
+  FAILs; a down link FAILs with a `nmcli device wifi connect …` join remediation) + **the WiFi
+  roams and heals** (`wpa_supplicant@wlan0` enabled, the `bgscan` line in its conf, the heal
+  installed with its timer enabled, and the DHCP gateway answers a ping — a FAIL names the BSSID and
+  the signal; all four skipped on a wired box) + **the root filesystem is read-only** (an rw root
+  FAILs with "reboot after --install") + **the root writers are masked** (`armbian-ramlog`,
+  `systemd-networkd-persistent-storage`, `fake-hwclock-save` and its timer; graded on every SBC,
+  wired or WiFi).
+- **The handheld's WiFi roams to the strongest AP and heals itself (issue 808, design
+  5972548198).** netplan has no background-scan setting and nothing checks that an associated link
+  carries traffic, so after a reboot handheld-1 sat on a far AP with no traffic. On a board with a
+  `wl*` radio `--install` takes the WiFi over from netplan: it migrates the SSID, passphrase and
+  country from the board's own netplan WiFi YAML into `/etc/wpa_supplicant/wpa_supplicant-wlan0.conf`
+  (0600, `bgscan="simple:30:-65:300"`, the `wpa_passphrase`-derived 64-hex PSK — the passphrase is
+  never on an argv, never printed, never logged), writes a networkd DHCP file for `wlan0` with the
+  settings netplan generated plus a `Restart=on-failure` drop-in for `wpa_supplicant@wlan0`,
+  enables `systemd-networkd`, `wpa_supplicant@wlan0` and the heal timer, and only then moves that
+  YAML aside once as `.bak`. `bkshading-wifi-heal.timer` (every 20 s) pings the DHCP gateway: after
+  3 misses it runs `wpa_cli reassociate`, after 6 it restarts `wpa_supplicant@wlan0`. It never
+  acts on a pass it could not measure (a missing tool is named, not counted). Each action writes
+  one journal line naming the BSSID and signal before and after the new association. While the
+  supplicant is still connecting (not COMPLETED) these steps wait, with one exception, the
+  **stuck rung**:
+  - a stopped supplicant unit is started at once: no driver reload while `wlan0` is there; with
+    `wlan0` gone the remembered driver module is loaded, or reloaded, first;
+  - after 3 passes in which the WiFi driver refused associations or a running supplicant did not
+    answer, the heal stops the supplicant, does a **driver reload** (the module behind `wlan0`,
+    `sprdwl_ng` on the Orange Pi Zero 2W) and starts it again. A refusal is the supplicant journal
+    line `Association request to the driver failed`, each line counted once. Live on handheld-1
+    the uwe5622 driver wedged this way, and only a module reload revived it.
+
+  Plain scanning out of range never triggers it.
+
+  A re-run keeps the conf. Refused before anything changes: a board with neither a netplan WiFi
+  YAML nor that conf, a netplan WiFi that differs from an existing conf, a YAML the migration
+  cannot carry whole, or no `wpa_cli`/`ip`/`ping`.
+- **Read-only root, the same as the camboxes (issue 808, owner ruling 5948648089).** The handheld
+  is unplugged after each use, and a power cut mid-write can corrupt its microSD root. So
+  `--install` also writes the read-only fstab from the ONE shared canon `scripts/lib/ro-root.sh`
+  (the cambox root line + its five tmpfs mounts `/tmp /var/log /var/tmp /var/cache /var/spool`,
+  the board's own other mounts kept, the original saved once to `/etc/fstab.bak`). It also makes
+  journald volatile (`Storage=volatile`, the journal in RAM) after removing any debug
+  `Storage=persistent` drop-in, and masks `armbian-ramlog`, `systemd-networkd-persistent-storage` and
+  `fake-hwclock-save` with its timer (both fail on a read-only root). All of it takes effect at the next
+  reboot. A later `--install` on the read-only root remounts it rw for its own writes and back.
+  `--install` refuses on a cambox, whose root is `setup-device.sh`'s.
+- **Deploy the ARM relay:** `scripts/bkshading-deploy-relay.sh --host <sbc> --arch arm64` —
+  `--arch arm64` fetches the `bkshading-relay-linux-arm64` artifact. The deploy reads the target's
+  own root (`findmnt -no OPTIONS /`): a read-only root gets the cambox `remount,rw → swap →
+  remount,ro` cycle, a read-write root (a board before its first read-only reboot) none, and an
+  unreadable root refuses before the box is touched. The scp + sha256 byte-verify + ENABLE-ONLY
+  discipline is otherwise identical to the cambox path.
 - **The physical box bring-up is the owner's / supervisor's step** (no rig access in this lane):
   flash the board's 64-bit arm64 image (Raspberry Pi OS Lite / Debian / Armbian) with headless WiFi
   + ssh, join the rig WiFi SSID (a 2.4 GHz-only board needs a 2.4 GHz SSID on site), give the box a
@@ -194,8 +248,8 @@ params-only block — a handheld has no NDI feed). This milestone provisions the
 
 ```
 # on the SBC (after flashing the arm64 image + deploying the aarch64 relay):
-scripts/bkshading-provision-sbc.sh --install   # gphoto2 + reused relay unit; enable (defer to reboot)
-scripts/bkshading-provision-sbc.sh --check     # verify gphoto2 + unit enabled + aarch64 binary + WiFi link
+scripts/bkshading-provision-sbc.sh --install   # gphoto2 + reused relay unit + WiFi roam/heal + read-only root; enable (defer to reboot)
+scripts/bkshading-provision-sbc.sh --check     # verify gphoto2 + unit enabled + aarch64 binary + WiFi link/roam/heal/gateway + ro root
 ```
 
 ## Running (once built on CI)

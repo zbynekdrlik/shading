@@ -7,7 +7,10 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, bail, Result};
+use axum::http::StatusCode;
+use bkshading_proto::read::FpsNotSettable;
 use bkshading_proto::wire::SetRequest;
+use bkshading_relay::http::set_error_status;
 use bkshading_relay::transport::{
     build_get_config_many_args, gphoto2_stderr_tail, parse_capture_fps_env, parse_first_model,
     parse_min_read_interval_env, read_is_fresh, split_config_blocks, split_focus_and_summary,
@@ -47,8 +50,14 @@ impl FakeRunner {
             "Current: 5600\nBottom: 2500\nTop: 10000\nEND".into(),
         );
         configs.insert("d005".into(), "Current: 0\nEND".into());
-        configs.insert("d006".into(), "Current: 2500\nEND".into());
-        configs.insert("d007".into(), "Current: 25\nBottom: 5\nTop: 60\nEND".into());
+        // issue 1402: d006 = the PROJECT fps MENU (x100) with the BMPCC's own choice list, d007 =
+        // the OFF-SPEED fps RANGE. Project 25.00 and off-speed 50 DIFFER on purpose, so a
+        // d006<->d007 swap (positional or semantic) changes what the relay reports.
+        configs.insert(
+            "d006".into(),
+            "Current: 2500\nChoice: 0 8\nChoice: 1 2398\nChoice: 2 2400\nChoice: 3 2500\nChoice: 4 2997\nChoice: 5 3000\nChoice: 6 5000\nChoice: 7 5994\nEND".into(),
+        );
+        configs.insert("d007".into(), "Current: 50\nBottom: 5\nTop: 60\nEND".into());
         FakeRunner {
             detect: AUTO_DETECT.into(),
             configs,
@@ -119,11 +128,14 @@ fn read_state_reports_online_camera() {
         st.camera.as_deref(),
         Some("Blackmagic Design Pocket Cinema Camera 4K")
     );
+    // issue 1402: d006 is the PROJECT fps (x100), d007 the OFF-SPEED fps -- distinct values in the
+    // fake, so a positional (issue 1229 batch order) or semantic swap fails below.
     assert_eq!(st.params.iso, Some(400));
     assert_eq!(st.params.kelvin, Some(5600)); // d004
     assert_eq!(st.params.tint, Some(0)); // d005 -- distinct from d006 to catch a positional swap
-    assert_eq!(st.params.sensor_fps100, Some(2500)); // d006 -- ditto; issue 1229 batch order
-    assert_eq!(st.params.shutter, Some(50)); // d002 18000 @ 25fps -> 1/50
+    assert_eq!(st.params.fps100, Some(2500)); // d006 Current 2500
+    assert_eq!(st.params.sensor_fps100, Some(5000)); // d007 Current 50 x100
+    assert_eq!(st.params.shutter, Some(50)); // d002 18000 @ the PROJECT 25fps -> 1/50
     assert!(st.fps_supported);
     // issue 1238: full_camera() deliberately omits d003, so the best-effort focus-distance read
     // degrades to None WITHOUT breaking the online state — the RED/GREEN guard against reading
@@ -137,6 +149,11 @@ fn read_state_reports_online_camera() {
     for (got, want) in caps.fnumber_choices.iter().zip([2.8, 4.0, 5.2, 8.0]) {
         assert!((got - want).abs() < 1e-9, "fnumber choice {got} != {want}");
     }
+    // issue 1402: the d006 project-fps choices reach the service verbatim (x100, the `8` kept).
+    assert_eq!(
+        caps.fps_choices,
+        vec![8, 2398, 2400, 2500, 2997, 3000, 5000, 5994]
+    );
     assert_eq!(st.version, "1.7.0-dev.516");
 }
 
@@ -297,8 +314,8 @@ fn apply_writes_expected_gphoto2_config() {
         iso: Some(800),
         kelvin: Some(6500),
         tint: Some(10),
-        shutter: Some(50), // @ 25fps -> d002 angle 18000
-        fps: Some(30),
+        shutter: Some(50), // @ the NEW project 30fps (issue 1402) -> d002 angle 21600
+        fps: Some(30),     // 3000 is one of the camera's d006 choices
         auto_wb: Some(true), // dropped (no PTP equivalent)
     };
     let n = session.apply(&req).expect("apply ok");
@@ -306,33 +323,39 @@ fn apply_writes_expected_gphoto2_config() {
     let writes = recorded.lock().unwrap().clone();
     assert!(writes.contains(&("f-number".into(), "f/8.0".into())));
     assert!(writes.contains(&("iso".into(), "800".into())));
-    assert!(writes.contains(&("d002".into(), "18000".into())));
+    // issue 1402: the shutter set together with the fps converts at the NEW project rate.
+    assert!(writes.contains(&("d002".into(), "21600".into())));
     assert!(writes.contains(&("d004".into(), "6500".into())));
     assert!(writes.contains(&("d005".into(), "10".into())));
-    assert!(writes.contains(&("d007".into(), "30".into())));
+    // issue 1402: the project fps goes to d006 (x100); the off-speed d007 is never written.
+    assert!(writes.contains(&("d006".into(), "3000".into())));
+    assert!(!writes.iter().any(|(k, _)| k == "d007"));
     assert!(!writes.iter().any(|(k, _)| k.contains("wb")));
 }
 
-/// A [`Gphoto2Runner`] that COUNTS its `auto_detect` invocations (via a shared atomic), so a test
-/// can assert how many real USB-PTP READ CYCLES a sequence of `/api/state` calls actually
-/// triggered. `read_state` calls `auto_detect` exactly once per uncached read cycle (before the
-/// coalesced core `get_config_many` batch + the best-effort `d003`), so its count is the read-cycle
-/// proxy — used by the min-interval-floor tests (issue 1229). It deliberately does NOT override
-/// `get_config_many`, so a floor test measures read CYCLES, not USB sessions per read (that is the
-/// separate `SessionCountingRunner`).
+/// A [`Gphoto2Runner`] that COUNTS its real READ CYCLES (via a shared atomic), so a test can assert
+/// how many USB-PTP read cycles a sequence of `/api/state` calls actually triggered. Every uncached
+/// read cycle runs exactly ONE coalesced core `get_config_many` batch (issue 1229), so that batch is
+/// the read-cycle proxy used by the min-interval-floor tests. It used to count `auto_detect`, but
+/// since issue 1371 a read cycle reuses the detected camera and detects only at the first read and
+/// after a failed read, so the detect no longer marks every cycle. The batch is counted ONCE and
+/// read from the inner fake directly, so a floor test measures read CYCLES, not USB sessions per
+/// read (that is the separate `SessionCountingRunner`).
 struct CountingRunner {
     inner: FakeRunner,
-    detect_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Gphoto2Runner for CountingRunner {
     fn auto_detect(&self) -> Result<String> {
-        self.detect_calls
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.inner.auto_detect()
     }
     fn get_config(&self, key: &str) -> Result<String> {
         self.inner.get_config(key)
+    }
+    fn get_config_many(&self, keys: &[&str]) -> Result<Vec<String>> {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        keys.iter().map(|k| self.inner.get_config(k)).collect()
     }
     fn set_config(&self, key: &str, value: &str) -> Result<()> {
         self.inner.set_config(key, value)
@@ -347,13 +370,13 @@ fn read_state_burst_coalesces_to_one_gphoto2_read_1229() {
     // #663 self-heal USB reset every 600 s (~10 s frozen picture, live during production).
     // The relay must coalesce a rapid burst of `/api/state` reads into AT MOST ONE real gphoto2
     // read (served from a min-interval-floored cache). With the default floor (>=10 s), five
-    // reads in the same instant must trigger exactly ONE auto-detect. On the pre-fix code (no
+    // reads in the same instant must trigger exactly ONE core read batch. On the pre-fix code (no
     // cache/floor) this triggers five -> the test is RED until the floor lands.
-    let detect_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let session = CameraSession::new(
         Box::new(CountingRunner {
             inner: FakeRunner::full_camera(),
-            detect_calls: detect_calls.clone(),
+            reads: reads.clone(),
         }),
         "1.7.0-dev.516",
     );
@@ -361,7 +384,7 @@ fn read_state_burst_coalesces_to_one_gphoto2_read_1229() {
         let _ = session.read_state();
     }
     assert_eq!(
-        detect_calls.load(std::sync::atomic::Ordering::SeqCst),
+        reads.load(std::sync::atomic::Ordering::SeqCst),
         1,
         "a burst of 5 rapid /api/state reads must hit gphoto2 at most once (min-interval floor)"
     );
@@ -382,12 +405,12 @@ fn read_state_reads_again_after_floor_elapses_1229() {
     // The floor caps the read RATE: within `min_read_interval_ms` of the last read, `/api/state`
     // is cached (no gphoto2); once the floor elapses, the next read hits gphoto2 again — so a
     // panel left open still gets fresh readback, just at most once per floor on the shared bus.
-    let detect_calls = Arc::new(AtomicUsize::new(0));
+    let reads = Arc::new(AtomicUsize::new(0));
     let clock = Arc::new(AtomicU64::new(0));
     let session = CameraSession::new(
         Box::new(CountingRunner {
             inner: FakeRunner::full_camera(),
-            detect_calls: detect_calls.clone(),
+            reads: reads.clone(),
         }),
         "1.7.0-dev.516",
     )
@@ -395,12 +418,12 @@ fn read_state_reads_again_after_floor_elapses_1229() {
     .with_clock(Box::new(FakeClock(clock.clone())));
 
     let _ = session.read_state(); // t=0 -> real read #1
-    assert_eq!(detect_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
 
     clock.store(9_999, Ordering::SeqCst); // still within the floor
     let _ = session.read_state();
     assert_eq!(
-        detect_calls.load(Ordering::SeqCst),
+        reads.load(Ordering::SeqCst),
         1,
         "within the floor -> served from cache, no gphoto2"
     );
@@ -408,7 +431,7 @@ fn read_state_reads_again_after_floor_elapses_1229() {
     clock.store(10_000, Ordering::SeqCst); // floor elapsed (>=)
     let _ = session.read_state();
     assert_eq!(
-        detect_calls.load(Ordering::SeqCst),
+        reads.load(Ordering::SeqCst),
         2,
         "floor elapsed -> a fresh real read"
     );
@@ -419,12 +442,12 @@ fn apply_invalidates_read_cache_1229() {
     // A write (SetRequest) is user-initiated and rare, so it stays per-invocation; but after it
     // succeeds the cached read is stale, so the NEXT /api/state must read fresh (even inside the
     // same floor window) so the panel reflects the change instead of the pre-write cache.
-    let detect_calls = Arc::new(AtomicUsize::new(0));
+    let reads = Arc::new(AtomicUsize::new(0));
     let clock = Arc::new(AtomicU64::new(0));
     let session = CameraSession::new(
         Box::new(CountingRunner {
             inner: FakeRunner::full_camera(),
-            detect_calls: detect_calls.clone(),
+            reads: reads.clone(),
         }),
         "1.7.0-dev.516",
     )
@@ -433,7 +456,7 @@ fn apply_invalidates_read_cache_1229() {
 
     let _ = session.read_state(); // real read #1
     let _ = session.read_state(); // cached (same instant)
-    assert_eq!(detect_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
 
     session
         .apply(&SetRequest {
@@ -446,30 +469,36 @@ fn apply_invalidates_read_cache_1229() {
             auto_wb: None,
         })
         .expect("apply ok");
+    // `apply` reads the camera itself before it writes (one core batch); count from here.
+    let after_write = reads.load(Ordering::SeqCst);
 
     // Same instant, but the write invalidated the cache -> fresh read.
     let _ = session.read_state();
     assert_eq!(
-        detect_calls.load(Ordering::SeqCst),
-        2,
+        reads.load(Ordering::SeqCst),
+        after_write + 1,
         "a successful write must invalidate the read cache"
     );
 }
 
 /// A runner whose `set_config` always FAILS (camera busy/unplugged mid-apply), so a test can
-/// prove a partially-failed write still invalidates the cache. Detect + get_config succeed.
+/// prove a partially-failed write still invalidates the cache. Detect + reads succeed; `reads`
+/// counts the core read batches (one per real read cycle).
 struct FailWriteRunner {
     inner: FakeRunner,
-    detect_calls: Arc<AtomicUsize>,
+    reads: Arc<AtomicUsize>,
 }
 
 impl Gphoto2Runner for FailWriteRunner {
     fn auto_detect(&self) -> Result<String> {
-        self.detect_calls.fetch_add(1, Ordering::SeqCst);
         self.inner.auto_detect()
     }
     fn get_config(&self, key: &str) -> Result<String> {
         self.inner.get_config(key)
+    }
+    fn get_config_many(&self, keys: &[&str]) -> Result<Vec<String>> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        keys.iter().map(|k| self.inner.get_config(k)).collect()
     }
     fn set_config(&self, _key: &str, _value: &str) -> Result<()> {
         bail!("camera busy (simulated mid-apply failure)")
@@ -481,12 +510,12 @@ fn apply_failed_write_also_invalidates_read_cache_1229() {
     // Review finding (issue 1229): a write that FAILS partway still leaves the camera dirty
     // (earlier writes landed), so the cached pre-write snapshot is stale and must NOT be served
     // for up to a floor. A partially-failed apply must invalidate the cache too, not only success.
-    let detect_calls = Arc::new(AtomicUsize::new(0));
+    let reads = Arc::new(AtomicUsize::new(0));
     let clock = Arc::new(AtomicU64::new(0));
     let session = CameraSession::new(
         Box::new(FailWriteRunner {
             inner: FakeRunner::full_camera(),
-            detect_calls: detect_calls.clone(),
+            reads: reads.clone(),
         }),
         "1.7.0-dev.516",
     )
@@ -495,7 +524,7 @@ fn apply_failed_write_also_invalidates_read_cache_1229() {
 
     let _ = session.read_state(); // real read #1 populates the cache
     let _ = session.read_state(); // cached (same instant)
-    assert_eq!(detect_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
 
     let res = session.apply(&SetRequest {
         aperture_norm: None,
@@ -511,12 +540,121 @@ fn apply_failed_write_also_invalidates_read_cache_1229() {
         "a failing set_config must propagate the error"
     );
 
+    // `apply` read the camera itself before its write failed (one core batch); count from here.
+    let after_write = reads.load(Ordering::SeqCst);
+
     // Same instant, but the failed write must have invalidated the cache -> fresh read.
     let _ = session.read_state();
     assert_eq!(
-        detect_calls.load(Ordering::SeqCst),
-        2,
+        reads.load(Ordering::SeqCst),
+        after_write + 1,
         "a partially-failed write must also invalidate the read cache"
+    );
+}
+
+/// A [`Gphoto2Runner`] that counts its `gphoto2 --auto-detect` runs AND its core read batches,
+/// and whose reads fail while `fail_reads` is set (a camera that went away mid-session). Issue 1371:
+/// the detect enumerates every USB device on the box, the capture grabber included, so the relay
+/// must not run it on every read cycle.
+struct DetectCountingRunner {
+    inner: FakeRunner,
+    detects: Arc<AtomicUsize>,
+    reads: Arc<AtomicUsize>,
+    fail_reads: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Gphoto2Runner for DetectCountingRunner {
+    fn auto_detect(&self) -> Result<String> {
+        self.detects.fetch_add(1, Ordering::SeqCst);
+        self.inner.auto_detect()
+    }
+    fn get_config(&self, key: &str) -> Result<String> {
+        self.inner.get_config(key)
+    }
+    fn get_config_many(&self, keys: &[&str]) -> Result<Vec<String>> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        if self.fail_reads.load(Ordering::SeqCst) {
+            bail!("PTP I/O error (simulated: camera gone)");
+        }
+        keys.iter().map(|k| self.inner.get_config(k)).collect()
+    }
+    fn set_config(&self, key: &str, value: &str) -> Result<()> {
+        self.inner.set_config(key, value)
+    }
+}
+
+#[test]
+fn read_cycle_detects_once_and_again_only_after_a_failed_read_1371() {
+    // Issue 1371: every 10 s read cycle ran `gphoto2 --auto-detect`, which sweeps the whole USB
+    // bus. On cam5 that sweep shares bus 4 with the Cam Link and knocked the capture phase tracker
+    // out of lock (~45 % of the time vs ~14 % with the relay stopped). The relay keeps the detected
+    // camera: ONE detect at the first read, none on later cycles, one again after a failed read.
+    // Pre-fix every read cycle detects, so the second assert reads 3 -> RED.
+    let detects = Arc::new(AtomicUsize::new(0));
+    let reads = Arc::new(AtomicUsize::new(0));
+    let fail_reads = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let clock = Arc::new(AtomicU64::new(0));
+    let session = CameraSession::new(
+        Box::new(DetectCountingRunner {
+            inner: FakeRunner::full_camera(),
+            detects: detects.clone(),
+            reads: reads.clone(),
+            fail_reads: fail_reads.clone(),
+        }),
+        "1.7.0-dev.516",
+    )
+    .with_min_read_interval_ms(10_000)
+    .with_clock(Box::new(FakeClock(clock.clone())));
+
+    let st = session.read_state(); // t=0 -> first read cycle
+    assert!(st.online);
+    assert_eq!(detects.load(Ordering::SeqCst), 1, "the first read detects");
+
+    clock.store(10_000, Ordering::SeqCst);
+    assert!(session.read_state().online);
+    clock.store(20_000, Ordering::SeqCst);
+    let st = session.read_state();
+    assert!(st.online);
+    assert_eq!(
+        reads.load(Ordering::SeqCst),
+        3,
+        "three real read cycles ran"
+    );
+    assert_eq!(
+        detects.load(Ordering::SeqCst),
+        1,
+        "later read cycles reuse the detected camera, no USB-wide detect"
+    );
+    assert_eq!(
+        st.camera.as_deref(),
+        Some("Blackmagic Design Pocket Cinema Camera 4K"),
+        "the cached model is still reported"
+    );
+
+    // The camera goes away: the read fails, the state goes offline, the cache is dropped.
+    fail_reads.store(true, Ordering::SeqCst);
+    clock.store(30_000, Ordering::SeqCst);
+    assert!(
+        !session.read_state().online,
+        "a failed read reports offline"
+    );
+    assert_eq!(detects.load(Ordering::SeqCst), 1);
+
+    // It comes back: the next cycle detects again, exactly once.
+    fail_reads.store(false, Ordering::SeqCst);
+    clock.store(40_000, Ordering::SeqCst);
+    assert!(session.read_state().online);
+    assert_eq!(
+        detects.load(Ordering::SeqCst),
+        2,
+        "the cycle after a failed read detects again"
+    );
+    clock.store(50_000, Ordering::SeqCst);
+    assert!(session.read_state().online);
+    assert_eq!(
+        detects.load(Ordering::SeqCst),
+        2,
+        "and then reuses it again"
     );
 }
 
@@ -788,4 +926,204 @@ fn stderr_tail_trims_long_and_keeps_short() {
     let tail = gphoto2_stderr_tail(&long);
     assert!(tail.starts_with('…'));
     assert_eq!(tail.chars().count(), 201); // ellipsis + 200 chars
+}
+
+// --- issue 1402: the fps write sets d006 to a LISTED choice; anything else is refused -----------
+
+/// A [`FakeRunner`] that RECORDS every `set_config` and COUNTS read cycles (the core
+/// `get_config_many` batch runs once per real read, incl. the burst-open plan read; since issue
+/// 1371 the detect runs only at the first read), for the issue-1402 write-refusal tests.
+struct WriteRecorder {
+    inner: FakeRunner,
+    read_cycles: Arc<AtomicUsize>,
+    writes: Arc<Mutex<Vec<(String, String)>>>,
+}
+
+impl Gphoto2Runner for WriteRecorder {
+    fn auto_detect(&self) -> Result<String> {
+        self.inner.auto_detect()
+    }
+    fn get_config(&self, key: &str) -> Result<String> {
+        self.inner.get_config(key)
+    }
+    fn get_config_many(&self, keys: &[&str]) -> Result<Vec<String>> {
+        self.read_cycles.fetch_add(1, Ordering::SeqCst);
+        keys.iter().map(|k| self.inner.get_config(k)).collect()
+    }
+    fn set_config(&self, key: &str, value: &str) -> Result<()> {
+        self.writes
+            .lock()
+            .unwrap()
+            .push((key.to_string(), value.to_string()));
+        Ok(())
+    }
+}
+
+type Recorded = Arc<Mutex<Vec<(String, String)>>>;
+
+/// A session over the Pocket 6K's real d006/d007 (cam3 on handheld-1, issue 1402 body): project
+/// 60.00 (not one of its d006 choices), off-speed 50.
+fn pocket_6k_session() -> (CameraSession, Arc<AtomicUsize>, Recorded) {
+    recorder_session(
+        FakeRunner::full_camera()
+            .with_config(
+                "d006",
+                "Current: 6000\nChoice: 0 8\nChoice: 1 2398\nChoice: 2 2400\nChoice: 3 2500\nChoice: 4 2997\nChoice: 5 3000\nChoice: 6 5000\nChoice: 7 5994\nEND",
+            )
+            .with_config("d007", "Current: 50\nBottom: 5\nTop: 60\nEND"),
+    )
+}
+
+/// A recording session over any [`FakeRunner`] camera (issue 1402).
+fn recorder_session(inner: FakeRunner) -> (CameraSession, Arc<AtomicUsize>, Recorded) {
+    let read_cycles = Arc::new(AtomicUsize::new(0));
+    let writes: Recorded = Arc::new(Mutex::new(Vec::new()));
+    let session = CameraSession::new(
+        Box::new(WriteRecorder {
+            inner,
+            read_cycles: read_cycles.clone(),
+            writes: writes.clone(),
+        }),
+        "1.7.0-dev.762",
+    );
+    (session, read_cycles, writes)
+}
+
+#[test]
+fn pocket_6k_state_reads_the_project_fps_from_d006_1402() {
+    let (session, _, _) = pocket_6k_session();
+    let st = session.read_state();
+    assert!(st.online);
+    assert_eq!(st.params.fps100, Some(6000), "the camera runs 60.00");
+    assert_eq!(st.params.sensor_fps100, Some(5000), "off-speed 50 x100");
+    assert!(st.fps_supported, "d006 is exposed");
+    assert_eq!(
+        st.caps.unwrap().fps_choices,
+        vec![8, 2398, 2400, 2500, 2997, 3000, 5000, 5994]
+    );
+}
+
+#[test]
+fn a_60_fps_set_is_refused_named_and_writes_nothing_1402() {
+    let (session, read_cycles, writes) = pocket_6k_session();
+    let err = match session.submit(&SetRequest {
+        fps: Some(60),
+        ..Default::default()
+    }) {
+        Err(e) => e,
+        Ok(_) => panic!("6000 is not a d006 choice: the SET must be refused"),
+    };
+    let refused = err
+        .downcast_ref::<FpsNotSettable>()
+        .expect("the refusal is the named FpsNotSettable error");
+    assert_eq!(refused.fps, 60);
+    assert_eq!(
+        refused.choices,
+        vec![8, 2398, 2400, 2500, 2997, 3000, 5000, 5994]
+    );
+    assert!(err.to_string().contains("5994"), "lists the choices: {err}");
+    // Nothing reached the camera: not d006 rounded to 5994, not d007.
+    assert!(
+        writes.lock().unwrap().is_empty(),
+        "a refused SET writes nothing"
+    );
+    // The relay answers it as a client error (422), not as a camera failure (502).
+    assert_eq!(set_error_status(&err), StatusCode::UNPROCESSABLE_ENTITY);
+
+    // The single-flight gate is idle again and the refused opening SET left no stale plan behind:
+    // the next SET runs and plans from a FRESH read of the camera.
+    let reads_after_refusal = read_cycles.load(Ordering::SeqCst);
+    let outcome = session
+        .submit(&SetRequest {
+            fps: Some(50),
+            ..Default::default()
+        })
+        .expect("5000 is a listed choice");
+    assert!(matches!(outcome, ApplyOutcome::Applied { count: 1, .. }));
+    assert_eq!(
+        read_cycles.load(Ordering::SeqCst),
+        reads_after_refusal + 1,
+        "the burst after a refused opening SET re-reads the camera"
+    );
+    assert_eq!(
+        writes.lock().unwrap().clone(),
+        vec![("d006".to_string(), "5000".to_string())],
+        "a listed rate is written to d006, x100, exactly"
+    );
+}
+
+#[test]
+fn a_refused_fps_inside_an_open_burst_keeps_the_burst_1402() {
+    let (session, read_cycles, writes) = pocket_6k_session();
+    // Opens the burst (one plan read).
+    session
+        .submit(&SetRequest {
+            iso: Some(800),
+            ..Default::default()
+        })
+        .expect("iso ok");
+    let reads_in_burst = read_cycles.load(Ordering::SeqCst);
+    // A refused fps mid-burst: no write, and the open burst keeps its plan.
+    assert!(session
+        .submit(&SetRequest {
+            fps: Some(60),
+            ..Default::default()
+        })
+        .is_err());
+    session
+        .submit(&SetRequest {
+            tint: Some(5),
+            ..Default::default()
+        })
+        .expect("tint ok");
+    assert_eq!(
+        read_cycles.load(Ordering::SeqCst),
+        reads_in_burst,
+        "no extra read: the burst plan survived the refusal"
+    );
+    assert_eq!(
+        writes.lock().unwrap().clone(),
+        vec![
+            ("iso".to_string(), "800".to_string()),
+            ("d005".to_string(), "5".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn a_shutter_after_an_fps_write_in_the_same_burst_converts_at_the_new_rate_1402() {
+    // full_camera(): project 25.00 (d006 2500, the BMPCC choice list), off-speed 50. d002 is the
+    // shutter ANGLE and the camera already runs 50.00 when it arrives (the earlier SET wrote d006),
+    // so a 1/100 shutter is 180 deg = 18000. Converting at the burst-open 25.00 wrote 9000.
+    let (session, read_cycles, writes) = recorder_session(FakeRunner::full_camera());
+    session
+        .submit(&SetRequest {
+            fps: Some(50),
+            ..Default::default()
+        })
+        .expect("5000 is a listed choice");
+    session
+        .submit(&SetRequest {
+            shutter: Some(100),
+            ..Default::default()
+        })
+        .expect("shutter ok");
+    assert_eq!(
+        read_cycles.load(Ordering::SeqCst),
+        1,
+        "one burst, one plan read"
+    );
+    assert_eq!(
+        writes.lock().unwrap().clone(),
+        vec![
+            ("d006".to_string(), "5000".to_string()),
+            ("d002".to_string(), "18000".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn set_error_status_keeps_a_camera_failure_a_bad_gateway_1402() {
+    let camera_err = anyhow!("gphoto2 set-config d004 failed: PTP I/O error");
+    assert_eq!(set_error_status(&camera_err), StatusCode::BAD_GATEWAY);
 }

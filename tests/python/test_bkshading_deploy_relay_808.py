@@ -34,6 +34,7 @@ import re
 import stat
 import subprocess
 import tempfile
+import time
 
 import yaml
 
@@ -178,6 +179,7 @@ def test_dry_run_prints_plan_and_touches_nothing():
         # enable-only intent surfaced; never a start.
         assert re.search(r"(NOT start|enable-only|not.*start|reboot)", out, re.I)
         assert "remount,rw" in out and "remount,ro" in out, "dry-run must describe the ro-root swap"
+        assert "findmnt -no OPTIONS /" in out, "the plan must say the target's root mode decides it"
 
 
 def test_missing_host_fails_with_usage():
@@ -207,8 +209,11 @@ def _write_fake(path, body):
     os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
 
-def _fake_deploy_env(tmp, remote_sha):
+def _fake_deploy_env(tmp, remote_sha, root_opts="ro,relatime"):
     """Fake ssh/scp that log argv; ssh's sha256sum echoes remote_sha. Returns (env, logfile).
+
+    The fake box answers the root-mode read (`findmnt -no OPTIONS /`) with `root_opts`: a cambox root
+    is read-only (issue 808 slice B: the deploy remounts only when the target's own root is ro).
 
     Built with sentinel replacement (not %-formatting) so the literal bash ``%s`` printf specs never
     collide with Python string interpolation.
@@ -227,12 +232,13 @@ def _fake_deploy_env(tmp, remote_sha):
         # issue 808: the deploy reads the relay state first and refuses on an unreadable read, so
         # the fake box answers it like a real one whose relay is stopped.
         '  *"is-active"*) printf "inactive\\n" ;;\n'
+        '  *"findmnt"*) printf "__ROOT__\\n" ;;\n'
         '  *sha256sum*) printf "__SHA__\\n" ;;\n'
         '  *"test -x"*) printf "yes\\n" ;;\n'
         "  *) : ;;\n"
         "esac\n"
         "exit 0\n"
-    ).replace("__LOG__", log).replace("__SHA__", remote_sha)
+    ).replace("__LOG__", log).replace("__SHA__", remote_sha).replace("__ROOT__", root_opts)
     _write_fake(fake_ssh, ssh_body)
     # Fake scp: log argv (the last non-flag arg is the remote target root@host:/path).
     fake_scp = os.path.join(tmp, "fake-scp")
@@ -252,6 +258,9 @@ def _fake_deploy_env(tmp, remote_sha):
     # touches the real rig OBS hosts (a busy/unreadable-mode test overwrites this fake afterward).
     _write_fake_obs_phase2(tmp, "idle")
     env["BKSHADING_DEPLOY_OBS_PHASE2_DIR"] = tmp
+    # Issue 1371: the deploy refuses while the rig lease is held; a scratch lease dir that does not
+    # exist = no holder, so a test never reads dev1's real /var/tmp/rig-lease (an E2E may hold it).
+    env["RIG_LEASE_DIR"] = os.path.join(tmp, "no-rig-lease")
     return env, log
 
 
@@ -284,6 +293,72 @@ def test_fake_deploy_sequence_and_enable_only():
         assert "systemctl start" not in calls, "deploy must never start the service"
         assert "systemctl restart" not in calls, "deploy must never restart the service"
         assert "enable --now" not in calls, "deploy must never enable --now the service"
+
+
+# ---------------------------------------------------------------------------------------------
+# issue 808 slice B: the remount follows the TARGET's own root mode, never a flag
+# ---------------------------------------------------------------------------------------------
+def test_root_remount_action_is_pure_and_first_token_only():
+    for opts, want in (
+        ("ro", "remount"),
+        ("ro,relatime", "remount"),
+        ("ro,noatime,commit=120,errors=remount-ro", "remount"),
+        ("rw", "none"),
+        ("rw,relatime,errors=remount-ro", "none"),
+        ("", "unreadable"),
+        ("rox", "unreadable"),
+        ("ssh: connect to host x port 22: Connection refused", "unreadable"),
+    ):
+        got = subprocess.run(
+            ["bash", "-c", '. "%s"\nbkshading_deploy_root_remount_action "$O"' % LIB],
+            capture_output=True, text=True, env=dict(os.environ, O=opts), check=True,
+        ).stdout.strip()
+        assert got == want, (opts, got)
+
+
+def test_root_opts_command_reads_findmnt_with_a_proc_mounts_fallback():
+    cmd = _bash("bkshading_deploy_root_opts_cmd")
+    assert cmd.startswith("findmnt -no OPTIONS /"), cmd
+    assert "/proc/mounts" in cmd, "a failed findmnt must fall back to /proc/mounts, never read empty"
+    assert "remount" not in cmd, "the read must never be mistaken for a remount by a fake or a log grep"
+
+
+def test_fake_deploy_to_a_rw_root_never_remounts():
+    with tempfile.TemporaryDirectory() as tmp:
+        fake_bin = os.path.join(tmp, "bkshading-relay")
+        with open(fake_bin, "wb") as f:
+            f.write(b"RELAYBINARYCONTENT")
+        env, log = _fake_deploy_env(tmp, _local_sha(fake_bin), root_opts="rw,relatime")
+        r = _run_script(["--host", "10.77.9.60", "--binary", fake_bin], env=env)
+        assert r.returncode == 0, r.stdout + r.stderr
+        calls = open(log).read()
+        assert "findmnt" in calls and ("root@10.77.9.60:" + RELAY_BIN_PATH) in calls, calls
+        assert "remount" not in calls, "an rw root is never remounted:\n" + calls
+        assert "root back to read-only" not in r.stdout
+        # a cambox (the amd64 default) always runs read-only: an rw one is reported loudly
+        assert "WARNING: the root on 10.77.9.60 is read-WRITE" in r.stderr, r.stderr
+
+
+def test_unreadable_root_refuses_before_touching_the_box():
+    for opts in ("", "garbage"):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_bin = os.path.join(tmp, "bkshading-relay")
+            with open(fake_bin, "wb") as f:
+                f.write(b"RELAYBINARYCONTENT")
+            env, log = _fake_deploy_env(tmp, _local_sha(fake_bin), root_opts=opts)
+            r = _run_script(["--host", "10.77.9.201", "--binary", fake_bin], env=env)
+            assert r.returncode == 1, (opts, r.returncode, r.stdout, r.stderr)
+            assert "could not read the root mount options" in r.stderr, r.stderr
+            calls = open(log).read()
+            assert "remount" not in calls and "SCP" not in calls and "systemctl stop" not in calls, calls
+
+
+def test_no_remount_flag_is_refused():
+    with tempfile.TemporaryDirectory() as tmp:
+        fake_bin = os.path.join(tmp, "bkshading-relay")
+        open(fake_bin, "w").close()
+        r = _run_script(["--host", "10.77.9.201", "--no-remount", "--binary", fake_bin, "--dry-run"])
+        assert r.returncode == 2 and "unknown argument" in r.stderr, (r.returncode, r.stderr)
 
 
 def test_fake_deploy_sha_mismatch_fails():
@@ -500,3 +575,50 @@ if __name__ == "__main__":
             print("FAIL %s: %s" % (fn.__name__, e))
     print("\n%d/%d passed" % (len(fns) - failed, len(fns)))
     sys.exit(1 if failed else 0)
+
+
+# ---------------------------------------------------------------------------------------------
+# Issue 1371: the deploy refuses while an E2E holds the rig lease (14.10.2026: a relay deploy hit
+# cam5 during run 38579117744 because only the broadcast guard existed). --force-live is the
+# broadcast override and must NOT bypass the lease.
+# ---------------------------------------------------------------------------------------------
+def _hold_lease(lease_dir, heartbeat_age_s=0):
+    os.makedirs(lease_dir, exist_ok=True)
+    with open(os.path.join(lease_dir, "holder.json"), "w") as f:
+        f.write(
+            '{"repo": "zbynekdrlik/camera-box", "run_id": "38579117744", "run_url": "u", '
+            '"job": "full-path", "expected_release_at": "2026-10-14T15:19:23Z"}'
+        )
+    hb = os.path.join(lease_dir, "heartbeat")
+    open(hb, "w").close()
+    t = time.time() - heartbeat_age_s
+    os.utime(hb, (t, t))
+
+
+def test_deploy_refuses_while_the_rig_lease_is_held_1371():
+    for extra in ([], ["--force-live"]):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_bin = os.path.join(tmp, "bkshading-relay")
+            with open(fake_bin, "wb") as f:
+                f.write(b"RELAYBINARYCONTENT")
+            env, log = _rig_env(tmp, _local_sha(fake_bin))
+            _hold_lease(env["RIG_LEASE_DIR"])
+            r = _run_script(["--host", "10.77.9.65", "--binary", fake_bin] + extra, env=env)
+            out = r.stdout + r.stderr
+            assert r.returncode == 6, (extra, r.returncode, out)
+            assert "38579117744" in out and "rig lease is held" in out, out
+            calls = open(log).read() if os.path.exists(log) else ""
+            assert calls == "", "no ssh/scp at all while the lease is held: %r" % calls
+
+
+def test_a_stale_or_absent_lease_does_not_block_the_deploy_1371():
+    with tempfile.TemporaryDirectory() as tmp:
+        fake_bin = os.path.join(tmp, "bkshading-relay")
+        with open(fake_bin, "wb") as f:
+            f.write(b"RELAYBINARYCONTENT")
+        env, log = _rig_env(tmp, _local_sha(fake_bin))
+        # A holder whose heartbeat is older than the stale bound is reclaimable, not a live run.
+        _hold_lease(env["RIG_LEASE_DIR"], heartbeat_age_s=6000)
+        r = _run_script(["--host", "10.77.9.65", "--binary", fake_bin], env=env)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "SCP" in open(log).read()

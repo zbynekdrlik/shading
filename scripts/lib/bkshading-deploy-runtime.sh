@@ -14,6 +14,9 @@
 # scripts/lib/frame-probe-deploy.sh + scripts/lib/bkshading-relay-runtime.sh.
 # airuleset:script-ok source-only lib — set -euo pipefail would leak into the sourcing shell (ci-testing-gotchas)
 
+# shellcheck source=scripts/lib/ro-root.sh
+. "$(dirname "${BASH_SOURCE[0]}")/ro-root.sh"  # ro_root_mount_mode -- the ONE first-token root reading (issue 808)
+
 # The CI artifact name the `bkshading` job uploads the relay/service into (KEEP IN SYNC with
 # .github/workflows/ci.yml `Upload bkshading binaries`; the python test cross-checks both).
 bkshading_deploy_artifact_name() { printf '%s\n' bkshading-linux-amd64; }
@@ -59,6 +62,28 @@ bkshading_deploy_sha_match() {  # $1 = local sha, $2 = remote sha
   fi
 }
 
+# The REMOTE command that reads the target's root mount options (issue 808, slice B). `findmnt`
+# first; if it fails outright, /proc/mounts directly (the setup-device.sh ensure_root_writable
+# fallback), so a missing findmnt never reads as an empty "unknown" root on a box that has one.
+bkshading_deploy_root_opts_cmd() {
+  # shellcheck disable=SC2016  # the $2/$4 are awk's fields on the REMOTE side, never expanded here
+  printf '%s\n' 'findmnt -no OPTIONS / 2>/dev/null || awk '"'"'$2=="/"{print $4; exit}'"'"' /proc/mounts'
+}
+
+# Remount decision for the swap, from the TARGET's own root mount options (issue 808, slice B --
+# the SBC root goes read-only "the same as the camboxes"): `remount` for a read-only root (the
+# remount,rw -> swap -> remount,ro cycle), `none` for a read-write root (a board before its first
+# read-only reboot: remounting it ro would be wrong), `unreadable` for an empty or unexpected read
+# -- the caller refuses before touching the box. ONE first-token reading: ro_root_mount_mode, the
+# same semantics as setup-device.sh / verify-device.sh root_mount_is_readonly.
+bkshading_deploy_root_remount_action() {  # $1 = `findmnt -no OPTIONS /` output from the target
+  case "$(ro_root_mount_mode "${1:-}")" in
+    ro) printf '%s\n' remount ;;
+    rw) printf '%s\n' none ;;
+    *) printf '%s\n' unreadable ;;
+  esac
+}
+
 # Restore decision after the binary swap (issue 808, 25.9.2026): the deploy STOPS an active relay
 # before the swap so no process holds the replaced (deleted-but-open) binary -- that open file was
 # what made the final `remount,ro` fail "busy" on cam6/cam7 and leave the root read-WRITE. After the
@@ -77,54 +102,7 @@ bkshading_deploy_restore_action() {  # $1 = `systemctl is-active` output read be
   esac
 }
 
-# The REMOTE command that lists the holders of deleted-but-open files on the box, in `lsof +L1`
-# columns. A cambox does not provision lsof (psmisc/fuser only), so without it the same lines are
-# built from /proc. Three places can hold a deleted file there, and the 25.9.2026 incident was the
-# first one: a running binary that was replaced is held through its EXECUTABLE (`/proc/<pid>/exe`,
-# lsof `txt`), a library through a MAPPING (`/proc/<pid>/maps`, lsof `mem`), and an open file
-# through an fd (`/proc/<pid>/fd/*`). Anonymous memory that always reads `(deleted)` but never
-# holds `/` (`/memfd:*`, `/dev/shm/*`, `/SYSV*`) is left out, so it cannot crowd the real holder
-# out of the 40-line cap; a process name with spaces has them turned into `_` so the columns hold.
-# PROC_ROOT (default /proc) lets a test plant a fake tree. Emit as the WHOLE ssh command (the body is
-# a quoted heredoc: nothing expands locally except the one __PROC__ placeholder).
-bkshading_deploy_ro_holder_probe_cmd() {  # $1 = PROC_ROOT (default /proc)
-  local root="${1:-/proc}" body
-  body="$(cat <<'PROBE'
-
-if command -v lsof >/dev/null 2>&1; then
-  lsof +L1 2>/dev/null | grep -vE ' (/memfd:|/dev/shm/|/SYSV)' | head -n 40
-else
-  echo "COMMAND PID USER FD TYPE DEVICE SIZE/OFF NLINK NODE NAME"
-  for d in "__PROC__/"[0-9]*; do
-    p="${d##*/}"
-    c="$(tr ' ' _ <"$d/comm" 2>/dev/null)"
-    t="$(readlink "$d/exe" 2>/dev/null)" && case "$t" in *" (deleted)") echo "${c:-?} $p - txt - - - 0 - $t" ;; esac
-    awk '/ \(deleted\)$/ { $1=$2=$3=$4=$5=""; sub(/^ +/, ""); print }' "$d/maps" 2>/dev/null | sort -u |
-      while IFS= read -r t; do echo "${c:-?} $p - mem - - - 0 - $t"; done
-    for l in "$d"/fd/*; do
-      t="$(readlink "$l" 2>/dev/null)" || continue
-      case "$t" in *" (deleted)") echo "${c:-?} $p - fd - - - 0 - $t" ;; esac
-    done
-  done 2>/dev/null | grep -vE ' (/memfd:|/dev/shm/|/SYSV)' | sort -u | head -n 40
-fi
-PROBE
-)"
-  printf '%s\n' "${body//__PROC__/"$root"}"   # quoted: bash 5.2 patsub_replacement expands a bare &
-}
-
-# Name the holders that keep the root from going read-only again (issue 808): `lsof +L1` text ->
-# ONE line `command[pid] path; command[pid] path` (the header row skipped, the `(deleted)` marker
-# dropped). Empty input -> empty output. Pure (awk over the argument), never fails the caller.
-bkshading_deploy_ro_holders() {  # $1 = `lsof +L1` output
-  printf '%s\n' "${1:-}" | awk '
-    NR == 1 && $1 == "COMMAND" { next }
-    NF >= 10 {
-      path = $10
-      for (i = 11; i <= NF; i++) { if ($i == "(deleted)") break; path = path " " $i }
-      key = $1 "[" $2 "] " path
-      if (seen[key]++) next
-      out = out (out == "" ? "" : "; ") key
-    }
-    END { if (out != "") print out }
-  ' || true
-}
+# The holders of deleted-but-open files that keep the root from going read-only again (issue 808:
+# the `lsof +L1` / /proc probe and its one-line summary) moved to scripts/lib/ro-window.sh with the
+# ONE verified ro close that names them (issue 1407): ro_window_holder_probe_cmd,
+# ro_window_deleted_holders.

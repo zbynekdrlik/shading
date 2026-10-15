@@ -105,8 +105,8 @@ checklist (meaningful once the camera is physically cabled to the relay box).
 ## M2 — live camera preview (issue 808, `bkshading/service/src/preview/**`)
 Owner architecture: the cambox publishes ONE NDI stream (strih OBS + this service both consume it);
 the service subscribes to the NDI **low-bandwidth** variant, decimates to ~3 fps, JPEG-encodes, and
-serves the latest frame at `GET /api/cameras/<id>/preview.jpg`; the web UI reloads an `<img>` a few
-times a second. Structure: a `PreviewSource` trait behind which the **default stub** (test pattern,
+serves the latest frame at `GET /api/cameras/<id>/preview.jpg`; the web UI fetches it a few
+times a second while the feed is live (next bullet list). Structure: a `PreviewSource` trait behind which the **default stub** (test pattern,
 CI-safe, no libndi) and a `#[cfg(feature="ndi")]` real receiver live; pure CI-tested stages
 (`frame`/`pattern`/`decimate`/`encode`/`convert`/`store`) + runtime glue (`source`/`worker` — one OS
 thread per camera, NOT tokio, since NDI capture is a blocking FFI call). Feature `ndi` is OFF by
@@ -133,7 +133,49 @@ was reused.
 - The feature-gated path gets its OWN CI step: `cargo clippy -p bkshading --features ndi
   --all-targets -- -D warnings` (libloading is a RUNTIME load, so it compiles without libndi).
 - Decimation runs on a MONOTONIC `Instant` (not wall clock — immune to an NTP backward step); the
-  store's `updated_ms` stays wall clock for diagnostics.
+  store's `updated_ms` stays wall clock (`store::wall_clock_ms`), the clock freshness is judged on.
+
+### A preview is shown only while its frame is FRESH — 204, `previewLive`, no frozen frame (issue 808, 3.10.2026)
+The panel used to reload an `<img>` at 3 Hz against an endpoint that answered `503` until a frame
+existed: with cam1 powered off after a production, Chromium logged a console error every ~1.6 s.
+And the store kept the LAST frame forever (nobody clears it when the NDI feed ends), so a stopped
+feed stayed on screen frozen as if live.
+- **Freshness is a READ decision, never a store clear.** `PreviewFrame::is_fresh(now_ms,
+  max_age_ms)` / `PreviewStore::get_fresh` / `is_live`; the raw frame stays for diagnostics.
+- **The bound** is `PreviewConfig::max_frame_age_ms()` = max(`PREVIEW_MAX_AGE_FLOOR_MS` 3000,
+  `PREVIEW_MAX_AGE_FRAME_PERIODS` 5 × the decimator period, 2 × `capture_timeout_ms`). At the
+  defaults the 3 s floor wins. A backward wall-clock step reads as age 0 (live), never an underflow.
+- **The endpoint never answers 4xx/5xx for a known camera.** The pure `http::preview_response`:
+  - a fresh frame → `200 image/jpeg`;
+  - no frame, a stale frame, or a camera without `ndi_preview` → `204 No Content`;
+  - an unknown camera id → `404`, the only error status.
+  Every known-camera answer is `no-store`. Chromium logs every 4xx/5xx resource load as a console
+  error (the E2E gotcha below), so a non-error "no picture" status is the only console-clean shape.
+- **`CameraView.preview_live` (`previewLive`, serde default false) gates the panel.** The pump and
+  `/api/cameras` read it from the store after the relay polls. `camera_view(cam, state,
+  preview_live)` stays pure and never reports a params-only camera live. The issue-1337 immediate
+  per-camera push carries the current view's flag over, since the relay does not know the preview.
+- **The panel loader** (`web/app.js` `refreshPreviews` / `loadPreview` / `showPreviewPlaceholder`):
+  - fetch only while `previewLive` AND the panel has contact (`isConnected`);
+  - `fetch(no-store)` → blob → object URL, revoking the previous one; one request in flight per block;
+  - a 204 / a failed fetch / a push that turns the feed off → the placeholder, with the `<img>` src
+    attribute REMOVED (fires no error event) and the URL revoked.
+  - one `AbortController` per block: a fetch is aborted after `PREVIEW_FETCH_TIMEOUT_MS` (2 s) and
+    whenever the block drops to its placeholder (an aborted fetch logs nothing in Chromium), and a
+    frame that arrives after contact was lost is not painted. A fetch that only TIMED OUT, on a
+    feed still live with contact, keeps a frame painted less than `PREVIEW_KEEP_ON_TIMEOUT_MS` (3 s)
+    ago (stamped with the monotonic `performance.now()`), so one slow request never flashes "obraz
+    sa zastavil", and the freeze stays bounded. `panel.spec.js` pins both: a route that holds the
+    first request 8 s (a second must arrive within 6 s, polled every 100 ms -- the default
+    `expect.poll` intervals stop before the deadline), and a stall after a frame (the frame survives
+    the first timeout, the stopped placeholder follows).
+  The placeholder says "NDI preview — čakám…" before any frame and "NDI preview — obraz sa
+  zastavil, čakám…" after a live feed stopped. Never point an `<img>` straight at a polled
+  endpoint that can answer 4xx/5xx again.
+- **A live/stale flip is logged once.** `monitor::preview_transitions` (the issue-1309
+  `reach_transitions` model) gives the pump one info line per preview camera that went stale or
+  came back, and one for a camera first seen without a frame. A stopped feed leaves the worker on
+  quiet capture timeouts, so without it nothing reaches the service log.
 
 ### M2 follow-up — cross-platform libndi discovery + provisioning (issue 1157)
 The M2 receiver copied `src/ndi.rs`'s `NdiLib::load()` VERBATIM, which is Linux-only (`libndi.so*`
@@ -197,11 +239,13 @@ never load on its own ship target.
 
 ## Camera fps ↔ box grab-mode sync (issue 809)
 The camera FRAME-RATE get/set ALREADY EXISTS from M1 — do NOT add a new message pair. It flows
-through the general shading path: `ShadingParams.fps100` (project fps d007 x100) + `sensor_fps100`
-(d006 readback) on the GET side, and `SetRequest.fps` → `read::plan_writes` → gphoto2 `d007` on the
-SET side; the relay reads d006/d007 in `read_state`, `RelayState.fps_supported` reports whether d007
-is exposed. #809 added only the grab-mode SYNC LAYER on top of that (duplicating the get/set would
-break the one-source-of-truth the owner flagged in the MVP):
+through the general shading path: `ShadingParams.fps100` (PROJECT fps = d006, already x100) +
+`sensor_fps100` (OFF-SPEED fps = d007 x100) on the GET side, and `SetRequest.fps` →
+`read::plan_writes` → gphoto2 `d006 = fps*100` (a listed choice only) on the SET side; the relay
+reads d006/d007 in `read_state`, `RelayState.fps_supported` reports whether d006 is exposed and
+`CameraCaps.fps_choices` carries its choice list. The d006/d007 meaning was swapped until issue 1402
+(next subsection). #809 added only the grab-mode SYNC LAYER on top of that (duplicating the get/set
+would break the one-source-of-truth the owner flagged in the MVP):
 - proto: `FpsSync {Unknown,Synced,Mismatch}` + pure `FpsSync::classify(camera_fps100, grab_fps)`
   (kebab-case wire: `"unknown"/"synced"/"mismatch"`); `CameraView` gains `grab_fps` + `fps_sync`.
 - service: `CameraConfig.grab_fps: Option<i64>` (per-camera box grab mode, `60` for cam1); the
@@ -210,12 +254,95 @@ break the one-source-of-truth the owner flagged in the MVP):
   button that issues the existing `SetRequest.fps`. NEVER an auto-write — a camera-side format
   change can interrupt recording (owner constraint); the button lives only in the click handler,
   never in `updateBlock` (which runs every poll). Test `test_app_js_align_button_...` pins that.
-- The sync compares PROJECT fps (d007), NOT sensor fps (d006): d007 is exactly what the align write
-  changes and what the camera's HDMI output follows; `sensor_fps100` stays an off-speed diagnostic.
+  Since issue 1402 the button is offered only when `CameraView.fpsAlignSettable` is set (below).
+- The sync compares the PROJECT fps (d006), NOT the off-speed fps (d007): d006 is exactly what the
+  align write changes and what the camera's HDMI output follows; `sensor_fps100` stays an off-speed
+  diagnostic.
 - `grab_fps` is a plain integer for now (the rig is integer-genlock 60). A fractional NTSC grab
   (59.94/29.97) would classify Mismatch against an integer and needs a new representation — deferred
   scope, not a bug. Deriving grab from the box's live capture_fps (vs a static config field) is the
   follow-up.
+
+### d006 = the PROJECT fps, d007 = the OFF-SPEED fps, on every BMPCC in the fleet (issue 1402, 4.10.2026)
+The owner saw cam3 (the Pocket 6K on handheld-1) show `fps 50.00` and the issue-809 warning
+`kamera 50.00 ≠ grab 60` with the "Zosúladiť s grab (60)" button, while the camera ran 60. The MVP
+mapping had the two frame-rate properties swapped. Live `gphoto2 --get-config d006 --get-config d007`
+on both bodies:
+
+| body | d006 (MENU, x100) | d007 (RANGE 5..60, plain) |
+|---|---|---|
+| Pocket 6K, handheld-1 (cam3 block) | Current 6000 | Current 50 |
+| Pocket 4K, cam1 | Current 6000 | Current 60 |
+
+Both list the same d006 choices `8, 2398, 2400, 2500, 2997, 3000, 5000, 5994`. `8` is a non-rate
+entry, and **the current `6000` is NOT a choice**. The swap stayed invisible while both properties
+read the same rate. The old fps-test fixtures (d006 `2500`, d007 `25`) read the same either way
+round, so the proto `mapping.rs` fixtures and the relay `FakeRunner` now carry DIFFERENT currents
+(project 25.00, off-speed 50). `relay/tests/burst_1337.rs` keeps 2500/25: no fps test reads it.
+
+- **The ONE shared mapping (`bkshading/proto`), per the main's design 5979166692:**
+  - `fps100` = d006 Current. It drives the shutter angle <-> denominator conversion and the
+    issue-809 comparison. No d006 → `None`, never the off-speed rate; the conversion then runs at
+    `DEFAULT_FPS100` for that cycle.
+  - `sensorFps100` = d007 Current x100, a diagnostic only.
+  - `caps.fpsChoices` = the d006 list verbatim (`parse_fps100_choices`, the `8` kept).
+  - `caps.fpsMin`/`fpsMax` stay the off-speed d007 RANGE bounds.
+  - `RawConfigs.project_fps` holds the d006 block and `sensor_fps` the d007 block. `read_raw`
+    destructures them from `CORE_CONFIG_KEYS` order.
+- **`fps_settable(choices, wanted_fps100)`** (`mapping.rs`) = d006 present AND `wanted` is EXACTLY a
+  listed choice. It is the one rule behind both the relay's write and the service's offer.
+- **The `fps` write sets d006 to exactly `fps*100`, only for a listed choice.** Anything else, `60`
+  included, makes `plan_writes` refuse the WHOLE request with the named `FpsNotSettable` error
+  (`fps-not-settable: fps 60 (6000 x100) is not one of the camera's d006 project-fps choices [8,
+  2398, …] …`) before anything is planned. It is never rounded to a neighbour (`5994`) and never
+  redirected to d007.
+  - The relay answers it **422** (`http::set_error_status`); a gphoto2 failure stays 502. The
+    service logs the relay body and answers the panel 502.
+  - A refused SET inside an open write-burst keeps the burst plan; one that would have OPENED the
+    burst drops the basis read for it.
+  - It never drops other clients' queued SETs (only a real camera error aborts the FIFO).
+- **The project fps goes first; the shutter angle converts at the rate the camera then runs**
+  (review rounds 1-2). `plan_writes` plans d006 BEFORE every other value. `d002` is the shutter
+  ANGLE, so a `shutter` in the same request converts at the new rate and arrives while the camera
+  already runs it. An accepted `fps` write also updates the write-burst plan's `fps100` for the
+  rest of the burst. Whether a BMPCC keeps the angle or the speed across a rate change is NOT
+  verified; with d006 first it does not matter.
+- **The panel offers "Zosúladiť s grab" only when `CameraView.fpsAlignSettable`** (`fpsAlignSettable`,
+  serde default false). The service sets it from the same `fps_settable` with `grab*100` and the
+  relay's `caps.fpsChoices`. With the camera at 6000 and the grab at 60 there is no mismatch, so no
+  button. A camera at 50.00 against a 60 grab warns but gets no button, because 6000 is not a
+  choice: the 60 project rate is set on the camera itself, by design (approach 3 of the design, a
+  raw unlisted write, is refused until a bench test proves it). An older relay without `fpsChoices`
+  never gets the button.
+- **Tests** (both real choice lists, the 6000-not-listed case, the `8` entry, and every integer fps
+  0..=240 → only 24/25/30/50 written):
+  - `proto/tests/fps_d006_1402.rs`;
+  - the 1402 cases in `relay/tests/relay.rs` and `service/tests/service.rs`;
+  - the panel Playwright test `the align-to-grab button is offered only for a grab the camera lists`;
+  - `test_app_js_align_button_offered_only_for_a_listed_grab_1402`.
+- **The E2E test-camera step follows the same mapping** (issue 1402 follow-up, design 5991648511):
+  `scripts/camera_test_settings.py` (issue 1371) reads `d006` (x100) as its project fps, for the
+  shutter `1/N s` LOG line only (never set), and no longer reads `d007`. A production-exposure
+  snapshot saved before the switch carries a whole-fps `context.d007`, read only when `d006` is
+  absent (LEGACY). Detail: `.claude/rules/camera-test-settings.md`.
+- **Deploy + read-back (supervisor; any order is safe):**
+  - Why any order is safe: a new relay refuses a `60` write from an old panel (422), and a new
+    service offers no button to an old relay (no `fpsChoices`).
+  - Every relay deploy is rig-busy gated and restores the relay's previous state.
+  1. **handheld-1 (cam3 block)**: `scripts/bkshading-deploy-relay.sh --host <handheld-1> --arch arm64`
+     (the arm64 SBC path, `bkshading-sbc.md`). Read back
+     `curl -s http://handheld-1.lan:8771/api/state`: `params.fps100 = 6000`,
+     `params.sensorFps100 = 5000`, `caps.fpsChoices = [8,2398,2400,2500,2997,3000,5000,5994]`.
+  2. **cam1, cam2 cambox relays**: `scripts/bkshading-deploy-relay.sh --host <cam>`, only outside a
+     production and NEVER while an E2E holds the rig lease (read
+     `http://10.77.9.200:8890/rig-lease.json` first; no relay touch while it is held). In rig TEST mode
+     the relay on the source box and cam2 is stopped+disabled (issue 1311), and the deploy keeps it
+     stopped. Read cam1 back when its relay runs (EVENT mode, outside a production):
+     `params.fps100 = 6000`, `params.sensorFps100 = 6000`.
+  3. **The service on strih-snv**: the issue-1353 path (the `bkshading-service-linux-amd64` artifact,
+     `setup-strih.sh` step 16c or the binary placed by hand, `systemctl restart bkshading-service`).
+     Then check `/api/version` and the panel DOM version. The cam3 block shows `fps 60.00`, no
+     `kamera … ≠ grab` warning and no "Zosúladiť s grab" button.
 
 
 ## Relay focus-distance exposure + the honest focus/exposure-MODE constraint (issue 1238)
@@ -237,7 +364,9 @@ ignores the new key), so relay/service/panel interoperate across versions with n
   (https://www.tal.org/tutorials/blackmagic-pocket-cinema-camera-usb-control-over-ptp) + the MVP
   `mapping.rs` "Verified PTP facts". The documented properties are `iso`, `f-number`, and
   `d001`(unknown RANGE 30–5000), `d002`(shutter angle), **`d003`(manual focus DISTANCE)**,
-  `d004`(WB Kelvin), `d005`(tint), `d006`(sensor fps), `d007`(project fps),
+  `d004`(WB Kelvin), `d005`(tint), `d006`(PROJECT fps x100, MENU), `d007`(OFF-SPEED fps,
+  RANGE 5..60) — this list, taken from the MVP mapping, had d006/d007 swapped until issue 1402
+  corrected it from live reads of both bodies,
   `d008`(unknown MENU 2/0), `d009`(unknown ro 0), `d00a`(unknown ro 0). The standard PTP
   `focusmode`(0x500A)/`expprogram`(0x500E) are absent. So `d003` distance is the ONLY honest
   focus signal — its presence confirms manual focus control is reachable, and a value that is
@@ -272,97 +401,19 @@ ignores the new key), so relay/service/panel interoperate across versions with n
   ring is a supervisor rig step (needs the camera cabled to a relay box), not a code-lane task.
 
 
-## SBC / handheld provisioning (issue 808 — the last milestone; Design v3, owner 14.9.2026)
-A handheld camera runs the SAME `bkshading-relay` on **a separately powered zero-class arm64 SBC
-with WiFi**: camera USB → SBC host port (PTP/gphoto2), SBC on the rig WiFi. **The board is
-DEVICE-AGNOSTIC** (owner has not finally chosen — Design v3, comment 5664682477 + ROZHODNUTÉ
-5664746806): a Raspberry **Pi Zero 2 W**, a **Radxa ZERO 3W**, or an **Orange Pi Zero 2W** (the
-ordered prototype). **The box's power supply is the OWNER's own business (ruling 17.9.2026, #808
-comment 5711321335: „napajanie si normalne ja riesim") — never a design item, never a bench item,
-never a question to him.** The only electrical fact the docs state: **all candidate boards are
-5 V-only — 5 V on the board's power port, never raw 15 V / D-tap.** (Background only: PTP makes the
-camera the USB *device*, so the camera itself is not the box's power source.) The service already understands the
-handheld (`Transport::SbcRelay`, `handheld-1..3` / `transport="sbc-relay"` in
-`bkshading.example.toml`, a params-only block — no NDI preview). The box side is
-`scripts/bkshading-provision-sbc.sh` (+ pure lib `scripts/lib/bkshading-sbc-runtime.sh`), mirroring
-the relay/cloudflared provisioning canon but with two deliberate deltas + one gotcha:
-- **Do NOT hard-code one board's port topology.** Per-board (all one USB cable to the camera + a 5 V
-  feed the owner arranges): **Pi Zero 2 W** = micro-USB OTG host + a separate micro-USB 5 V power-in
-  (2.4 GHz WiFi only → needs a 2.4 GHz SSID on site); **Radxa ZERO 3W** = USB3-C host + OTG-C 5 V-in
-  (dual-band); **Orange Pi Zero 2W** = two USB-C (host-vs-power is revision-dependent — probe both;
-  dual-band).
-- **The SBC REUSES `systemd/bkshading-relay.service` UNCHANGED** (owner: "the SAME relay component")
-  and writes **NO `CAMERA_BOX_CAPTURE_FPS` env** — an SBC has no camera-box appliance to derive from
-  and a handheld has no grab comparison, so the unit's `EnvironmentFile=-` degrades gracefully
-  (relay → `capture_fps=None` → service static config). Do NOT reuse `bkshading-provision-relay.sh`
-  (its whole job is deriving that env from `camera-box.service.d` drop-ins, which an SBC lacks).
-- **A `systemd/bkshading-relay.service` UNIT-FILE change never rides any binary deploy** (neither
-  `bkshading-deploy-relay.sh` nor the fleet post-merge deploy touch `/etc/systemd/system/`) — it
-  needs its own manual re-provision per box: `mount -o remount,rw /` → write the unit →
-  `systemctl daemon-reload && systemctl restart bkshading-relay` → read back
-  `systemctl show -p Restart,RestartUSec,ActiveState` → `mount -o remount,ro /`. Done live
-  2026-09-04 on cam1+cam2 for the issue-1228 `Restart=on-failure`/`RestartSec=5` unit (cam2 had
-  drifted on an older `Restart=always`/3 provisioning). Symptom of forgetting this: repo unit and
-  `systemctl cat` disagree after a green release.
-- **Deploy uses `bkshading-deploy-relay.sh --arch arm64 --no-remount`.** `--arch arm64` fetches the
-  `bkshading-relay-linux-arm64` artifact; `--no-remount` skips the read-only-root swap (a cambox
-  appliance has a ro root; a **stock arm64 SBC image — Raspberry Pi OS / Debian / Armbian — root is
-  read-WRITE** — remounting it ro is wrong). The default (no flags) is still amd64 + ro-root remount
-  (cambox), byte-unchanged.
-- **CROSS-BUILD GOTCHA — only the RELAY cross-builds to aarch64 trivially; the SERVICE does NOT.**
-  The relay is pure Rust (axum/tokio/serde/clap; **no reqwest/rustls/ring, no libndi** on the relay
-  side), so the CI `bkshading` job cross-compiles it for `aarch64-unknown-linux-gnu` with just
-  `rustup target add` + the `gcc-aarch64-linux-gnu` linker + `CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER`.
-  Target = aarch64 (NOT armhf): every candidate board is ARMv8 (Cortex-A53) with a 64-bit stock
-  image; a 32-bit `armv7-unknown-linux-gnueabihf` build is one extra matrix entry only if a legacy
-  handheld needs it. **Do NOT naively add a service ARM cross-build** — the service pulls
-  `ring`/`rustls` (reqwest) + the libndi FFI, which do NOT cross-link with a bare gcc linker; the
-  service is Windows/amd64 only (it runs on the strih PC), so there is deliberately no service ARM
-  artifact.
-- **`--check` verifies the deployed relay binary is actually AArch64** (an ELF `e_machine` read via
-  `od` — offset 18, 2 bytes LE, AArch64=183 / x86-64=62; pure helpers in `bkshading-sbc-runtime.sh`,
-  Tier-0 testable with a 20-byte fake-ELF fixture) so a mis-deployed amd64 binary is caught here,
-  not at reboot with an opaque `Exec format error`.
-- **`--check` also verifies the WiFi link is up** — a pure `bkshading_sbc_wifi_link_state
-  <sysfs-root> <iface-glob>` reads `/sys/class/net/wl*/operstate` and returns `up`/`down`/`none`
-  (`BKSHADING_SBC_NET_SYSFS` injects a fake tree for Tier-0). **`operstate` is the primary signal
-  but NOT the only one — `carrier==1` also counts as up.** Some drivers (notably the **Orange Pi
-  Zero 2W's out-of-tree `uwe5622`**) leave `operstate` at `"unknown"`/`"dormant"` while genuinely
-  associated, so operstate-alone would false-FAIL the very prototype board; a genuinely-down link is
-  `operstate down` AND no carrier. **Band-agnostic on purpose** (a
-  2.4 GHz-only Pi Zero 2 W is as valid as a dual-band board — the check only proves a link, never a
-  band/SSID); an optional best-effort `iw`-parsed SSID enriches the OK line (`bkshading_sbc_wifi_ssid_from_iw`,
-  never gating). A **wired box with no `wl*` interface (the cambox class, which runs the SAME reused
-  unit) SKIPs the WiFi check — never FAILs**; a down wireless link FAILs with a `nmcli device wifi
-  connect …` join remediation (noting a 2.4 GHz-only board needs a 2.4 GHz SSID on site).
-- The physical bring-up (flash the arm64 image, headless WiFi, then deploy + `--install` + reboot)
-  is the owner's/supervisor's rig step. Transports stay USB-PTP (gphoto2/libusb) / USB-Eth REST —
-  NEVER Bluetooth; a gphoto2 camera is a USB device, not a network link, so the netplan `enx*`
-  CDC-NCM trap (#1155) does not touch the handheld.
-
-### Supervisor bench checklist (run when the prototype board arrives — the HARDWARE half, UNVERIFIED in code lanes)
-The code lane ships the provisioning + `--check`; these live-hardware steps are the supervisor's:
-1. ~~PD / power-role listener on the camera's USB-C port~~ — **DROPPED (owner ruling 17.9.2026):
-   the box's power supply is the owner's business; nothing about power is measured, designed or
-   asked.** The board arrives powered by whatever the owner arranged (5 V on its power port).
-2. **`gphoto2 --auto-detect` on the real board** — the camera enumerates on the SBC's USB host port
-   and PTP control works (the relay's transport).
-3. **WiFi join** — the board is on the rig WiFi SSID; on a **2.4 GHz-only** board bring up a 2.4 GHz
-   SSID on site first. Then `scripts/bkshading-provision-sbc.sh --check` reports the link `up`.
-4. **Per-board port/power probe** — **Orange Pi Zero 2W:** which USB-C is host vs power is
-   **revision-dependent — probe both**; its WiFi driver is **out-of-tree (`uwe5622`)**, so verify
-   `wl*` comes up on the vendor/Armbian image **before** `--install`. **Radxa ZERO 3W:** USB3-C =
-   host, OTG-C = 5 V-in. **Pi Zero 2 W:** micro-USB OTG = host, separate micro-USB = 5 V-in.
-5. **End-to-end** — deploy the aarch64 relay, `--install`, reboot, add the `handheld-N` record, and
-   confirm the strih `bkshading` service sees the handheld live (params-only block).
+## SBC / handheld provisioning → `.claude/rules/bkshading-sbc.md`
+The handheld SBC (the device-agnostic zero-class arm64 board, the reused relay unit, the read-only
+root from the shared `scripts/lib/ro-root.sh` canon, the arm64 relay deploy that reads the target's
+root, the supervisor bench checklist) lives in its own rule. It auto-loads on the SBC scripts,
+`scripts/lib/ro-root.sh` and the relay deploy.
 
 
 ## Service DEPLOY path onto strih (Windows) — issue 808 (repeatable, mirrors the relay canon)
 
 **Retired default (issue 1317 part 3):** the Windows strih PC this section targets is GONE (M4
-cut-over); the service now runs on the Linux strih-lx as a systemd unit (the issue-1353 section
+cut-over); the service now runs on the Linux strih-snv as a systemd unit (the issue-1353 section
 below). `bkshading-deploy-service.sh` therefore has NO default `--host` (it used to be 10.77.9.202,
-now strih-lx's address) and refuses a linux-genlock fleet address via `obs_fleet_refuse_linux_target`,
+now strih-snv's address) and refuses a linux-genlock fleet address via `obs_fleet_refuse_linux_target`,
 naming `setup-strih.sh` step 16c. It stays usable for an explicit Windows box.
 
 The `bkshading-windows` CI job release-builds + uploads the deployable service as
@@ -403,7 +454,7 @@ CI / the .sh / the .ps1 cannot drift (`tests/python/test_bkshading_deploy_servic
   provisioning + live NDI-preview verify already noted above.
 
 
-## Service DEPLOY path onto strih (Linux notebook strih-lx) — issue 1353 (the post-M4 sibling of the Windows path)
+## Service DEPLOY path onto strih (Linux notebook strih-snv) — issue 1353 (the post-M4 sibling of the Windows path)
 
 Post-M4 the notebook IS the strih, so the service is PROVISIONED (not "deployed" ad-hoc) as a systemd
 unit — the `setup-strih.sh` / `verify-strih.sh` / `strih-provision.sh` machinery, not a bespoke
@@ -458,7 +509,7 @@ the printer — parity-tested), `setup-strih.sh` step **"16c"** (lettered, TOTAL
   binary). The install is robust to any zip nesting (`find -type f -name bkshading` / `-type d -name
   web`). The bundle-state step-9 curl+`GH_TOKEN` is the raw-FILE precedent; a CI artifact needs the
   artifacts API, not the raw endpoint.
-- **UNVERIFIED (supervisor rig steps):** the LIVE `setup-strih.sh` run on strih-lx (10.77.9.202) +
+- **UNVERIFIED (supervisor rig steps):** the LIVE `setup-strih.sh` run on strih-snv (10.77.9.202) +
   `verify-strih.sh` green + STARTING the service (`systemctl start bkshading-service`) + the owner's
   panel acceptance on `http://strih.lan:8770/` (development = one camera on cam1) with the PC off.
 
@@ -564,8 +615,11 @@ business running (and polling the shared bus) while measurements run.
   the issue-808 E2E pause + `EVENT_ASSERT_TARGETS` use — the resolved source box
   (`${RIG_SOURCE_BOX}=$RIG_SOURCE_IP`) + `cam2=$PAINTER_IP`. The unit name is the ONE source of
   truth `bkshading_relay_unit_name` (from `bkshading-relay-runtime.sh`). Every systemctl line is
-  `|| true`-tolerant and the ssh loop is best-effort per box (a bad/unreachable box never aborts
-  the switch).
+  `|| true`-tolerant and the ssh loop tries every box. A box whose state did not land (unreachable,
+  persist not landed, or since issue 1407 a root that did not close read-only) makes the apply
+  return non-zero, and rig-mode RECORDS that rc: it warns by name, runs every remaining step of the
+  switch (EVENT's burn-OFF, mapping and contract; TEST's painter steps) and exits non-zero at the
+  end, naming the box and its writers (the issue-868 pattern, `.claude/rules/ro-window.md`).
 - **This makes the issue-808 E2E pause/restore a TRUE no-op in TEST mode:** with the relay already
   stopped+disabled, `bkshading_e2e_pause_stop_cmds` reads `systemctl is-active`=false AND (in steady
   state) no `/run/bkshading-e2e-paused` marker → `was-active=0` → `bkshading_e2e_pause_restore_cmds`
@@ -665,9 +719,31 @@ NOT a physical or lifecycle change.
   RED at 9 on the pre-fix path), `split_config_blocks`/`build_get_config_many_args` are pure and
   unit-tested + rustc-replicated, and a `CoalescingFakeRunner` (join stdout → split, mirroring the
   real `Gphoto2Cli`) proves a coalesced read yields byte-identical state to the per-key path.
-- **What is NOT reduced (deferred, not dropped):** the `--auto-detect` presence probe stays a
-  separate session (folding it needs caching the port + deriving presence from the batch — a bigger
-  change, not this lane); and the residual "one 3-session read/floor can still occasionally clip the
+- **The `--auto-detect` runs once, not per cycle (issue 1371, 14.10.2026).** It enumerates EVERY
+  USB device on the box, and on cam5 (BMPCC + Cam Link on bus 4) the per-cycle sweep pushed the
+  camera-box capture phase tracker into a re-seed ~45 % of the time (relay stopped ~14 %).
+  `CameraSession::camera_for_read` keeps the detected model; `forget_detected` drops it when a read
+  fails, so the next cycle detects again. A steady read is 2 sessions (core batch + d003/summary),
+  3 at the first read and after a failure. The floor tests count the core `get_config_many` batch
+  as their read-cycle proxy (the detect no longer marks every cycle).
+- **Reads go through ONE persistent, PACED `gphoto2 --shell` (issue 1371, 14.10.2026).** cam5 measured:
+  usbmon showed one CLI read cycle = ~250 BMPCC transfers in two 4-6 ms bursts (`gphoto2 --debug`:
+  Open session, Device info, Storage IDs, Object handles = the card listing, 7x property desc, Close
+  session); during each burst the Cam Link on the same root port fell +3..+16 ms behind, its frame
+  timestamps stepped late and camera-box re-seeded its capture phase ~7x/min. One shell reading one
+  key every 120 ms brought it to the no-relay baseline (~2/min). `uvcvideo hwtimestamps=1` did NOT
+  help (no usable device clock on the Cam Link). So `read_raw` sends `PACED_READ_KEYS` (the 7 core
+  keys + `5007` + `d003`) through `Gphoto2Shell::get_config` (reads to `END`; a `***` line =
+  `Ok(None)`, best-effort for `5007`/`d003`, an error for a core key), `READ_PACING_MS` (100) apart;
+  a cycle takes ~1 s, under the service's 1.5 s poll timeout. `5007` is the raw F-Number MENU
+  (`Current: 400` = f/4.00), `RawConfigs.fnumber_raw`, preferred over the `--summary` raw, so the
+  summary dump is gone from the paced path. The shell lives in `BurstSession.shell`, opened by the
+  first read, shared with write bursts, NOT closed at the burst idle-close. Any shell error / wedge
+  kills it and THAT cycle reads over the CLI (`read_raw_cli`, unchanged); the next cycle opens a
+  fresh one. With no gphoto2 binary configured (the fake-runner tests) every read is the CLI path.
+  Tests: `bkshading/relay/tests/paced_read_1371.rs` (a fake `gphoto2 --shell` script). The E2E
+  test-camera step refuses while the relay is active, so the held session never meets it.
+- **What is NOT reduced (deferred, not dropped):** the residual "one 3-session read/floor can still occasionally clip the
   isochronous stream" is bounded far lower but not provably zero on a single shared controller — the
   final clean-watch A/B (relay-on steady vs off) is a supervisor live-verify step (blocked in this
   lane by an in-progress E2E, which itself pauses the relay). If that watch still shows dips, the
@@ -864,18 +940,23 @@ the root stayed read-WRITE (cam6/cam7).
   (`RESTORE_SESSION`), out of the terminal's process group. The test for it needs a fake sshpass
   that handles + forwards SIGINT -- with an empty prefix, the inherited SIG_IGN hides the bug.
   Consequence: the re-run restore can only be stopped with SIGKILL. That is bounded (ConnectTimeout
-  10, ServerAlive ~30 s, the 3x2 s remount loop; the Type=simple unit's `start` returns at once).
+  10, ServerAlive ~30 s, the one verified ro close; the Type=simple unit's `start` returns at once).
   `ssh_box`/`scp_box` carry ServerAliveInterval so a dead connection cannot postpone the restore.
-- **The ro remount is checked:** retried 3x, then FAIL LOUD with the holder named (the pure
-  `bkshading_deploy_ro_holders` over `bkshading_deploy_ro_holder_probe_cmd`: `lsof +L1`, or -- a
-  cambox has no lsof -- the same columns built from /proc) plus `fuser -vm /`, and exit non-zero.
+- **The ro remount is checked** -- since issue 1407 through the ONE shared verified close
+  (`ro_window_close_cmds`, `scripts/lib/ro-window.sh`, `.claude/rules/ro-window.md`), run on the box
+  in ONE ssh call, no retry. The root mode is READ (never the mount exit code alone); a root left
+  writable prints the box's FAIL lines: the writers (`fuser -vm /` filtered to ACCESS `F`, never a
+  `head -n 40` cut) and the deleted-but-open holders (`ro_window_holder_probe_cmd`: `lsof +L1`, or --
+  a cambox has no lsof -- the same columns built from /proc), then one summary line
+  (`ro_window_holders`), and exit non-zero. **A failed close starts nothing: the relay is left
+  STOPPED and says so** (issue 1407 reversed the old "the relay restore still runs").
   The /proc fallback must scan `/proc/<pid>/exe` (a replaced RUNNING binary -- the 25.9. incident --
   is held there, lsof `txt`) and `/proc/<pid>/maps` (`mem`), not only `fd/*`; its PROC_ROOT argument
   lets a test plant a fake tree (substituted with bash `${body//__PROC__/$root}`, never sed). It
   drops `/memfd:`, `/dev/shm/`, `/SYSV` noise (always "(deleted)", never holds /) so it cannot crowd
   the real holder out of the 40-line cap, and turns spaces in a process name into `_` so the lsof
-  columns hold. The remote loop exits only 0 or 1, so any other rc (ssh 255,
-  sshpass 5/6) is reported as an ssh failure, not a busy mount. The relay restore still runs.
+  columns hold. The close exits only 0 or 1, so any other rc (ssh 255, sshpass 5/6) is reported
+  as an ssh failure, not a busy mount.
 - **Run resolution is ONE shared resolver:** `scripts/lib/ci-run-resolve.sh`
   `ci_run_latest_success REPO BRANCH WORKFLOW ARTIFACT [LIMIT=100]`, used by the relay deploy,
   `deploy-fleet.sh`, the setup-device relay `latest` plan and (since #1394) setup-device STEP 3 /
@@ -1219,3 +1300,15 @@ itself is UNVERIFIED in code lanes — if the shell path never completes it sile
 - Reproduce a panel E2E locally with ZERO builds: `python3 -m http.server 8799 --directory
   bkshading/service/web` + the Playwright MCP `browser_run_code_unsafe` with the test's own init
   script + route (the banner logic, routes and console gate all run without the Rust service).
+  Or run the spec itself: `npm install @playwright/test@1.58.2` in a scratch dir (its chromium
+  revision 1208 is already cached on dev1), copy `panel.spec.js` + `fixtures/` there, and give it a
+  config whose only webServer is that static server; set `PREVIEW_SVC_BASE_URL` for the preview
+  tests. Run the same spec against the pre-fix `web/` (exported from git) to see it RED.
+- **The preview tests use a SECOND service instance** (issue 808): `e2e-preview-config.toml` on
+  `:8782`, one camera WITH `ndi_preview` whose feed is absent (CI's `--features ndi` build loads no
+  libndi). The issue-1304 tests keep their one params-only camera on `:8780`. A second camera in the
+  shared config would make their unscoped `[data-role="aperture-inc"]` locators match two blocks
+  (strict-mode violation). The preview spec addresses `:8782` by absolute URL.
+- **A JPEG fixture trips the staging secret scanner** (`block-sensitive-staging.sh` reads its bytes
+  as a high-entropy blob), whether inlined as base64 or committed as a binary file. It is not a
+  secret: stage it with `# airuleset:secret-ok <what it is>` on the `git add`.

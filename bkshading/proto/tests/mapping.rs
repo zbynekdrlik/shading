@@ -89,9 +89,15 @@ const D002_BLOCK: &str =
 const D004_BLOCK: &str =
     "Label: PTP Property 0xd004\nType: RANGE\nCurrent: 5600\nBottom: 2500\nTop: 10000\nEND";
 const D005_BLOCK: &str = "Label: PTP Property 0xd005\nType: MENU\nCurrent: 0\nEND";
-const D006_BLOCK: &str = "Label: PTP Property 0xd006\nType: MENU\nCurrent: 2500\nEND";
+// issue 1402: d006 is the PROJECT fps (a MENU of the BMPCC's own timebases, x100) and d007 the
+// OFF-SPEED fps (a plain-int RANGE). The two currents DIFFER here (project 25.00, off-speed 50) on
+// purpose: with equal values (the old 2500 / 25 pair) a d006<->d007 swap read exactly the same and
+// the tests could never see it — which is how the swap shipped.
+const D006_BLOCK: &str = "Label: PTP Property 0xd006\nType: MENU\nCurrent: 2500\nChoice: 0 8\nChoice: 1 2398\nChoice: 2 2400\nChoice: 3 2500\nChoice: 4 2997\nChoice: 5 3000\nChoice: 6 5000\nChoice: 7 5994\nEND";
 const D007_BLOCK: &str =
-    "Label: PTP Property 0xd007\nType: RANGE\nCurrent: 25\nBottom: 5\nTop: 60\nEND";
+    "Label: PTP Property 0xd007\nType: RANGE\nCurrent: 50\nBottom: 5\nTop: 60\nEND";
+/// The d006 choice list both BMPCC bodies in the fleet report (issue 1402), x100, verbatim.
+const BMPCC_D006_CHOICES: [i64; 8] = [8, 2398, 2400, 2500, 2997, 3000, 5000, 5994];
 // issue 1238: d003 manual focus distance (RANGE, ~0=closest..65536=infinite).
 const D003_BLOCK: &str =
     "Label: PTP Property 0xd003\nType: RANGE\nCurrent: 32768\nBottom: 0\nTop: 65536\nEND";
@@ -154,10 +160,11 @@ fn full_raw() -> RawConfigs {
         shutter_angle: D002_BLOCK.to_string(),
         kelvin: D004_BLOCK.to_string(),
         tint: D005_BLOCK.to_string(),
-        sensor_fps: D006_BLOCK.to_string(),
-        project_fps: D007_BLOCK.to_string(),
+        project_fps: D006_BLOCK.to_string(),
+        sensor_fps: D007_BLOCK.to_string(),
         focus_distance: D003_BLOCK.to_string(),
         summary: String::new(),
+        fnumber_raw: String::new(),
     }
 }
 
@@ -167,8 +174,10 @@ fn params_and_caps_from_full_camera() {
     assert_eq!(params.iso, Some(400));
     assert_eq!(params.kelvin, Some(5600));
     assert_eq!(params.tint, Some(0));
-    assert_eq!(params.sensor_fps100, Some(2500));
-    // project fps 25 -> fps100 2500; d002 18000 at 2500 -> shutter denom 50.
+    // issue 1402: the off-speed fps is d007 (plain 50) x100.
+    assert_eq!(params.sensor_fps100, Some(5000));
+    // project fps = d006 2500 (25.00, already x100); d002 18000 at 2500 -> shutter denom 50.
+    // (Converting at the off-speed 50 would give 1/100 — the old swap.)
     assert_eq!(params.fps100, Some(2500));
     assert_eq!(params.shutter, Some(50));
     // issue 1238: d003 manual focus distance lifts through verbatim.
@@ -178,8 +187,11 @@ fn params_and_caps_from_full_camera() {
     assert!((norm - (2.0 / 3.0)).abs() < 1e-9, "norm was {norm}");
     // caps
     assert_eq!(caps.iso_choices, vec![100, 200, 400, 800]);
+    // fps_min/fps_max are the OFF-SPEED d007 RANGE bounds; the settable PROJECT rates are the d006
+    // choices (issue 1402).
     assert_eq!(caps.fps_min, 5);
     assert_eq!(caps.fps_max, 60);
+    assert_eq!(caps.fps_choices, BMPCC_D006_CHOICES.to_vec());
     assert_eq!(caps.kelvin_min, 2500);
     assert_eq!(caps.kelvin_max, 10000);
     assert!(!caps.shutter_choices.is_empty());
@@ -218,7 +230,9 @@ fn fnumber_choices_parity_drops_unparseable_1304() {
         },
         &labels,
         2500,
-    );
+        &[],
+    )
+    .expect("no fps in the request -> nothing to refuse");
     assert!(writes.contains(&("f-number".to_string(), "f/4.0".to_string())));
 }
 
@@ -294,6 +308,47 @@ fn empty_fnumber_block_yields_no_choices_1304() {
 }
 
 #[test]
+fn aperture_from_the_5007_block_when_current_null_1371() {
+    // Issue 1371: the relay's paced read takes `gphoto2 --get-config 5007` (the raw F-Number MENU)
+    // instead of the --summary dump. cam5's live block, with the RADIO current (null) for its
+    // off-grid f/4 lens and choices from f/4.5: the 5007 raw 400 gives f/4.0, the slider snaps
+    // to the nearest choice (index 0), exactly like the summary path.
+    let raw = RawConfigs {
+        fnumber: "Label: F-Number\nType: RADIO\nCurrent: (null)\nChoice: 0 f/0.19\nChoice: 1 f/0\nChoice: 2 f/4.5\nChoice: 3 f/4.8\nChoice: 4 f/5.6\nEND".to_string(),
+        fnumber_raw: "Label: F-Number\nReadonly: 0\nType: MENU\nCurrent: 400\nChoice: 0 19\nChoice: 1 0\nEND".to_string(),
+        // A stale/different summary must lose to the 5007 block.
+        summary: "F-Number(0x5007): ... value: f/8 (800)".to_string(),
+        ..Default::default()
+    };
+    let (params, caps) = params_and_caps(&raw);
+    let av = params.aperture_av.expect("aperture_av from the 5007 raw");
+    assert!(
+        (av - 2.0 * 4.0f64.log2()).abs() < 1e-9,
+        "f/4.0 -> AV 4.0, got {av}"
+    );
+    assert_eq!(
+        params.aperture_norm,
+        Some(0.0),
+        "nearest choice f/4.5 = index 0"
+    );
+    assert_eq!(caps.fnumber_choices, vec![4.5, 4.8, 5.6]);
+
+    // A 5007 block with no usable value (0 / missing) falls back to the summary line.
+    for block in ["Label: F-Number\nType: MENU\nCurrent: 0\nEND", ""] {
+        let raw = RawConfigs {
+            fnumber_raw: block.to_string(),
+            summary: "F-Number(0x5007): ... value: f/2 (200)".to_string(),
+            ..raw.clone()
+        };
+        let av = params_and_caps(&raw)
+            .0
+            .aperture_av
+            .expect("summary fallback");
+        assert!((av - 2.0).abs() < 1e-9, "f/2 -> AV 2, got {av}");
+    }
+}
+
+#[test]
 fn parse_summary_fnumber_raw_1306() {
     assert_eq!(
         parse_summary_fnumber_raw(
@@ -338,6 +393,7 @@ fn camera_caps_fnumber_choices_wire_is_camel_case_1304() {
         iso_choices: vec![100, 200],
         fnumber_choices: vec![2.8, 4.0, 5.2, 8.0],
         shutter_choices: vec![50, 60],
+        fps_choices: vec![2400, 2500],
         fps_min: 5,
         fps_max: 60,
         kelvin_min: 2500,
@@ -376,17 +432,21 @@ fn plan_writes_maps_every_field() {
         iso: Some(800),
         kelvin: Some(6500),
         tint: Some(10),
-        shutter: Some(50), // at 2500 -> angle 18000
-        fps: Some(30),
+        shutter: Some(50),   // at the NEW 30.00 (issue 1402) -> angle 21600
+        fps: Some(30),       // 3000 is one of the camera's d006 choices
         auto_wb: Some(true), // no PTP equivalent -> dropped
     };
-    let writes = plan_writes(&req, &choices, 2500);
+    let writes = plan_writes(&req, &choices, 2500, &BMPCC_D006_CHOICES).expect("30 is listed");
     assert!(writes.contains(&("f-number".to_string(), "f/8.0".to_string())));
     assert!(writes.contains(&("iso".to_string(), "800".to_string())));
-    assert!(writes.contains(&("d002".to_string(), "18000".to_string())));
+    // issue 1402: the shutter set together with the fps converts at the NEW project rate (d002 is
+    // written after d006): 1/50 at 30.00 = 216 deg, not 180 deg at the old 25.00.
+    assert!(writes.contains(&("d002".to_string(), "21600".to_string())));
     assert!(writes.contains(&("d004".to_string(), "6500".to_string())));
     assert!(writes.contains(&("d005".to_string(), "10".to_string())));
-    assert!(writes.contains(&("d007".to_string(), "30".to_string())));
+    // issue 1402: the project fps is d006 (x100); the off-speed d007 is never written.
+    assert!(writes.contains(&("d006".to_string(), "3000".to_string())));
+    assert!(!writes.iter().any(|(k, _)| k == "d007"));
     // auto_wb never produces a write.
     assert!(!writes.iter().any(|(k, _)| k == "auto-wb" || k == "d008"));
 }

@@ -75,6 +75,41 @@ impl Default for PreviewConfig {
     }
 }
 
+/// The smallest freshness bound for a stored preview frame, in ms (issue 808).
+///
+/// A preview frame older than the bound counts as STALE: the HTTP endpoint answers
+/// `204 No Content` instead of serving it and the panel shows its placeholder. 3 s is long enough
+/// that the low-bandwidth NDI stream's normal arrival jitter, plus one dropped decimation slot,
+/// never flickers a live preview to the placeholder. It is short enough that an operator sees a
+/// stopped feed within a few seconds, instead of a frozen picture that still looks live.
+pub const PREVIEW_MAX_AGE_FLOOR_MS: u64 = 3000;
+
+/// How many preview frame periods a live feed may stay quiet before it counts as stopped
+/// (issue 808).
+///
+/// The worker stores at most one frame per decimation period (`1000 / fps` ms, the
+/// [`decimate::Decimator`] interval), so five missed periods is a feed that has stopped, not one
+/// that is late. This term only beats the floor at a slow preview rate (below ~1.7 fps).
+pub const PREVIEW_MAX_AGE_FRAME_PERIODS: u64 = 5;
+
+impl PreviewConfig {
+    /// The freshness bound for this camera set's preview frames, in ms (issue 808):
+    /// `max(PREVIEW_MAX_AGE_FLOOR_MS, PREVIEW_MAX_AGE_FRAME_PERIODS x frame period,
+    /// 2 x capture_timeout_ms)`.
+    ///
+    /// The capture term covers one capture call that times out on a hiccup: the worker loops and
+    /// keeps waiting, so a single timed-out call must not flip a live preview off. The frame
+    /// period comes from the same [`decimate::Decimator`] the worker thins with, so a
+    /// non-positive fps floors to 1 fps here exactly as it does there. At the defaults (3 fps,
+    /// 1000 ms timeout) the floor wins: 3000 ms. Pure.
+    pub fn max_frame_age_ms(&self) -> u64 {
+        let period = decimate::Decimator::new(self.fps).min_interval_ms();
+        PREVIEW_MAX_AGE_FLOOR_MS
+            .max(period.saturating_mul(PREVIEW_MAX_AGE_FRAME_PERIODS))
+            .max(self.capture_timeout_ms.saturating_mul(2))
+    }
+}
+
 /// Spawn a preview worker for every camera that has an `ndi_preview` source name, returning
 /// the shared store the HTTP layer reads. A camera without a preview name (a handheld with no
 /// feed) gets no worker — its block stays params-only.
