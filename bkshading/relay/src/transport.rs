@@ -648,6 +648,10 @@ struct BurstSession {
     /// The "before" of the next aperture write's convergence. `None` = not known (a write that went
     /// over the CLI, an unreadable read-back); cleared at idle-close and on a write error.
     aperture_raw: Option<i64>,
+    /// The iris position before a run of QUEUED aperture clicks (issue 1452): a click with another
+    /// aperture click queued behind it skips its read-back and leaves its "before" here, so the
+    /// run's last click converges from where the run started. Cleared with `aperture_raw`.
+    aperture_run_start: Option<i64>,
     /// Whether the burst's LAST aperture write moved the iris (issue 1452): `Some(true)` = it moved
     /// (wherever it landed, so the idle-close does not report it as ignored), `Some(false)` = it
     /// did not move (cam7: flagged as before), `None` = not measured. Taken at idle-close.
@@ -752,16 +756,6 @@ impl CameraSession {
             aperture_settle_poll_ms: APERTURE_SETTLE_POLL_MS,
             live_projection: Mutex::new(None),
         }
-    }
-
-    /// Publishes the burst's current representation (issue 1452): the projected state, else the
-    /// burst-open state, else nothing. Called by the burst drain whenever either changes.
-    fn publish_projection(&self, burst: &BurstSession) {
-        *self
-            .live_projection
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            burst.projected.clone().or_else(|| burst.open_state.clone());
     }
 
     /// Sets the pause before each 0x5007 read-back after an aperture write (issue 1452). Production
@@ -981,16 +975,7 @@ impl CameraSession {
             Ok(guard) => guard,
             Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
             Err(std::sync::TryLockError::WouldBlock) => {
-                return self
-                    .live_projection
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone()
-                    .or_else(|| cache.as_ref().map(|c| c.state.clone()))
-                    .unwrap_or_else(|| RelayState {
-                        capture_fps: self.capture_fps,
-                        ..RelayState::offline(self.version.clone())
-                    });
+                return self.busy_burst_state(cache.as_ref().map(|c| &c.state));
             }
         };
         let (next_state, action) = burst_step(
@@ -1016,6 +1001,7 @@ impl CameraSession {
                 written_at_close = Some(std::mem::take(&mut burst.written));
                 aperture_moved_at_close = burst.aperture_moved.take();
                 burst.aperture_raw = None;
+                burst.aperture_run_start = None;
                 self.publish_projection(&burst); // issue 1452: no burst state outlives the burst
                 burst.shell_disabled = false;
                 tracing::info!("shading write-burst idle-closed; taking one authoritative read");

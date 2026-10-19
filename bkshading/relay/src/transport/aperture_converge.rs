@@ -22,6 +22,16 @@ struct Landing {
     now: Option<i64>,
 }
 
+impl Landing {
+    /// Nothing was read back (no shell, an unreadable value, a failed shell).
+    fn unknown() -> Self {
+        Landing {
+            seen: Vec::new(),
+            now: None,
+        }
+    }
+}
+
 impl CameraSession {
     /// Converges an aperture write onto the requested listed step (issue 1452): reads 0x5007 back
     /// through the burst's open shell until the iris settles, writes ONE correcting listed step
@@ -49,10 +59,7 @@ impl CameraSession {
         }
         let outcome = match burst.shell.as_mut() {
             Some(sh) => self.measure_and_correct_aperture(sh, before, requested, labels),
-            None => Ok(Landing {
-                seen: Vec::new(),
-                now: None,
-            }),
+            None => Ok(Landing::unknown()),
         };
         let landing = outcome.unwrap_or_else(|e| {
             tracing::warn!(error = %e, "aperture read-back failed; shell closed, landing unknown");
@@ -60,10 +67,7 @@ impl CameraSession {
                 sh.close();
             }
             burst.shell_disabled = true;
-            Landing {
-                seen: Vec::new(),
-                now: None,
-            }
+            Landing::unknown()
         });
         burst.aperture_raw = landing.now;
         burst.aperture_moved = aperture_moved(before, &landing.seen);
@@ -85,10 +89,7 @@ impl CameraSession {
                 requested = requested_label,
                 "aperture write: 0x5007 not readable, landing unknown"
             );
-            return Ok(Landing {
-                seen: Vec::new(),
-                now: None,
-            });
+            return Ok(Landing::unknown());
         };
         let settled = Landing {
             seen: vec![landed],

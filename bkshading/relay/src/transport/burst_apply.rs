@@ -1,5 +1,6 @@
 //! One shading write inside a write burst (issue 1337) — [`CameraSession::burst_apply`], moved out
-//! of `transport.rs` unchanged (issue 1452) because that file is over its size budget. A child of
+//! of `transport.rs` (issue 1452) because that file is over its size budget, together with the
+//! burst's published state (`publish_projection` / `busy_burst_state`, issue 1452). A child of
 //! `transport`, so it reaches the session's private burst state without widening it.
 
 use anyhow::{Context, Result};
@@ -53,6 +54,7 @@ impl CameraSession {
             burst.open_state = Some(open_state);
             // issue 1452: where the iris is before this burst's first aperture write.
             burst.aperture_raw = current_fnumber_x100(&raw);
+            burst.aperture_run_start = None;
             burst.aperture_moved = None;
             // issue 1343: a fresh burst starts a fresh write accumulation (the previous burst's
             // writes were consumed at its idle-close). Reset here on the FIRST set of a burst.
@@ -131,12 +133,7 @@ impl CameraSession {
                         // The CLI FALLBACK also failed -> a real camera error; invalidate the plan
                         // basis (same as the no-shell CLI path below) so the next burst re-reads the
                         // now-uncertain camera, then propagate (-> 502).
-                        burst.plan = None;
-                        burst.open_state = None;
-                        burst.written = SetRequest::default(); // issue 1343: no stale not-applied
-                        burst.projected = None; // item 0: drop the stale projection
-                        burst.aperture_raw = None; // issue 1452: the camera is uncertain now
-                        burst.aperture_moved = None;
+                        burst.forget_camera_state();
                         self.publish_projection(burst);
                         return Err(e2)
                             .with_context(|| format!("CLI fallback set-config {key}={value}"));
@@ -146,12 +143,7 @@ impl CameraSession {
                     // No shell (disabled / not configured): CLI. A failure is a real camera error —
                     // invalidate the plan so the next burst re-reads the now-uncertain camera.
                     if let Err(e) = self.runner.set_config(key, value) {
-                        burst.plan = None;
-                        burst.open_state = None;
-                        burst.written = SetRequest::default(); // issue 1343: no stale not-applied
-                        burst.projected = None; // item 0: drop the stale projection
-                        burst.aperture_raw = None; // issue 1452: the camera is uncertain now
-                        burst.aperture_moved = None;
+                        burst.forget_camera_state();
                         self.publish_projection(burst);
                         return Err(e);
                     }
@@ -161,13 +153,23 @@ impl CameraSession {
         // 4b. issue 1452: the requested aperture listed index, when this SET wrote the f-number. The
         //     iris position before it leaves `aperture_raw` until the read-back below re-measures
         //     it, so the projection published meanwhile shows the request, not the old position.
+        //     When another aperture click is already queued behind this one, the read-back is
+        //     deferred to the run's LAST click (which converges from where the run started), so a
+        //     quick run pays one settle and the first click's PUT never waits for N of them.
         let aperture_write = match req.aperture_norm {
             Some(norm) if writes.iter().any(|(key, _)| key == "f-number") => {
                 let choice_count = basis.fnumber_labels.len() as i64;
-                Some((
-                    norm_to_choice_index(norm, choice_count) as usize,
-                    burst.aperture_raw.take(),
-                ))
+                let before = burst
+                    .aperture_raw
+                    .take()
+                    .or_else(|| burst.aperture_run_start.take());
+                if self.aperture_click_queued() {
+                    burst.aperture_run_start = before;
+                    burst.aperture_moved = None;
+                    None
+                } else {
+                    Some((norm_to_choice_index(norm, choice_count) as usize, before))
+                }
             }
             // An aperture SET that planned no write (no f-number list): nothing moved or measured.
             Some(_) => {
@@ -208,6 +210,56 @@ impl CameraSession {
         );
         burst.state = state_after_ok;
         Ok(n)
+    }
+
+    /// Whether another aperture click is queued behind the running SET (issue 1452). Lock order
+    /// burst -> set_queue, the same order `submit` already uses.
+    fn aperture_click_queued(&self) -> bool {
+        self.set_queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .has_pending_aperture()
+    }
+
+    /// Publishes the burst's current representation (issue 1452): the projected state, else the
+    /// burst-open state, else nothing. Called by the burst drain whenever either changes, and at
+    /// the idle-close. `live_projection` is a leaf lock.
+    pub(super) fn publish_projection(&self, burst: &BurstSession) {
+        *self
+            .live_projection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            burst.projected.clone().or_else(|| burst.open_state.clone());
+    }
+
+    /// What `read_state` answers while the burst drain holds the burst lock (issue 1452): the
+    /// published burst state, else the last cached read, else a benign offline snapshot. Touches
+    /// no camera — the shell owns it.
+    pub(super) fn busy_burst_state(&self, cached: Option<&RelayState>) -> RelayState {
+        self.live_projection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .or_else(|| cached.cloned())
+            .unwrap_or_else(|| RelayState {
+                capture_fps: self.capture_fps,
+                ..RelayState::offline(self.version.clone())
+            })
+    }
+}
+
+impl BurstSession {
+    /// Drops everything the burst knew about the camera after a failed write (issue 1343 / 1452):
+    /// the plan basis and open state (the next burst re-reads the now-uncertain camera), the
+    /// merged writes (no stale not-applied), the projection, and the aperture tracking.
+    fn forget_camera_state(&mut self) {
+        self.plan = None;
+        self.open_state = None;
+        self.written = SetRequest::default();
+        self.projected = None;
+        self.aperture_raw = None;
+        self.aperture_run_start = None;
+        self.aperture_moved = None;
     }
 }
 
