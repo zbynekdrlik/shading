@@ -11,6 +11,7 @@ use bkshading_proto::aperture::{
 };
 use bkshading_proto::mapping::fnumber_to_av;
 use bkshading_proto::read::{current_fnumber_x100, RawConfigs};
+use bkshading_proto::wire::{SetQueue, SetRequest, SubmitAction};
 
 /// cam6's f-number list around the evidence (ascending), as the relay holds it.
 fn labels() -> Vec<String> {
@@ -243,4 +244,39 @@ fn current_fnumber_x100_prefers_the_radio_then_the_5007_block_1452() {
     };
     assert_eq!(current_fnumber_x100(&off_grid), Some(400));
     assert_eq!(current_fnumber_x100(&RawConfigs::default()), None);
+}
+
+// --- a run of queued aperture clicks settles once, at its last click ------------------------------
+
+#[test]
+fn the_queue_tells_whether_a_queued_set_moves_the_aperture_again_1452() {
+    let aperture = SetRequest {
+        aperture_norm: Some(0.5),
+        ..Default::default()
+    };
+    let iso = SetRequest {
+        iso: Some(800),
+        ..Default::default()
+    };
+    let mut q = SetQueue::default();
+    assert!(!q.has_pending_aperture(), "an empty queue");
+    assert!(matches!(
+        q.submit(aperture.clone()),
+        SubmitAction::RunNow(_)
+    ));
+    assert!(
+        !q.has_pending_aperture(),
+        "the running SET itself is not pending"
+    );
+    q.submit(iso);
+    assert!(!q.has_pending_aperture(), "only an ISO click is queued");
+    q.submit(aperture);
+    assert!(q.has_pending_aperture(), "an aperture click is queued");
+    q.finish(); // the ISO click runs
+    assert!(
+        q.has_pending_aperture(),
+        "the aperture click is still queued"
+    );
+    q.finish(); // the aperture click runs
+    assert!(!q.has_pending_aperture(), "nothing queued any more");
 }

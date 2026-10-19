@@ -478,4 +478,9 @@ impl SetQueue {
     pub fn queued_total(&self) -> u64 {
         self.queued_total
     }
+
+    /// RED stub (issue 1452): whether a queued SET moves the aperture again.
+    pub fn has_pending_aperture(&self) -> bool {
+        false
+    }
 }

@@ -391,6 +391,72 @@ fn a_status_read_is_never_held_behind_an_aperture_settle_1452() {
 
 #[cfg(unix)]
 #[test]
+fn a_run_of_queued_aperture_clicks_settles_once_at_the_last_click_1452() {
+    // Two quick clicks: the second is queued while the first is still in its burst. Settling
+    // (and correcting) every click would make the first PUT wait for the whole run; the first
+    // click therefore skips its read-back and the LAST one converges from the run's start.
+    // Body: f/4.0 -> click f/4.5 (lands f/4.8, overshoot) -> click f/4.8 (already there).
+    let scratch = Scratch::new("run");
+    let bin = fake_body(&scratch.0, 400, Body::OvershootsUp);
+    let clock = Arc::new(AtomicU64::new(0));
+    let s = Arc::new(session(&bin, &clock));
+    let first = {
+        let s = s.clone();
+        std::thread::spawn(move || {
+            s.submit(&SetRequest {
+                aperture_norm: Some(norm(1)),
+                ..Default::default()
+            })
+            .map(|_| ())
+        })
+    };
+    // The first click holds the burst (its open read is running): the second one queues.
+    wait_for_command(&scratch.0, "get-config iso");
+    let second = s
+        .submit(&SetRequest {
+            aperture_norm: Some(norm(2)),
+            ..Default::default()
+        })
+        .expect("submit ok");
+    assert!(
+        matches!(second, ApplyOutcome::Queued),
+        "the second click queues behind the first"
+    );
+    first
+        .join()
+        .expect("first click thread")
+        .expect("the run applied");
+    let cmds = shell_commands(&scratch.0);
+    assert_eq!(
+        aperture_writes(&cmds),
+        vec![
+            "set-config f-number=f/4.5".to_string(),
+            "set-config f-number=f/4.8".to_string()
+        ],
+        "no correction mid-run, none needed at its end: {cmds:?}"
+    );
+    let reads_after_first_write = cmds
+        .iter()
+        .skip_while(|c| !c.starts_with("set-config f-number="))
+        .filter(|c| *c == "get-config 5007")
+        .count();
+    assert_eq!(
+        reads_after_first_write, 2,
+        "one settle (two equal reads) for the whole run: {cmds:?}"
+    );
+
+    clock.store(6_000, Ordering::SeqCst);
+    let closed = s.read_state();
+    assert!(closed.not_applied.is_empty(), "{:?}", closed.not_applied);
+    let got = closed.params.aperture_av.expect("aperture read");
+    assert!(
+        (got - av(4.8)).abs() < 1e-9,
+        "camera at f/4.8, got AV {got}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn a_write_to_the_value_the_iris_already_holds_is_not_read_back_1452() {
     // An absolute SET (Stream Deck / Companion) of the f-number the iris already sits on asks for
     // no move: no read-back, no settle bound paid.
