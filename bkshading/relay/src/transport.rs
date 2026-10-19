@@ -494,6 +494,9 @@ pub const PACED_READ_KEYS: [&str; 9] = [
 /// the no-relay baseline. A cycle of 9 keys takes ~1 s, under the service's 1.5 s poll timeout.
 pub const READ_PACING_MS: u64 = 100;
 
+/// RED stub (issue 1452): the most 0x5007 reads one aperture settle takes.
+pub const APERTURE_SETTLE_MAX_READS: usize = 5;
+
 /// Builds the gphoto2 argv for reading many config keys in ONE process (issue 1229):
 /// `["--get-config", k1, "--get-config", k2, …]`. A single `gphoto2` invocation with this argv
 /// opens the camera ONCE (one USB open/enumerate/close) and reads every key in that one PTP
@@ -718,6 +721,11 @@ impl CameraSession {
             burst: Mutex::new(BurstSession::default()),
             gphoto2_binary: String::new(),
         }
+    }
+
+    /// RED stub (issue 1452): the aperture settle pause — no convergence runs yet.
+    pub fn with_aperture_settle_poll_ms(self, _ms: u64) -> Self {
+        self
     }
 
     /// Sets the `gphoto2` binary path used to open the write-burst shell (issue 1337). The binary

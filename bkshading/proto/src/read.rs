@@ -115,6 +115,11 @@ fn current_i64(block: &str) -> Option<i64> {
     parse_current(block).and_then(|s| s.parse::<i64>().ok())
 }
 
+/// RED stub (issue 1452): the camera's current aperture x100 — not read yet.
+pub fn current_fnumber_x100(_raw: &RawConfigs) -> Option<i64> {
+    None
+}
+
 /// Builds `(ShadingParams, CameraCaps)` from the raw gphoto2 config blocks.
 ///
 /// Frame rates (issue 1402, read live on both BMPCC bodies in the fleet): `fps100` is the
