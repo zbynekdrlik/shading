@@ -1280,8 +1280,8 @@ slider norm (0) instead of the real f-number. Fixed across THREE layers, each Ti
 Deploy service → strih (anytime) + relay → camboxes (outside production only), start the relay, then:
 set `duration_ms` ≤ 150 ms per set in a burst (relay log); click → confirmed number ≤ 1 s; 20 rapid
 clicks = 20 moves (since issue 1452 an APERTURE click that ends a run also settles its 0x5007
-read-back, ~0.9-2 s, so for aperture judge the run, not each click: see the 1452 section); cam1 grabber `Streaming: sent/captured` flat during a 60 s burst (issue-1229
-metric); no `gphoto2` process 5 s after the burst (`pgrep gphoto2` empty). The `--shell` speedup
+read-back, ~0.9-2 s, so for aperture judge the run, not each click: see the 1452 section); cam1
+grabber `Streaming: sent/captured` flat during a 60 s burst (issue-1229 metric); no `gphoto2` process 5 s after the burst (`pgrep gphoto2` empty). The `--shell` speedup
 itself is UNVERIFIED in code lanes — if the shell path never completes it silently uses the CLI
 (still pre-read-free, ~1 set/spawn), which the rig step confirms/tunes.
 
@@ -1307,14 +1307,22 @@ reachable over USB-PTP.
   transport.rs is over its size budget, so new burst logic goes into a child, never into
   transport.rs. After a burst SET that wrote `f-number`, the relay reads 0x5007 through the burst's
   OPEN shell every `APERTURE_SETTLE_POLL_MS` (300) up to `APERTURE_SETTLE_MAX_READS` (5), makes at
-  most ONE correcting write, settles again. A SET to the listed value the iris already holds is not
-  read back. A write that fell back to the CLI has no read-back (no new gphoto2 process per read,
-  issue 1229) and is reported as before.
+  most ONE correcting write, settles again. A single click to the listed value the iris already
+  holds is not read back (a run's last click always is, below). A write that fell back to the CLI
+  has no read-back (no new gphoto2 process per read, issue 1229) and is reported as before.
 - **A run of queued aperture clicks settles ONCE, at its last click.** The FIFO drain answers the
   first click's PUT only after the whole run, and the service write client gives up at 10 s, so a
   click with another aperture click already queued behind it (`SetQueue::has_pending_aperture`,
   peeked under the burst lock: order burst -> set_queue, as `submit`) skips its read-back and leaves
-  its "before" in `BurstSession.aperture_run_start`; the run's last click converges from there.
+  its "before" in `BurstSession.aperture_run_start` and its request in `aperture_run_last_request`.
+  The run's last click (`ApertureStart.run_last_request`) is ALWAYS read back, even when it asks for
+  the run's starting value; it judges the overshoot direction from the run's previous request (where
+  the iris was heading), its settle needs two equal reads (no measured pre-write position inside a
+  run), and its landings are compared with the run's start for the moved/ignored report. Known
+  limits: the queue peek cannot see that a queued aperture SET will be refused (a combined
+  `{apertureNorm, fps}` with an unlisted fps — the panel never sends one), which leaves the run
+  unmeasured and flagged as before; each queued write still pays the 300 ms shell quiet gap, so
+  ~30 queued clicks still reach the 10 s write-client limit (unchanged by this ticket).
 - **A status read never waits on a settle.** One settle costs the 300 ms write quiet gap plus 2-5
   shell reads 300 ms apart: ~0.9 s on a moving body, ~1.8-2 s on cam7 (the full bound), ~2 s with
   a correction — past the service's 1.5 s poll timeout (the panel would show the relay offline).
@@ -1346,7 +1354,9 @@ reachable over USB-PTP.
   (relay log `aperture write overshot; one correcting step back`), or shows 4.8 without the red
   flag; cam7 still flagged; a SET of the value the iris already holds (Stream Deck absolute) does
   not move it (the no-read-back skip assumes so); during a 3-click aperture run the panel stays
-  online and the run settles once. The 300 ms poll is unverified against a real iris's travel
+  online and the run settles once, on the LAST request (not paused at an earlier click's landing:
+  the run's settle has no start value to wait away from); a quick + then - run back to the start
+  value ends on it. The 300 ms poll is unverified against a real iris's travel
   time: if a real overshoot reads as "not moved", raise the poll, never the read count first.
 
 ## Panel Playwright E2E gotchas — the PWA service worker defeats `page.route`, and 4xx/5xx fixtures are console errors (issue 1343, 18.9.2026)
