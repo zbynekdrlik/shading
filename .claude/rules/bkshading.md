@@ -1322,7 +1322,9 @@ reachable over USB-PTP.
   limits: the queue peek cannot see that a queued aperture SET will be refused (a combined
   `{apertureNorm, fps}` with an unlisted fps — the panel never sends one), which leaves the run
   unmeasured and flagged as before; each queued write still pays the 300 ms shell quiet gap, so
-  ~30 queued clicks still reach the 10 s write-client limit (unchanged by this ticket).
+  ~30 queued clicks still reach the 10 s write-client limit (unchanged by this ticket); a run whose
+  last click repeats the previous request (a repeated absolute Stream Deck press) has no direction
+  to judge an overshoot by, so it is not corrected (the report stays honest: moved, real value).
 - **A status read never waits on a settle.** One settle costs the 300 ms write quiet gap plus 2-5
   shell reads 300 ms apart: ~0.9 s on a moving body, ~1.8-2 s on cam7 (the full bound), ~2 s with
   a correction — past the service's 1.5 s poll timeout (the panel would show the relay offline).

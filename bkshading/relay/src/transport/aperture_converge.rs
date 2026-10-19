@@ -142,6 +142,7 @@ impl CameraSession {
         tracing::info!(
             requested = requested_label,
             before_x100 = ?before,
+            direction_from = ?direction_from,
             landed_x100 = landed,
             correction = %fix_label,
             "aperture write overshot; one correcting step back toward the request"
