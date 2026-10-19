@@ -115,9 +115,32 @@ fn current_i64(block: &str) -> Option<i64> {
     parse_current(block).and_then(|s| s.parse::<i64>().ok())
 }
 
-/// RED stub (issue 1452): the camera's current aperture x100 — not read yet.
-pub fn current_fnumber_x100(_raw: &RawConfigs) -> Option<i64> {
-    None
+/// The RADIO `Current:` only when it names a real f-number; libgphoto2 prints `Current: (null)`
+/// (-> parse_fnumber None) when the lens is open below the camera's first enumerated stop.
+fn current_fnumber_label(raw: &RawConfigs) -> Option<String> {
+    parse_current(&raw.fnumber).filter(|c| parse_fnumber(c).is_some())
+}
+
+/// The camera's current f-number: the RADIO `Current:` when it names a real f-number, else the raw
+/// 0x5007 value / 100 — the only honest current-aperture signal in the off-grid case (issue 1306).
+/// The `5007` property block (issue 1371, the relay's paced read) wins over the `--summary` line;
+/// a non-positive raw is no value.
+fn current_fnumber(raw: &RawConfigs) -> Option<f64> {
+    let summary_fnumber = current_i64(&raw.fnumber_raw)
+        .filter(|raw_x100| *raw_x100 > 0)
+        .or_else(|| parse_summary_fnumber_raw(&raw.summary))
+        .map(|raw_x100| raw_x100 as f64 / 100.0);
+    current_fnumber_label(raw)
+        .as_deref()
+        .and_then(parse_fnumber)
+        .or(summary_fnumber)
+}
+
+/// The camera's current aperture as the raw PTP value x100 (`450` = f/4.5), from the same source
+/// [`params_and_caps`] reports (issue 1452): the relay's write burst starts its aperture
+/// convergence from it, comparing it with the 0x5007 read-back after a write.
+pub fn current_fnumber_x100(raw: &RawConfigs) -> Option<i64> {
+    current_fnumber(raw).map(|f| (f * 100.0).round() as i64)
 }
 
 /// Builds `(ShadingParams, CameraCaps)` from the raw gphoto2 config blocks.
@@ -141,20 +164,8 @@ pub fn params_and_caps(raw: &RawConfigs) -> (ShadingParams, CameraCaps) {
     // `aperture_norm`, the caps `fnumber_choices` below, and the relay's `plan_writes` all count
     // from THIS same list, so the panel's +/- step index can never diverge from the write index.
     let fnumber_labels = parse_fnumber_labels(&raw.fnumber);
-    // The RADIO `Current:` only when it names a real f-number; libgphoto2 prints `Current: (null)`
-    // (-> parse_fnumber None) when the lens is open below the camera's first enumerated stop.
-    let current_label = parse_current(&raw.fnumber).filter(|c| parse_fnumber(c).is_some());
-    // Fall back to the raw 0x5007 value / 100 when the RADIO current is absent — the only honest
-    // current-aperture signal in the off-grid case (issue 1306). The `5007` property block (issue
-    // 1371, the relay's paced read) wins over the `--summary` line; a non-positive raw is no value.
-    let summary_fnumber = current_i64(&raw.fnumber_raw)
-        .filter(|raw_x100| *raw_x100 > 0)
-        .or_else(|| parse_summary_fnumber_raw(&raw.summary))
-        .map(|raw_x100| raw_x100 as f64 / 100.0);
-    let current_fnumber_value = current_label
-        .as_deref()
-        .and_then(parse_fnumber)
-        .or(summary_fnumber);
+    let current_label = current_fnumber_label(raw);
+    let current_fnumber_value = current_fnumber(raw);
     let aperture_av = current_fnumber_value.and_then(fnumber_to_av);
     let aperture_norm = match &current_label {
         // An exact enumerated choice -> its exact position in the (filtered) choice list. If the

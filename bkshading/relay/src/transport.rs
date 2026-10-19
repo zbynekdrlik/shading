@@ -12,12 +12,14 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
+use bkshading_proto::aperture::{landed_aperture, not_applied_after_aperture_motion};
 use bkshading_proto::mapping::{
     choices_to_norm, fnumber_to_av, norm_to_choice_index, parse_fnumber, parse_fnumber_labels,
     DEFAULT_FPS100,
 };
 use bkshading_proto::read::{
-    fps_supported, not_applied_keys, params_and_caps, plan_writes, FpsNotSettable, RawConfigs,
+    current_fnumber_x100, fps_supported, not_applied_keys, params_and_caps, plan_writes,
+    FpsNotSettable, RawConfigs,
 };
 use bkshading_proto::wire::{
     summarize_set_request, RelayState, SetQueue, SetRequest, ShadingParams, SubmitAction,
@@ -26,6 +28,9 @@ use bkshading_proto::wire::{
 use crate::burst::{
     burst_step, BurstAction, BurstEvent, BurstState, Gphoto2Shell, WRITE_SESSION_IDLE_MS,
 };
+
+// issue 1452: the aperture convergence a write burst runs after an aperture write.
+mod aperture_converge;
 
 /// Hard per-gphoto2-command timeout (issue 1309). A gphoto2 that hangs on a busy / unresponsive
 /// USB-PTP device would otherwise hold the serialized camera lock (and its child) forever, wedging
@@ -494,7 +499,12 @@ pub const PACED_READ_KEYS: [&str; 9] = [
 /// the no-relay baseline. A cycle of 9 keys takes ~1 s, under the service's 1.5 s poll timeout.
 pub const READ_PACING_MS: u64 = 100;
 
-/// RED stub (issue 1452): the most 0x5007 reads one aperture settle takes.
+/// The pause before each 0x5007 read-back after an aperture write in a write burst (issue 1452),
+/// while the iris moves. Reads go through the burst's open shell, never a new process per read.
+pub const APERTURE_SETTLE_POLL_MS: u64 = 300;
+
+/// The most 0x5007 reads one settle takes (issue 1452), so a body that never moves its iris (cam7)
+/// costs at most `APERTURE_SETTLE_MAX_READS * APERTURE_SETTLE_POLL_MS` per aperture write.
 pub const APERTURE_SETTLE_MAX_READS: usize = 5;
 
 /// Builds the gphoto2 argv for reading many config keys in ONE process (issue 1229):
@@ -632,6 +642,15 @@ struct BurstSession {
     /// A shell open/write failed this burst ⇒ use the CLI write path for the REST of the burst
     /// (never re-open a broken shell per write). Cleared when the burst idle-closes.
     shell_disabled: bool,
+    /// The camera's aperture as the raw 0x5007 value x100, as last known in this burst (issue
+    /// 1452): seeded from the burst-open read, then the settled read-back of each aperture write.
+    /// The "before" of the next aperture write's convergence. `None` = not known (a write that went
+    /// over the CLI, an unreadable read-back); cleared at idle-close and on a write error.
+    aperture_raw: Option<i64>,
+    /// Whether the burst's LAST aperture write moved the iris (issue 1452): `Some(true)` = it moved
+    /// (wherever it landed, so the idle-close does not report it as ignored), `Some(false)` = it
+    /// did not move (cam7: flagged as before), `None` = not measured. Taken at idle-close.
+    aperture_moved: Option<bool>,
 }
 
 /// Merges every present (`Some`) field of `req` into `acc` (issue 1343) — a later SET's value wins,
@@ -704,6 +723,9 @@ pub struct CameraSession {
     /// the CLI runner write path, which is still pre-read-free and fast. The real binary comes from
     /// the CLI `--gphoto2` arg via [`with_gphoto2_binary`](Self::with_gphoto2_binary).
     gphoto2_binary: String,
+    /// The pause before each 0x5007 read-back after an aperture write (issue 1452);
+    /// [`APERTURE_SETTLE_POLL_MS`] in production, shortened by tests.
+    aperture_settle_poll_ms: u64,
 }
 
 impl CameraSession {
@@ -720,11 +742,14 @@ impl CameraSession {
             set_queue: Mutex::new(SetQueue::default()),
             burst: Mutex::new(BurstSession::default()),
             gphoto2_binary: String::new(),
+            aperture_settle_poll_ms: APERTURE_SETTLE_POLL_MS,
         }
     }
 
-    /// RED stub (issue 1452): the aperture settle pause — no convergence runs yet.
-    pub fn with_aperture_settle_poll_ms(self, _ms: u64) -> Self {
+    /// Sets the pause before each 0x5007 read-back after an aperture write (issue 1452). Production
+    /// keeps [`APERTURE_SETTLE_POLL_MS`]; tests shorten it so a fake shell settles fast.
+    pub fn with_aperture_settle_poll_ms(mut self, ms: u64) -> Self {
+        self.aperture_settle_poll_ms = ms;
         self
     }
 
@@ -943,6 +968,8 @@ impl CameraSession {
         // issue 1343: the writes this burst made, captured at idle-close to compare against the
         // authoritative readback below (`not_applied_keys`) — `Some` only on the burst-close read.
         let mut written_at_close: Option<SetRequest> = None;
+        // issue 1452: whether the burst's last aperture write moved the iris (taken at idle-close).
+        let mut aperture_moved_at_close: Option<bool> = None;
         let force_read = match action {
             BurstAction::CloseShellFinalRead => {
                 burst.state = next_state;
@@ -954,6 +981,8 @@ impl CameraSession {
                                         // issue 1343: take the merged writes BEFORE resetting, so the authoritative read
                                         // below can flag every key the camera did not apply.
                 written_at_close = Some(std::mem::take(&mut burst.written));
+                aperture_moved_at_close = burst.aperture_moved.take();
+                burst.aperture_raw = None;
                 burst.shell_disabled = false;
                 tracing::info!("shading write-burst idle-closed; taking one authoritative read");
                 true
@@ -996,7 +1025,20 @@ impl CameraSession {
                     .as_ref()
                     .map(|c| c.fnumber_choices.clone())
                     .unwrap_or_default();
-                state.not_applied = not_applied_keys(&written, &state.params, &choices);
+                // issue 1452: an aperture write that MOVED the iris is applied wherever it landed
+                // (cam6 one listed step past the request, cam5 its lens's wide-open stop): the
+                // state carries the camera's real value, so it is not listed as ignored. A write
+                // that did not move (cam7) or was not measured keeps the issue-1343 flag.
+                state.not_applied = not_applied_after_aperture_motion(
+                    not_applied_keys(&written, &state.params, &choices),
+                    aperture_moved_at_close,
+                );
+                if written.aperture_norm.is_some() && aperture_moved_at_close == Some(true) {
+                    tracing::info!(
+                        aperture_av = ?state.params.aperture_av,
+                        "shading aperture write moved the iris; reported at the camera's own value"
+                    );
+                }
                 if !state.not_applied.is_empty() {
                     tracing::info!(
                         not_applied = ?state.not_applied,
@@ -1282,6 +1324,9 @@ impl CameraSession {
             };
             burst.plan = Some(basis);
             burst.open_state = Some(open_state);
+            // issue 1452: where the iris is before this burst's first aperture write.
+            burst.aperture_raw = current_fnumber_x100(&raw);
+            burst.aperture_moved = None;
             // issue 1343: a fresh burst starts a fresh write accumulation (the previous burst's
             // writes were consumed at its idle-close). Reset here on the FIRST set of a burst.
             burst.written = SetRequest::default();
@@ -1361,6 +1406,8 @@ impl CameraSession {
                         burst.open_state = None;
                         burst.written = SetRequest::default(); // issue 1343: no stale not-applied
                         burst.projected = None; // item 0: drop the stale projection
+                        burst.aperture_raw = None; // issue 1452: the camera is uncertain now
+                        burst.aperture_moved = None;
                         return Err(e2)
                             .with_context(|| format!("CLI fallback set-config {key}={value}"));
                     }
@@ -1373,9 +1420,20 @@ impl CameraSession {
                         burst.open_state = None;
                         burst.written = SetRequest::default(); // issue 1343: no stale not-applied
                         burst.projected = None; // item 0: drop the stale projection
+                        burst.aperture_raw = None; // issue 1452: the camera is uncertain now
+                        burst.aperture_moved = None;
                         return Err(e);
                     }
                 }
+            }
+        }
+        // 4b. issue 1452: an aperture write is read back through the shell until the iris settles,
+        //     and an overshoot gets ONE correcting listed step back toward the request.
+        if let Some(norm) = req.aperture_norm {
+            if writes.iter().any(|(key, _)| key == "f-number") {
+                let choice_count = basis.fnumber_labels.len() as i64;
+                let requested = norm_to_choice_index(norm, choice_count) as usize;
+                self.converge_aperture(burst, requested, &basis.fnumber_labels);
             }
         }
         // 5. Writes applied — record what this SET wrote (issue 1343: the merged `written` is
@@ -1393,7 +1451,13 @@ impl CameraSession {
             }
         }
         if let (Some(basis), Some(open)) = (burst.plan.clone(), burst.open_state.clone()) {
-            let params = project_shading(&open.params, &burst.written, &basis.fnumber_labels);
+            let mut params = project_shading(&open.params, &burst.written, &basis.fnumber_labels);
+            // issue 1452: an aperture write whose landing was read back reports where the iris
+            // really is, not where it was asked to go.
+            if let (Some(_), Some(raw)) = (burst.written.aperture_norm, burst.aperture_raw) {
+                (params.aperture_av, params.aperture_norm) =
+                    landed_aperture(raw, &basis.fnumber_labels);
+            }
             burst.projected = Some(RelayState { params, ..open });
         }
         let now2 = self.clock.now_ms();
