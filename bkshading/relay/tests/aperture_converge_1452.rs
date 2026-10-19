@@ -45,6 +45,8 @@ enum Body {
     OvershootsUp,
     /// Overshoots ONE listed step in the direction of every write, up and down.
     OvershootsBoth,
+    /// A downward write lands ONE listed step past the request; an upward write lands on it.
+    OvershootsDown,
     /// cam7: every write is ACKed and the iris stays where it was.
     NeverMoves,
     /// Like `OvershootsUp`, but the shell process exits on the first 0x5007 read after a write.
@@ -64,6 +66,9 @@ fn fake_body(dir: &Path, start: i64, body: Body) -> PathBuf {
         Body::OvershootsUp | Body::DiesOnReadBack => up,
         Body::OvershootsBoth => {
             "if [ \"$v\" -gt \"$AP\" ]; then AP=$(next \"$v\"); elif [ \"$v\" -lt \"$AP\" ]; then AP=$(prev \"$v\"); fi"
+        }
+        Body::OvershootsDown => {
+            "if [ \"$v\" -lt \"$AP\" ]; then AP=$(prev \"$v\"); else AP=$v; fi"
         }
         Body::NeverMoves => ":",
     };
@@ -443,6 +448,60 @@ fn a_run_of_queued_aperture_clicks_settles_once_at_the_last_click_1452() {
     assert_eq!(
         reads_after_first_write, 2,
         "one settle (two equal reads) for the whole run: {cmds:?}"
+    );
+
+    clock.store(6_000, Ordering::SeqCst);
+    let closed = s.read_state();
+    assert!(closed.not_applied.is_empty(), "{:?}", closed.not_applied);
+    let got = closed.params.aperture_av.expect("aperture read");
+    assert!(
+        (got - av(4.8)).abs() < 1e-9,
+        "camera at f/4.8, got AV {got}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_run_that_ends_on_its_starting_value_is_still_read_back_and_corrected_1452() {
+    // f/4.8 -> click f/5.2 (lands f/5.2, deferred: the second click is queued) -> click f/4.8,
+    // back to where the run started. The iris is NOT at f/4.8 when that last click runs, so it is
+    // not a no-op: it is read back (the body overshoots down to f/4.5) and corrected ONE step up,
+    // the direction judged from the run's previous click (f/5.2), never from the run's start.
+    let scratch = Scratch::new("runback");
+    let bin = fake_body(&scratch.0, 480, Body::OvershootsDown);
+    let clock = Arc::new(AtomicU64::new(0));
+    let s = Arc::new(session(&bin, &clock));
+    let first = {
+        let s = s.clone();
+        std::thread::spawn(move || {
+            s.submit(&SetRequest {
+                aperture_norm: Some(norm(3)),
+                ..Default::default()
+            })
+            .map(|_| ())
+        })
+    };
+    wait_for_command(&scratch.0, "get-config iso");
+    let second = s
+        .submit(&SetRequest {
+            aperture_norm: Some(norm(2)),
+            ..Default::default()
+        })
+        .expect("submit ok");
+    assert!(matches!(second, ApplyOutcome::Queued));
+    first
+        .join()
+        .expect("first click thread")
+        .expect("the run applied");
+    let cmds = shell_commands(&scratch.0);
+    assert_eq!(
+        aperture_writes(&cmds),
+        vec![
+            "set-config f-number=f/5.2".to_string(),
+            "set-config f-number=f/4.8".to_string(),
+            "set-config f-number=f/4.8".to_string()
+        ],
+        "the run's last click is read back and corrected once: {cmds:?}"
     );
 
     clock.store(6_000, Ordering::SeqCst);
