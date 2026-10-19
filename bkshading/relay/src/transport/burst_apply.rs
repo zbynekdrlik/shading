@@ -9,6 +9,7 @@ use bkshading_proto::mapping::{norm_to_choice_index, parse_fnumber_labels, DEFAU
 use bkshading_proto::read::{current_fnumber_x100, fps_supported, params_and_caps, plan_writes};
 use bkshading_proto::wire::{summarize_set_request, RelayState, SetRequest};
 
+use super::aperture_converge::ApertureStart;
 use super::{merge_written, project_shading, BurstSession, CameraSession, PlanBasis};
 use crate::burst::{
     burst_step, BurstAction, BurstEvent, BurstState, Gphoto2Shell, WRITE_SESSION_IDLE_MS,
@@ -55,6 +56,7 @@ impl CameraSession {
             // issue 1452: where the iris is before this burst's first aperture write.
             burst.aperture_raw = current_fnumber_x100(&raw);
             burst.aperture_run_start = None;
+            burst.aperture_run_last_request = None;
             burst.aperture_moved = None;
             // issue 1343: a fresh burst starts a fresh write accumulation (the previous burst's
             // writes were consumed at its idle-close). Reset here on the FIRST set of a burst.
@@ -154,21 +156,32 @@ impl CameraSession {
         //     iris position before it leaves `aperture_raw` until the read-back below re-measures
         //     it, so the projection published meanwhile shows the request, not the old position.
         //     When another aperture click is already queued behind this one, the read-back is
-        //     deferred to the run's LAST click (which converges from where the run started), so a
-        //     quick run pays one settle and the first click's PUT never waits for N of them.
+        //     deferred to the run's LAST click, so a quick run pays one settle and the first
+        //     click's PUT never waits for N of them. That last click compares its landings with
+        //     where the run started and judges its overshoot direction from the run's previous
+        //     request (where the iris was heading), never from the start the iris already left.
         let aperture_write = match req.aperture_norm {
             Some(norm) if writes.iter().any(|(key, _)| key == "f-number") => {
                 let choice_count = basis.fnumber_labels.len() as i64;
+                let requested = norm_to_choice_index(norm, choice_count) as usize;
                 let before = burst
                     .aperture_raw
                     .take()
                     .or_else(|| burst.aperture_run_start.take());
+                let run_last_request = burst.aperture_run_last_request.take();
                 if self.aperture_click_queued() {
                     burst.aperture_run_start = before;
+                    burst.aperture_run_last_request = Some(requested);
                     burst.aperture_moved = None;
                     None
                 } else {
-                    Some((norm_to_choice_index(norm, choice_count) as usize, before))
+                    Some((
+                        requested,
+                        ApertureStart {
+                            raw: before,
+                            run_last_request,
+                        },
+                    ))
                 }
             }
             // An aperture SET that planned no write (no f-number list): nothing moved or measured.
@@ -197,8 +210,8 @@ impl CameraSession {
         // 5b. issue 1452: read the aperture back through the shell until the iris settles, correct
         //     an overshoot by ONE listed step, then project + publish where the iris really is.
         //     A status read meanwhile is answered from the projection just published.
-        if let Some((requested, before)) = aperture_write {
-            self.converge_aperture(burst, before, requested, &basis.fnumber_labels);
+        if let Some((requested, start)) = aperture_write {
+            self.converge_aperture(burst, start, requested, &basis.fnumber_labels);
             refresh_projection(burst);
             self.publish_projection(burst);
         }
@@ -259,6 +272,7 @@ impl BurstSession {
         self.projected = None;
         self.aperture_raw = None;
         self.aperture_run_start = None;
+        self.aperture_run_last_request = None;
         self.aperture_moved = None;
     }
 }

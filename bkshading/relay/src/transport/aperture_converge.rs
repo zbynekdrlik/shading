@@ -32,33 +32,58 @@ impl Landing {
     }
 }
 
+/// Where an aperture write starts from (issue 1452).
+pub(super) struct ApertureStart {
+    /// The iris position (x100) before the write — for the last click of a deferred run, before
+    /// the run. The landings are compared with it (`aperture_moved`).
+    pub(super) raw: Option<i64>,
+    /// `Some(index)` when this click ends a deferred run of aperture clicks: the listed index the
+    /// run's previous click asked for, where the iris was heading — the overshoot direction's
+    /// reference. `None` for a single click (the direction comes from `raw`).
+    pub(super) run_last_request: Option<usize>,
+}
+
 impl CameraSession {
     /// Converges an aperture write onto the requested listed step (issue 1452): reads 0x5007 back
     /// through the burst's open shell until the iris settles, writes ONE correcting listed step
     /// when the camera overshot ([`aperture_correction`]), and records where the iris is now
     /// (`aperture_raw`, the next write's "before") and whether it moved (`aperture_moved`, the
-    /// idle-close report: ANY landing away from `before` is a move).
+    /// idle-close report: ANY landing away from `start.raw` is a move).
     ///
-    /// `before` is the iris position before this write (x100), `requested` the listed index the
-    /// write asked for. A write to the position the iris already holds asks for no move and is not
-    /// read back. Best-effort: it never fails the SET (the write itself already succeeded). A write
-    /// that went over the CLI has no shell to read through, so its landing stays unknown (no new
-    /// gphoto2 process per read, the issue-1229 bus doctrine); a shell error closes the shell for
-    /// the rest of the burst, exactly like a failed shell write.
+    /// `requested` is the listed index the write asked for. A single click to the position the
+    /// iris already holds asks for no move and is not read back; the last click of a run always is
+    /// (its deferred clicks already moved the iris, wherever its request points). Best-effort: it
+    /// never fails the SET (the write itself already succeeded). A write that went over the CLI
+    /// has no shell to read through, so its landing stays unknown (no new gphoto2 process per
+    /// read, the issue-1229 bus doctrine); a shell error closes the shell for the rest of the
+    /// burst, exactly like a failed shell write.
     pub(super) fn converge_aperture(
         &self,
         burst: &mut BurstSession,
-        before: Option<i64>,
+        start: ApertureStart,
         requested: usize,
         labels: &[String],
     ) {
-        if before.and_then(|raw| fnumber_label_index(labels, raw)) == Some(requested) {
-            burst.aperture_raw = before;
+        let ends_run = start.run_last_request.is_some();
+        let direction_from = start
+            .run_last_request
+            .or_else(|| start.raw.and_then(|raw| fnumber_label_index(labels, raw)));
+        if !ends_run && direction_from == Some(requested) {
+            burst.aperture_raw = start.raw;
             burst.aperture_moved = None;
             return;
         }
+        // The settle waits for a reading away from the measured pre-write position; a run's last
+        // click has none (the iris is somewhere along the run), so two equal reads settle it.
+        let settle_from = if ends_run { None } else { start.raw };
         let outcome = match burst.shell.as_mut() {
-            Some(sh) => self.measure_and_correct_aperture(sh, before, requested, labels),
+            Some(sh) => self.measure_and_correct_aperture(
+                sh,
+                settle_from,
+                direction_from,
+                requested,
+                labels,
+            ),
             None => Ok(Landing::unknown()),
         };
         let landing = outcome.unwrap_or_else(|e| {
@@ -70,16 +95,18 @@ impl CameraSession {
             Landing::unknown()
         });
         burst.aperture_raw = landing.now;
-        burst.aperture_moved = aperture_moved(before, &landing.seen);
+        burst.aperture_moved = aperture_moved(start.raw, &landing.seen);
     }
 
-    /// The shell half of [`converge_aperture`](Self::converge_aperture): the settled read-back,
-    /// the at-most-one correcting write, and the settled read-back after it. `Err` = the shell
-    /// failed (the caller closes it).
+    /// The shell half of [`converge_aperture`](Self::converge_aperture): the settled read-back
+    /// (waiting for a reading away from `before`, when known), the at-most-one correcting write
+    /// (direction judged from the listed index `direction_from`), and the settled read-back after
+    /// it. `Err` = the shell failed (the caller closes it).
     fn measure_and_correct_aperture(
         &self,
         sh: &mut Gphoto2Shell,
         before: Option<i64>,
+        direction_from: Option<usize>,
         requested: usize,
         labels: &[String],
     ) -> Result<Landing> {
@@ -97,7 +124,7 @@ impl CameraSession {
         };
         let correction = aperture_correction(
             requested,
-            before.and_then(|raw| fnumber_label_index(labels, raw)),
+            direction_from,
             fnumber_label_index(labels, landed),
             labels.len(),
         )
@@ -106,6 +133,7 @@ impl CameraSession {
             tracing::info!(
                 requested = requested_label,
                 before_x100 = ?before,
+                direction_from = ?direction_from,
                 landed_x100 = landed,
                 "aperture write settled"
             );

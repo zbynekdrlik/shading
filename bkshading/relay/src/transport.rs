@@ -652,6 +652,11 @@ struct BurstSession {
     /// aperture click queued behind it skips its read-back and leaves its "before" here, so the
     /// run's last click converges from where the run started. Cleared with `aperture_raw`.
     aperture_run_start: Option<i64>,
+    /// The listed index the run's latest DEFERRED click asked for (issue 1452): where the iris is
+    /// heading when the run's last click runs, so that click judges its overshoot direction from
+    /// it (never from the run's start, which the iris already left). Cleared with
+    /// `aperture_run_start`.
+    aperture_run_last_request: Option<usize>,
     /// Whether the burst's LAST aperture write moved the iris (issue 1452): `Some(true)` = it moved
     /// (wherever it landed, so the idle-close does not report it as ignored), `Some(false)` = it
     /// did not move (cam7: flagged as before), `None` = not measured. Taken at idle-close.
@@ -1002,6 +1007,7 @@ impl CameraSession {
                 aperture_moved_at_close = burst.aperture_moved.take();
                 burst.aperture_raw = None;
                 burst.aperture_run_start = None;
+                burst.aperture_run_last_request = None;
                 self.publish_projection(&burst); // issue 1452: no burst state outlives the burst
                 burst.shell_disabled = false;
                 tracing::info!("shading write-burst idle-closed; taking one authoritative read");
