@@ -46,7 +46,7 @@ impl CameraSession {
             }
         };
         burst.aperture_raw = landed;
-        burst.aperture_moved = aperture_moved(before, landed);
+        burst.aperture_moved = aperture_moved(before, landed.as_slice());
     }
 
     /// The shell half of [`converge_aperture`](Self::converge_aperture): the settled read-back,

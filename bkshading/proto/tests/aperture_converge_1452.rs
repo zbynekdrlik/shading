@@ -139,12 +139,23 @@ fn settle_with_an_unknown_start_needs_two_equal_reads_1452() {
 
 #[test]
 fn moved_compares_the_raw_values_1452() {
-    assert_eq!(aperture_moved(Some(400), Some(480)), Some(true));
+    assert_eq!(aperture_moved(Some(400), &[480]), Some(true));
     // cam5: a request for f/4.8 lands the lens's wide-open f/4.0, outside the list: still moved.
-    assert_eq!(aperture_moved(Some(520), Some(400)), Some(true));
-    assert_eq!(aperture_moved(Some(400), Some(400)), Some(false));
-    assert_eq!(aperture_moved(None, Some(400)), None);
-    assert_eq!(aperture_moved(Some(400), None), None);
+    assert_eq!(aperture_moved(Some(520), &[400]), Some(true));
+    assert_eq!(aperture_moved(Some(400), &[400]), Some(false));
+    assert_eq!(aperture_moved(None, &[400]), None);
+    assert_eq!(aperture_moved(Some(400), &[]), None);
+}
+
+#[test]
+fn moved_counts_every_landing_not_only_the_last_1452() {
+    // The write landed elsewhere (f/4.5) and the correcting write took the iris back onto its
+    // starting value (f/5.2): it moved twice, it was never ignored.
+    assert_eq!(aperture_moved(Some(520), &[450, 520]), Some(true));
+    // Overshoot then corrected: moved.
+    assert_eq!(aperture_moved(Some(400), &[480, 450]), Some(true));
+    // Every landing at the start: did not move.
+    assert_eq!(aperture_moved(Some(400), &[400, 400]), Some(false));
 }
 
 #[test]
@@ -214,7 +225,7 @@ fn landed_aperture_is_the_real_value_on_the_panel_scale_1452() {
 }
 
 #[test]
-fn current_fnumber_x100_prefers_the_5007_block_then_the_radio_1452() {
+fn current_fnumber_x100_prefers_the_radio_then_the_5007_block_1452() {
     let raw = RawConfigs {
         fnumber: "Current: f/4.5\nChoice: 0 f/4\nChoice: 1 f/4.5\nEND".into(),
         fnumber_raw: "Current: 480\nEND".into(),
