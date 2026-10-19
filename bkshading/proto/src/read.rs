@@ -3,6 +3,7 @@
 //! shells out to gphoto2 and hands the captured text/plan here, so every transform stays
 //! unit-testable without a camera (and standalone-`rustc`-testable under Tier-0).
 
+use crate::aperture::fnumber_raw_from_block;
 use crate::mapping::*;
 use crate::wire::{CameraCaps, SetRequest, ShadingParams};
 
@@ -126,8 +127,7 @@ fn current_fnumber_label(raw: &RawConfigs) -> Option<String> {
 /// The `5007` property block (issue 1371, the relay's paced read) wins over the `--summary` line;
 /// a non-positive raw is no value.
 fn current_fnumber(raw: &RawConfigs) -> Option<f64> {
-    let summary_fnumber = current_i64(&raw.fnumber_raw)
-        .filter(|raw_x100| *raw_x100 > 0)
+    let summary_fnumber = fnumber_raw_from_block(&raw.fnumber_raw)
         .or_else(|| parse_summary_fnumber_raw(&raw.summary))
         .map(|raw_x100| raw_x100 as f64 / 100.0);
     current_fnumber_label(raw)

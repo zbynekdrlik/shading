@@ -70,11 +70,17 @@ pub fn aperture_settle(before_raw: Option<i64>, reads: &[i64], max_reads: usize)
     }
 }
 
-/// Whether an aperture write moved the iris (issue 1452): the raw values (x100) before and after,
-/// compared as values, so a landing outside the list (cam5's wide-open f/4.0) still counts as a
-/// move. `None` when either side is unknown.
+/// Whether an aperture write moved the iris (issue 1452): `landings` are the settled raw values
+/// (x100) after the write and after its correction, oldest first. ANY landing away from
+/// `before_raw` is a move — a write corrected back onto its starting value still moved twice, it
+/// was never ignored. Compared as values, so a landing outside the list (cam5's wide-open f/4.0)
+/// counts. `None` when the start is unknown or nothing was read back.
 pub fn aperture_moved(before_raw: Option<i64>, landings: &[i64]) -> Option<bool> {
-    Some(before_raw? != *landings.last()?)
+    let before = before_raw?;
+    if landings.is_empty() {
+        return None;
+    }
+    Some(landings.iter().any(|raw| *raw != before))
 }
 
 /// The issue-1343 `notApplied` list after the issue-1452 motion check: a burst whose last aperture

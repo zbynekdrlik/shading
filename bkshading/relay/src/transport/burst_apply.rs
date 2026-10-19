@@ -58,6 +58,7 @@ impl CameraSession {
             // writes were consumed at its idle-close). Reset here on the FIRST set of a burst.
             burst.written = SetRequest::default();
             burst.projected = None; // item 0: no projection until the first write of this burst
+            self.publish_projection(burst); // issue 1452: a busy-burst status read sees the open state
         }
         let basis = burst
             .plan
@@ -80,6 +81,7 @@ impl CameraSession {
                 if !matches!(burst.state, BurstState::Open { .. }) {
                     burst.plan = None;
                     burst.open_state = None;
+                    self.publish_projection(burst);
                 }
                 return Err(anyhow::Error::new(refused));
             }
@@ -135,6 +137,7 @@ impl CameraSession {
                         burst.projected = None; // item 0: drop the stale projection
                         burst.aperture_raw = None; // issue 1452: the camera is uncertain now
                         burst.aperture_moved = None;
+                        self.publish_projection(burst);
                         return Err(e2)
                             .with_context(|| format!("CLI fallback set-config {key}={value}"));
                     }
@@ -149,20 +152,30 @@ impl CameraSession {
                         burst.projected = None; // item 0: drop the stale projection
                         burst.aperture_raw = None; // issue 1452: the camera is uncertain now
                         burst.aperture_moved = None;
+                        self.publish_projection(burst);
                         return Err(e);
                     }
                 }
             }
         }
-        // 4b. issue 1452: an aperture write is read back through the shell until the iris settles,
-        //     and an overshoot gets ONE correcting listed step back toward the request.
-        if let Some(norm) = req.aperture_norm {
-            if writes.iter().any(|(key, _)| key == "f-number") {
+        // 4b. issue 1452: the requested aperture listed index, when this SET wrote the f-number. The
+        //     iris position before it leaves `aperture_raw` until the read-back below re-measures
+        //     it, so the projection published meanwhile shows the request, not the old position.
+        let aperture_write = match req.aperture_norm {
+            Some(norm) if writes.iter().any(|(key, _)| key == "f-number") => {
                 let choice_count = basis.fnumber_labels.len() as i64;
-                let requested = norm_to_choice_index(norm, choice_count) as usize;
-                self.converge_aperture(burst, requested, &basis.fnumber_labels);
+                Some((
+                    norm_to_choice_index(norm, choice_count) as usize,
+                    burst.aperture_raw.take(),
+                ))
             }
-        }
+            // An aperture SET that planned no write (no f-number list): nothing moved or measured.
+            Some(_) => {
+                burst.aperture_moved = None;
+                None
+            }
+            None => None,
+        };
         // 5. Writes applied — record what this SET wrote (issue 1343: the merged `written` is
         //    compared against the authoritative readback at the burst idle-close), refresh the
         //    burst's PROJECTED state (item 0: open-read + every merged write projected onto it, so a
@@ -177,15 +190,15 @@ impl CameraSession {
                 plan.fps100 = fps100;
             }
         }
-        if let (Some(basis), Some(open)) = (burst.plan.clone(), burst.open_state.clone()) {
-            let mut params = project_shading(&open.params, &burst.written, &basis.fnumber_labels);
-            // issue 1452: an aperture write whose landing was read back reports where the iris
-            // really is, not where it was asked to go.
-            if let (Some(_), Some(raw)) = (burst.written.aperture_norm, burst.aperture_raw) {
-                (params.aperture_av, params.aperture_norm) =
-                    landed_aperture(raw, &basis.fnumber_labels);
-            }
-            burst.projected = Some(RelayState { params, ..open });
+        refresh_projection(burst);
+        self.publish_projection(burst);
+        // 5b. issue 1452: read the aperture back through the shell until the iris settles, correct
+        //     an overshoot by ONE listed step, then project + publish where the iris really is.
+        //     A status read meanwhile is answered from the projection just published.
+        if let Some((requested, before)) = aperture_write {
+            self.converge_aperture(burst, before, requested, &basis.fnumber_labels);
+            refresh_projection(burst);
+            self.publish_projection(burst);
         }
         let now2 = self.clock.now_ms();
         let (state_after_ok, _) = burst_step(
@@ -195,5 +208,23 @@ impl CameraSession {
         );
         burst.state = state_after_ok;
         Ok(n)
+    }
+}
+
+/// Recomputes the burst's PROJECTED state (issue 1343 item 0): the burst-open read with every
+/// merged write projected onto it. Issue 1452: once an aperture write's landing was read back
+/// (`aperture_raw` holds it), the aperture shows where the iris really is, not where it was asked
+/// to go. Nothing to project before the burst-open read.
+fn refresh_projection(burst: &mut BurstSession) {
+    if let (Some(basis), Some(open)) = (burst.plan.as_ref(), burst.open_state.as_ref()) {
+        let mut params = project_shading(&open.params, &burst.written, &basis.fnumber_labels);
+        if let (Some(_), Some(raw)) = (burst.written.aperture_norm, burst.aperture_raw) {
+            (params.aperture_av, params.aperture_norm) =
+                landed_aperture(raw, &basis.fnumber_labels);
+        }
+        burst.projected = Some(RelayState {
+            params,
+            ..open.clone()
+        });
     }
 }

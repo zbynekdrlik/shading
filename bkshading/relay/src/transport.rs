@@ -727,6 +727,12 @@ pub struct CameraSession {
     /// The pause before each 0x5007 read-back after an aperture write (issue 1452);
     /// [`APERTURE_SETTLE_POLL_MS`] in production, shortened by tests.
     aperture_settle_poll_ms: u64,
+    /// The state the open burst is represented by, published by the burst drain whenever it
+    /// changes (issue 1452): `read_state` serves it when the burst lock is busy (a write, a 0x5007
+    /// settle) instead of waiting behind it — the service polls with a 1.5 s timeout and a settle
+    /// can take longer. A leaf lock: nothing else is ever taken while it is held. `None` outside a
+    /// burst.
+    live_projection: Mutex<Option<RelayState>>,
 }
 
 impl CameraSession {
@@ -744,7 +750,18 @@ impl CameraSession {
             burst: Mutex::new(BurstSession::default()),
             gphoto2_binary: String::new(),
             aperture_settle_poll_ms: APERTURE_SETTLE_POLL_MS,
+            live_projection: Mutex::new(None),
         }
+    }
+
+    /// Publishes the burst's current representation (issue 1452): the projected state, else the
+    /// burst-open state, else nothing. Called by the burst drain whenever either changes.
+    fn publish_projection(&self, burst: &BurstSession) {
+        *self
+            .live_projection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            burst.projected.clone().or_else(|| burst.open_state.clone());
     }
 
     /// Sets the pause before each 0x5007 read-back after an aperture write (issue 1452). Production
@@ -957,10 +974,25 @@ impl CameraSession {
         // cycle). While a burst's shell owns the camera, serve the cache (never read). When the
         // burst has gone idle, close the shell and take ONE authoritative read at burst close,
         // bypassing the issue-1229 floor once (a rare, user-interaction-driven event, not polling).
-        let mut burst = self
-            .burst
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // issue 1452: never WAIT for the burst lock. While the burst drain holds it (a write, a
+        // 0x5007 settle that can outlast the service's 1.5 s poll timeout) the camera is owned by
+        // the shell anyway, so answer at once with the burst's published state.
+        let mut burst = match self.burst.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return self
+                    .live_projection
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+                    .or_else(|| cache.as_ref().map(|c| c.state.clone()))
+                    .unwrap_or_else(|| RelayState {
+                        capture_fps: self.capture_fps,
+                        ..RelayState::offline(self.version.clone())
+                    });
+            }
+        };
         let (next_state, action) = burst_step(
             burst.state,
             BurstEvent::IdleCheck { now_ms },
@@ -984,6 +1016,7 @@ impl CameraSession {
                 written_at_close = Some(std::mem::take(&mut burst.written));
                 aperture_moved_at_close = burst.aperture_moved.take();
                 burst.aperture_raw = None;
+                self.publish_projection(&burst); // issue 1452: no burst state outlives the burst
                 burst.shell_disabled = false;
                 tracing::info!("shading write-burst idle-closed; taking one authoritative read");
                 true
