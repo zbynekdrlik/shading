@@ -1279,7 +1279,8 @@ slider norm (0) instead of the real f-number. Fixed across THREE layers, each Ti
 ### Rig acceptance (supervisor, relay half OUTSIDE production, EVENT mode)
 Deploy service → strih (anytime) + relay → camboxes (outside production only), start the relay, then:
 set `duration_ms` ≤ 150 ms per set in a burst (relay log); click → confirmed number ≤ 1 s; 20 rapid
-clicks = 20 moves; cam1 grabber `Streaming: sent/captured` flat during a 60 s burst (issue-1229
+clicks = 20 moves (since issue 1452 an APERTURE click that ends a run also settles its 0x5007
+read-back, ~0.9-2 s, so for aperture judge the run, not each click: see the 1452 section); cam1 grabber `Streaming: sent/captured` flat during a 60 s burst (issue-1229
 metric); no `gphoto2` process 5 s after the burst (`pgrep gphoto2` empty). The `--shell` speedup
 itself is UNVERIFIED in code lanes — if the shell path never completes it silently uses the CLI
 (still pre-read-free, ~1 set/spawn), which the rig step confirms/tunes.
@@ -1309,13 +1310,20 @@ reachable over USB-PTP.
   most ONE correcting write, settles again. A SET to the listed value the iris already holds is not
   read back. A write that fell back to the CLI has no read-back (no new gphoto2 process per read,
   issue 1229) and is reported as before.
-- **A status read never waits on a settle.** A settle holds the burst lock up to ~1.5 s (cam7, the
-  full bound) or ~3 s with a correction, past the service's 1.5 s poll timeout (the panel would show
-  the relay offline). `read_state` therefore try-locks the burst; on `WouldBlock` it answers from
-  `CameraSession.live_projection`, which the drain publishes (`publish_projection`: the projection,
-  else the burst-open state) after the open read, after the writes, after the settle, on every
-  error path, and clears at idle-close. It is a leaf lock. Any NEW long step inside the burst drain
-  must publish before it starts.
+- **A run of queued aperture clicks settles ONCE, at its last click.** The FIFO drain answers the
+  first click's PUT only after the whole run, and the service write client gives up at 10 s, so a
+  click with another aperture click already queued behind it (`SetQueue::has_pending_aperture`,
+  peeked under the burst lock: order burst -> set_queue, as `submit`) skips its read-back and leaves
+  its "before" in `BurstSession.aperture_run_start`; the run's last click converges from there.
+- **A status read never waits on a settle.** One settle costs the 300 ms write quiet gap plus 2-5
+  shell reads 300 ms apart: ~0.9 s on a moving body, ~1.8-2 s on cam7 (the full bound), ~2 s with
+  a correction — past the service's 1.5 s poll timeout (the panel would show the relay offline).
+  `read_state` therefore try-locks the burst; on `WouldBlock` it answers `busy_burst_state`: the
+  `CameraSession.live_projection` the drain publishes (`publish_projection`: the projection, else
+  the burst-open state) after the open read, after the writes, after the settle, on every error
+  path, cleared at idle-close; else the last cached read; else offline (only on the very first
+  burst after a relay start, before any read filled the cache). It is a leaf lock. Any NEW long step
+  inside the burst drain must publish before it starts.
 - **Report:** `BurstSession.aperture_raw` (seeded from the burst-open read via
   `read::current_fnumber_x100`, then each settled landing) is the next write's "before";
   `aperture_moved` of the LAST aperture write is taken at the idle-close. A moved write is not in
@@ -1326,15 +1334,20 @@ reachable over USB-PTP.
   over every position) and `relay/tests/aperture_converge_1452.rs` (a STATEFUL fake `gphoto2 --shell`
   whose 0x5007 moves like cam6 / cam7 / an up-and-down overshooter / a shell that dies on the
   read-back, driven through the real `CameraSession` burst; `with_aperture_settle_poll_ms` shortens
-  the poll; one test spawns the write on a thread and times a concurrent `read_state`).
+  the poll; one test spawns the write on a thread and times a concurrent `read_state`, another
+  queues a second click behind the first and expects one settle for the run).
 - **Open with the main (not decided in the lane):** no correction when the overshoot lands on the
-  first/last listed value (the design's table), and an off-list START (cam1 at f/4.0 below its 4.5
-  grid) has no index, so it is never corrected — a raw-value direction would cover it.
+  first/last listed value (the design's table); an off-list START (cam1 at f/4.0 below its 4.5
+  grid) has no index, so it is never corrected (a raw-value direction would cover it); a correction
+  that overshoots back onto the START reports "moved" with the iris where it began (synthetic so
+  far: cam6 lands exactly on downward writes).
 - **Live acceptance (supervisor, outside production, rig-busy gated):** deploy the relay to
   cam5/cam6/cam7 (`scripts/bkshading-deploy-relay.sh`), then on cam6 4.0 -> request 4.5: lands 4.5
   (relay log `aperture write overshot; one correcting step back`), or shows 4.8 without the red
-  flag; cam7 still flagged. The 300 ms poll is unverified against a real iris's travel time: if a
-  real overshoot reads as "not moved", raise the poll, never the read count first.
+  flag; cam7 still flagged; a SET of the value the iris already holds (Stream Deck absolute) does
+  not move it (the no-read-back skip assumes so); during a 3-click aperture run the panel stays
+  online and the run settles once. The 300 ms poll is unverified against a real iris's travel
+  time: if a real overshoot reads as "not moved", raise the poll, never the read count first.
 
 ## Panel Playwright E2E gotchas — the PWA service worker defeats `page.route`, and 4xx/5xx fixtures are console errors (issue 1343, 18.9.2026)
 
