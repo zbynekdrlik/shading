@@ -1209,7 +1209,8 @@ slider norm (0) instead of the real f-number. Fixed across THREE layers, each Ti
 - A persistent `gphoto2 --shell` child (`Gphoto2Shell`) is used ONLY inside a WRITE BURST: opened on
   the first set, kept warm across a burst of clicks, closed after `WRITE_SESSION_IDLE_MS` (5 s) idle.
   Inside a burst each write is planned from the f-number choices read ONCE at burst open (NO
-  pre-write read), and applied through the shell — so a click moves the camera in ~150 ms.
+  pre-write read), and applied through the shell — so a click moves the camera in ~150 ms (an
+  aperture click then also settles its 0x5007 read-back, issue 1452 below).
 - **It is a best-effort OPTIMISATION with a hard CLI FALLBACK.** Any shell error, or no completion
   within `WRITE_SESSION_WEDGE_MS` (3 s), KILLS the child and falls the write back to a per-invocation
   CLI `--set-config` (bounded by the existing 8 s `GPHOTO2_TIMEOUT`). So correctness NEVER depends on
@@ -1282,6 +1283,58 @@ clicks = 20 moves; cam1 grabber `Streaming: sent/captured` flat during a 60 s bu
 metric); no `gphoto2` process 5 s after the burst (`pgrep gphoto2` empty). The `--shell` speedup
 itself is UNVERIFIED in code lanes — if the shell path never completes it silently uses the CLI
 (still pre-read-free, ~1 set/spawn), which the rig step confirms/tunes.
+
+## Aperture writes converge onto the request; a moved iris is never "ignored" (issue 1452, 19.10.2026)
+
+Live on three bodies (issue 1452 comments 6262112518 / 6262566110): cam6 (Pocket 6K, fw 8.1) moves
+its iris on a 0x5007 write but lands ONE listed step PAST the request (f/4.0 -> f/4.5 -> f/4.8);
+cam5 (Pocket 4K, fw 9.8) asked for its lowest listed value lands the lens's own wide-open stop
+outside its list; cam7 (Pocket 6K, fw 8.6) ACKs and ignores every write. Values between listed ones
+are refused on every body (`Invalid Device Prop Format`), so the owner's fine 1/8-stop grid is not
+reachable over USB-PTP.
+
+- **Pure decisions in `bkshading/proto/src/aperture.rs`** (std-only, rustc-replica testable):
+  `aperture_correction` (overshoot past the request in the direction of the write -> ONE listed
+  step back; landed on the request, no move, undershoot, off the list, unknown start, or a list end
+  -> none), `aperture_settle` (two equal reads away from the start, or the read bound),
+  `aperture_moved` (ANY settled landing away from the start, raw values, so an off-list landing
+  counts and a write corrected back onto its start still moved), `not_applied_after_aperture_motion`
+  (a moved write drops `apertureNorm`), `fnumber_raw_from_block` (the ONE 0x5007 parser, read.rs
+  uses it too).
+- **Relay half in `transport` child modules** (`transport/aperture_converge.rs`,
+  `transport/burst_apply.rs`): a child reaches the private `BurstSession` without widening it.
+  transport.rs is over its size budget, so new burst logic goes into a child, never into
+  transport.rs. After a burst SET that wrote `f-number`, the relay reads 0x5007 through the burst's
+  OPEN shell every `APERTURE_SETTLE_POLL_MS` (300) up to `APERTURE_SETTLE_MAX_READS` (5), makes at
+  most ONE correcting write, settles again. A SET to the listed value the iris already holds is not
+  read back. A write that fell back to the CLI has no read-back (no new gphoto2 process per read,
+  issue 1229) and is reported as before.
+- **A status read never waits on a settle.** A settle holds the burst lock up to ~1.5 s (cam7, the
+  full bound) or ~3 s with a correction, past the service's 1.5 s poll timeout (the panel would show
+  the relay offline). `read_state` therefore try-locks the burst; on `WouldBlock` it answers from
+  `CameraSession.live_projection`, which the drain publishes (`publish_projection`: the projection,
+  else the burst-open state) after the open read, after the writes, after the settle, on every
+  error path, and clears at idle-close. It is a leaf lock. Any NEW long step inside the burst drain
+  must publish before it starts.
+- **Report:** `BurstSession.aperture_raw` (seeded from the burst-open read via
+  `read::current_fnumber_x100`, then each settled landing) is the next write's "before";
+  `aperture_moved` of the LAST aperture write is taken at the idle-close. A moved write is not in
+  `notApplied`; the projection shows the settled landing (`aperture::landed_aperture`) and the
+  idle-close read carries the camera's own value. No wire field was added (`apertureLanded` in the
+  design was optional: the params already carry the real value).
+- **Tests:** `proto/tests/aperture_converge_1452.rs` (the decision table, the one-step bound swept
+  over every position) and `relay/tests/aperture_converge_1452.rs` (a STATEFUL fake `gphoto2 --shell`
+  whose 0x5007 moves like cam6 / cam7 / an up-and-down overshooter / a shell that dies on the
+  read-back, driven through the real `CameraSession` burst; `with_aperture_settle_poll_ms` shortens
+  the poll; one test spawns the write on a thread and times a concurrent `read_state`).
+- **Open with the main (not decided in the lane):** no correction when the overshoot lands on the
+  first/last listed value (the design's table), and an off-list START (cam1 at f/4.0 below its 4.5
+  grid) has no index, so it is never corrected — a raw-value direction would cover it.
+- **Live acceptance (supervisor, outside production, rig-busy gated):** deploy the relay to
+  cam5/cam6/cam7 (`scripts/bkshading-deploy-relay.sh`), then on cam6 4.0 -> request 4.5: lands 4.5
+  (relay log `aperture write overshot; one correcting step back`), or shows 4.8 without the red
+  flag; cam7 still flagged. The 300 ms poll is unverified against a real iris's travel time: if a
+  real overshoot reads as "not moved", raise the poll, never the read count first.
 
 ## Panel Playwright E2E gotchas — the PWA service worker defeats `page.route`, and 4xx/5xx fixtures are console errors (issue 1343, 18.9.2026)
 
