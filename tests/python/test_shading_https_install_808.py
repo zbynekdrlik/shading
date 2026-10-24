@@ -501,7 +501,8 @@ INTERKOM_HOST = "interkom-lx.newlevel.media"
 INTERKOM_ALIASES = ["interkom.newlevel.media", "interkom-snv.newlevel.media"]
 INTERKOM_PP = "interkom-pp.newlevel.media"
 INTERKOM_UPSTREAM = "http://strih.lan:8790"
-INTERKOM_JANUS = "http://strih.lan:8188"
+# issue 1453: /janus goes to the hub's relay (the frame allowlist), never to Janus directly.
+INTERKOM_JANUS = "http://strih.lan:8790"
 INTERKOM_SITE_NAME = "interkom"
 RETIRED_IPS = ("10.77.9.203", "10.77.9.202")
 
@@ -713,7 +714,9 @@ def test_no_retired_ip_in_generated_interkom_config():
         assert ip not in rendered, "retired IP %s in interkom render" % ip
         assert ip not in committed, "retired IP %s in committed interkom conf" % ip
     assert "proxy_pass http://strih.lan:8790;" in committed, committed
-    assert "proxy_pass http://strih.lan:8188;" in committed, committed
+    # issue 1453: nothing proxies to Janus's own WebSocket port; /janus goes to the hub's relay.
+    assert ":8188" not in committed, committed
+    assert committed.count("proxy_pass http://strih.lan:8790;") == 2, committed
 
 
 def test_committed_interkom_conf_has_all_three_server_names():

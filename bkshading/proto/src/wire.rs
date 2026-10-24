@@ -478,4 +478,11 @@ impl SetQueue {
     pub fn queued_total(&self) -> u64 {
         self.queued_total
     }
+
+    /// Whether a SET still QUEUED (not the one running) moves the aperture again (issue 1452). The
+    /// relay then defers the running click's 0x5007 read-back to the run's last aperture click, so
+    /// a quick run of clicks pays one settle, not one per click.
+    pub fn has_pending_aperture(&self) -> bool {
+        self.pending.iter().any(|req| req.aperture_norm.is_some())
+    }
 }

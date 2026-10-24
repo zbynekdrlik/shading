@@ -185,15 +185,16 @@ interkom_https_aliases() { printf '%s\n' 'interkom.newlevel.media interkom-snv.n
 # today) so the upstream follows future box swaps without a code change — NEVER the retired 10.77.9.203.
 interkom_https_upstream() { printf '%s\n' http://strih.lan:8790; }
 
-# The upstream the `/janus` location forwards to — Janus's WebSocket API on strih-snv (:8188), via the
-# same resolvable strih.lan identity (never the retired 10.77.9.203).
-interkom_https_janus_upstream() { printf '%s\n' http://strih.lan:8188; }
+# The upstream the `/janus` location forwards to -- the intercom hub's /janus relay (:8790, issue
+# 1453: it forwards only the phone page's own frames to Janus, whose WebSocket listens on loopback
+# only), via the same resolvable strih.lan identity (never the retired 10.77.9.203).
+interkom_https_janus_upstream() { printf '%s\n' http://strih.lan:8790; }
 
 # The nginx site name (basename under sites-available / sites-enabled) for the interkom front.
 interkom_https_site_name() { printf '%s\n' interkom; }
 
 # Render the extra `location /janus { ... }` block for the interkom site: the phone's janus.js
-# connects wss://<host>/janus and nginx proxies it to the Janus WS API with an HTTP/1.1 Upgrade
+# connects wss://<host>/janus and nginx proxies it to the hub's Janus relay with an HTTP/1.1 Upgrade
 # passthrough + a long read timeout for the persistent socket. $1 = janus upstream (default the
 # const above). Single-quoted heredoc so the literal nginx `$vars` pass through untouched.
 # shellcheck disable=SC2120  # the janus-upstream arg is optional (defaults to the const)
@@ -201,7 +202,8 @@ interkom_https_janus_location() {
   local janus="${1:-$(interkom_https_janus_upstream)}"
   cat <<EOF
     # Janus WebRTC signalling — the phone's janus.js connects wss://\$host/janus; nginx proxies it
-    # to the Janus WebSocket API. HTTP/1.1 Upgrade passthrough + a long read timeout for the WS.
+    # to the intercom hub's /janus relay, which forwards only the page's own frames to Janus (issue
+    # 1453). HTTP/1.1 Upgrade passthrough + a long read timeout for the WS.
     location = /janus {
         proxy_pass ${janus};
         proxy_http_version 1.1;

@@ -12,6 +12,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
+use bkshading_proto::aperture::not_applied_after_aperture_motion;
 use bkshading_proto::mapping::{
     choices_to_norm, fnumber_to_av, norm_to_choice_index, parse_fnumber, parse_fnumber_labels,
     DEFAULT_FPS100,
@@ -26,6 +27,11 @@ use bkshading_proto::wire::{
 use crate::burst::{
     burst_step, BurstAction, BurstEvent, BurstState, Gphoto2Shell, WRITE_SESSION_IDLE_MS,
 };
+
+// issue 1452: the aperture convergence a write burst runs after an aperture write.
+mod aperture_converge;
+// issue 1337 (moved by issue 1452): one shading write inside a write burst.
+mod burst_apply;
 
 /// Hard per-gphoto2-command timeout (issue 1309). A gphoto2 that hangs on a busy / unresponsive
 /// USB-PTP device would otherwise hold the serialized camera lock (and its child) forever, wedging
@@ -494,6 +500,14 @@ pub const PACED_READ_KEYS: [&str; 9] = [
 /// the no-relay baseline. A cycle of 9 keys takes ~1 s, under the service's 1.5 s poll timeout.
 pub const READ_PACING_MS: u64 = 100;
 
+/// The pause before each 0x5007 read-back after an aperture write in a write burst (issue 1452),
+/// while the iris moves. Reads go through the burst's open shell, never a new process per read.
+pub const APERTURE_SETTLE_POLL_MS: u64 = 300;
+
+/// The most 0x5007 reads one settle takes (issue 1452), so a body that never moves its iris (cam7)
+/// costs at most `APERTURE_SETTLE_MAX_READS * APERTURE_SETTLE_POLL_MS` per aperture write.
+pub const APERTURE_SETTLE_MAX_READS: usize = 5;
+
 /// Builds the gphoto2 argv for reading many config keys in ONE process (issue 1229):
 /// `["--get-config", k1, "--get-config", k2, …]`. A single `gphoto2` invocation with this argv
 /// opens the camera ONCE (one USB open/enumerate/close) and reads every key in that one PTP
@@ -629,6 +643,24 @@ struct BurstSession {
     /// A shell open/write failed this burst ⇒ use the CLI write path for the REST of the burst
     /// (never re-open a broken shell per write). Cleared when the burst idle-closes.
     shell_disabled: bool,
+    /// The camera's aperture as the raw 0x5007 value x100, as last known in this burst (issue
+    /// 1452): seeded from the burst-open read, then the settled read-back of each aperture write.
+    /// The "before" of the next aperture write's convergence. `None` = not known (a write that went
+    /// over the CLI, an unreadable read-back); cleared at idle-close and on a write error.
+    aperture_raw: Option<i64>,
+    /// The iris position before a run of QUEUED aperture clicks (issue 1452): a click with another
+    /// aperture click queued behind it skips its read-back and leaves its "before" here, so the
+    /// run's last click converges from where the run started. Cleared with `aperture_raw`.
+    aperture_run_start: Option<i64>,
+    /// The listed index the run's latest DEFERRED click asked for (issue 1452): where the iris is
+    /// heading when the run's last click runs, so that click judges its overshoot direction from
+    /// it (never from the run's start, which the iris already left). Cleared with
+    /// `aperture_run_start`.
+    aperture_run_last_request: Option<usize>,
+    /// Whether the burst's LAST aperture write moved the iris (issue 1452): `Some(true)` = it moved
+    /// (wherever it landed, so the idle-close does not report it as ignored), `Some(false)` = it
+    /// did not move (cam7: flagged as before), `None` = not measured. Taken at idle-close.
+    aperture_moved: Option<bool>,
 }
 
 /// Merges every present (`Some`) field of `req` into `acc` (issue 1343) — a later SET's value wins,
@@ -701,6 +733,15 @@ pub struct CameraSession {
     /// the CLI runner write path, which is still pre-read-free and fast. The real binary comes from
     /// the CLI `--gphoto2` arg via [`with_gphoto2_binary`](Self::with_gphoto2_binary).
     gphoto2_binary: String,
+    /// The pause before each 0x5007 read-back after an aperture write (issue 1452);
+    /// [`APERTURE_SETTLE_POLL_MS`] in production, shortened by tests.
+    aperture_settle_poll_ms: u64,
+    /// The state the open burst is represented by, published by the burst drain whenever it
+    /// changes (issue 1452): `read_state` serves it when the burst lock is busy (a write, a 0x5007
+    /// settle) instead of waiting behind it — the service polls with a 1.5 s timeout and a settle
+    /// can take longer. A leaf lock: nothing else is ever taken while it is held. `None` outside a
+    /// burst.
+    live_projection: Mutex<Option<RelayState>>,
 }
 
 impl CameraSession {
@@ -717,7 +758,16 @@ impl CameraSession {
             set_queue: Mutex::new(SetQueue::default()),
             burst: Mutex::new(BurstSession::default()),
             gphoto2_binary: String::new(),
+            aperture_settle_poll_ms: APERTURE_SETTLE_POLL_MS,
+            live_projection: Mutex::new(None),
         }
+    }
+
+    /// Sets the pause before each 0x5007 read-back after an aperture write (issue 1452). Production
+    /// keeps [`APERTURE_SETTLE_POLL_MS`]; tests shorten it so a fake shell settles fast.
+    pub fn with_aperture_settle_poll_ms(mut self, ms: u64) -> Self {
+        self.aperture_settle_poll_ms = ms;
+        self
     }
 
     /// Sets the `gphoto2` binary path used to open the write-burst shell (issue 1337). The binary
@@ -923,10 +973,16 @@ impl CameraSession {
         // cycle). While a burst's shell owns the camera, serve the cache (never read). When the
         // burst has gone idle, close the shell and take ONE authoritative read at burst close,
         // bypassing the issue-1229 floor once (a rare, user-interaction-driven event, not polling).
-        let mut burst = self
-            .burst
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // issue 1452: never WAIT for the burst lock. While the burst drain holds it (a write, a
+        // 0x5007 settle that can outlast the service's 1.5 s poll timeout) the camera is owned by
+        // the shell anyway, so answer at once with the burst's published state.
+        let mut burst = match self.burst.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return self.busy_burst_state(cache.as_ref().map(|c| &c.state));
+            }
+        };
         let (next_state, action) = burst_step(
             burst.state,
             BurstEvent::IdleCheck { now_ms },
@@ -935,6 +991,8 @@ impl CameraSession {
         // issue 1343: the writes this burst made, captured at idle-close to compare against the
         // authoritative readback below (`not_applied_keys`) — `Some` only on the burst-close read.
         let mut written_at_close: Option<SetRequest> = None;
+        // issue 1452: whether the burst's last aperture write moved the iris (taken at idle-close).
+        let mut aperture_moved_at_close: Option<bool> = None;
         let force_read = match action {
             BurstAction::CloseShellFinalRead => {
                 burst.state = next_state;
@@ -946,6 +1004,11 @@ impl CameraSession {
                                         // issue 1343: take the merged writes BEFORE resetting, so the authoritative read
                                         // below can flag every key the camera did not apply.
                 written_at_close = Some(std::mem::take(&mut burst.written));
+                aperture_moved_at_close = burst.aperture_moved.take();
+                burst.aperture_raw = None;
+                burst.aperture_run_start = None;
+                burst.aperture_run_last_request = None;
+                self.publish_projection(&burst); // issue 1452: no burst state outlives the burst
                 burst.shell_disabled = false;
                 tracing::info!("shading write-burst idle-closed; taking one authoritative read");
                 true
@@ -988,7 +1051,20 @@ impl CameraSession {
                     .as_ref()
                     .map(|c| c.fnumber_choices.clone())
                     .unwrap_or_default();
-                state.not_applied = not_applied_keys(&written, &state.params, &choices);
+                // issue 1452: an aperture write that MOVED the iris is applied wherever it landed
+                // (cam6 one listed step past the request, cam5 its lens's wide-open stop): the
+                // state carries the camera's real value, so it is not listed as ignored. A write
+                // that did not move (cam7) or was not measured keeps the issue-1343 flag.
+                state.not_applied = not_applied_after_aperture_motion(
+                    not_applied_keys(&written, &state.params, &choices),
+                    aperture_moved_at_close,
+                );
+                if written.aperture_norm.is_some() && aperture_moved_at_close == Some(true) {
+                    tracing::info!(
+                        aperture_av = ?state.params.aperture_av,
+                        "shading aperture write moved the iris; reported at the camera's own value"
+                    );
+                }
                 if !state.not_applied.is_empty() {
                     tracing::info!(
                         not_applied = ?state.not_applied,
@@ -1236,165 +1312,5 @@ impl CameraSession {
             count: total_applied,
             state: Box::new(state),
         })
-    }
-
-    /// Applies ONE shading write inside an open (or opening) burst (issue 1337): plan the writes
-    /// from the choices read ONCE at burst open (NO pre-write read), then run them through the
-    /// persistent `gphoto2 --shell` — falling any shell error back to a per-invocation CLI write for
-    /// the rest of the burst so a broken/slow shell never loses a write and never wedges the relay.
-    /// Returns the number of gphoto2 writes performed. Called only from [`submit`] under the burst
-    /// lock. A CLI-path write failure is a real camera error and propagates (→ 502).
-    fn burst_apply(&self, burst: &mut BurstSession, req: &SetRequest) -> Result<usize> {
-        // 1. Plan basis: read the camera ONCE at burst open (detect + core batch + focus/summary =
-        //    the normal 3-session read, NOT one per write), caching the PlanBasis (f-number labels,
-        //    fps100, the d006 fps choices) AND the full state to project the response onto.
-        //    Subsequent writes in the burst pay NO read. A read failure (absent/busy camera)
-        //    propagates -> 502, exactly like `apply`.
-        if burst.plan.is_none() {
-            let camera = self.camera_for_read();
-            let raw = self
-                .read_raw(&mut burst.shell)
-                .inspect_err(|_| self.forget_detected())?;
-            let (params, caps) = params_and_caps(&raw);
-            let basis = PlanBasis {
-                fnumber_labels: parse_fnumber_labels(&raw.fnumber),
-                fps100: params.fps100.unwrap_or(DEFAULT_FPS100),
-                // issue 1402: the d006 project-fps choices a `fps` write must hit exactly.
-                fps_choices: caps.fps_choices.clone(),
-            };
-            let open_state = RelayState {
-                online: camera.is_some(),
-                camera,
-                params,
-                caps: Some(caps),
-                fps_supported: fps_supported(&raw),
-                capture_fps: self.capture_fps,
-                version: self.version.clone(),
-                not_applied: Vec::new(),
-            };
-            burst.plan = Some(basis);
-            burst.open_state = Some(open_state);
-            // issue 1343: a fresh burst starts a fresh write accumulation (the previous burst's
-            // writes were consumed at its idle-close). Reset here on the FIRST set of a burst.
-            burst.written = SetRequest::default();
-            burst.projected = None; // item 0: no projection until the first write of this burst
-        }
-        let basis = burst
-            .plan
-            .clone()
-            .expect("burst.plan set immediately above");
-        let writes = match plan_writes(req, &basis.fnumber_labels, basis.fps100, &basis.fps_choices)
-        {
-            Ok(writes) => writes,
-            Err(refused) => {
-                // issue 1402: a `fps` the camera's d006 does not list refuses the whole SET before
-                // ANY write or burst-state change — never rounded to a neighbour, never sent to
-                // the off-speed d007. Inside an open burst the plan stays (the camera is
-                // untouched). If this SET would have OPENED the burst, drop the basis read for it,
-                // so no plan outlives a burst that never opened (the next burst re-reads).
-                tracing::warn!(
-                    error = %refused,
-                    set = %summarize_set_request(req),
-                    "shading SET refused before any write (issue 1402)"
-                );
-                if !matches!(burst.state, BurstState::Open { .. }) {
-                    burst.plan = None;
-                    burst.open_state = None;
-                }
-                return Err(anyhow::Error::new(refused));
-            }
-        };
-        let n = writes.len();
-        // 2. Burst state machine: this SET arrived (opens the burst on the first set).
-        let now = self.clock.now_ms();
-        let (state_after_set, action) = burst_step(
-            burst.state,
-            BurstEvent::Set { now_ms: now },
-            WRITE_SESSION_IDLE_MS,
-        );
-        burst.state = state_after_set;
-        // 3. Open the persistent shell on the first set of a burst (unless disabled this burst, or
-        //    no gphoto2 binary was configured — then the CLI write path is used, still pre-read-free).
-        if matches!(action, BurstAction::OpenShellThenWrite)
-            && burst.shell.is_none()
-            && !burst.shell_disabled
-            && !self.gphoto2_binary.is_empty()
-        {
-            match Gphoto2Shell::open(&self.gphoto2_binary) {
-                Ok(sh) => {
-                    burst.shell = Some(sh);
-                    tracing::info!("shading write-burst shell opened");
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "shading write-burst shell open failed; CLI for this burst");
-                    burst.shell_disabled = true;
-                }
-            }
-        }
-        // 4. Run the writes: shell fast-path, CLI fallback on any shell error. `as_mut().map(...)`
-        //    runs the shell write (if a shell is open) and RELEASES the borrow before the match, so
-        //    the error arm can `take()` the shell to kill it.
-        for (key, value) in &writes {
-            match burst.shell.as_mut().map(|sh| sh.set_config(key, value)) {
-                Some(Ok(())) => {} // shell write applied
-                Some(Err(e)) => {
-                    // Shell wedged/errored: kill it, disable the shell for the rest of this burst,
-                    // and RETRY this write on the CLI (never lose the write).
-                    tracing::warn!(error = %e, key = %key, "write-burst shell error; kill shell + CLI fallback");
-                    if let Some(sh) = burst.shell.take() {
-                        sh.close();
-                    }
-                    burst.shell_disabled = true;
-                    if let Err(e2) = self.runner.set_config(key, value) {
-                        // The CLI FALLBACK also failed -> a real camera error; invalidate the plan
-                        // basis (same as the no-shell CLI path below) so the next burst re-reads the
-                        // now-uncertain camera, then propagate (-> 502).
-                        burst.plan = None;
-                        burst.open_state = None;
-                        burst.written = SetRequest::default(); // issue 1343: no stale not-applied
-                        burst.projected = None; // item 0: drop the stale projection
-                        return Err(e2)
-                            .with_context(|| format!("CLI fallback set-config {key}={value}"));
-                    }
-                }
-                None => {
-                    // No shell (disabled / not configured): CLI. A failure is a real camera error —
-                    // invalidate the plan so the next burst re-reads the now-uncertain camera.
-                    if let Err(e) = self.runner.set_config(key, value) {
-                        burst.plan = None;
-                        burst.open_state = None;
-                        burst.written = SetRequest::default(); // issue 1343: no stale not-applied
-                        burst.projected = None; // item 0: drop the stale projection
-                        return Err(e);
-                    }
-                }
-            }
-        }
-        // 5. Writes applied — record what this SET wrote (issue 1343: the merged `written` is
-        //    compared against the authoritative readback at the burst idle-close), refresh the
-        //    burst's PROJECTED state (item 0: open-read + every merged write projected onto it, so a
-        //    pump read while the burst is open confirms the clicks instead of reverting them), and
-        //    refresh the burst idle clock.
-        merge_written(&mut burst.written, req);
-        // issue 1402: an accepted fps write moved the camera's project rate. The rest of this burst
-        // converts a shutter to the d002 ANGLE at the NEW rate the camera now runs, never at the
-        // burst-open rate. (plan_writes accepted `fps`, so `fps * 100` is a listed choice.)
-        if let (Some(fps), Some(plan)) = (req.fps, burst.plan.as_mut()) {
-            if let Some(fps100) = fps.checked_mul(100) {
-                plan.fps100 = fps100;
-            }
-        }
-        if let (Some(basis), Some(open)) = (burst.plan.clone(), burst.open_state.clone()) {
-            let params = project_shading(&open.params, &burst.written, &basis.fnumber_labels);
-            burst.projected = Some(RelayState { params, ..open });
-        }
-        let now2 = self.clock.now_ms();
-        let (state_after_ok, _) = burst_step(
-            burst.state,
-            BurstEvent::WriteOk { now_ms: now2 },
-            WRITE_SESSION_IDLE_MS,
-        );
-        burst.state = state_after_ok;
-        Ok(n)
     }
 }
