@@ -36,7 +36,7 @@ are added as SEPARATE workspace members:
   root package. `cargo fmt --all` DOES cover the new members (so they must be fmt-clean).
 - The members get their OWN CI jobs: `bkshading` (Linux clippy/test/build) + `bkshading-windows`
   (windows-latest `cargo check` — the service ships to the strih PC, Windows first). Both are in the
-  `notify-on-failure` needs list. These jobs are the members' FIRST real compile (Tier-0, below).
+  `notify-on-failure` needs list.
 - Deps stay OUT of the appliance tree: axum/tokio/reqwest(rustls, no openssl)/toml live only in the
   member manifests, so the appliance's minimal deps + probe feature-gating are never touched.
 
@@ -63,33 +63,23 @@ drifted after each root-only bump (root `.518` vs members `.516` live).
   `python-tests` CI job, no toolchain; a skip-if-no-cargo `cargo metadata` check proves resolved
   value-level uniformity where cargo exists).
 
-## Tier-0 verification of a NEW crate (no cargo build locally, issue 557)
-CI is the first compile. The local net that CAUGHT real issues here:
-1. `cargo fmt --all -- --check` — parses every member, proving the Rust is brace/syntax-balanced
-   (a fmt-clean run is your only local "it compiles-shaped" signal).
-2. **Standalone `rustc --edition 2021 --test`** for a pure, `std`-only module (e.g.
-   `proto/src/mapping.rs`): paste the module body inside `mod m { … }` with `//!`→`//` (an inner
-   doc-comment breaks `include!`/module-wrap), add inline `#[test]`s, `rustc --test` + run the
-   binary. This genuinely RUNS the fragile PTP math without cargo.
-3. Python static tests under `tests/python/test_bkshading_*.py` (stdlib only: `os`/`re`/`tomllib`) —
+## Verifying a NEW crate
+1. Python static tests under `tests/python/test_bkshading_*.py` (stdlib only: `os`/`re`/`tomllib`) —
    validate the web-UI structure + config schema. They are picked up automatically by the existing
    `python-tests` CI job (pytest discovers `test_*` in `tests/python`).
    NOTE: a python static webui test CANNOT catch a CSS/JS runtime bug — the M1 review found an
    author `.block-preview{display:flex}` beating the UA `[hidden]` rule (params-only block still
-   showed its preview); a real Playwright E2E against a running service is M2 (Tier-0 can't run it).
-4. Type errors are the residual risk fmt can't catch — hand-audit the axum 0.7 (`:id` routes, not
-   `{id}`), reqwest-rustls, serde `rename_all`, clap-derive, `spawn_blocking` Send-bounds surfaces,
-   and clippy `-D warnings` traps (a never-read struct field fails `dead_code`; and since Rust
-   1.98, `chunks_exact(N)` with a CONSTANT N is a clippy-deny lint — use index math or
+   showed its preview); that needs a real Playwright E2E against a running service (M2).
+2. axum 0.7 routes are `:id`, not `{id}`. clippy `-D warnings` traps (a never-read struct field
+   fails `dead_code`; and since Rust 1.98, `chunks_exact(N)` with a CONSTANT N is a clippy-deny lint — use index math or
    `slice::as_chunks::<N>().0`; the main crate was fixed in dev `052da4c5d`;
    `Option::map_or(<bool literal>, |x| …)` trips `unnecessary_map_or` (clippy `style`, stable
    1.84) — use `is_none_or`/`is_some_and` instead, issue 1157; a two-comparison bound check
    `x > a && x <= b` (e.g. a sanity-cap on an env value) trips `manual_range_contains` (clippy
    `style`) — use `(a+1..=b).contains(&x)` / `(a..=b).contains(&x)`, issue 1229). These clippy traps bite HARDEST
    in the `#[cfg(feature = "ndi")]` code (`ndi_source.rs`): it compiles ONLY under
-   `--features ndi` on CI, so a `-D warnings` lint there is invisible to `cargo fmt` and to every
-   Tier-0 local check — CI is the first (and only) place it surfaces. Hand-audit feature-gated
-   code against this list before pushing.
+   `--features ndi`, so a `-D warnings` lint there is invisible to a default-feature check.
+   Hand-audit feature-gated code against this list before pushing.
 
 ## M1 done / M2+ deferred
 Done: the 3 crates + workspace/CI wiring, the 4+4 responsive web panel skeleton (version in the DOM,
@@ -184,7 +174,7 @@ runtime is `Processing.NDI.Lib.x64.dll` at `C:\Program Files\NDI\NDI 6 Tools\Run
 in-repo at `scripts/bundle-state-server.py::DEFAULT_NDI_RUNTIME_DLL`) — so `--features ndi` could
 never load on its own ship target.
 - **Discovery is now a PURE, default-feature module** `bkshading/service/src/preview/ndi_paths.rs`
-  (Tier-0 unit-tested WITHOUT libndi, mirroring the `convert.rs` split): `NdiOs {Linux,Windows,Macos}`
+  (unit-tested WITHOUT libndi, mirroring the `convert.rs` split): `NdiOs {Linux,Windows,Macos}`
   as an INPUT (not `cfg!`) so every OS's candidate set is tested on the Linux runner. The
   `NdiLib::load_uncached()` loader (reached only via the process-shared `NdiLib::shared()`)
   now consumes `ndi_search_candidates(current_ndi_os(), |k| std::env::var(k).ok())` (env dirs →
@@ -562,7 +552,7 @@ shading-dead for 76 minutes until a human noticed and ran `systemctl start` by h
 - **The fix: a persistent marker file ON THE BOX**, `/run/bkshading-e2e-paused` (tmpfs — writable
   even on the cambox's read-only rootfs; vanishes on reboot, after which the `enabled` relay unit
   starts on its own anyway). ONE source of truth: `bkshading_e2e_pause_marker_path` (default
-  `/run/bkshading-e2e-paused`, overridable via `BKSHADING_E2E_PAUSE_MARKER` for Tier-0 testing),
+  `/run/bkshading-e2e-paused`, overridable via `BKSHADING_E2E_PAUSE_MARKER` for testing),
   consumed by BOTH `bkshading_e2e_pause_stop_cmds` and `bkshading_e2e_pause_restore_cmds`.
 - **`bkshading_e2e_pause_stop_cmds` now treats EITHER `systemctl is-active` OR an already-existing
   marker file as was-active=1** — a marker still on disk means a PRIOR run paused the relay and
@@ -659,11 +649,9 @@ can never disable it — 0/negative/junk falls back to the default; features-def
 - **Writes (`apply`/`SetRequest`) stay per-invocation** (user-initiated + rare) and INVALIDATE the
   cache on success, so the next poll reflects the change instead of a stale cache for up to a floor.
 - **Testability seam:** pure `read_is_fresh(read_at_ms, now_ms, floor_ms)` + a `MonoClock` trait
-  (`InstantClock` prod, `FakeClock` in `tests/relay.rs`) let the floor be Tier-0 tested via the
+  (`InstantClock` prod, `FakeClock` in `tests/relay.rs`) let the floor be tested via the
   fake runner with an injected clock (count gphoto2 spawns under a burst / after floor-expiry /
-  after a write) — no real sleeps, no camera. When cargo can't run locally (Tier-0 #557), verify
-  the decision RED→GREEN with a throwaway local python replica of `read_is_fresh` + the
-  burst/floor/invalidate simulation (a dev aid — nothing committed; CI is the first real compile).
+  after a write) — no real sleeps, no camera.
 - **REJECTED alternative — a persistent `gphoto2 --shell` session** (approach 2): it only cuts
   per-read RÉŽIU (re-enumeration), NOT the FREQUENCY of control traffic (the actual root), and
   brings its own failure class (shell wedge, camera-unplug holding a dead session, fragile
@@ -715,9 +703,9 @@ NOT a physical or lifecycle change.
 - **`d003` stays its own call, NEVER folded into the batch** — a camera that does not answer `d003`
   would abort a batched core read (gphoto2 errors the whole invocation), wrongly degrading the
   essential shading state to offline. Best-effort `d003` alone can fail harmlessly (→ `None`).
-- **Tier-0:** the batch/session count is proven by a `SessionCountingRunner` (one read ≤ 3 sessions;
+- **Tests:** the batch/session count is proven by a `SessionCountingRunner` (one read ≤ 3 sessions;
   RED at 9 on the pre-fix path), `split_config_blocks`/`build_get_config_many_args` are pure and
-  unit-tested + rustc-replicated, and a `CoalescingFakeRunner` (join stdout → split, mirroring the
+  unit-tested, and a `CoalescingFakeRunner` (join stdout → split, mirroring the
   real `Gphoto2Cli`) proves a coalesced read yields byte-identical state to the per-key path.
 - **The `--auto-detect` runs once, not per cycle (issue 1371, 14.10.2026).** It enumerates EVERY
   USB device on the box, and on cam5 (BMPCC + Cam Link on bus 4) the per-cycle sweep pushed the
@@ -868,7 +856,7 @@ capture drop — it cascades into stuck D-state gphoto2 processes and fork-exhau
   `--force-live` (logged loudly) is the SUPERVISOR-ONLY override for a genuine idle-rig-but-guard-
   unavailable case; a normal deploy never passes it. Env `STRIH_HOST`/`STREAM_HOST` (default
   10.77.9.202/.204) + `OBS_PASSWORD` mirror `rig-busy-gate.sh`; `BKSHADING_DEPLOY_OBS_PHASE2_DIR`
-  is a Tier-0 test seam pointing the guard at a fake `obs_phase2.py`. The gate applies to EVERY
+  is a test seam pointing the guard at a fake `obs_phase2.py`. The gate applies to EVERY
   deploy including a handheld SBC (`--arch arm64`), which shares no xHCI bus with the rig — this is
   a deliberate conservative default (a handheld camera may itself be in use during a broadcast);
   pass `--force-live` for a genuinely off-rig handheld deploy.
@@ -1039,7 +1027,7 @@ drag is imprecise. The three step semantics DIFFER and are not interchangeable:
   serving `/api/state` with `fNumberChoices` + recording PUT `/api/params` bodies). Playwright's
   `webServer` array manages BOTH the stub and the service; the spec clicks +/- on clona/K/tint and
   asserts the forwarded absolute PUT bodies + a clean console. Chromium only, one spec (small CI
-  budget). `npm install` (no committed lockfile — Tier-0 has no network), then `npx playwright
+  budget). `npm install` (no committed lockfile), then `npx playwright
   install --with-deps chromium`.
 
 
@@ -1067,7 +1055,7 @@ The panel is installable as a windowed web app (own icon in the Windows dock, no
   whole origin), `/icon-192.png` + `/icon-512.png` (`image/png`), `/favicon.svg` (`image/svg+xml`).
   Each is served via a pure `*_asset()` helper + a `*_CONTENT_TYPE` const (mirrors `rendered_index`),
   so the service route tests pin the payload + content-type WITHOUT standing up an HTTP server
-  (Tier-0 — the codebase has no tower dev-dep).
+  (the codebase has no tower dev-dep).
 - **Secure-context fact (for the owner):** Chrome/Edge offer a PWA install ONLY on HTTPS or
   `localhost`. So: (a) on the strih PC itself, `http://localhost:8770` gives the FULL install; (b)
   on another PC over plain-HTTP LAN (`http://strih.lan:8770`) the browser gives no install prompt —
@@ -1093,7 +1081,7 @@ resolves to dev1's PRIVATE LAN IP** — never the cloudflared tunnel.
   `curl` 200 on the manifest). The committed nginx site is `scripts/nginx/shading.newlevel.media.conf`
   (== the lib's default render — a drift-guard test pins the equality). The pure decisions (site
   render, certbot argv, deploy hook, cloudflare.ini, --check verdict) live in
-  `scripts/lib/shading-https.sh` and are Tier-0 tested by `tests/python/test_shading_https_install_808.py`.
+  `scripts/lib/shading-https.sh` and are tested by `tests/python/test_shading_https_install_808.py`.
   Flags: `--hostname` / `--upstream` / `--lan-ip` / `--email` (live defaults baked in), `--dry-run`
   (rehearse the DNS record step). The installer needs privilege for `/etc` writes; the owner/
   supervisor runs it on dev1 (never a lane worker).
@@ -1145,9 +1133,9 @@ current-aperture signal is the `gphoto2 --summary` line `F-Number(0x5007) … va
   `refreshStepDisabled` disables "−" (idx 0) while "+" moves to the first/next enumerated choice —
   the camera exposes no smaller f-number than its first enumerated stop over PTP. No panel change
   was needed; the existing bound-disable logic produces this by construction.
-- **Tier-0:** the pure aperture selection + parsers were RED→GREEN-proven via a `rustc --test`
-  replica (cam1 → `av=2·log2(4)`, norm 0, `[4.5,4.8,5.6]`; cam2 → `av=2·log2(2)`, norm 0,
-  `[2.6,2.8,3.2]`; the clean-list `f/5.2` case still norm 2/3). CI runs the real proto+relay tests.
+- **Tests:** the proto+relay tests pin the pure aperture selection + parsers (cam1 →
+  `av=2·log2(4)`, norm 0, `[4.5,4.8,5.6]`; cam2 → `av=2·log2(2)`, norm 0, `[2.6,2.8,3.2]`; the
+  clean-list `f/5.2` case still norm 2/3).
 
 
 ## Relay + service LOGGING is on by default, and gphoto2 shell-outs are BOUNDED (issue 1309, 15.9.2026)
@@ -1203,7 +1191,7 @@ relay ran a full `read_raw()` (3 gphoto2 spawns) BEFORE every write + one `--set
 param (~4 processes/click ≈ 1 s); the service `forward_set` shared the 1.5 s poll `reqwest` client
 so a ~1 s write timed out mid-apply (no confirmation → the owner re-clicked); the panel dropped the
 whole push while `interacting` and had no optimistic echo; and the aperture step read the off-grid
-slider norm (0) instead of the real f-number. Fixed across THREE layers, each Tier-0 tested:
+slider norm (0) instead of the real f-number. Fixed across THREE layers, each unit-tested:
 
 ### Layer 1 — relay write-burst session (`bkshading/relay/src/burst.rs` + `transport.rs`)
 - A persistent `gphoto2 --shell` child (`Gphoto2Shell`) is used ONLY inside a WRITE BURST: opened on
@@ -1219,11 +1207,10 @@ slider norm (0) instead of the real f-number. Fixed across THREE layers, each Ti
   boundary + CLI fallback are the whole safety story, and the read path is untouched (still
   per-invocation CLI, floored — the issue-1229 quiet-bus doctrine resumes the moment the burst closes).
 - **The `--shell` command grammar (`set-config key=value`) + prompt shape are UNVERIFIED against a
-  live camera** — a Tier-0 lane has no gphoto2/camera. The fallback makes that acceptable; the
+  live camera** — a lane has no gphoto2/camera. The fallback makes that acceptable; the
   supervisor's rig acceptance (below) confirms/tunes the shell speedup. The PURE pieces (the
   `burst_step` state machine, `burst_idle_expired`, the shell-line classifiers, `project_shading`,
-  the FIFO `SetQueue`) ARE Tier-0 tested (rustc replicas + `tests/burst_1337.rs` incl. a fake
-  `gphoto2 --shell` script).
+  the FIFO `SetQueue`) ARE tested (`tests/burst_1337.rs` incl. a fake `gphoto2 --shell` script).
 - **Wedge watchdog:** the shell read is bounded by `WRITE_SESSION_WEDGE_MS` via a reader-thread +
   `recv_timeout` (the `wedge-watchdog-pattern.md` idea — a bounded kill boundary, never an unbounded
   block); the camera lock is never held across an unbounded wait.
@@ -1294,7 +1281,7 @@ outside its list; cam7 (Pocket 6K, fw 8.6) ACKs and ignores every write. Values 
 are refused on every body (`Invalid Device Prop Format`), so the owner's fine 1/8-stop grid is not
 reachable over USB-PTP.
 
-- **Pure decisions in `bkshading/proto/src/aperture.rs`** (std-only, rustc-replica testable):
+- **Pure decisions in `bkshading/proto/src/aperture.rs`** (std-only):
   `aperture_correction` (overshoot past the request in the direction of the write -> ONE listed
   step back; landed on the request, no move, undershoot, off the list, unknown start, or a list end
   -> none), `aperture_settle` (two equal reads away from the start, or the read bound),
