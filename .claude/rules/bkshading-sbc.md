@@ -116,11 +116,11 @@ the relay/cloudflared provisioning canon but with two deliberate deltas + one go
   artifact.
 - **`--check` verifies the deployed relay binary is actually AArch64** (an ELF `e_machine` read via
   `od` — offset 18, 2 bytes LE, AArch64=183 / x86-64=62; pure helpers in `bkshading-sbc-runtime.sh`,
-  Tier-0 testable with a 20-byte fake-ELF fixture) so a mis-deployed amd64 binary is caught here,
+  testable with a 20-byte fake-ELF fixture) so a mis-deployed amd64 binary is caught here,
   not at reboot with an opaque `Exec format error`.
 - **`--check` also verifies the WiFi link is up** — a pure `bkshading_sbc_wifi_link_state
   <sysfs-root> <iface-glob>` reads `/sys/class/net/wl*/operstate` and returns `up`/`down`/`none`
-  (`BKSHADING_SBC_NET_SYSFS` injects a fake tree for Tier-0). **`operstate` is the primary signal
+  (`BKSHADING_SBC_NET_SYSFS` injects a fake tree for tests). **`operstate` is the primary signal
   but NOT the only one — `carrier==1` also counts as up.** Some drivers (notably the **Orange Pi
   Zero 2W's out-of-tree `uwe5622`**) leave `operstate` at `"unknown"`/`"dormant"` while genuinely
   associated, so operstate-alone would false-FAIL the very prototype board; a genuinely-down link is
