@@ -22,12 +22,15 @@ dev2 MVP `pybridge/mapping.py`). Owner architecture: issue 808 comments 53558360
 - Camera list is config-driven (`bkshading/service/bkshading.example.toml`): a camera is a record
   (id, transport, address, optional `ndi_preview`). **A camera with no `ndi_preview` renders a
   params-only block** (no preview). M2 delivers the LIVE preview (JPEG over HTTP; see M2 section).
-- **The panel is cam1..cam7, one block per cambox (owner ruling 5977504457).** A handheld SBC is
+- **The panel lists the box's OWN venue cameras (`STRIH_CAMERAS`; owner 26.10.2026: "ale v pp urcite
+  nie je 7 kamier!!!" -- strih-snv 2 3 5, strih-pp 1 4 6 7; all seven only at a joint event, issue
+  1431), one block per cambox (owner ruling 5977504457).** A handheld SBC is
   never its own block: it drives the block of the cambox its video reaches (`sbc-relay` + its
   address; the block keeps `CAMN (usb)` + `grab_fps`). The strih seed `strih_bkshading_config_text`
-  renders it from the box fact `STRIH_BKSHADING_RELAYS` (`none` | `N=<transport>@<host>:<port>`
-  overrides of the default `cambox-relay` at `camN.lan:8771`; strih-pp lists all seven by IP,
-  `camN.lan` does not resolve there). Tests: `tests/python/test_bkshading_relays_fact_808.py`.
+  renders it from the box facts `STRIH_CAMERAS` + `STRIH_BKSHADING_RELAYS` (`none` |
+  `N=<transport>@<host>:<port>` overrides of the default `cambox-relay` at `camN.lan:8771`, N one of
+  the box's cameras; strih-pp lists its four by IP, `camN.lan` does not resolve there). The seed is
+  written only when the file is absent, so a live box is brought to it by hand (strih-pp 26.10.2026). Tests: `tests/python/test_bkshading_relays_fact_808.py`.
 - **`relay/src/transport.rs` is split** (issue 808): `transport/gphoto2.rs` (the CLI seam),
   `transport/reads.rs` (read constants + pure helpers), re-exported from `transport`. New code goes
   into a child module, never back into transport.rs (size budget).
