@@ -78,7 +78,7 @@ def test_every_box_declares_its_shading_relays(boxes, box, want):
     ("strih-snv", "3=sbc-relay@-x.lan:8771", "host:port"),
     ("strih-snv", "3=sbc-relay@a.lan:99999", "host:port"),
     ("strih-snv", "none 3=sbc-relay@a.lan:8771", "N=transport@host:port"),
-    ("strih-snv", "", "N=transport@host:port"),
+    ("strih-snv", "", "empty"),
     ("stream-snv", "3=sbc-relay@a.lan:8771", "stream role"),
 ])
 def test_the_loader_refuses_a_wrong_relay_list(boxes, box, new, word):
