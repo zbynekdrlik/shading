@@ -22,6 +22,15 @@ dev2 MVP `pybridge/mapping.py`). Owner architecture: issue 808 comments 53558360
 - Camera list is config-driven (`bkshading/service/bkshading.example.toml`): a camera is a record
   (id, transport, address, optional `ndi_preview`). **A camera with no `ndi_preview` renders a
   params-only block** (no preview). M2 delivers the LIVE preview (JPEG over HTTP; see M2 section).
+- **The panel is cam1..cam7, one block per cambox (owner ruling 5977504457).** A handheld SBC is
+  never its own block: it drives the block of the cambox its video reaches (`sbc-relay` + its
+  address; the block keeps `CAMN (usb)` + `grab_fps`). The strih seed `strih_bkshading_config_text`
+  renders it from the box fact `STRIH_BKSHADING_RELAYS` (`none` | `N=<transport>@<host>:<port>`
+  overrides of the default `cambox-relay` at `camN.lan:8771`; strih-pp lists all seven by IP,
+  `camN.lan` does not resolve there). Tests: `tests/python/test_bkshading_relays_fact_808.py`.
+- **`relay/src/transport.rs` is split** (issue 808): `transport/gphoto2.rs` (the CLI seam),
+  `transport/reads.rs` (read constants + pure helpers), re-exported from `transport`. New code goes
+  into a child module, never back into transport.rs (size budget).
 - Relay transport = shell out to the `gphoto2` CLI behind the `CameraTransport`-style trait (NOT a
   `libgphoto2` FFI binding — the trait keeps FFI as a future 2nd impl). Rationale: no build-time C
   dep → clean ARM cross-build for the zero-class arm64 SBC handheld relay.
