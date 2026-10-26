@@ -1,5 +1,7 @@
-"""issue 808 (owner ruling 5977504457, 4.10.2026): the shading panel is cam1..cam7, one block per cambox,
-and a handheld SBC is the CONTROL of the cambox its video reaches, never its own panel.
+"""issue 808 (owner ruling 5977504457, 4.10.2026): one panel block per cambox, and a handheld SBC is the
+CONTROL of the cambox its video reaches, never its own panel. Owner 26.10.2026: "ale v pp urcite nie je 7
+kamier!!!" / "cela zostava kamier je snv plus pp ked sme na spolocnej akcii, inak su rozdelene medzi dva zbory"
+-- a box's panel lists ITS venue's cameras (`STRIH_CAMERAS`: strih-snv 2 3 5, strih-pp 1 4 6 7).
 
 The provisioning seed `strih_bkshading_config_text` (setup-strih step 16c) still wrote cam1 + three
 standalone `handheld-1..3` panels. It now renders cam1..cam7 from the box fact `STRIH_BKSHADING_RELAYS`:
@@ -37,19 +39,19 @@ def _bash(body, boxes, *args):
                           cwd=str(REPO), timeout=60)
 
 
-def _expected(addresses):
-    """cam1..cam7 blocks: every one keeps its cambox preview + grab fps, the transport + address vary."""
+def _expected(cams, addresses):
+    """One block per venue camera: every one keeps its cambox preview + grab fps, the transport + address vary."""
     want = []
-    for n in range(1, 8):
+    for n in cams:
         transport, address = addresses[n]
         want.append({"id": "cam%d" % n, "label": "Cam %d" % n, "transport": transport, "address": address,
                      "ndi_preview": "CAM%d (usb)" % n, "grab_fps": 60})
     return want
 
 
-SNV_LIVE = _expected({n: ("cambox-relay", "cam%d.lan:8771" % n) for n in range(1, 8)}
+SNV_LIVE = _expected((2, 3, 5), {n: ("cambox-relay", "cam%d.lan:8771" % n) for n in range(1, 8)}
                      | {3: ("sbc-relay", "handheld-1.lan:8771")})
-PP_LIVE = _expected({n: ("cambox-relay", "10.77.9.6%d:8771" % n) for n in range(1, 8)}
+PP_LIVE = _expected((1, 4, 6, 7), {n: ("cambox-relay", "10.77.9.6%d:8771" % n) for n in range(1, 8)}
                     | {4: ("sbc-relay", "10.77.8.70:8771")})
 
 
@@ -57,8 +59,7 @@ PP_LIVE = _expected({n: ("cambox-relay", "10.77.9.6%d:8771" % n) for n in range(
 
 @pytest.mark.parametrize("box,want", [
     ("strih-snv", "3=sbc-relay@handheld-1.lan:8771"),
-    ("strih-pp", "1=cambox-relay@10.77.9.61:8771 2=cambox-relay@10.77.9.62:8771 3=cambox-relay@10.77.9.63:8771 "
-                 "4=sbc-relay@10.77.8.70:8771 5=cambox-relay@10.77.9.65:8771 6=cambox-relay@10.77.9.66:8771 "
+    ("strih-pp", "1=cambox-relay@10.77.9.61:8771 4=sbc-relay@10.77.8.70:8771 6=cambox-relay@10.77.9.66:8771 "
                  "7=cambox-relay@10.77.9.67:8771"),
     ("stream-snv", "none"),
     ("stream-pp", "none"),
@@ -80,6 +81,7 @@ def test_every_box_declares_its_shading_relays(boxes, box, want):
     ("strih-snv", "none 3=sbc-relay@a.lan:8771", "N=transport@host:port"),
     ("strih-snv", "", "empty"),
     ("stream-snv", "3=sbc-relay@a.lan:8771", "stream role"),
+    ("strih-snv", "4=sbc-relay@a.lan:8771", "STRIH_CAMERAS"),
 ])
 def test_the_loader_refuses_a_wrong_relay_list(boxes, box, new, word):
     f = boxes / ("%s.env" % box)
@@ -123,6 +125,7 @@ def test_explicit_args_override_the_bind_and_the_relays(boxes):
     cams = {c["id"]: c for c in cfg["camera"]}
     assert cams["cam5"]["transport"] == "sbc-relay" and cams["cam5"]["address"] == "handheld-2.lan:8771"
     assert cams["cam3"]["transport"] == "cambox-relay" and cams["cam3"]["address"] == "cam3.lan:8771"
+    assert sorted(cams) == ["cam2", "cam3", "cam5"], "only the box's own venue cameras"
     _t, cfg = _seed(boxes, "strih-snv", "0.0.0.0:8770", "none")
     assert all(c["transport"] == "cambox-relay" for c in cfg["camera"])
 
@@ -138,4 +141,4 @@ def test_the_seed_refuses_a_wrong_relay_list(boxes, bad):
 def test_setup_names_the_seeded_panel():
     s = SETUP.read_text()
     assert "cam1 + handhelds" not in s
-    assert "seeded /etc/bkshading/bkshading.toml (cam1..cam7" in s
+    assert "seeded /etc/bkshading/bkshading.toml (the box's STRIH_CAMERAS" in s
