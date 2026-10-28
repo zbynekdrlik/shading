@@ -72,7 +72,9 @@ async fn main() -> Result<()> {
     let addr: SocketAddr = config.bind.parse()?;
 
     let config = Arc::new(config);
-    let agg = Arc::new(Aggregator::new(VERSION)?);
+    // issue 808: relays that announce themselves (a handheld SBC on venue WiFi).
+    let registry = bkshading::registry::RelayRegistry::new();
+    let agg = Arc::new(Aggregator::with_registry(VERSION, registry.clone())?);
 
     // Start one preview worker per camera that has an NDI preview source (M2). Returns the
     // shared store the `preview.jpg` HTTP handler reads. Cameras without a preview name get
@@ -159,6 +161,7 @@ async fn main() -> Result<()> {
         previews,
         live: live_rx,
         live_tx,
+        registry,
     };
 
     tracing::info!(
@@ -169,9 +172,13 @@ async fn main() -> Result<()> {
         "bkshading service starting"
     );
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, router(state))
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    // ConnectInfo: the relay registration keeps the announcing peer's address (issue 808).
+    axum::serve(
+        listener,
+        router(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
     Ok(())
 }
 

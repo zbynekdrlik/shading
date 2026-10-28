@@ -14,6 +14,7 @@ use bkshading_proto::wire::{
 
 use crate::config::{CameraConfig, ServiceConfig};
 use crate::preview::store::{wall_clock_ms, PreviewStore};
+use crate::registry::RelayRegistry;
 
 /// Pure assembly of a [`CameraView`] from a camera's config and its (optional) relay state.
 /// Split out so the mapping — including "has NDI preview iff `ndi_preview` is configured"
@@ -104,10 +105,20 @@ pub struct Aggregator {
     /// nepoklikám viackrát"). Separate client so tuning the write path never touches the poll path.
     write_client: reqwest::Client,
     version: String,
+    /// Self-registered relays (issue 808): resolves a `register:<id>` camera address.
+    registry: RelayRegistry,
 }
 
 impl Aggregator {
     pub fn new(version: impl Into<String>) -> anyhow::Result<Self> {
+        Self::with_registry(version, RelayRegistry::new())
+    }
+
+    /// An aggregator that resolves `register:<id>` addresses through `registry` (issue 808).
+    pub fn with_registry(
+        version: impl Into<String>,
+        registry: RelayRegistry,
+    ) -> anyhow::Result<Self> {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_millis(1500))
             .build()?;
@@ -119,6 +130,7 @@ impl Aggregator {
             client,
             write_client,
             version: version.into(),
+            registry,
         })
     }
 
@@ -152,7 +164,11 @@ impl Aggregator {
 
     /// Reads one relay's `/api/state`, returning `None` if unreachable / malformed.
     async fn poll_state(&self, cam: &CameraConfig) -> Option<RelayState> {
-        let url = format!("http://{}/api/state", cam.address);
+        let Some(address) = self.registry.resolve(&cam.address, Instant::now()) else {
+            tracing::debug!(id = %cam.id, address = %cam.address, "relay not registered (or stale)");
+            return None;
+        };
+        let url = format!("http://{address}/api/state");
         match self.client.get(&url).send().await {
             Ok(resp) if resp.status().is_success() => resp.json::<RelayState>().await.ok(),
             Ok(resp) => {
@@ -180,8 +196,13 @@ impl Aggregator {
         cam: &CameraConfig,
         req: &SetRequest,
     ) -> anyhow::Result<Option<RelayState>> {
-        let url = format!("http://{}/api/params", cam.address);
         let params = summarize_set_request(req);
+        let Some(address) = self.registry.resolve(&cam.address, Instant::now()) else {
+            tracing::error!(id = %cam.id, params = %params, address = %cam.address,
+                "PUT /api/params -> relay not registered (or stale)");
+            anyhow::bail!("relay {} is not registered", cam.id);
+        };
+        let url = format!("http://{address}/api/params");
         let start = Instant::now();
         let result = self.write_client.put(&url).json(req).send().await;
         let latency_ms = start.elapsed().as_millis() as u64;

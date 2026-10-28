@@ -10,11 +10,11 @@ use std::sync::Arc;
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Path, State,
+        ConnectInfo, Path, State,
     },
     http::{header, HeaderName, StatusCode},
     response::{Html, IntoResponse, Json, Response},
-    routing::{get, put},
+    routing::{get, post, put},
     Router,
 };
 use bkshading_proto::wire::{Aggregate, RelayState, ServerMsg, SetRequest};
@@ -23,6 +23,7 @@ use tokio::sync::watch;
 use crate::aggregator::{aggregate_with_camera_update, Aggregator};
 use crate::config::{CameraConfig, ServiceConfig};
 use crate::preview::store::{wall_clock_ms, PreviewStore};
+use crate::registry::{announced_address, valid_relay_id, Registration, RelayRegistry};
 
 const INDEX_HTML: &str = include_str!("../web/index.html");
 const APP_JS: &str = include_str!("../web/app.js");
@@ -80,6 +81,8 @@ pub struct AppState {
     /// uses it to push an IMMEDIATE per-camera confirmation over the WS after a successful write,
     /// instead of waiting up to 2 s for the next pump tick (the owner's "číslo sa hneď zmení").
     pub live_tx: Arc<watch::Sender<Arc<Aggregate>>>,
+    /// Self-registered relays (issue 808): a handheld SBC announces itself here.
+    pub registry: RelayRegistry,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -97,8 +100,31 @@ pub fn router(state: AppState) -> Router {
         .route("/api/cameras", get(cameras))
         .route("/api/cameras/:id/params", put(set_params))
         .route("/api/cameras/:id/preview.jpg", get(preview_jpg))
+        .route("/api/relays/register", post(register_relay))
         .route("/ws", get(ws_upgrade))
         .with_state(state)
+}
+
+/// `POST /api/relays/register` (issue 808): a relay announces `{id, port}`; the service keeps the
+/// address the request came FROM, so a handheld on venue WiFi is found whatever DHCP gave it.
+async fn register_relay(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+    Json(reg): Json<Registration>,
+) -> Response {
+    if !valid_relay_id(&reg.id) || reg.port == 0 {
+        tracing::warn!(peer = %peer, "relay registration refused: bad id or port");
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let address = announced_address(peer.ip(), reg.port);
+    let now = std::time::Instant::now();
+    let fresh = state.registry.lookup(&reg.id, now).is_none();
+    match state.registry.register(&reg.id, address.clone(), now) {
+        Some(old) => tracing::info!(id = %reg.id, from = %old, to = %address, "relay moved"),
+        None if fresh => tracing::info!(id = %reg.id, address = %address, "relay registered"),
+        None => {}
+    }
+    Json(serde_json::json!({ "id": reg.id, "address": address })).into_response()
 }
 
 /// Upgrades a `GET /ws` to a WebSocket that receives a live push of the whole aggregate:

@@ -14,11 +14,11 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::Result;
-use bkshading_relay::http;
 use bkshading_relay::transport::{
     parse_capture_fps_env, parse_min_read_interval_env, CameraSession, Gphoto2Cli,
     DEFAULT_MIN_READ_INTERVAL_MS,
 };
+use bkshading_relay::{http, register};
 use clap::Parser;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -37,6 +37,17 @@ struct Args {
     /// Path to the `gphoto2` binary.
     #[arg(long, default_value = "gphoto2")]
     gphoto2: String,
+
+    /// Announce this relay to the venue shading service at this URL (issue 808), e.g.
+    /// `http://strih.lan:8770/api/relays/register`. A handheld SBC on venue WiFi uses it so the
+    /// service never needs the SBC's DHCP address; a cambox relay runs without it. Also read from
+    /// `BKSHADING_REGISTER_URL`.
+    #[arg(long, env = "BKSHADING_REGISTER_URL")]
+    register_url: Option<String>,
+
+    /// The id announced with `--register-url` (default: this box's hostname, e.g. handheld-1).
+    #[arg(long, env = "BKSHADING_RELAY_ID")]
+    relay_id: Option<String>,
 }
 
 #[tokio::main]
@@ -92,6 +103,26 @@ async fn main() -> Result<()> {
             .await
             .unwrap_or(None);
         tracing::info!(camera = ?detected, "startup camera detect");
+    }
+    // issue 808 (owner 28.10.2026): a handheld announces itself to the shading service instead of
+    // the service dialling a fixed SBC address. A bad flag fails the start by name.
+    if let Some(url) = args
+        .register_url
+        .as_deref()
+        .filter(|u| !u.trim().is_empty())
+    {
+        let target = register::parse_register_url(url.trim()).map_err(anyhow::Error::msg)?;
+        let id = match args.relay_id.filter(|i| !i.trim().is_empty()) {
+            Some(id) => id.trim().to_string(),
+            None => std::fs::read_to_string("/etc/hostname")
+                .map(|h| h.trim().to_string())
+                .unwrap_or_default(),
+        };
+        if !register::valid_relay_id(&id) {
+            anyhow::bail!("invalid relay id {id:?} for --register-url (set --relay-id)");
+        }
+        tracing::info!(id = %id, host = %target.host, port = target.port, "announcing to the shading service");
+        tokio::spawn(register::run(target, id, addr.port()));
     }
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, http::router(session))

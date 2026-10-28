@@ -6,4 +6,5 @@
 
 pub mod burst;
 pub mod http;
+pub mod register;
 pub mod transport;

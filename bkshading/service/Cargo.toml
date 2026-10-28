@@ -56,3 +56,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 jpeg-encoder = "0.7"
 # Runtime dynamic load of libndi (feature `ndi` only).
 libloading = { version = "0.8", optional = true }
+
+[dev-dependencies]
+# issue 808: the relay-registration E2E drives the real relay announcer against the real service.
+bkshading-relay = { path = "../relay" }

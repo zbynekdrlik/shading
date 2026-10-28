@@ -810,3 +810,87 @@ fn preview_transitions_log_each_live_stale_flip_once_808() {
     let mut fresh: HashMap<String, bool> = HashMap::new();
     assert!(preview_transitions(&mut fresh, &views(true)).is_empty());
 }
+
+// ── issue 808 (owner ruling 28.10.2026): a handheld relay registers itself, its IP is never config ──
+
+#[test]
+fn a_register_address_resolves_only_through_a_fresh_registration_808() {
+    use bkshading::registry::{RelayRegistry, REGISTRATION_TTL};
+    use std::time::{Duration, Instant};
+    let reg = RelayRegistry::new();
+    let t0 = Instant::now();
+    // Nothing announced yet: unreachable, never a guessed address.
+    assert_eq!(reg.resolve("register:handheld-1", t0), None);
+    // A plain host:port passes through untouched.
+    assert_eq!(
+        reg.resolve("10.77.9.66:8771", t0).as_deref(),
+        Some("10.77.9.66:8771")
+    );
+    assert_eq!(
+        reg.register("handheld-1", "10.77.8.78:8771".into(), t0),
+        None
+    );
+    assert_eq!(
+        reg.resolve("register:handheld-1", t0 + Duration::from_secs(5))
+            .as_deref(),
+        Some("10.77.8.78:8771")
+    );
+    // DHCP hands the SBC another address: the next announcement moves it, and the move is reported.
+    let t1 = t0 + Duration::from_secs(10);
+    assert_eq!(
+        reg.register("handheld-1", "10.77.8.91:8771".into(), t1)
+            .as_deref(),
+        Some("10.77.8.78:8771")
+    );
+    assert_eq!(
+        reg.resolve("register:handheld-1", t1).as_deref(),
+        Some("10.77.8.91:8771")
+    );
+    // A relay that stopped announcing goes stale: unreachable again.
+    assert_eq!(
+        reg.resolve(
+            "register:handheld-1",
+            t1 + REGISTRATION_TTL + Duration::from_secs(1)
+        ),
+        None
+    );
+    // Another id never resolves through this one.
+    assert_eq!(reg.resolve("register:handheld-2", t1), None);
+}
+
+#[test]
+fn a_relay_id_is_a_plain_name_and_the_announced_address_is_the_peer_808() {
+    use bkshading::registry::{announced_address, registered_id, valid_relay_id};
+    use std::net::IpAddr;
+    assert!(valid_relay_id("handheld-1"));
+    assert!(valid_relay_id("cam4.sbc_1"));
+    for bad in ["", "a b", "x\ny", "../etc", "h:1", &"a".repeat(65)] {
+        assert!(!valid_relay_id(bad), "{bad:?} must be refused");
+    }
+    assert_eq!(registered_id("register:handheld-1"), Some("handheld-1"));
+    assert_eq!(registered_id("register:"), None);
+    assert_eq!(registered_id("10.77.8.70:8771"), None);
+    let v4: IpAddr = "10.77.8.78".parse().unwrap();
+    assert_eq!(announced_address(v4, 8771), "10.77.8.78:8771");
+    let mapped: IpAddr = "::ffff:10.77.8.78".parse().unwrap();
+    assert_eq!(announced_address(mapped, 8771), "10.77.8.78:8771");
+    let v6: IpAddr = "fd00::5".parse().unwrap();
+    assert_eq!(announced_address(v6, 8771), "[fd00::5]:8771");
+}
+
+#[test]
+fn a_config_camera_may_name_its_relay_by_registration_808() {
+    let cfg = bkshading::config::ServiceConfig::from_toml_str(
+        r#"
+[[camera]]
+id = "cam4"
+label = "Cam 4"
+transport = "sbc-relay"
+address = "register:handheld-1"
+ndi_preview = "CAM4 (usb)"
+grab_fps = 60
+"#,
+    )
+    .unwrap();
+    assert_eq!(cfg.cameras[0].address, "register:handheld-1");
+}
