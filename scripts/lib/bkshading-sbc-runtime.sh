@@ -57,6 +57,24 @@ bkshading_sbc_cross_linker_bin() { printf '%s\n' aarch64-linux-gnu-gcc; }
 # the single source of truth; the python test pins it to `no`.
 bkshading_sbc_writes_capture_fps_env() { printf '%s\n' no; }
 
+# --- The SBC announces itself to the venue shading service (owner ruling 28.10.2026) ---
+
+# "to sa malo pripajat na shading bridge a nie bridge na shading pc": a handheld on venue WiFi gets
+# whatever DHCP address it gets, so the service never dials a fixed SBC address. The relay posts
+# {id, port} to this URL every 10 s (bkshading-relay --register-url, read from the env file below);
+# the service reaches the camera configured as `register:<hostname>`. `strih.lan` names the
+# venue's strih at every venue, so one value fits SNV and PP.
+bkshading_sbc_register_url() { printf '%s\n' 'http://strih.lan:8770/api/relays/register'; }
+
+# The relay's environment file on an SBC (the unit's `EnvironmentFile=-`), and its exact content:
+# the register URL only. Still NO CAMERA_BOX_CAPTURE_FPS (bkshading_sbc_writes_capture_fps_env).
+bkshading_sbc_relay_env_path() { printf '%s\n' /etc/bkshading/relay.env; }
+bkshading_sbc_relay_env_text() {
+  printf '%s\n' "# written by scripts/bkshading-provision-sbc.sh (issue 808): the relay announces itself to the"
+  printf '%s\n' "# venue shading service; the service never needs this board's address."
+  printf 'BKSHADING_REGISTER_URL=%s\n' "$(bkshading_sbc_register_url)"
+}
+
 # --- ELF architecture classification (provision --check catches a mis-deployed amd64 binary) ---
 
 # Map an ELF e_machine value (decimal, little-endian) to a short arch name. 183 = AArch64,

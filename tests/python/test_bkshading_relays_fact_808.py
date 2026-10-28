@@ -50,16 +50,16 @@ def _expected(cams, addresses):
 
 
 SNV_LIVE = _expected((2, 3, 5), {n: ("cambox-relay", "cam%d.lan:8771" % n) for n in range(1, 8)}
-                     | {3: ("sbc-relay", "handheld-1.lan:8771")})
+                     | {3: ("sbc-relay", "register:handheld-1")})
 PP_LIVE = _expected((1, 4, 6, 7), {n: ("cambox-relay", "10.77.9.6%d:8771" % n) for n in range(1, 8)}
-                    | {4: ("sbc-relay", "10.77.8.70:8771")})
+                    | {4: ("sbc-relay", "register:handheld-1")})
 
 
 # --- the fact ---------------------------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("box,want", [
-    ("strih-snv", "3=sbc-relay@handheld-1.lan:8771"),
-    ("strih-pp", "1=cambox-relay@10.77.9.61:8771 4=sbc-relay@10.77.8.70:8771 6=cambox-relay@10.77.9.66:8771 "
+    ("strih-snv", "3=sbc-relay@register:handheld-1"),
+    ("strih-pp", "1=cambox-relay@10.77.9.61:8771 4=sbc-relay@register:handheld-1 6=cambox-relay@10.77.9.66:8771 "
                  "7=cambox-relay@10.77.9.67:8771"),
     ("stream-snv", "none"),
     ("stream-pp", "none"),
@@ -82,6 +82,12 @@ def test_every_box_declares_its_shading_relays(boxes, box, want):
     ("strih-snv", "", "empty"),
     ("stream-snv", "3=sbc-relay@a.lan:8771", "stream role"),
     ("strih-snv", "4=sbc-relay@a.lan:8771", "STRIH_CAMERAS"),
+    # owner 28.10.2026: a register id only names an sbc-relay, and only a plain hostname-like id.
+    ("strih-snv", "3=cambox-relay@register:cam3", "register:<id>"),
+    ("strih-snv", "3=sbc-relay@register:", "register:<id>"),
+    ("strih-snv", "3=sbc-relay@register:hand held", "N=transport@host:port"),
+    ("strih-snv", "3=sbc-relay@register:h\u00e1ndheld", "unsafe character"),
+    ("strih-snv", "3=sbc-relay@register:" + "a" * 65, "register:<id>"),
 ])
 def test_the_loader_refuses_a_wrong_relay_list(boxes, box, new, word):
     f = boxes / ("%s.env" % box)
@@ -110,7 +116,8 @@ def test_the_seed_writes_the_live_panel_of_the_box(boxes, box, want):
     assert cfg["preview"] == {"fps": 3.0, "jpeg_quality": 55, "capture_timeout_ms": 1000,
                               "reconnect_backoff_ms": 2000}
     assert cfg["camera"] == want
-    assert "handheld-1\"" not in text and 'id = "handheld' not in text, "a handheld is never its own panel"
+    # A handheld is never its own panel block (its registration id may appear in an address, owner 28.10.2026).
+    assert 'id = "handheld' not in text, "a handheld is never its own panel"
 
 
 def test_an_sbc_relay_block_names_the_ruling(boxes):
@@ -142,3 +149,11 @@ def test_setup_names_the_seeded_panel():
     s = SETUP.read_text()
     assert "cam1 + handhelds" not in s
     assert "seeded /etc/bkshading/bkshading.toml (the box's STRIH_CAMERAS" in s
+
+
+def test_a_handheld_named_by_its_registration_id_is_seeded_as_register_808(boxes):
+    # Owner 28.10.2026: the handheld's WiFi address is never a fact; the panel config names its id.
+    _t, cfg = _seed(boxes, "strih-snv", "0.0.0.0:8770", "3=sbc-relay@register:handheld-1")
+    cams = {c["id"]: c for c in cfg["camera"]}
+    assert cams["cam3"]["transport"] == "sbc-relay"
+    assert cams["cam3"]["address"] == "register:handheld-1"

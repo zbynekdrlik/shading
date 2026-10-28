@@ -57,7 +57,7 @@ def test_a_handheld_controls_a_cambox_block_that_keeps_its_preview():
     cfg = _load()
     cams = {c["id"]: c for c in cfg["camera"]}
     assert cams["cam3"]["transport"] == "sbc-relay"
-    assert cams["cam3"]["address"] == "handheld-1.lan:8771"
+    assert cams["cam3"]["address"] == "register:handheld-1"
     for n in range(1, 8):
         assert cams["cam%d" % n]["ndi_preview"] == "CAM%d (usb)" % n
 

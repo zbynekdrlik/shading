@@ -289,10 +289,10 @@ def test_install_then_check_end_to_end_enable_only_no_env():
         assert os.path.isfile(installed_unit)
         with open(installed_unit) as a, open(UNIT) as b:
             assert a.read() == b.read(), "installed unit must byte-match the repo relay unit"
-        # NO env file written anywhere under the temp root (the SBC writes no capture-fps env)
-        for dirpath, _dirs, files in os.walk(root):
-            for fn in files:
-                assert fn != "relay.env", "an SBC must NOT write a relay.env capture-fps file"
+        # relay.env carries ONLY the register URL (owner 28.10.2026), never a capture-fps line.
+        env = open(os.path.join(root, "etc", "bkshading", "relay.env")).read()
+        assert "BKSHADING_REGISTER_URL=http://strih.lan:8770/api/relays/register\n" in env, env
+        assert "CAMERA_BOX_CAPTURE_FPS" not in env, env
         # ENABLE-ONLY: daemon-reload + enable, NEVER start/restart.
         log = open(calls).read()
         assert "daemon-reload" in log, log
@@ -857,3 +857,27 @@ if __name__ == "__main__":
             print("FAIL %s: %s" % (fn.__name__, e))
     print("\n%d/%d passed" % (len(fns) - failed, len(fns)))
     sys.exit(1 if failed else 0)
+
+
+def test_check_fails_when_the_relay_env_is_missing_or_changed_808():
+    # Owner 28.10.2026: the handheld announces itself to the shading service; a board whose relay.env
+    # lost the register URL would silently drop out of the panel, so --check names it.
+    root = tempfile.mkdtemp()
+    try:
+        r, _c, _b = _run_provision("--install", root)
+        assert r.returncode == 0, (r.stdout, r.stderr)
+        env = os.path.join(root, "etc", "bkshading", "relay.env")
+        r_ok, _c2, _b2 = _run_provision("--check", root)
+        assert r_ok.returncode == 0, (r_ok.stdout, r_ok.stderr)
+        assert "registers the relay with http://strih.lan:8770/api/relays/register" in r_ok.stdout
+        with open(env, "a") as f:
+            f.write("BKSHADING_REGISTER_URL=http://10.77.8.70:8770/api/relays/register\n")
+        r2, _c3, _b3 = _run_provision("--check", root)
+        assert r2.returncode != 0
+        assert "relay.env missing or differs" in r2.stderr, r2.stderr
+        os.remove(env)
+        r3, _c4, _b4 = _run_provision("--check", root)
+        assert r3.returncode != 0
+        assert "relay.env missing or differs" in r3.stderr, r3.stderr
+    finally:
+        shutil.rmtree(root, ignore_errors=True)

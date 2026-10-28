@@ -44,14 +44,15 @@ grab_fps = 60
 # cam3: the camera is a handheld with a Teradek whose receiver feeds cam3, so the cam3 block is
 # controlled by the bkshading-relay on that camera's SBC (handheld-1), not by the cambox. The SBC is
 # a separately powered zero-class arm64 board with WiFi (device-agnostic: Raspberry Pi Zero 2 W /
-# Radxa ZERO 3W / Orange Pi Zero 2W) running the SAME relay component the camboxes run; give it a
-# stable hostname via a static DHCP lease (an ops step) so `handheld-1.lan` resolves. A 2.4 GHz-only
-# board (e.g. a Pi Zero 2 W) needs a 2.4 GHz SSID on site.
+# Radxa ZERO 3W / Orange Pi Zero 2W) running the SAME relay component the camboxes run. The SBC
+# announces itself to this service (relay --register-url, owner 28.10.2026), so its WiFi address is
+# never configured: `register:<relay id>` reaches it at the address its last announcement came from.
+# A 2.4 GHz-only board (e.g. a Pi Zero 2 W) needs a 2.4 GHz SSID on site.
 [[camera]]
 id = "cam3"
 label = "Cam 3"
 transport = "sbc-relay"
-address = "handheld-1.lan:8771"
+address = "register:handheld-1"
 ndi_preview = "CAM3 (usb)"
 grab_fps = 60
 
