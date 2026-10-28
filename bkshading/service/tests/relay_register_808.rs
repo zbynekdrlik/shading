@@ -105,6 +105,10 @@ async fn a_registered_handheld_is_reached_at_the_address_it_announced_from_808()
     // Before the handheld announces itself the camera is unreachable: no address is guessed.
     let before = agg.snapshot(&cfg, &PreviewStore::new()).await;
     assert!(!before.cameras[0].reachable, "no registration yet");
+    assert_eq!(
+        before.cameras[0].registration, None,
+        "nothing announced, nothing shown"
+    );
 
     // The REAL relay announcer posts {id, port} to the service.
     let target = bkshading_relay::register::parse_register_url(&format!(
@@ -128,6 +132,14 @@ async fn a_registered_handheld_is_reached_at_the_address_it_announced_from_808()
     let after = agg.snapshot(&cfg, &PreviewStore::new()).await;
     let cam = &after.cameras[0];
     assert!(cam.reachable, "reached through the registration");
+    // The panel sees the registration: who, from where, just now.
+    let reg = cam
+        .registration
+        .as_ref()
+        .expect("the view carries the registration");
+    assert_eq!(reg.relay_id, "handheld-1");
+    assert_eq!(reg.address, format!("127.0.0.1:{}", relay.port()));
+    assert!(reg.fresh && reg.age_s <= 2, "{reg:?}");
     let state = cam.state.as_ref().unwrap();
     assert!(state.online);
     assert_eq!(state.params.iso, Some(1250));

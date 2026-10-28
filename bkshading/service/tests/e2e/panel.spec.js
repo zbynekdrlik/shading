@@ -772,6 +772,7 @@ test("a handheld that registers itself becomes reachable in the panel and takes 
   const online = page.locator('[data-role="online"]');
   // No announcement yet: the service has no address for register:handheld-e2e, never a guess.
   await expect(online).toHaveText("relay offline", { timeout: 15000 });
+  await expect(page.locator('[data-role="registration"]')).toBeHidden();
 
   // The stub relay (127.0.0.1:8781) announces itself; the service keeps the peer address + port.
   const reg = await page.request.post(`${REGISTER_SVC}/api/relays/register`, {
@@ -782,6 +783,11 @@ test("a handheld that registers itself becomes reachable in the panel and takes 
 
   // The next pump snapshot reaches the stub through the registration.
   await expect(online).toHaveText("online", { timeout: 15000 });
+  // issue 808: the block names the handheld, where it announced from and how fresh that is.
+  const regLine = page.locator('[data-role="registration"]');
+  await expect(regLine).toBeVisible();
+  await expect(regLine).toContainText("handheld-e2e · 127.0.0.1:8781 · ohlásený pred");
+  await expect(regLine).not.toHaveClass(/stale/);
 
   // A write from the panel is forwarded to the registered relay.
   const before = (await (await page.request.get(`${STUB}/__recorded`)).json()).length;

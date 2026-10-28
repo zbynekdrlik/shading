@@ -86,6 +86,8 @@ body {
 .cam-online { font-size: 0.72rem; color: var(--muted); }
 .cam-online.ok { color: var(--ok); }
 .cam-online.bad { color: var(--bad); }
+.cam-registration { font-size: 0.68rem; color: var(--muted); margin: -0.2rem 0 0.4rem; }
+.cam-registration.stale { color: var(--bad); }
 
 .control { background: var(--panel-2); border-radius: 0.5rem; padding: 0.55rem 0.6rem; }
 .control-head { display: flex; justify-content: space-between; color: var(--muted); font-size: 0.8rem; margin-bottom: 0.35rem; }

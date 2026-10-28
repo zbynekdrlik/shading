@@ -68,6 +68,7 @@ pub fn camera_view(
         fps_sync,
         fps_align_settable,
         state,
+        registration: None,
     }
 }
 
@@ -87,7 +88,9 @@ pub fn aggregate_with_camera_update(
 ) -> Aggregate {
     let mut agg = current.clone();
     if let Some(slot) = agg.cameras.iter_mut().find(|c| c.id == cam.id) {
+        let registration = slot.registration.take();
         *slot = camera_view(cam, Some(relay_state), slot.preview_live);
+        slot.registration = registration;
     }
     agg
 }
@@ -146,6 +149,7 @@ impl Aggregator {
         // Read the clock AFTER the polls (up to one client timeout), so liveness is judged at the
         // moment the snapshot is published.
         let now_ms = wall_clock_ms();
+        let now = Instant::now();
         let max_age_ms = cfg.preview.max_frame_age_ms();
         let cameras = cfg
             .cameras
@@ -153,7 +157,9 @@ impl Aggregator {
             .zip(states)
             .map(|(cam, state)| {
                 let live = previews.is_live(&cam.id, now_ms, max_age_ms);
-                camera_view(cam, state, live)
+                let mut view = camera_view(cam, state, live);
+                view.registration = self.registry.view_for(&cam.address, now);
+                view
             })
             .collect();
         Aggregate {

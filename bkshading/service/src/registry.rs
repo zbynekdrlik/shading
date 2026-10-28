@@ -14,6 +14,8 @@ use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use bkshading_proto::RegistrationView;
+
 /// The config `address` prefix that names a self-registering relay by its id.
 pub const REGISTER_PREFIX: &str = "register:";
 
@@ -56,10 +58,19 @@ pub fn announced_address(peer: IpAddr, port: u16) -> String {
     }
 }
 
+/// One relay's registration: where its last announcement came from, when, and since when it has
+/// announced without a gap longer than [`REGISTRATION_TTL`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Entry {
+    address: String,
+    last: Instant,
+    since: Instant,
+}
+
 /// The live registrations, shared between the HTTP handler and the aggregator.
 #[derive(Debug, Clone, Default)]
 pub struct RelayRegistry {
-    inner: Arc<Mutex<HashMap<String, (String, Instant)>>>,
+    inner: Arc<Mutex<HashMap<String, Entry>>>,
 }
 
 impl RelayRegistry {
@@ -68,19 +79,50 @@ impl RelayRegistry {
     }
 
     /// Record an announcement at `now`. Returns the previous address when it changed (the caller
-    /// logs a move once), `None` for a new or unchanged relay.
+    /// logs a move once), `None` for a new or unchanged relay. An announcement after a gap longer
+    /// than [`REGISTRATION_TTL`] starts a new announcing streak.
     pub fn register(&self, id: &str, address: String, now: Instant) -> Option<String> {
         let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let previous = map.insert(id.to_string(), (address.clone(), now));
-        previous.and_then(|(old, _)| (old != address).then_some(old))
+        let previous = map.get(id).cloned();
+        let since = match &previous {
+            Some(e) if now.saturating_duration_since(e.last) <= REGISTRATION_TTL => e.since,
+            _ => now,
+        };
+        map.insert(
+            id.to_string(),
+            Entry {
+                address: address.clone(),
+                last: now,
+                since,
+            },
+        );
+        previous.and_then(|e| (e.address != address).then_some(e.address))
     }
 
     /// The fresh announced address of relay `id` at `now`, else `None`.
     pub fn lookup(&self, id: &str, now: Instant) -> Option<String> {
+        self.status(id, now).filter(|s| s.fresh).map(|s| s.address)
+    }
+
+    /// The panel's view of relay `id` at `now`, stale or fresh; `None` if it never announced.
+    pub fn status(&self, id: &str, now: Instant) -> Option<RegistrationView> {
         let map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        map.get(id).and_then(|(addr, at)| {
-            (now.saturating_duration_since(*at) <= REGISTRATION_TTL).then(|| addr.clone())
+        map.get(id).map(|e| {
+            let age = now.saturating_duration_since(e.last);
+            RegistrationView {
+                relay_id: id.to_string(),
+                address: e.address.clone(),
+                age_s: age.as_secs(),
+                announcing_s: e.last.saturating_duration_since(e.since).as_secs(),
+                fresh: age <= REGISTRATION_TTL,
+            }
         })
+    }
+
+    /// The registration view for a camera configured with `address`: `None` for a fixed
+    /// `host:port`, or a `register:<id>` relay that never announced.
+    pub fn view_for(&self, address: &str, now: Instant) -> Option<RegistrationView> {
+        registered_id(address).and_then(|id| self.status(id, now))
     }
 
     /// The address to reach a camera configured with `address`: a plain `host:port` as is, a

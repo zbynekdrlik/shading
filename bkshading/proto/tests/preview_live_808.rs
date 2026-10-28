@@ -19,6 +19,7 @@ fn view(preview_live: bool) -> CameraView {
         fps_sync: FpsSync::Unknown,
         fps_align_settable: false,
         state: None,
+        registration: None,
     }
 }
 

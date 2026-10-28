@@ -859,6 +859,61 @@ fn a_register_address_resolves_only_through_a_fresh_registration_808() {
 }
 
 #[test]
+fn the_panel_view_shows_the_announcement_age_and_the_unbroken_announcing_time_808() {
+    use bkshading::registry::{RelayRegistry, REGISTRATION_TTL};
+    use std::time::{Duration, Instant};
+    let reg = RelayRegistry::new();
+    let t0 = Instant::now();
+    assert_eq!(
+        reg.view_for("register:handheld-1", t0),
+        None,
+        "never announced"
+    );
+    assert_eq!(
+        reg.view_for("10.77.9.66:8771", t0),
+        None,
+        "a fixed address has no registration"
+    );
+    // Announcing every 10 s for 10 min: one unbroken streak.
+    for i in 0..=60 {
+        reg.register(
+            "handheld-1",
+            "10.77.8.78:8771".into(),
+            t0 + Duration::from_secs(10 * i),
+        );
+    }
+    let now = t0 + Duration::from_secs(604);
+    let v = reg.view_for("register:handheld-1", now).unwrap();
+    assert_eq!(v.relay_id, "handheld-1");
+    assert_eq!(v.address, "10.77.8.78:8771");
+    assert_eq!((v.age_s, v.announcing_s, v.fresh), (4, 600, true));
+    // A DHCP move inside the TTL keeps the streak.
+    reg.register(
+        "handheld-1",
+        "10.77.8.91:8771".into(),
+        t0 + Duration::from_secs(610),
+    );
+    let v = reg
+        .view_for("register:handheld-1", t0 + Duration::from_secs(610))
+        .unwrap();
+    assert_eq!(
+        (v.address.as_str(), v.announcing_s),
+        ("10.77.8.91:8771", 610)
+    );
+    // Silent past the TTL: still shown, but stale, with its last address.
+    let late = t0 + Duration::from_secs(610) + REGISTRATION_TTL + Duration::from_secs(1);
+    let v = reg.view_for("register:handheld-1", late).unwrap();
+    assert!(!v.fresh);
+    assert_eq!(v.address, "10.77.8.91:8771");
+    // The next announcement after that gap starts a new streak (the relay restarted).
+    reg.register("handheld-1", "10.77.8.91:8771".into(), late);
+    let v = reg
+        .view_for("register:handheld-1", late + Duration::from_secs(3))
+        .unwrap();
+    assert_eq!((v.announcing_s, v.age_s, v.fresh), (0, 3, true));
+}
+
+#[test]
 fn a_relay_id_is_a_plain_name_and_the_announced_address_is_the_peer_808() {
     use bkshading::registry::{announced_address, registered_id, valid_relay_id};
     use std::net::IpAddr;

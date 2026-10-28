@@ -370,6 +370,7 @@ fn camera_view_carries_fps_align_settable_camel_case_and_defaults_false_1402() {
         fps_sync: FpsSync::Mismatch,
         fps_align_settable: true,
         state: None,
+        registration: None,
     };
     let json = serde_json::to_string(&view).unwrap();
     assert!(json.contains("\"fpsAlignSettable\":true"), "{json}");

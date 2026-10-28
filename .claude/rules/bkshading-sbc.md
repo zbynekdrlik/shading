@@ -365,6 +365,13 @@ pripajat na shading bridge a nie bridge na shading pc".
   strih-pp: `ssh -o ProxyCommand='sshpass -p <pw> ssh -W %h:%p newlevel@strih-pp.lan' root@<ip>`.
 - **The SBC journal is RAM-only**, so a pre-reboot outage leaves no trace (the 28.10. case); shipping
   it to the venue strih is an open item on issue 808.
+- **The panel shows the registration** (`CameraView.registration`, `RegistrationView`: relay id, the
+  announced address, `ageS` since the last announcement, `announcingS` = the unbroken streak, `fresh`).
+  The streak restarts after a gap longer than the 35 s TTL, so "beží 3 min" after an outage means
+  the relay (or its WiFi) came back 3 min ago. A stale entry stays on the block in red ("sa neohlásil
+  N min (naposledy <ip>)"): a dead handheld is visible, not just "relay offline". The immediate
+  per-camera push after a write carries the previous registration over. The relay-side uptime was
+  deliberately NOT added to `RelayState` (26 struct-literal sites); the streak is the same signal.
 - Tests: `relay/tests/register_808.rs`, `service/tests/relay_register_808.rs` (the real announcer
   against the real router + aggregator over sockets), `tests/service.rs` registry cases, the panel
   Playwright test "a handheld that registers itself..." (`e2e-register-config.toml`, port 8783).
