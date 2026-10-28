@@ -343,6 +343,32 @@ the relay/cloudflared provisioning canon but with two deliberate deltas + one go
   NEVER Bluetooth; a gphoto2 camera is a USB device, not a network link, so the netplan `enx*`
   CDC-NCM trap (#1155) does not touch the handheld.
 
+## The handheld registers itself; no SBC address is ever configured (owner ruling 28.10.2026)
+
+PP event 28.10.: handheld-1 came back on WiFi with DHCP 10.77.8.78 while strih-pp's service dialled
+the fact `4=sbc-relay@10.77.8.70:8771`, so cam4 shading was dead until a hand edit. Owner: "to sa malo
+pripajat na shading bridge a nie bridge na shading pc".
+- **Relay:** `--register-url` / `BKSHADING_REGISTER_URL` (+ `--relay-id`, default the hostname)
+  POSTs `{id, port}` every 10 s (`bkshading/relay/src/register.rs`, plain HTTP over a tokio
+  `TcpStream`, no client crate, so the arm64 build stays dependency-light). A failure is logged once
+  per change and retried; it never stops the relay API. Cambox relays run without the flag.
+- **Service:** `POST /api/relays/register` keeps the PEER address of the request + the announced
+  port (`bkshading/service/src/registry.rs`); a camera with `address = "register:<id>"` is reached
+  through it while it is fresh (35 s), else it reads unreachable, never a guessed address. A bad id
+  or port 0 answers 400. `main.rs` serves with `into_make_service_with_connect_info::<SocketAddr>()`.
+- **Provisioning:** the SBC writes `/etc/bkshading/relay.env` with ONLY
+  `BKSHADING_REGISTER_URL=http://strih.lan:8770/api/relays/register` (`bkshading_sbc_relay_env_text`;
+  `strih.lan` names the venue strih at every venue); `--check` grades it byte for byte.
+  `STRIH_BKSHADING_RELAYS` takes `N=sbc-relay@register:<id>` (sbc-relay only); both venues name
+  the one travelling handheld `register:handheld-1`.
+- **Reaching the PP handheld from dev1:** dev1's own 10.77.8.0/23 route is the SNV LAN, so go through
+  strih-pp: `ssh -o ProxyCommand='sshpass -p <pw> ssh -W %h:%p newlevel@strih-pp.lan' root@<ip>`.
+- **The SBC journal is RAM-only**, so a pre-reboot outage leaves no trace (the 28.10. case); shipping
+  it to the venue strih is an open item on issue 808.
+- Tests: `relay/tests/register_808.rs`, `service/tests/relay_register_808.rs` (the real announcer
+  against the real router + aggregator over sockets), `tests/service.rs` registry cases, the panel
+  Playwright test "a handheld that registers itself..." (`e2e-register-config.toml`, port 8783).
+
 ### Supervisor bench checklist (run when the prototype board arrives — the HARDWARE half, UNVERIFIED in code lanes)
 The code lane ships the provisioning + `--check`; these live-hardware steps are the supervisor's:
 1. ~~PD / power-role listener on the camera's USB-C port~~ — **DROPPED (owner ruling 17.9.2026):

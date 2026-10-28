@@ -12,6 +12,9 @@ const SVC_PORT = 8780;
 // issue 808: a second service instance with ONE preview camera whose NDI feed is absent
 // (e2e-preview-config.toml); panel.spec.js addresses it by absolute URL.
 const PREVIEW_SVC_PORT = 8782;
+// issue 808 (owner 28.10.2026): a third service instance whose one camera is a self-registering
+// handheld (`register:<id>`, e2e-register-config.toml); panel.spec.js announces the stub relay to it.
+const REGISTER_SVC_PORT = 8783;
 const BIN = process.env.BKSHADING_BIN;
 if (!BIN) {
   throw new Error("BKSHADING_BIN must point to the built bkshading service binary");
@@ -19,6 +22,7 @@ if (!BIN) {
 const stub = path.resolve(__dirname, "..", "stub_relay.py");
 const config = path.resolve(__dirname, "e2e-config.toml");
 const previewConfig = path.resolve(__dirname, "e2e-preview-config.toml");
+const registerConfig = path.resolve(__dirname, "e2e-register-config.toml");
 
 module.exports = defineConfig({
   testDir: ".",
@@ -47,6 +51,12 @@ module.exports = defineConfig({
     {
       command: `${BIN} --config ${previewConfig}`,
       url: `http://127.0.0.1:${PREVIEW_SVC_PORT}/api/version`,
+      reuseExistingServer: false,
+      timeout: 30000,
+    },
+    {
+      command: `${BIN} --config ${registerConfig}`,
+      url: `http://127.0.0.1:${REGISTER_SVC_PORT}/api/version`,
       reuseExistingServer: false,
       timeout: 30000,
     },

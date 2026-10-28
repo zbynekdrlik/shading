@@ -751,3 +751,50 @@ test("the align-to-grab button is offered only for a grab the camera lists, cons
 
   expect(problems, `console problems: ${problems.join(" | ")}`).toEqual([]);
 });
+
+// issue 808 (owner ruling 28.10.2026: "to sa malo pripajat na shading bridge a nie bridge na
+// shading pc"): a handheld is configured only by the id it registers with. Before it announces
+// itself the panel shows its relay offline; after one POST /api/relays/register from the relay's
+// host the service reaches it at that address and a panel write lands on it.
+const REGISTER_SVC = process.env.REGISTER_SVC_BASE_URL || "http://127.0.0.1:8783";
+
+test("a handheld that registers itself becomes reachable in the panel and takes a write, console clean", async ({
+  page,
+}) => {
+  const problems = [];
+  page.on("console", (msg) => {
+    const t = msg.type();
+    if (t === "error" || t === "warning") problems.push(`${t}: ${msg.text()}`);
+  });
+  page.on("pageerror", (err) => problems.push(`pageerror: ${err.message}`));
+
+  await page.goto(`${REGISTER_SVC}/`);
+  const online = page.locator('[data-role="online"]');
+  // No announcement yet: the service has no address for register:handheld-e2e, never a guess.
+  await expect(online).toHaveText("relay offline", { timeout: 15000 });
+
+  // The stub relay (127.0.0.1:8781) announces itself; the service keeps the peer address + port.
+  const reg = await page.request.post(`${REGISTER_SVC}/api/relays/register`, {
+    data: { id: "handheld-e2e", port: 8781 },
+  });
+  expect(reg.status()).toBe(200);
+  expect(await reg.json()).toEqual({ id: "handheld-e2e", address: "127.0.0.1:8781" });
+
+  // The next pump snapshot reaches the stub through the registration.
+  await expect(online).toHaveText("online", { timeout: 15000 });
+
+  // A write from the panel is forwarded to the registered relay.
+  const before = (await (await page.request.get(`${STUB}/__recorded`)).json()).length;
+  const kInc = page.locator('[data-role="kelvin-inc"]');
+  await expect(kInc).toBeEnabled({ timeout: 15000 });
+  await kInc.click();
+  await expect
+    .poll(async () => (await (await page.request.get(`${STUB}/__recorded`)).json()).length, {
+      timeout: 10000,
+    })
+    .toBeGreaterThan(before);
+  const recorded = await (await page.request.get(`${STUB}/__recorded`)).json();
+  expect(recorded.slice(before).some((b) => b.kelvin === 5700), "kelvin + -> 5700 via the registration").toBeTruthy();
+
+  expect(problems, `console problems: ${problems.join(" | ")}`).toEqual([]);
+});
