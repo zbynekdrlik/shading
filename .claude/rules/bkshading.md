@@ -31,6 +31,20 @@ dev2 MVP `pybridge/mapping.py`). Owner architecture: issue 808 comments 53558360
   `N=<transport>@<host>:<port>` overrides of the default `cambox-relay` at `camN.lan:8771`, N one of
   the box's cameras; strih-pp lists its four by IP, `camN.lan` does not resolve there). The seed is
   written only when the file is absent, so a live box is brought to it by hand (strih-pp 26.10.2026). Tests: `tests/python/test_bkshading_relays_fact_808.py`.
+- **Issue 1431 (joint event: `strih.lan` is the ONE switch): every cambox relay registers itself, and
+  both strih boxes declare all seven cameras.** The cambox relay.env carries
+  `BKSHADING_REGISTER_URL=http://strih.lan:8770/api/relays/register` + `BKSHADING_RELAY_ID=camN`
+  (`bkshading_relay_env_file_content FPS RELAY_ID`; the unit is UNCHANGED because the SBC reuses it).
+  The service's camera list is static and its preview workers start from it at boot, so a registration
+  alone cannot add a camera: the seed lists the venue cameras first as `address = "register:camN"` +
+  `fallback_address = <the literal relay>` (used while no fresh registration exists: an older relay
+  binary, a relay that has not announced yet), then the other venue's cameras with `visiting = true`.
+  A visiting block is left out of the panel (and not polled) until its relay has announced itself once
+  (`aggregator::camera_listed`), and stays (red, stale) after, so a normal event still shows only the
+  venue's cameras (the 26.10. ruling). A visiting block must name `register:<id>` (refused at load).
+  A handheld override (`N=sbc-relay@...`) is written as before, no fallback. Live boxes keep their
+  hand-made `bkshading.toml` until it is re-seeded by hand (the seed is written only when absent).
+  verify-device `(ao)` FAILs a relay.env without the two lines.
 - **`relay/src/transport.rs` is split** (issue 808): `transport/gphoto2.rs` (the CLI seam),
   `transport/reads.rs` (read constants + pure helpers), re-exported from `transport`. New code goes
   into a child module, never back into transport.rs (size budget).

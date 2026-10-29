@@ -37,6 +37,21 @@ bkshading_relay_apt_package() { printf '%s\n' gphoto2; }
 # (ONE source of truth — the python test pins this against src/capture.rs).
 bkshading_relay_default_capture_fps() { printf '%s\n' 60; }
 
+# Issue 1431: where every cambox relay announces itself (the issue-808 registration the handheld SBC uses).
+# `strih.lan` names the venue strih at every venue, so ONE router record moves the shading with the
+# intercom, the preview and the clock (dantesync --ntp-server strih.lan).
+bkshading_relay_register_url() { printf '%s\n' http://strih.lan:8770/api/relays/register; }
+
+# bkshading_relay_id_for_device NAME -> the relay id a cambox registers with: its camera name lowercased
+# (CAM3 / cam3 -> cam3), the id the strih seed names in `register:camN`. Anything but camN (N >= 1)
+# prints nothing and returns 1: a relay with a wrong id would drive another camera's panel block.
+bkshading_relay_id_for_device() {
+  local id
+  id="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+  [[ "$id" =~ ^cam[123456789][0123456789]*$ ]] || return 1
+  printf '%s\n' "$id"
+}
+
 # --- Pure helpers ---
 
 # Extract the LAST CAMERA_BOX_CAPTURE_FPS value from concatenated camera-box.service.d drop-in text
@@ -67,7 +82,7 @@ bkshading_relay_effective_capture_fps() {
 # Compose the EnvironmentFile body (/etc/bkshading/relay.env) for a given effective fps. Defaults to
 # the appliance default when called with no argument.
 bkshading_relay_env_file_content() {
-  local fps="${1:-}"
+  local fps="${1:-}" relay_id="${2:-}"
   [ -n "$fps" ] || fps="$(bkshading_relay_default_capture_fps)"
   cat <<EOF
 # /etc/bkshading/relay.env -- provisioned by scripts/bkshading-provision-relay.sh (issue 808/809).
@@ -77,5 +92,12 @@ bkshading_relay_env_file_content() {
 # The relay's EnvironmentFile= line makes this file OPTIONAL: if it is absent the relay reports no
 # capture fps and the service falls back to the static grab_fps config instead of a wrong value.
 CAMERA_BOX_CAPTURE_FPS=$fps
+EOF
+  [ -n "$relay_id" ] || return 0
+  cat <<EOF
+# Issue 1431: announce this relay to the shading service behind strih.lan as its camera, so the strih in
+# use (one router record) drives it -- a visiting camera appears on the other venue's strih with no edit.
+BKSHADING_REGISTER_URL=$(bkshading_relay_register_url)
+BKSHADING_RELAY_ID=$relay_id
 EOF
 }
