@@ -44,7 +44,17 @@ dev2 MVP `pybridge/mapping.py`). Owner architecture: issue 808 comments 53558360
   venue's cameras (the 26.10. ruling). A visiting block must name `register:<id>` (refused at load).
   A handheld override (`N=sbc-relay@...`) is written as before, no fallback. Live boxes keep their
   hand-made `bkshading.toml` until it is re-seeded by hand (the seed is written only when absent).
-  verify-device `(ao)` FAILs a relay.env without the two lines.
+  verify-device `(ao)` FAILs a relay.env without the two lines. The visiting set is the union of every
+  strih fact file's `STRIH_CAMERAS` (`strih_box_fleet_cameras`), never a literal range. Known limits:
+  - **Registration is unauthenticated** (the issue-808 design), so with register-first any LAN host that
+    POSTs `id=camN` redirects that camera's polls and writes until the real relay announces again. The
+    rig LAN is the trust boundary, as it already was for the handheld.
+  - **A visiting camera's block is its cambox relay**, never the other venue's handheld override: the ONE
+    travelling `handheld-1` already drives a home block on each strih, and naming it twice would list the
+    visiting block at every normal event. At a joint event the handheld drives the home block the strih in
+    use names for it.
+  - **Preview workers run for every declared camera**, visiting ones included (they start from the static
+    list at boot); an absent NDI source only backs off, as for any offline camera.
 - **`relay/src/transport.rs` is split** (issue 808): `transport/gphoto2.rs` (the CLI seam),
   `transport/reads.rs` (read constants + pure helpers), re-exported from `transport`. New code goes
   into a child module, never back into transport.rs (size budget).
@@ -489,13 +499,12 @@ the printer — parity-tested), `setup-strih.sh` step **"16c"** (lettered, TOTAL
   never a filesystem `web/`. This is why the Windows canon ships `bkshading.exe` ALONE. The Linux
   artifact + install still carry `web/` beside the binary (design wording) as a panel-source copy, but
   do NOT assume it is required at runtime, and do not add a unit dependency on it.
-- **NO cambox relay repoint is needed to migrate the service to the notebook.** The relay is a PASSIVE
-  listener (`ExecStart=/usr/local/bin/bkshading-relay --bind 0.0.0.0:8771`, `--help` = only
-  `--bind`/`--gphoto2`); its `EnvironmentFile=-/etc/bkshading/relay.env` carries ONLY
-  `CAMERA_BOX_CAPTURE_FPS`. There is NO service-host / report-target config anywhere on the relay side
-  — the SERVICE connects OUT to each cambox at `<cambox>.lan:8771` (the SERVICE config's
-  `[[camera]].address`, host-independent). So "the relays report to host X" is imprecise; moving the
-  service host changes nothing on the boxes.
+- **NO cambox relay repoint is needed to migrate the service to another strih.** The SERVICE still
+  connects OUT to each relay on :8771. Since issue 1431 the cambox relay also ANNOUNCES itself to
+  `strih.lan` (its relay.env carries `CAMERA_BOX_CAPTURE_FPS`, `BKSHADING_REGISTER_URL` and
+  `BKSHADING_RELAY_ID`), so the address the service dials comes from that registration, else the
+  block's `fallback_address`. Moving the service host means pointing the `strih.lan` record at it,
+  nothing on the boxes.
 - **Config seeded ONLY IF absent** (`[ ! -f /etc/bkshading/bkshading.toml ]`, the `projector.json`
   precedent) from `strih_bkshading_config_text` (pinned from the canonical
   `bkshading/service/bkshading.example.toml` — the schema the Windows config was itself seeded from,

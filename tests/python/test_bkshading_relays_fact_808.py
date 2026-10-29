@@ -192,3 +192,14 @@ def test_a_handheld_named_by_its_registration_id_is_seeded_as_register_808(boxes
     cams = {c["id"]: c for c in cfg["camera"]}
     assert cams["cam3"]["transport"] == "sbc-relay"
     assert cams["cam3"]["address"] == "register:handheld-1"
+
+
+def test_the_visiting_blocks_follow_the_fact_files_not_a_literal_range_1431(boxes):
+    # A camera no strih venue lists gets no block; the visiting set is read from the fact files.
+    f = boxes / "strih-pp.env"
+    text = f.read_text().replace("STRIH_CAMERAS=1 4 6 7", "STRIH_CAMERAS=1 4 6")
+    f.write_text(text.replace(" 7=cambox-relay@10.77.9.67:8771", ""))
+    r = _bash('strih_box_load strih-snv || exit 9\nstrih_box_fleet_cameras', boxes)
+    assert r.returncode == 0 and r.stdout.strip() == "1 2 3 4 5 6", r.stdout + r.stderr
+    _t, cfg = _seed(boxes, "strih-snv")
+    assert sorted(c["id"] for c in cfg["camera"]) == ["cam%d" % n for n in (1, 2, 3, 4, 5, 6)], cfg["camera"]
