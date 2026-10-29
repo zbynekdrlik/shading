@@ -174,3 +174,67 @@ async fn a_bad_registration_is_refused_and_records_nothing_808() {
         None
     );
 }
+
+/// Issue 1431: both strih boxes declare all seven cameras. A venue camera is register-first with its
+/// literal relay as the fallback; a visiting camera is listed once its relay announced itself.
+const JOINT_CONFIG: &str = r#"
+[[camera]]
+id = "cam2"
+label = "Cam 2"
+transport = "cambox-relay"
+address = "register:cam2"
+fallback_address = "FALLBACK"
+
+[[camera]]
+id = "cam1"
+label = "Cam 1"
+transport = "cambox-relay"
+address = "register:cam1"
+visiting = true
+"#;
+
+#[tokio::test]
+async fn a_visiting_camera_appears_once_its_relay_registers_and_a_venue_camera_falls_back_1431() {
+    let home_relay = fake_relay().await;
+    let visiting_relay = fake_relay().await;
+    let cfg = Arc::new(
+        ServiceConfig::from_toml_str(
+            &JOINT_CONFIG.replace("FALLBACK", &format!("127.0.0.1:{}", home_relay.port())),
+        )
+        .unwrap(),
+    );
+    let registry = RelayRegistry::new();
+    let agg = Arc::new(Aggregator::with_registry("test", registry.clone()).unwrap());
+    let svc = service(registry.clone(), cfg.clone(), agg.clone()).await;
+
+    // A normal event: only the venue camera is listed, reached through its literal relay (its relay
+    // has not registered: an older relay binary, or before the first announcement).
+    let before = agg.snapshot(&cfg, &PreviewStore::new()).await;
+    let ids: Vec<&str> = before.cameras.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(ids, ["cam2"], "the other venue's camera is not listed");
+    assert!(before.cameras[0].reachable, "reached through the fallback");
+
+    // Joint event: the visiting cambox's relay announces itself to this strih (strih.lan points here).
+    let target = bkshading_relay::register::parse_register_url(&format!(
+        "http://127.0.0.1:{}/api/relays/register",
+        svc.port()
+    ))
+    .unwrap();
+    let status = bkshading_relay::register::announce_once(&target, "cam1", visiting_relay.port())
+        .await
+        .unwrap();
+    assert_eq!(status, 200);
+
+    let after = agg.snapshot(&cfg, &PreviewStore::new()).await;
+    let ids: Vec<&str> = after.cameras.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(ids, ["cam2", "cam1"], "config order kept");
+    let cam1 = &after.cameras[1];
+    assert!(
+        cam1.reachable,
+        "the visiting camera is driven through its registration"
+    );
+    assert_eq!(
+        cam1.registration.as_ref().map(|r| r.address.clone()),
+        Some(format!("127.0.0.1:{}", visiting_relay.port()))
+    );
+}

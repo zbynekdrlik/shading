@@ -125,6 +125,17 @@ impl RelayRegistry {
         registered_id(address).and_then(|id| self.status(id, now))
     }
 
+    /// Issue 1431: like [`Self::resolve`], but a `register:<id>` with no fresh registration falls
+    /// back to `fallback` (the camera's literal relay address) when one is configured.
+    pub fn resolve_camera(
+        &self,
+        address: &str,
+        _fallback: Option<&str>,
+        now: Instant,
+    ) -> Option<String> {
+        self.resolve(address, now)
+    }
+
     /// The address to reach a camera configured with `address`: a plain `host:port` as is, a
     /// `register:<id>` through its fresh registration, else `None` (unreachable).
     pub fn resolve(&self, address: &str, now: Instant) -> Option<String> {

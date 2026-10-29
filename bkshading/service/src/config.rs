@@ -53,6 +53,16 @@ pub struct CameraConfig {
     /// field for now (the follow-up is deriving it from the box's live capture_fps).
     #[serde(default)]
     pub grab_fps: Option<i64>,
+    /// Issue 1431: the relay's literal `host:port`, used while a `register:<id>` address has no
+    /// fresh registration (a cambox relay that has not announced itself, an older relay). Absent
+    /// => a stale/missing registration reads unreachable, as before.
+    #[serde(default)]
+    pub fallback_address: Option<String>,
+    /// Issue 1431: a camera of the OTHER venue (a joint event). Its block is left out of the panel
+    /// until its relay has announced itself once, so a normal event lists only the venue's own
+    /// cameras (owner 26.10.2026). Needs a `register:<id>` address.
+    #[serde(default)]
+    pub visiting: bool,
 }
 
 impl ServiceConfig {

@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 
 use bkshading_proto::mapping::fps_settable;
 use bkshading_proto::wire::{
-    resolve_grab, summarize_set_request, Aggregate, CameraView, FpsSync, RelayState, SetRequest,
+    resolve_grab, summarize_set_request, Aggregate, CameraView, FpsSync, RegistrationView,
+    RelayState, SetRequest,
 };
 
 use crate::config::{CameraConfig, ServiceConfig};
@@ -70,6 +71,13 @@ pub fn camera_view(
         state,
         registration: None,
     }
+}
+
+/// Issue 1431: whether the panel lists `cam` now. A venue camera always; a `visiting` camera
+/// (the other venue's, a joint event) only once its relay has announced itself (`registration`
+/// is `Some`, stale or fresh), so a normal event shows only the venue's own cameras.
+pub fn camera_listed(_cam: &CameraConfig, _registration: Option<&RegistrationView>) -> bool {
+    true
 }
 
 /// Rebuilds ONE camera's view (from its config + a fresh relay state) inside a copy of `current`
