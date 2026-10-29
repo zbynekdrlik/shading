@@ -49,6 +49,8 @@ set -euo pipefail
 #   (exit 6)          the rig lease is held by a live E2E (issue 1371): no deploy, no bypass. A lease
 #                     held by THIS run itself (RIG_LEASE_REPO/RIG_LEASE_RUN_ID, else GITHUB_REPOSITORY/
 #                     GITHUB_RUN_ID; issue 1452, the post-merge deploy job) is ours and goes through.
+#                     BKSHADING_DEPLOY_LEASE_RESOURCE=<atom> (deploy-fleet --venue sets <venue>-cams):
+#                     a holder whose declared issue-1450 `resources` do not name it goes through too.
 #   --force-live      BYPASS the rig-busy guard and deploy even while a broadcast is live. Supervisor
 #                     override ONLY, logged loudly — a relay deploy/restart during live production can
 #                     fork-wedge the cambox (gphoto2 PTP on the shared xHCI bus, 2026-09-13 #1229).
@@ -342,6 +344,10 @@ OWN_LEASE_RUN="${RIG_LEASE_RUN_ID:-${GITHUB_RUN_ID:-}}"
 if ! rig_lease_is_stale "${RIG_LEASE_STALE_SECS:-5400}"; then
   if rig_lease_held_by "$OWN_LEASE_REPO" "$OWN_LEASE_RUN"; then
     echo "the rig lease is held by this run itself ($OWN_LEASE_REPO#$OWN_LEASE_RUN) -- proceeding with the relay deploy to $HOST"
+  elif [ -n "${BKSHADING_DEPLOY_LEASE_RESOURCE:-}" ] && ! rig_lease_holder_covers "$BKSHADING_DEPLOY_LEASE_RESOURCE"; then
+    # issue 1452: deploy-fleet --venue <v> names the target's own cameras (<v>-cams); a holder that
+    # declared other resources (issue 1450) does not own this box.
+    echo "the rig lease is held by $(rig_lease_holder_summary) for other resources, not $BKSHADING_DEPLOY_LEASE_RESOURCE -- proceeding with the relay deploy to $HOST"
   else
     echo "ERROR: the rig lease is held by $(rig_lease_holder_summary) -- an E2E owns the camboxes; no relay deploy to $HOST until it releases (re-run then). --force-live does not bypass the lease." >&2
     exit 6
