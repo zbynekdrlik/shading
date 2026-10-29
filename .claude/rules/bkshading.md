@@ -869,6 +869,13 @@ from the relay's issue-1229 read-floor cache (never a direct gphoto2 call). It i
   key names, pinned by pytest against `CORE_CONFIG_KEYS` + `plan_writes`, so renaming a relay key
   breaks that test first. See `.claude/rules/camera-test-settings.md`.
 
+## The fleet upgrade carries the relay (issue 1452)
+
+`scripts/deploy-fleet.sh` deploys the relay of the SAME CI run on every cambox that has one, through
+`bkshading-deploy-relay.sh` itself, names a relay failure in FAILED and prints each box's camera-box
++ relay version; `rig-dev-handover-check.sh` FORGOTs a relay older than camera-box. The relay deploy
+accepts a rig lease held by the caller's own run. Detail: `.claude/rules/fleet-relay-upgrade.md`.
+
 ## NEVER deploy OR restart a cambox relay during production — the deploy tool is now rig-busy gated (2026-09-13 escalation, issue 1229)
 
 **The 2026-09-13 escalation, past the capture-dip class this ticket started on:** deploying the

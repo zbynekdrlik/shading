@@ -46,7 +46,9 @@ set -euo pipefail
 #   --binary <path>   deploy an already-downloaded CI relay binary (skips gh download).
 #   --dry-run         print the plan and touch no box (no ssh/scp; without --binary it still
 #                     downloads the CI artifact read-only, to show its sha256).
-#   (exit 6)          the rig lease is held by a live E2E (issue 1371): no deploy, no bypass.
+#   (exit 6)          the rig lease is held by a live E2E (issue 1371): no deploy, no bypass. A lease
+#                     held by THIS run itself (RIG_LEASE_REPO/RIG_LEASE_RUN_ID, else GITHUB_REPOSITORY/
+#                     GITHUB_RUN_ID; issue 1452, the post-merge deploy job) is ours and goes through.
 #   --force-live      BYPASS the rig-busy guard and deploy even while a broadcast is live. Supervisor
 #                     override ONLY, logged loudly — a relay deploy/restart during live production can
 #                     fork-wedge the cambox (gphoto2 PTP on the shared xHCI bus, 2026-09-13 #1229).
@@ -331,9 +333,19 @@ fi
 # swaps the binary under the run (it happened on cam5 during run 38579117744). --force-live is a
 # BROADCAST override only and does NOT bypass this; wait for the release. RIG_LEASE_DIR is the
 # shared lib's seam (tests point it at a scratch dir).
+# issue 1452: a lease held by THIS run itself (the post-merge deploy job takes it through
+# rig-busy-gate.sh before deploy-fleet.sh, which calls this script per box) is ours, not a foreign
+# holder: the identity is rig-busy-gate.sh's own (RIG_LEASE_REPO/RIG_LEASE_RUN_ID, else the Actions
+# GITHUB_REPOSITORY/GITHUB_RUN_ID); an operator shell has neither and is refused as before.
+OWN_LEASE_REPO="${RIG_LEASE_REPO:-${GITHUB_REPOSITORY:-}}"
+OWN_LEASE_RUN="${RIG_LEASE_RUN_ID:-${GITHUB_RUN_ID:-}}"
 if ! rig_lease_is_stale "${RIG_LEASE_STALE_SECS:-5400}"; then
-  echo "ERROR: the rig lease is held by $(rig_lease_holder_summary) -- an E2E owns the camboxes; no relay deploy to $HOST until it releases (re-run then). --force-live does not bypass the lease." >&2
-  exit 6
+  if rig_lease_held_by "$OWN_LEASE_REPO" "$OWN_LEASE_RUN"; then
+    echo "the rig lease is held by this run itself ($OWN_LEASE_REPO#$OWN_LEASE_RUN) -- proceeding with the relay deploy to $HOST"
+  else
+    echo "ERROR: the rig lease is held by $(rig_lease_holder_summary) -- an E2E owns the camboxes; no relay deploy to $HOST until it releases (re-run then). --force-live does not bypass the lease." >&2
+    exit 6
+  fi
 fi
 
 # --- rig-busy PREFLIGHT (2026-09-13 escalation): NEVER deploy a cambox relay while a broadcast may

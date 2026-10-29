@@ -96,6 +96,8 @@ the relay/cloudflared provisioning canon but with two deliberate deltas + one go
   every cambox at its next provisioning. The image builders write through it too (issue 1400):
   `create-usb-linux.sh`'s first-boot (rw) fstab takes the canon `/var/cache` line, and
   `build-image.sh`'s overlay image the whole tmpfs set (details: `provisioning-scripts.md`).
+- **The SBC is never part of `deploy-fleet.sh`** (issue 1452: the fleet upgrade carries the relay
+  of every CAMBOX it touches; the handheld is not in any `CAMERA_SET`). Its relay is deployed by hand.
 - **Deploy uses `bkshading-deploy-relay.sh --arch arm64`.** `--arch arm64` fetches the
   `bkshading-relay-linux-arm64` artifact. The remount follows the TARGET's own root
   (`bkshading_deploy_root_opts_cmd` = `findmnt -no OPTIONS /` with a `/proc/mounts` fallback, decided
