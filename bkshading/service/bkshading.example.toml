@@ -5,6 +5,11 @@
 # `ndi_preview` is optional -- a camera with no video feed omits it and gets a params-only block.
 # setup-strih step 16c seeds the strih box's config from the box fact STRIH_BKSHADING_RELAYS
 # (scripts/lib/strih-provision.sh strih_bkshading_config_text); this example is the strih-snv state.
+# Issue 1431: a cambox relay registers itself as camN with the strih behind strih.lan, so the seed writes
+# a venue camera as `address = "register:camN"` + `fallback_address = "<its literal relay>"` (used while no
+# fresh registration exists), and a camera of the other venue as `address = "register:camN"` +
+# `visiting = true` (listed only once its relay registered, at a joint event). This example keeps the
+# literal addresses, which still work.
 
 # Web panel bind address (the operator opens http://strih.lan:8770/).
 bind = "0.0.0.0:8770"

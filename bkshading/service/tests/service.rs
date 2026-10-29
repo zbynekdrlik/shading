@@ -1086,3 +1086,37 @@ visiting = true
     assert!(view.as_ref().is_some_and(|v| !v.fresh));
     assert!(camera_listed(visiting, view.as_ref()));
 }
+
+#[test]
+fn both_strih_seeds_load_in_the_service_1431() {
+    // The setup-strih seed (scripts/lib/strih-provision.sh strih_bkshading_config_text) for both strih
+    // boxes must load in the real service, visiting blocks included (a visiting block needs register:<id>).
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for (box_name, home) in [("strih-snv", 3usize), ("strih-pp", 4)] {
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(
+                "set -euo pipefail; . scripts/lib/strih-box-facts.sh; \
+                 . scripts/lib/strih-provision.sh; strih_box_load \"$1\" >/dev/null; \
+                 strih_bkshading_config_text",
+            )
+            .arg("seed")
+            .arg(box_name)
+            .current_dir(&repo)
+            .output()
+            .expect("run bash");
+        assert!(
+            out.status.success(),
+            "{box_name}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let cfg = ServiceConfig::from_toml_str(&String::from_utf8(out.stdout).unwrap())
+            .unwrap_or_else(|e| panic!("{box_name} seed does not load: {e}"));
+        assert_eq!(cfg.cameras.len(), 7, "{box_name}");
+        assert_eq!(
+            cfg.cameras.iter().filter(|c| !c.visiting).count(),
+            home,
+            "{box_name}: the venue cameras"
+        );
+    }
+}
