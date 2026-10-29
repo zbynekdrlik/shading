@@ -110,7 +110,7 @@ fi
 # drift. It never starts/restarts the relay; the enable-state follows the rig mode (WANT_STATE).
 do_install() {
   echo "[bkshading-provision-relay] --install (never started; unit ${WANT_STATE} for ${DEVICE:-this box} in rig mode ${RIG_MODE_ARG})"
-  bkshading_relay_provision_install "$WANT_STATE" || {
+  bkshading_relay_provision_install "$WANT_STATE" "" "$(bkshading_relay_id_for_device "$DEVICE" || true)" || {
     echo "bkshading relay install FAILED (see the lines above)" >&2
     return 1
   }
@@ -145,6 +145,18 @@ do_check() {
     echo "OK: env $ENV_FILE ($fpsline)"
   else
     echo "FAIL: env file $ENV_FILE missing or has no CAMERA_BOX_CAPTURE_FPS=<int>" >&2
+    rc=1
+  fi
+  # (3b) issue 1431: the relay registers with the strih behind strih.lan as this box's camera.
+  local want_url want_id got_url got_id
+  want_url="$(bkshading_relay_register_url)"
+  want_id="$(bkshading_relay_id_for_device "$DEVICE" || true)"
+  got_url="$(grep -E '^BKSHADING_REGISTER_URL=' "$ENV_FILE" 2>/dev/null | tail -n 1 | cut -d= -f2- || true)"
+  got_id="$(grep -E '^BKSHADING_RELAY_ID=' "$ENV_FILE" 2>/dev/null | tail -n 1 | cut -d= -f2- || true)"
+  if [ -n "$want_id" ] && [ "$got_url" = "$want_url" ] && [ "$got_id" = "$want_id" ]; then
+    echo "OK: relay registers as $got_id at $got_url"
+  else
+    echo "FAIL: env $ENV_FILE has BKSHADING_REGISTER_URL='${got_url}' BKSHADING_RELAY_ID='${got_id}', want $want_url + ${want_id:-camN (box '${DEVICE:-?}' is not a camN)} (issue 1431, re-run --install)" >&2
     rc=1
   fi
   # (4) gphoto2 runtime present.

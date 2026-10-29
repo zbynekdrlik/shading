@@ -428,7 +428,7 @@ def test_install_disabled_writes_everything_and_never_enables_or_starts():
         src_bin = os.path.join(tmp, "dl-relay")
         with open(src_bin, "w") as f:
             f.write("RELAY")
-        r = _src(PROV_LIB, 'bkshading_relay_provision_install disabled "$SRC"', env=dict(env, SRC=src_bin))
+        r = _src(PROV_LIB, 'bkshading_relay_provision_install disabled "$SRC" cam3', env=dict(env, SRC=src_bin))
         assert r.returncode == 0, r.stdout + r.stderr
         assert os.path.isfile(env["BKSHADING_RELAY_UNIT_DEST"])
         assert os.path.isfile(env["BKSHADING_RELAY_ENV_FILE"])
@@ -442,7 +442,7 @@ def test_install_disabled_writes_everything_and_never_enables_or_starts():
 def test_install_enabled_enables_and_reads_back():
     with tempfile.TemporaryDirectory() as tmp:
         env, calls = _prov_env(tmp)
-        r = _src(PROV_LIB, "bkshading_relay_provision_install enabled", env=env)
+        r = _src(PROV_LIB, "bkshading_relay_provision_install enabled '' cam3", env=env)
         assert r.returncode == 0, r.stdout + r.stderr
         log = _read(calls)
         assert re.search(r"^enable bkshading-relay.service$", log, re.M), log
@@ -474,15 +474,16 @@ def _unit_sha():
 
 
 def test_provision_verdict_grades_every_facet():
-    good = "BIN_X=yes\nUNIT_SHA=%s\nENV_FPS=60\nGPHOTO2=yes\nENABLED=disabled\n" % _unit_sha()
-    ok = _src(PROV_LIB, 'bkshading_relay_provision_verdict "$B" disabled', env={"B": good})
+    good = ("BIN_X=yes\nUNIT_SHA=%s\nENV_FPS=60\nENV_REGISTER_URL=%s\nENV_RELAY_ID=cam3\nGPHOTO2=yes\n"
+            "ENABLED=disabled\n" % (_unit_sha(), REGISTER_URL_1431))
+    ok = _src(PROV_LIB, 'bkshading_relay_provision_verdict "$B" disabled cam3', env={"B": good})
     assert ok.stdout.strip() == "ok", ok.stdout
-    wrong_mode = _src(PROV_LIB, 'bkshading_relay_provision_verdict "$B" enabled', env={"B": good})
+    wrong_mode = _src(PROV_LIB, 'bkshading_relay_provision_verdict "$B" enabled cam3', env={"B": good})
     assert wrong_mode.stdout.startswith("FAIL"), wrong_mode.stdout
-    unknown = _src(PROV_LIB, 'bkshading_relay_provision_verdict "$B" unknown', env={"B": good})
+    unknown = _src(PROV_LIB, 'bkshading_relay_provision_verdict "$B" unknown cam3', env={"B": good})
     assert unknown.stdout.startswith("FAIL") and "mode" in unknown.stdout, unknown.stdout
     bad = "BIN_X=no\nUNIT_SHA=deadbeef\nENV_FPS=\nGPHOTO2=no\nENABLED=\n"
-    out = _src(PROV_LIB, 'bkshading_relay_provision_verdict "$B" enabled', env={"B": bad}).stdout
+    out = _src(PROV_LIB, 'bkshading_relay_provision_verdict "$B" enabled cam3', env={"B": bad}).stdout
     for word in ("binary", "unit", "env", "gphoto2", "enabled"):
         assert word in out.lower(), (word, out)
     assert _src(PROV_LIB, 'bkshading_relay_provision_verdict "" enabled').stdout.startswith("FAIL")
@@ -490,7 +491,8 @@ def test_provision_verdict_grades_every_facet():
 
 def test_gather_snippet_emits_every_verdict_key():
     s = _src(PROV_LIB, "bkshading_relay_provision_gather_remote_snippet").stdout
-    for key in ("BIN_X=", "UNIT_SHA=", "ENV_FPS=", "GPHOTO2=", "ENABLED="):
+    for key in ("BIN_X=", "UNIT_SHA=", "ENV_FPS=", "ENV_REGISTER_URL=", "ENV_RELAY_ID=", "GPHOTO2=",
+                "ENABLED="):
         assert key in s, (key, s)
     assert "systemctl start" not in s and "systemctl restart" not in s
 
@@ -916,14 +918,20 @@ def _run_ao(block_out, env_extra):
     src = 'set -euo pipefail\n. "%s"\n. "%s"\n. "%s"\n%s%s' % (
         os.path.join(REPO, "scripts", "camera-set.sh"), PROV_LIB,
         os.path.join(REPO, "scripts", "lib", "rig-mode-state.sh"), prelude, block)
-    e = dict(os.environ, AO_BLOCK=block_out, AO_PAINTER="")
+    e = dict(os.environ, AO_PAINTER="")
     e.pop("CAMERA_BOX_RIG_MODE", None)
     e.update(env_extra)
+    e["AO_BLOCK"] = block_out.replace("@RELAY_ID@", e.get("CAMERA_NAME", "").lower())
     return subprocess.run(["bash", "-c", src], capture_output=True, text=True, env=e)
 
 
-def _good_block(enabled):
-    return "BIN_X=yes\nUNIT_SHA=%s\nENV_FPS=60\nGPHOTO2=yes\nENABLED=%s\n" % (_unit_sha(), enabled)
+REGISTER_URL_1431 = "http://strih.lan:8770/api/relays/register"
+
+
+def _good_block(enabled, relay_id=None):
+    """A healthy (ao) gather; the relay id follows the box under test (issue 1431), set by _run_ao."""
+    return ("BIN_X=yes\nUNIT_SHA=%s\nENV_FPS=60\nENV_REGISTER_URL=%s\nENV_RELAY_ID=%s\nGPHOTO2=yes\n"
+            "ENABLED=%s\n" % (_unit_sha(), REGISTER_URL_1431, relay_id or "@RELAY_ID@", enabled))
 
 
 def test_ao_block_passes_a_non_roster_box_enabled_in_any_mode():

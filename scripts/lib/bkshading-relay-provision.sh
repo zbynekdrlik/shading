@@ -80,21 +80,27 @@ bkshading_relay_provision_install_binary() {
   echo "  installed relay binary $BKRP_BIN"
 }
 
-# bkshading_relay_provision_install [enabled|disabled] [BINARY_SRC]
+# bkshading_relay_provision_install [enabled|disabled] [BINARY_SRC] RELAY_ID
+#   RELAY_ID (issue 1431, bkshading_relay_id_for_device) is the camN the relay registers with at strih.lan;
+#   none refuses before anything is written (a cambox relay that registers nowhere is the 1431 gap).
 #   gphoto2 + the derived env + the unit (+ the binary when BINARY_SRC is given), then daemon-reload
 #   and `enable` OR `disable` per the requested state, read back with a LITERAL is-enabled compare.
 #   NEVER starts/restarts the relay (enable-only; the relay comes up at boot / rig-mode.sh event).
 bkshading_relay_provision_install() {
-  local want="${1:-enabled}" bin_src="${2:-}" fps got
+  local want="${1:-enabled}" bin_src="${2:-}" relay_id="${3:-}" fps got
   _bkrp_init
   case "$want" in enabled | disabled) ;; *) echo "  unknown enable-state '$want' (want enabled|disabled)" >&2; return 2 ;; esac
+  if ! bkshading_relay_id_for_device "$relay_id" >/dev/null; then
+    echo "  no valid relay id ('${relay_id}', want camN) -- the relay could not register at strih.lan (issue 1431)" >&2
+    return 2
+  fi
   bkshading_relay_provision_install_gphoto2 || return 1
 
   fps="$(bkshading_relay_provision_derive_capture_fps)"
   mkdir -p "$(dirname "$BKRP_ENV_FILE")" || return 1
-  bkshading_relay_env_file_content "$fps" >"$BKRP_ENV_FILE" || return 1
+  bkshading_relay_env_file_content "$fps" "$relay_id" >"$BKRP_ENV_FILE" || return 1
   chmod 0644 "$BKRP_ENV_FILE" || return 1
-  echo "  wrote $BKRP_ENV_FILE (CAMERA_BOX_CAPTURE_FPS=$fps, derived from $BKRP_DROPIN_DIR)"
+  echo "  wrote $BKRP_ENV_FILE (CAMERA_BOX_CAPTURE_FPS=$fps, derived from $BKRP_DROPIN_DIR; registers as $relay_id at $(bkshading_relay_register_url))"
 
   mkdir -p "$(dirname "$BKRP_UNIT_DEST")" || return 1
   install -m 0644 "$BKRP_UNIT_SRC" "$BKRP_UNIT_DEST" || return 1
@@ -232,7 +238,7 @@ bkshading_relay_provision_fetch_binary() {
   esac
 }
 
-# bkshading_relay_provision_gather_remote_snippet -> REMOTE sh text (read-only) that prints the five
+# bkshading_relay_provision_gather_remote_snippet -> REMOTE sh text (read-only) that prints the seven
 # KEY=value lines bkshading_relay_provision_verdict grades. Embed as the WHOLE ssh command.
 bkshading_relay_provision_gather_remote_snippet() {
   local bin unit env
@@ -243,6 +249,8 @@ bkshading_relay_provision_gather_remote_snippet() {
 printf 'BIN_X=%s\n' "\$(test -x $bin && echo yes || echo no)"
 printf 'UNIT_SHA=%s\n' "\$(sha256sum $unit 2>/dev/null | awk '{print \$1}')"
 printf 'ENV_FPS=%s\n' "\$(grep -oE '^CAMERA_BOX_CAPTURE_FPS=[0-9]+\$' $env 2>/dev/null | tail -n 1 | cut -d= -f2)"
+printf 'ENV_REGISTER_URL=%s\n' "\$(grep -E '^BKSHADING_REGISTER_URL=' $env 2>/dev/null | tail -n 1 | cut -d= -f2-)"
+printf 'ENV_RELAY_ID=%s\n' "\$(grep -E '^BKSHADING_RELAY_ID=' $env 2>/dev/null | tail -n 1 | cut -d= -f2-)"
 printf 'GPHOTO2=%s\n' "\$(command -v gphoto2 >/dev/null 2>&1 && echo yes || echo no)"
 printf 'ENABLED=%s\n' "\$(systemctl is-enabled $(bkshading_relay_unit_name) 2>/dev/null)"
 SNIP
@@ -251,12 +259,13 @@ SNIP
 # _bkrp_block_field BLOCK KEY -> the LAST `KEY=value` value in BLOCK (empty when absent). Pure.
 _bkrp_block_field() { printf '%s\n' "${1:-}" | sed -n "s/^$2=//p" | tail -n 1; }
 
-# bkshading_relay_provision_verdict BLOCK EXPECTED_ENABLE_STATE -> `ok` | one `FAIL: <reason>` per line
+# bkshading_relay_provision_verdict BLOCK EXPECTED_ENABLE_STATE RELAY_ID -> `ok` | one `FAIL: <reason>` per line
+#   RELAY_ID = the camN this box must register as at strih.lan (issue 1431); empty FAILs (not derivable).
 #   BLOCK = the gather snippet's output. The installed unit must BYTE-match the repo unit (sha256).
 #   EXPECTED = bkshading_relay_expected_enable_state's answer; `unknown` FAILs (the rig mode could not
 #   be read for a roster box -- never a silent pass, test-strictness).
 bkshading_relay_provision_verdict() {
-  local block="${1:-}" want="${2:-}" out="" v want_sha
+  local block="${1:-}" want="${2:-}" relay_id="${3:-}" out="" v want_sha url
   _bkrp_init
   if [ -z "$block" ]; then
     printf '%s\n' "FAIL: empty relay state read -- cannot certify the bkshading relay is provisioned"
@@ -272,6 +281,15 @@ bkshading_relay_provision_verdict() {
   fi
   v="$(_bkrp_block_field "$block" ENV_FPS)"
   case "$v" in '' | *[!0-9]*) out="${out}FAIL: relay env $(bkshading_relay_env_path) missing or has no CAMERA_BOX_CAPTURE_FPS=<int>"$'\n' ;; esac
+  url="$(bkshading_relay_register_url)"
+  v="$(_bkrp_block_field "$block" ENV_REGISTER_URL)"
+  [ "$v" = "$url" ] || out="${out}FAIL: relay env has BKSHADING_REGISTER_URL='${v}', want ${url} -- the relay does not follow strih.lan (issue 1431; re-run setup-device.sh)"$'\n'
+  v="$(_bkrp_block_field "$block" ENV_RELAY_ID)"
+  if [ -z "$relay_id" ]; then
+    out="${out}FAIL: cannot derive this box's relay id (want camN) -- the registration cannot be graded (issue 1431)"$'\n'
+  elif [ "$v" != "$relay_id" ]; then
+    out="${out}FAIL: relay env has BKSHADING_RELAY_ID='${v}', want ${relay_id} -- it would drive another camera's shading block (issue 1431)"$'\n'
+  fi
   [ "$(_bkrp_block_field "$block" GPHOTO2)" = yes ] || out="${out}FAIL: gphoto2 not installed (the relay's USB-PTP runtime)"$'\n'
   v="$(_bkrp_block_field "$block" ENABLED)"
   case "$want" in

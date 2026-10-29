@@ -8,6 +8,12 @@ standalone `handheld-1..3` panels. It now renders cam1..cam7 from the box fact `
 `none` or space-separated `N=<transport>@<host>:<port>` overrides of the default `cambox-relay` at
 `camN.lan:8771`. The expected panels below are the live `/etc/bkshading/bkshading.toml` of each box,
 read 26.10.2026 (strih-pp minus its three stale handheld panels, which the ruling removes).
+
+Issue 1431 (joint event: strih.lan is the ONE switch): every cambox relay registers itself with the strih
+behind strih.lan as `camN`, and the service's camera list is static, so BOTH strih boxes now declare all seven
+cameras. A venue camera is `register:camN` with its literal relay as `fallback_address`; a camera of the other
+venue is `visiting = true` and the panel lists it only once its relay registered (still venue-only at a normal
+event). A handheld override (`N=sbc-relay@...`) stays exactly as before.
 """
 import os
 import subprocess
@@ -40,12 +46,23 @@ def _bash(body, boxes, *args):
 
 
 def _expected(cams, addresses):
-    """One block per venue camera: every one keeps its cambox preview + grab fps, the transport + address vary."""
+    """The venue cameras first (register-first, the literal relay as the fallback; a handheld override as it
+    is), then every other camera as a visiting block; each keeps its cambox preview + grab fps (issue 1431)."""
     want = []
     for n in cams:
         transport, address = addresses[n]
-        want.append({"id": "cam%d" % n, "label": "Cam %d" % n, "transport": transport, "address": address,
-                     "ndi_preview": "CAM%d (usb)" % n, "grab_fps": 60})
+        block = {"id": "cam%d" % n, "label": "Cam %d" % n, "transport": transport}
+        if transport == "cambox-relay":
+            block.update({"address": "register:cam%d" % n, "fallback_address": address})
+        else:
+            block["address"] = address
+        block.update({"ndi_preview": "CAM%d (usb)" % n, "grab_fps": 60})
+        want.append(block)
+    for n in range(1, 8):
+        if n not in cams:
+            want.append({"id": "cam%d" % n, "label": "Cam %d" % n, "transport": "cambox-relay",
+                         "address": "register:cam%d" % n, "visiting": True,
+                         "ndi_preview": "CAM%d (usb)" % n, "grab_fps": 60})
     return want
 
 
@@ -131,10 +148,28 @@ def test_explicit_args_override_the_bind_and_the_relays(boxes):
     assert cfg["bind"] == "127.0.0.1:9999"
     cams = {c["id"]: c for c in cfg["camera"]}
     assert cams["cam5"]["transport"] == "sbc-relay" and cams["cam5"]["address"] == "handheld-2.lan:8771"
-    assert cams["cam3"]["transport"] == "cambox-relay" and cams["cam3"]["address"] == "cam3.lan:8771"
-    assert sorted(cams) == ["cam2", "cam3", "cam5"], "only the box's own venue cameras"
+    assert "fallback_address" not in cams["cam5"], "a handheld named by its address has no fallback"
+    assert cams["cam3"]["transport"] == "cambox-relay" and cams["cam3"]["address"] == "register:cam3"
+    assert cams["cam3"]["fallback_address"] == "cam3.lan:8771"
+    home = sorted(i for i, c in cams.items() if not c.get("visiting"))
+    assert home == ["cam2", "cam3", "cam5"], "the box's own venue cameras are the ones always listed"
     _t, cfg = _seed(boxes, "strih-snv", "0.0.0.0:8770", "none")
     assert all(c["transport"] == "cambox-relay" for c in cfg["camera"])
+
+
+@pytest.mark.parametrize("box,home", [("strih-snv", (2, 3, 5)), ("strih-pp", (1, 4, 6, 7))])
+def test_both_strih_boxes_declare_all_seven_cameras_1431(boxes, box, home):
+    # Issue 1431: strih.lan picks the strih; a visiting cambox registers there as camN, so its block must exist.
+    _t, cfg = _seed(boxes, box)
+    cams = {c["id"]: c for c in cfg["camera"]}
+    assert sorted(cams) == ["cam%d" % n for n in range(1, 8)]
+    for n in range(1, 8):
+        c = cams["cam%d" % n]
+        assert c.get("visiting", False) is (n not in home), c
+        if c.get("visiting"):
+            assert c["address"] == "register:cam%d" % n and "fallback_address" not in c, c
+    # The venue cameras come first, in STRIH_CAMERAS order (the panel order).
+    assert [c["id"] for c in cfg["camera"]][: len(home)] == ["cam%d" % n for n in home]
 
 
 @pytest.mark.parametrize("bad", ["9=sbc-relay@a.lan:8771", "3=sbc-relay@a.lan", "3=wifi@a.lan:8771",
@@ -157,3 +192,14 @@ def test_a_handheld_named_by_its_registration_id_is_seeded_as_register_808(boxes
     cams = {c["id"]: c for c in cfg["camera"]}
     assert cams["cam3"]["transport"] == "sbc-relay"
     assert cams["cam3"]["address"] == "register:handheld-1"
+
+
+def test_the_visiting_blocks_follow_the_fact_files_not_a_literal_range_1431(boxes):
+    # A camera no strih venue lists gets no block; the visiting set is read from the fact files.
+    f = boxes / "strih-pp.env"
+    text = f.read_text().replace("STRIH_CAMERAS=1 4 6 7", "STRIH_CAMERAS=1 4 6")
+    f.write_text(text.replace(" 7=cambox-relay@10.77.9.67:8771", ""))
+    r = _bash('strih_box_load strih-snv || exit 9\nstrih_box_fleet_cameras', boxes)
+    assert r.returncode == 0 and r.stdout.strip() == "1 2 3 4 5 6", r.stdout + r.stderr
+    _t, cfg = _seed(boxes, "strih-snv")
+    assert sorted(c["id"] for c in cfg["camera"]) == ["cam%d" % n for n in (1, 2, 3, 4, 5, 6)], cfg["camera"]

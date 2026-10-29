@@ -228,6 +228,18 @@ def _fake_systemctl(record_path):
     return p
 
 
+def _non_roster_cambox():
+    """A resolvable cambox outside the TEST relay roster (the source box + cam2)."""
+    src = subprocess.run(
+        ["bash", "-c", '. "%s"\ncamera_source_box' % os.path.join(REPO, "scripts", "camera-set.sh")],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    for cam in ("cam3", "cam4", "cam5", "cam6", "cam7", "cam1"):
+        if cam not in (src, "cam2"):
+            return cam
+    raise AssertionError("no non-roster cambox")
+
+
 def _run_provision(mode, root, extra_env=None):
     sysd = os.path.join(root, "systemd-system")
     dropin = os.path.join(sysd, "camera-box.service.d")
@@ -243,6 +255,9 @@ def _run_provision(mode, root, extra_env=None):
         BKSHADING_RELAY_DROPIN_DIR=dropin,
         BKSHADING_RELAY_GPHOTO2="true",  # a binary that exists -> command -v succeeds, apt skipped
         BKSHADING_RELAY_SYSTEMCTL=sc,
+        # A cambox name (the CLI's box is otherwise this host's name, e.g. dev1): the relay registers as its
+        # camN since issue 1431. A box outside the TEST relay roster, so no --rig-mode is needed.
+        BKSHADING_RELAY_DEVICE_NAME=_non_roster_cambox(),
     )
     if extra_env:
         env.update(extra_env)

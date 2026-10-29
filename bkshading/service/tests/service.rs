@@ -949,3 +949,174 @@ grab_fps = 60
     .unwrap();
     assert_eq!(cfg.cameras[0].address, "register:handheld-1");
 }
+
+// ── issue 1431: strih.lan is the ONE switch — every cambox relay registers, both strihs list all seven ──
+
+#[test]
+fn a_camera_block_parses_its_fallback_and_visiting_flag_1431() {
+    let cfg = ServiceConfig::from_toml_str(
+        r#"
+[[camera]]
+id = "cam2"
+label = "Cam 2"
+transport = "cambox-relay"
+address = "register:cam2"
+fallback_address = "cam2.lan:8771"
+
+[[camera]]
+id = "cam1"
+label = "Cam 1"
+transport = "cambox-relay"
+address = "register:cam1"
+visiting = true
+"#,
+    )
+    .unwrap();
+    assert_eq!(
+        cfg.cameras[0].fallback_address.as_deref(),
+        Some("cam2.lan:8771")
+    );
+    assert!(!cfg.cameras[0].visiting, "a venue camera is not visiting");
+    assert_eq!(cfg.cameras[1].fallback_address, None);
+    assert!(cfg.cameras[1].visiting);
+}
+
+#[test]
+fn a_visiting_camera_needs_a_register_address_1431() {
+    // A visiting block with a plain host:port would never be listed (it never registers): refuse it
+    // by name at load, never a silently invisible camera.
+    let err = ServiceConfig::from_toml_str(
+        r#"
+[[camera]]
+id = "cam1"
+label = "Cam 1"
+transport = "cambox-relay"
+address = "10.77.9.61:8771"
+visiting = true
+"#,
+    )
+    .expect_err("a visiting camera without register:<id> is refused");
+    assert!(err.to_string().contains("cam1"), "{err}");
+    assert!(err.to_string().contains("register:"), "{err}");
+}
+
+#[test]
+fn register_first_then_the_literal_relay_1431() {
+    use bkshading::registry::{RelayRegistry, REGISTRATION_TTL};
+    use std::time::{Duration, Instant};
+    let reg = RelayRegistry::new();
+    let t0 = Instant::now();
+    // Not announced (an older relay, or before the first announcement): the literal relay.
+    assert_eq!(
+        reg.resolve_camera("register:cam2", Some("cam2.lan:8771"), t0)
+            .as_deref(),
+        Some("cam2.lan:8771")
+    );
+    // Announced: the registration wins over the literal.
+    reg.register("cam2", "10.77.9.62:8771".into(), t0);
+    assert_eq!(
+        reg.resolve_camera("register:cam2", Some("cam2.lan:8771"), t0)
+            .as_deref(),
+        Some("10.77.9.62:8771")
+    );
+    // The registration went stale: back to the literal relay.
+    let late = t0 + REGISTRATION_TTL + Duration::from_secs(1);
+    assert_eq!(
+        reg.resolve_camera("register:cam2", Some("cam2.lan:8771"), late)
+            .as_deref(),
+        Some("cam2.lan:8771")
+    );
+    // No fallback configured: a stale/missing registration is unreachable, as before (a handheld).
+    assert_eq!(reg.resolve_camera("register:handheld-1", None, t0), None);
+    // A blank fallback is no fallback.
+    assert_eq!(reg.resolve_camera("register:cam5", Some("  "), t0), None);
+    // A plain address passes through untouched; its fallback is never used.
+    assert_eq!(
+        reg.resolve_camera("10.77.9.66:8771", Some("x:1"), t0)
+            .as_deref(),
+        Some("10.77.9.66:8771")
+    );
+}
+
+#[test]
+fn a_visiting_camera_is_listed_only_once_its_relay_announced_1431() {
+    use bkshading::aggregator::camera_listed;
+    use bkshading::registry::{RelayRegistry, REGISTRATION_TTL};
+    use std::time::{Duration, Instant};
+    let cfg = ServiceConfig::from_toml_str(
+        r#"
+[[camera]]
+id = "cam2"
+label = "Cam 2"
+transport = "cambox-relay"
+address = "register:cam2"
+fallback_address = "cam2.lan:8771"
+
+[[camera]]
+id = "cam1"
+label = "Cam 1"
+transport = "cambox-relay"
+address = "register:cam1"
+visiting = true
+"#,
+    )
+    .unwrap();
+    let (home, visiting) = (&cfg.cameras[0], &cfg.cameras[1]);
+    let reg = RelayRegistry::new();
+    let t0 = Instant::now();
+    // A venue camera is always listed, registered or not.
+    assert!(camera_listed(
+        home,
+        reg.view_for(&home.address, t0).as_ref()
+    ));
+    // A camera of the other venue stays out of the panel at a normal event.
+    assert!(!camera_listed(
+        visiting,
+        reg.view_for(&visiting.address, t0).as_ref()
+    ));
+    // Joint event: its relay announced itself to this strih -> it appears.
+    reg.register("cam1", "10.77.9.61:8771".into(), t0);
+    assert!(camera_listed(
+        visiting,
+        reg.view_for(&visiting.address, t0).as_ref()
+    ));
+    // It stops announcing mid-event: the block STAYS (red, stale), never vanishes under the operator.
+    let late = t0 + REGISTRATION_TTL + Duration::from_secs(60);
+    let view = reg.view_for(&visiting.address, late);
+    assert!(view.as_ref().is_some_and(|v| !v.fresh));
+    assert!(camera_listed(visiting, view.as_ref()));
+}
+
+#[test]
+fn both_strih_seeds_load_in_the_service_1431() {
+    // The setup-strih seed (scripts/lib/strih-provision.sh strih_bkshading_config_text) for both strih
+    // boxes must load in the real service, visiting blocks included (a visiting block needs register:<id>).
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for (box_name, home) in [("strih-snv", 3usize), ("strih-pp", 4)] {
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(
+                "set -euo pipefail; . scripts/lib/strih-box-facts.sh; \
+                 . scripts/lib/strih-provision.sh; strih_box_load \"$1\" >/dev/null; \
+                 strih_bkshading_config_text",
+            )
+            .arg("seed")
+            .arg(box_name)
+            .current_dir(&repo)
+            .output()
+            .expect("run bash");
+        assert!(
+            out.status.success(),
+            "{box_name}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let cfg = ServiceConfig::from_toml_str(&String::from_utf8(out.stdout).unwrap())
+            .unwrap_or_else(|e| panic!("{box_name} seed does not load: {e}"));
+        assert_eq!(cfg.cameras.len(), 7, "{box_name}");
+        assert_eq!(
+            cfg.cameras.iter().filter(|c| !c.visiting).count(),
+            home,
+            "{box_name}: the venue cameras"
+        );
+    }
+}
