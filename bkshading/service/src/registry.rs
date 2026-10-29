@@ -130,10 +130,16 @@ impl RelayRegistry {
     pub fn resolve_camera(
         &self,
         address: &str,
-        _fallback: Option<&str>,
+        fallback: Option<&str>,
         now: Instant,
     ) -> Option<String> {
-        self.resolve(address, now)
+        self.resolve(address, now).or_else(|| {
+            registered_id(address)?;
+            fallback
+                .map(str::trim)
+                .filter(|f| !f.is_empty())
+                .map(str::to_string)
+        })
     }
 
     /// The address to reach a camera configured with `address`: a plain `host:port` as is, a

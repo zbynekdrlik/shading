@@ -76,8 +76,8 @@ pub fn camera_view(
 /// Issue 1431: whether the panel lists `cam` now. A venue camera always; a `visiting` camera
 /// (the other venue's, a joint event) only once its relay has announced itself (`registration`
 /// is `Some`, stale or fresh), so a normal event shows only the venue's own cameras.
-pub fn camera_listed(_cam: &CameraConfig, _registration: Option<&RegistrationView>) -> bool {
-    true
+pub fn camera_listed(cam: &CameraConfig, registration: Option<&RegistrationView>) -> bool {
+    !cam.visiting || registration.is_some()
 }
 
 /// Rebuilds ONE camera's view (from its config + a fresh relay state) inside a copy of `current`
@@ -149,19 +149,31 @@ impl Aggregator {
     /// the per-camera workers fill; each camera's `preview_live` is read from it after the relay
     /// polls, against `cfg.preview`'s freshness bound (issue 808).
     pub async fn snapshot(&self, cfg: &ServiceConfig, previews: &PreviewStore) -> Aggregate {
+        // issue 1431: a visiting camera (the other venue's) is listed, and polled, only once its
+        // relay has announced itself here; a normal event lists only the venue's own cameras.
+        let listed: Vec<&CameraConfig> = cfg
+            .cameras
+            .iter()
+            .filter(|cam| {
+                camera_listed(
+                    cam,
+                    self.registry
+                        .view_for(&cam.address, Instant::now())
+                        .as_ref(),
+                )
+            })
+            .collect();
         // Poll every relay CONCURRENTLY: /api/cameras latency is bounded by the SLOWEST relay
         // (~one client timeout), not the SUM — the normal M1 state has several relays down, and
         // each unreachable relay would otherwise burn a full connect timeout in series.
-        let states =
-            futures::future::join_all(cfg.cameras.iter().map(|cam| self.poll_state(cam))).await;
+        let states = futures::future::join_all(listed.iter().map(|cam| self.poll_state(cam))).await;
         // Read the clock AFTER the polls (up to one client timeout), so liveness is judged at the
         // moment the snapshot is published.
         let now_ms = wall_clock_ms();
         let now = Instant::now();
         let max_age_ms = cfg.preview.max_frame_age_ms();
-        let cameras = cfg
-            .cameras
-            .iter()
+        let cameras = listed
+            .into_iter()
             .zip(states)
             .map(|(cam, state)| {
                 let live = previews.is_live(&cam.id, now_ms, max_age_ms);
@@ -178,7 +190,11 @@ impl Aggregator {
 
     /// Reads one relay's `/api/state`, returning `None` if unreachable / malformed.
     async fn poll_state(&self, cam: &CameraConfig) -> Option<RelayState> {
-        let Some(address) = self.registry.resolve(&cam.address, Instant::now()) else {
+        let Some(address) = self.registry.resolve_camera(
+            &cam.address,
+            cam.fallback_address.as_deref(),
+            Instant::now(),
+        ) else {
             tracing::debug!(id = %cam.id, address = %cam.address, "relay not registered (or stale)");
             return None;
         };
@@ -211,7 +227,11 @@ impl Aggregator {
         req: &SetRequest,
     ) -> anyhow::Result<Option<RelayState>> {
         let params = summarize_set_request(req);
-        let Some(address) = self.registry.resolve(&cam.address, Instant::now()) else {
+        let Some(address) = self.registry.resolve_camera(
+            &cam.address,
+            cam.fallback_address.as_deref(),
+            Instant::now(),
+        ) else {
             tracing::error!(id = %cam.id, params = %params, address = %cam.address,
                 "PUT /api/params -> relay not registered (or stale)");
             anyhow::bail!("relay {} is not registered", cam.id);

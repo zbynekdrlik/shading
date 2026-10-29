@@ -995,8 +995,7 @@ address = "10.77.9.61:8771"
 visiting = true
 "#,
     )
-    .err()
-    .expect("a visiting camera without register:<id> is refused");
+    .expect_err("a visiting camera without register:<id> is refused");
     assert!(err.to_string().contains("cam1"), "{err}");
     assert!(err.to_string().contains("register:"), "{err}");
 }

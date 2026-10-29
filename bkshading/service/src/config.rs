@@ -67,7 +67,25 @@ pub struct CameraConfig {
 
 impl ServiceConfig {
     pub fn from_toml_str(s: &str) -> anyhow::Result<Self> {
-        Ok(toml::from_str(s)?)
+        let cfg: ServiceConfig = toml::from_str(s)?;
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    /// Issue 1431: a `visiting` camera is listed only once its relay registered, so it must name
+    /// that relay by `register:<id>`; a plain address would make it a camera that never appears.
+    fn validate(&self) -> anyhow::Result<()> {
+        for cam in &self.cameras {
+            if cam.visiting && crate::registry::registered_id(&cam.address).is_none() {
+                anyhow::bail!(
+                    "camera '{}' is visiting = true but its address '{}' is not register:<id> \
+                     (a visiting camera appears only once its relay registers)",
+                    cam.id,
+                    cam.address
+                );
+            }
+        }
+        Ok(())
     }
 
     pub fn from_path(path: &std::path::Path) -> anyhow::Result<Self> {
