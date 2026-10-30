@@ -46,8 +46,25 @@ fn landed_on_the_request_needs_no_correction_1452() {
 #[test]
 fn no_move_is_never_corrected_1452() {
     // cam7: the iris stayed where it was -> no correcting write (the report flags it instead).
+    // An UPWARD write that did not move is never corrected. (A downward one that did not move gets
+    // the step below the request since 30.10.2026 -- see the cam7 test below.)
     assert_eq!(aperture_correction(1, Some(0), Some(0), 5), None);
-    assert_eq!(aperture_correction(2, Some(3), Some(3), 5), None);
+}
+
+#[test]
+fn a_downward_write_that_did_not_move_writes_one_step_past_the_request_1452() {
+    // cam7 (BMPCC 6K fw 8.1, live 30.10.2026): a write lands on the request or ONE listed step
+    // ABOVE it, in either direction. From f/3.7 a write of f/3.5 lands f/3.7 again (no move), and
+    // a write of f/3.2 lands f/3.5. So a downward write that left the iris at (or above) its start
+    // gets ONE correcting write of the step below the request.
+    // before idx 3, request idx 2, landed idx 3 (did not move) -> write idx 1.
+    assert_eq!(aperture_correction(2, Some(3), Some(3), 5), Some(1));
+    // Landed above the start on a downward write: same correction.
+    assert_eq!(aperture_correction(2, Some(3), Some(4), 5), Some(1));
+    // The request is the first listed value: nothing below it to write.
+    assert_eq!(aperture_correction(0, Some(1), Some(1), 5), None);
+    // An upward write that did not move is never corrected (no body has shown it moving down).
+    assert_eq!(aperture_correction(1, Some(0), Some(0), 5), None);
 }
 
 #[test]
@@ -87,6 +104,12 @@ fn a_correction_is_one_step_and_its_own_result_is_never_corrected_again_1452() {
                 for landed in 0..n {
                     if let Some(fix) = aperture_correction(req, Some(before), Some(landed), n) {
                         assert!(fix < n, "the correction stays inside the list");
+                        if req < before && landed >= before {
+                            // A downward write that did not move (cam7, 30.10.2026): exactly the
+                            // ONE listed step below the request.
+                            assert_eq!(fix + 1, req, "req {req}, before {before}, landed {landed}");
+                            continue;
+                        }
                         assert_eq!(
                             fix.abs_diff(landed),
                             1,

@@ -51,6 +51,10 @@ enum Body {
     NeverMoves,
     /// Like `OvershootsUp`, but the shell process exits on the first 0x5007 read after a write.
     DiesOnReadBack,
+    /// cam7 (BMPCC 6K fw 8.1, live 30.10.2026): a write of f/4.5 or f/4.8 lands ONE listed step
+    /// above it, every other value lands exactly, in either direction -- also a write of the value
+    /// the iris already holds (f/4.8 held + written -> f/5.2).
+    LandsAboveOnSome,
 }
 
 /// The five listed f-numbers of the fake body (x100), ascending: f/4 f/4.5 f/4.8 f/5.2 f/5.6.
@@ -71,6 +75,9 @@ fn fake_body(dir: &Path, start: i64, body: Body) -> PathBuf {
             "if [ \"$v\" -lt \"$AP\" ]; then AP=$(prev \"$v\"); else AP=$v; fi"
         }
         Body::NeverMoves => ":",
+        Body::LandsAboveOnSome => {
+            "case \"$v\" in 450|480) AP=$(next \"$v\") ;; *) AP=$v ;; esac"
+        }
     };
     let die = u8::from(matches!(body, Body::DiesOnReadBack));
     let log = dir.join("cmds.log");
@@ -342,6 +349,82 @@ fn a_write_the_body_ignores_is_never_corrected_and_stays_flagged_1452() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn a_downward_write_that_did_not_move_lands_on_the_request_via_the_step_below_1452() {
+    // cam7 live 30.10.2026: from f/3.7 a write of f/3.5 left the iris at f/3.7; a write of f/3.2
+    // lands f/3.5. Fake: from f/5.2, a write of f/4.8 lands f/5.2 (no move) -> ONE correcting
+    // write of f/4.5 -> lands f/4.8, the request.
+    let scratch = Scratch::new("stuck-down");
+    let bin = fake_body(&scratch.0, 520, Body::LandsAboveOnSome);
+    let clock = Arc::new(AtomicU64::new(0));
+    let s = session(&bin, &clock);
+
+    let outcome = s
+        .submit(&SetRequest {
+            aperture_norm: Some(norm(2)),
+            ..Default::default()
+        })
+        .expect("submit ok");
+    let ApplyOutcome::Applied { state, .. } = outcome else {
+        panic!("an idle queue runs the SET")
+    };
+    let cmds = shell_commands(&scratch.0);
+    assert_eq!(
+        aperture_writes(&cmds),
+        vec![
+            "set-config f-number=f/4.8".to_string(),
+            "set-config f-number=f/4.5".to_string()
+        ],
+        "the write, then ONE correcting write of the step below the request: {cmds:?}"
+    );
+    let got = state.params.aperture_av.expect("aperture reported");
+    assert!((got - av(4.8)).abs() < 1e-9, "landed f/4.8, got AV {got}");
+
+    clock.store(6_000, Ordering::SeqCst);
+    let closed = s.read_state();
+    assert!(closed.online, "{closed:?}");
+    assert!(closed.not_applied.is_empty(), "{:?}", closed.not_applied);
+    let got = closed.params.aperture_av.expect("aperture read");
+    assert!(
+        (got - av(4.8)).abs() < 1e-9,
+        "camera at f/4.8, got AV {got}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_write_of_the_held_f_number_is_never_sent_to_the_camera_1452() {
+    // cam7 live 30.10.2026: writing the f/3.5 the iris already held moved it to f/3.7. A SET whose
+    // aperture is the listed position the iris holds (a Stream Deck absolute SET, a panel re-send)
+    // writes no f-number at all; the iris stays put and nothing is flagged.
+    let scratch = Scratch::new("held");
+    let bin = fake_body(&scratch.0, 480, Body::LandsAboveOnSome);
+    let clock = Arc::new(AtomicU64::new(0));
+    let s = session(&bin, &clock);
+
+    s.submit(&SetRequest {
+        aperture_norm: Some(norm(2)),
+        ..Default::default()
+    })
+    .expect("submit ok");
+    let cmds = shell_commands(&scratch.0);
+    assert!(
+        aperture_writes(&cmds).is_empty(),
+        "the held f-number is never written: {cmds:?}"
+    );
+
+    clock.store(6_000, Ordering::SeqCst);
+    let closed = s.read_state();
+    assert!(closed.online, "{closed:?}");
+    assert!(closed.not_applied.is_empty(), "{:?}", closed.not_applied);
+    let got = closed.params.aperture_av.expect("aperture read");
+    assert!(
+        (got - av(4.8)).abs() < 1e-9,
+        "the iris stays at f/4.8, got AV {got}"
+    );
+}
+
 /// Polls the fake shell's command log until a line starting with `prefix` appears (bounded).
 fn wait_for_command(dir: &Path, prefix: &str) {
     for _ in 0..750 {
@@ -518,7 +601,8 @@ fn a_run_that_ends_on_its_starting_value_is_still_read_back_and_corrected_1452()
 #[test]
 fn a_write_to_the_value_the_iris_already_holds_is_not_read_back_1452() {
     // An absolute SET (Stream Deck / Companion) of the f-number the iris already sits on asks for
-    // no move: no read-back, no settle bound paid.
+    // no move: no write (cam7 30.10.2026 moved on a held-value write), no read-back, no settle
+    // bound paid.
     let scratch = Scratch::new("noop");
     let bin = fake_body(&scratch.0, 450, Body::OvershootsUp);
     let clock = Arc::new(AtomicU64::new(0));
@@ -530,16 +614,9 @@ fn a_write_to_the_value_the_iris_already_holds_is_not_read_back_1452() {
     })
     .expect("submit ok");
     let cmds = shell_commands(&scratch.0);
-    assert_eq!(
-        aperture_writes(&cmds),
-        vec!["set-config f-number=f/4.5".to_string()]
-    );
-    let reads_after_write = cmds
-        .iter()
-        .skip_while(|c| !c.starts_with("set-config f-number="))
-        .filter(|c| *c == "get-config 5007")
-        .count();
-    assert_eq!(reads_after_write, 0, "{cmds:?}");
+    assert!(aperture_writes(&cmds).is_empty(), "{cmds:?}");
+    let reads_after_open = cmds.iter().filter(|c| *c == "get-config 5007").count();
+    assert!(reads_after_open <= 1, "only the burst-open read: {cmds:?}");
 
     clock.store(6_000, Ordering::SeqCst);
     let closed = s.read_state();

@@ -4,7 +4,7 @@
 //! `transport`, so it reaches the session's private burst state without widening it.
 
 use anyhow::{Context, Result};
-use bkshading_proto::aperture::landed_aperture;
+use bkshading_proto::aperture::{fnumber_label_index, landed_aperture};
 use bkshading_proto::mapping::{norm_to_choice_index, parse_fnumber_labels, DEFAULT_FPS100};
 use bkshading_proto::read::{current_fnumber_x100, fps_supported, params_and_caps, plan_writes};
 use bkshading_proto::wire::{summarize_set_request, RelayState, SetRequest};
@@ -70,7 +70,7 @@ impl CameraSession {
             .expect("burst.plan set immediately above");
         let writes = match plan_writes(req, &basis.fnumber_labels, basis.fps100, &basis.fps_choices)
         {
-            Ok(writes) => writes,
+            Ok(writes) => self.drop_held_aperture_write(burst, req, &basis.fnumber_labels, writes),
             Err(refused) => {
                 // issue 1402: a `fps` the camera's d006 does not list refuses the whole SET before
                 // ANY write or burst-state change — never rounded to a neighbour, never sent to
@@ -227,6 +227,31 @@ impl CameraSession {
 
     /// Whether another aperture click is queued behind the running SET (issue 1452). Lock order
     /// burst -> set_queue, the same order `submit` already uses.
+    /// Drops the f-number write of a SET whose aperture is the listed position the iris holds
+    /// (issue 1452, cam7 live 30.10.2026: writing the held f/3.5 moved the iris to f/3.7). Only
+    /// when that position is MEASURED (`aperture_raw`, not mid-run) and no further aperture click
+    /// is queued behind this one; every other write is kept.
+    fn drop_held_aperture_write(
+        &self,
+        burst: &BurstSession,
+        req: &SetRequest,
+        labels: &[String],
+        mut writes: Vec<(String, String)>,
+    ) -> Vec<(String, String)> {
+        let (Some(norm), Some(raw)) = (req.aperture_norm, burst.aperture_raw) else {
+            return writes;
+        };
+        let requested = norm_to_choice_index(norm, labels.len() as i64) as usize;
+        if fnumber_label_index(labels, raw) == Some(requested) && !self.aperture_click_queued() {
+            tracing::info!(
+                requested = labels.get(requested).map(String::as_str).unwrap_or("?"),
+                "aperture SET asks for the held f-number; not written (issue 1452)"
+            );
+            writes.retain(|(key, _)| key != "f-number");
+        }
+        writes
+    }
+
     fn aperture_click_queued(&self) -> bool {
         self.set_queue
             .lock()
