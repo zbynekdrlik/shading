@@ -46,8 +46,9 @@ fn landed_on_the_request_needs_no_correction_1452() {
 #[test]
 fn no_move_is_never_corrected_1452() {
     // cam7: the iris stayed where it was -> no correcting write (the report flags it instead).
+    // An UPWARD write that did not move is never corrected. (A downward one that did not move gets
+    // the step below the request since 30.10.2026 -- see the cam7 test below.)
     assert_eq!(aperture_correction(1, Some(0), Some(0), 5), None);
-    assert_eq!(aperture_correction(2, Some(3), Some(3), 5), None);
 }
 
 #[test]
@@ -103,6 +104,12 @@ fn a_correction_is_one_step_and_its_own_result_is_never_corrected_again_1452() {
                 for landed in 0..n {
                     if let Some(fix) = aperture_correction(req, Some(before), Some(landed), n) {
                         assert!(fix < n, "the correction stays inside the list");
+                        if req < before && landed >= before {
+                            // A downward write that did not move (cam7, 30.10.2026): exactly the
+                            // ONE listed step below the request.
+                            assert_eq!(fix + 1, req, "req {req}, before {before}, landed {landed}");
+                            continue;
+                        }
                         assert_eq!(
                             fix.abs_diff(landed),
                             1,

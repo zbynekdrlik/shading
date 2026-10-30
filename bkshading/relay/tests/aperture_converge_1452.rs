@@ -601,7 +601,8 @@ fn a_run_that_ends_on_its_starting_value_is_still_read_back_and_corrected_1452()
 #[test]
 fn a_write_to_the_value_the_iris_already_holds_is_not_read_back_1452() {
     // An absolute SET (Stream Deck / Companion) of the f-number the iris already sits on asks for
-    // no move: no read-back, no settle bound paid.
+    // no move: no write (cam7 30.10.2026 moved on a held-value write), no read-back, no settle
+    // bound paid.
     let scratch = Scratch::new("noop");
     let bin = fake_body(&scratch.0, 450, Body::OvershootsUp);
     let clock = Arc::new(AtomicU64::new(0));
@@ -613,16 +614,12 @@ fn a_write_to_the_value_the_iris_already_holds_is_not_read_back_1452() {
     })
     .expect("submit ok");
     let cmds = shell_commands(&scratch.0);
-    assert_eq!(
-        aperture_writes(&cmds),
-        vec!["set-config f-number=f/4.5".to_string()]
-    );
-    let reads_after_write = cmds
+    assert!(aperture_writes(&cmds).is_empty(), "{cmds:?}");
+    let reads_after_open = cmds
         .iter()
-        .skip_while(|c| !c.starts_with("set-config f-number="))
         .filter(|c| *c == "get-config 5007")
         .count();
-    assert_eq!(reads_after_write, 0, "{cmds:?}");
+    assert!(reads_after_open <= 1, "only the burst-open read: {cmds:?}");
 
     clock.store(6_000, Ordering::SeqCst);
     let closed = s.read_state();
