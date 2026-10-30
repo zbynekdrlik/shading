@@ -51,6 +51,22 @@ fn no_move_is_never_corrected_1452() {
 }
 
 #[test]
+fn a_downward_write_that_did_not_move_writes_one_step_past_the_request_1452() {
+    // cam7 (BMPCC 6K fw 8.1, live 30.10.2026): a write lands on the request or ONE listed step
+    // ABOVE it, in either direction. From f/3.7 a write of f/3.5 lands f/3.7 again (no move), and
+    // a write of f/3.2 lands f/3.5. So a downward write that left the iris at (or above) its start
+    // gets ONE correcting write of the step below the request.
+    // before idx 3, request idx 2, landed idx 3 (did not move) -> write idx 1.
+    assert_eq!(aperture_correction(2, Some(3), Some(3), 5), Some(1));
+    // Landed above the start on a downward write: same correction.
+    assert_eq!(aperture_correction(2, Some(3), Some(4), 5), Some(1));
+    // The request is the first listed value: nothing below it to write.
+    assert_eq!(aperture_correction(0, Some(1), Some(1), 5), None);
+    // An upward write that did not move is never corrected (no body has shown it moving down).
+    assert_eq!(aperture_correction(1, Some(0), Some(0), 5), None);
+}
+
+#[test]
 fn undershoot_is_never_corrected_1452() {
     // Moved toward the request but stopped short (a lens stop): not an overshoot, no correction.
     assert_eq!(aperture_correction(3, Some(0), Some(2), 5), None);
