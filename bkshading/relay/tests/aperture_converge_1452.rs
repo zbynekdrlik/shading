@@ -615,10 +615,7 @@ fn a_write_to_the_value_the_iris_already_holds_is_not_read_back_1452() {
     .expect("submit ok");
     let cmds = shell_commands(&scratch.0);
     assert!(aperture_writes(&cmds).is_empty(), "{cmds:?}");
-    let reads_after_open = cmds
-        .iter()
-        .filter(|c| *c == "get-config 5007")
-        .count();
+    let reads_after_open = cmds.iter().filter(|c| *c == "get-config 5007").count();
     assert!(reads_after_open <= 1, "only the burst-open read: {cmds:?}");
 
     clock.store(6_000, Ordering::SeqCst);

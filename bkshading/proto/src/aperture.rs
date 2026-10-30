@@ -27,11 +27,17 @@ use crate::mapping::{fnumber_to_av, nearest_choice_norm, parse_current, parse_fn
 ///
 /// An overshoot is a landing PAST the request in the direction the write asked for
 /// (`before < requested < landed`, or the mirror). The correction is ONE listed step from `landed`
-/// back toward the request — on cam6 that is the request itself. Everything else is `None`:
-/// landed on the request, did not move, stopped short, a position outside the list or unknown (no
-/// direction to judge by), or landed on the first / last listed value (the lens's own stop, which a
-/// step back would not fix). The correction's own result is never corrected again: the relay calls
-/// this once per write.
+/// back toward the request — on cam6 that is the request itself.
+///
+/// A DOWNWARD write that did not move down (`requested < before <= landed`) gets ONE write of the
+/// listed step BELOW the request (cam7, BMPCC 6K fw 8.1, live 30.10.2026: a write lands on the
+/// request or one listed step above it, so from f/3.7 a write of f/3.5 never moves the iris, while
+/// a write of f/3.2 lands f/3.5). An upward write that did not move is never corrected.
+///
+/// Everything else is `None`: landed on the request, stopped short, a position outside the list or
+/// unknown (no direction to judge by), or an overshoot onto the first / last listed value (the
+/// lens's own stop, which a step back would not fix). The correction's own result is never
+/// corrected again: the relay calls this once per write.
 pub fn aperture_correction(
     requested: usize,
     before: Option<usize>,
@@ -41,6 +47,9 @@ pub fn aperture_correction(
     let (before, landed) = (before?, landed?);
     if n < 2 || requested >= n || before >= n || landed >= n {
         return None;
+    }
+    if requested < before && landed >= before {
+        return requested.checked_sub(1);
     }
     if landed == 0 || landed == n - 1 {
         return None;
