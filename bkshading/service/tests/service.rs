@@ -810,3 +810,313 @@ fn preview_transitions_log_each_live_stale_flip_once_808() {
     let mut fresh: HashMap<String, bool> = HashMap::new();
     assert!(preview_transitions(&mut fresh, &views(true)).is_empty());
 }
+
+// ── issue 808 (owner ruling 28.10.2026): a handheld relay registers itself, its IP is never config ──
+
+#[test]
+fn a_register_address_resolves_only_through_a_fresh_registration_808() {
+    use bkshading::registry::{RelayRegistry, REGISTRATION_TTL};
+    use std::time::{Duration, Instant};
+    let reg = RelayRegistry::new();
+    let t0 = Instant::now();
+    // Nothing announced yet: unreachable, never a guessed address.
+    assert_eq!(reg.resolve("register:handheld-1", t0), None);
+    // A plain host:port passes through untouched.
+    assert_eq!(
+        reg.resolve("10.77.9.66:8771", t0).as_deref(),
+        Some("10.77.9.66:8771")
+    );
+    assert_eq!(
+        reg.register("handheld-1", "10.77.8.78:8771".into(), t0),
+        None
+    );
+    assert_eq!(
+        reg.resolve("register:handheld-1", t0 + Duration::from_secs(5))
+            .as_deref(),
+        Some("10.77.8.78:8771")
+    );
+    // DHCP hands the SBC another address: the next announcement moves it, and the move is reported.
+    let t1 = t0 + Duration::from_secs(10);
+    assert_eq!(
+        reg.register("handheld-1", "10.77.8.91:8771".into(), t1)
+            .as_deref(),
+        Some("10.77.8.78:8771")
+    );
+    assert_eq!(
+        reg.resolve("register:handheld-1", t1).as_deref(),
+        Some("10.77.8.91:8771")
+    );
+    // A relay that stopped announcing goes stale: unreachable again.
+    assert_eq!(
+        reg.resolve(
+            "register:handheld-1",
+            t1 + REGISTRATION_TTL + Duration::from_secs(1)
+        ),
+        None
+    );
+    // Another id never resolves through this one.
+    assert_eq!(reg.resolve("register:handheld-2", t1), None);
+}
+
+#[test]
+fn the_panel_view_shows_the_announcement_age_and_the_unbroken_announcing_time_808() {
+    use bkshading::registry::{RelayRegistry, REGISTRATION_TTL};
+    use std::time::{Duration, Instant};
+    let reg = RelayRegistry::new();
+    let t0 = Instant::now();
+    assert_eq!(
+        reg.view_for("register:handheld-1", t0),
+        None,
+        "never announced"
+    );
+    assert_eq!(
+        reg.view_for("10.77.9.66:8771", t0),
+        None,
+        "a fixed address has no registration"
+    );
+    // Announcing every 10 s for 10 min: one unbroken streak.
+    for i in 0..=60 {
+        reg.register(
+            "handheld-1",
+            "10.77.8.78:8771".into(),
+            t0 + Duration::from_secs(10 * i),
+        );
+    }
+    let now = t0 + Duration::from_secs(604);
+    let v = reg.view_for("register:handheld-1", now).unwrap();
+    assert_eq!(v.relay_id, "handheld-1");
+    assert_eq!(v.address, "10.77.8.78:8771");
+    assert_eq!((v.age_s, v.announcing_s, v.fresh), (4, 600, true));
+    // A DHCP move inside the TTL keeps the streak.
+    reg.register(
+        "handheld-1",
+        "10.77.8.91:8771".into(),
+        t0 + Duration::from_secs(610),
+    );
+    let v = reg
+        .view_for("register:handheld-1", t0 + Duration::from_secs(610))
+        .unwrap();
+    assert_eq!(
+        (v.address.as_str(), v.announcing_s),
+        ("10.77.8.91:8771", 610)
+    );
+    // Silent past the TTL: still shown, but stale, with its last address.
+    let late = t0 + Duration::from_secs(610) + REGISTRATION_TTL + Duration::from_secs(1);
+    let v = reg.view_for("register:handheld-1", late).unwrap();
+    assert!(!v.fresh);
+    assert_eq!(v.address, "10.77.8.91:8771");
+    // The next announcement after that gap starts a new streak (the relay restarted).
+    reg.register("handheld-1", "10.77.8.91:8771".into(), late);
+    let v = reg
+        .view_for("register:handheld-1", late + Duration::from_secs(3))
+        .unwrap();
+    assert_eq!((v.announcing_s, v.age_s, v.fresh), (0, 3, true));
+}
+
+#[test]
+fn a_relay_id_is_a_plain_name_and_the_announced_address_is_the_peer_808() {
+    use bkshading::registry::{announced_address, registered_id, valid_relay_id};
+    use std::net::IpAddr;
+    assert!(valid_relay_id("handheld-1"));
+    assert!(valid_relay_id("cam4.sbc_1"));
+    for bad in ["", "a b", "x\ny", "../etc", "h:1", &"a".repeat(65)] {
+        assert!(!valid_relay_id(bad), "{bad:?} must be refused");
+    }
+    assert_eq!(registered_id("register:handheld-1"), Some("handheld-1"));
+    assert_eq!(registered_id("register:"), None);
+    assert_eq!(registered_id("10.77.8.70:8771"), None);
+    let v4: IpAddr = "10.77.8.78".parse().unwrap();
+    assert_eq!(announced_address(v4, 8771), "10.77.8.78:8771");
+    let mapped: IpAddr = "::ffff:10.77.8.78".parse().unwrap();
+    assert_eq!(announced_address(mapped, 8771), "10.77.8.78:8771");
+    let v6: IpAddr = "fd00::5".parse().unwrap();
+    assert_eq!(announced_address(v6, 8771), "[fd00::5]:8771");
+}
+
+#[test]
+fn a_config_camera_may_name_its_relay_by_registration_808() {
+    let cfg = bkshading::config::ServiceConfig::from_toml_str(
+        r#"
+[[camera]]
+id = "cam4"
+label = "Cam 4"
+transport = "sbc-relay"
+address = "register:handheld-1"
+ndi_preview = "CAM4 (usb)"
+grab_fps = 60
+"#,
+    )
+    .unwrap();
+    assert_eq!(cfg.cameras[0].address, "register:handheld-1");
+}
+
+// ── issue 1431: strih.lan is the ONE switch — every cambox relay registers, both strihs list all seven ──
+
+#[test]
+fn a_camera_block_parses_its_fallback_and_visiting_flag_1431() {
+    let cfg = ServiceConfig::from_toml_str(
+        r#"
+[[camera]]
+id = "cam2"
+label = "Cam 2"
+transport = "cambox-relay"
+address = "register:cam2"
+fallback_address = "cam2.lan:8771"
+
+[[camera]]
+id = "cam1"
+label = "Cam 1"
+transport = "cambox-relay"
+address = "register:cam1"
+visiting = true
+"#,
+    )
+    .unwrap();
+    assert_eq!(
+        cfg.cameras[0].fallback_address.as_deref(),
+        Some("cam2.lan:8771")
+    );
+    assert!(!cfg.cameras[0].visiting, "a venue camera is not visiting");
+    assert_eq!(cfg.cameras[1].fallback_address, None);
+    assert!(cfg.cameras[1].visiting);
+}
+
+#[test]
+fn a_visiting_camera_needs_a_register_address_1431() {
+    // A visiting block with a plain host:port would never be listed (it never registers): refuse it
+    // by name at load, never a silently invisible camera.
+    let err = ServiceConfig::from_toml_str(
+        r#"
+[[camera]]
+id = "cam1"
+label = "Cam 1"
+transport = "cambox-relay"
+address = "10.77.9.61:8771"
+visiting = true
+"#,
+    )
+    .expect_err("a visiting camera without register:<id> is refused");
+    assert!(err.to_string().contains("cam1"), "{err}");
+    assert!(err.to_string().contains("register:"), "{err}");
+}
+
+#[test]
+fn register_first_then_the_literal_relay_1431() {
+    use bkshading::registry::{RelayRegistry, REGISTRATION_TTL};
+    use std::time::{Duration, Instant};
+    let reg = RelayRegistry::new();
+    let t0 = Instant::now();
+    // Not announced (an older relay, or before the first announcement): the literal relay.
+    assert_eq!(
+        reg.resolve_camera("register:cam2", Some("cam2.lan:8771"), t0)
+            .as_deref(),
+        Some("cam2.lan:8771")
+    );
+    // Announced: the registration wins over the literal.
+    reg.register("cam2", "10.77.9.62:8771".into(), t0);
+    assert_eq!(
+        reg.resolve_camera("register:cam2", Some("cam2.lan:8771"), t0)
+            .as_deref(),
+        Some("10.77.9.62:8771")
+    );
+    // The registration went stale: back to the literal relay.
+    let late = t0 + REGISTRATION_TTL + Duration::from_secs(1);
+    assert_eq!(
+        reg.resolve_camera("register:cam2", Some("cam2.lan:8771"), late)
+            .as_deref(),
+        Some("cam2.lan:8771")
+    );
+    // No fallback configured: a stale/missing registration is unreachable, as before (a handheld).
+    assert_eq!(reg.resolve_camera("register:handheld-1", None, t0), None);
+    // A blank fallback is no fallback.
+    assert_eq!(reg.resolve_camera("register:cam5", Some("  "), t0), None);
+    // A plain address passes through untouched; its fallback is never used.
+    assert_eq!(
+        reg.resolve_camera("10.77.9.66:8771", Some("x:1"), t0)
+            .as_deref(),
+        Some("10.77.9.66:8771")
+    );
+}
+
+#[test]
+fn a_visiting_camera_is_listed_only_once_its_relay_announced_1431() {
+    use bkshading::aggregator::camera_listed;
+    use bkshading::registry::{RelayRegistry, REGISTRATION_TTL};
+    use std::time::{Duration, Instant};
+    let cfg = ServiceConfig::from_toml_str(
+        r#"
+[[camera]]
+id = "cam2"
+label = "Cam 2"
+transport = "cambox-relay"
+address = "register:cam2"
+fallback_address = "cam2.lan:8771"
+
+[[camera]]
+id = "cam1"
+label = "Cam 1"
+transport = "cambox-relay"
+address = "register:cam1"
+visiting = true
+"#,
+    )
+    .unwrap();
+    let (home, visiting) = (&cfg.cameras[0], &cfg.cameras[1]);
+    let reg = RelayRegistry::new();
+    let t0 = Instant::now();
+    // A venue camera is always listed, registered or not.
+    assert!(camera_listed(
+        home,
+        reg.view_for(&home.address, t0).as_ref()
+    ));
+    // A camera of the other venue stays out of the panel at a normal event.
+    assert!(!camera_listed(
+        visiting,
+        reg.view_for(&visiting.address, t0).as_ref()
+    ));
+    // Joint event: its relay announced itself to this strih -> it appears.
+    reg.register("cam1", "10.77.9.61:8771".into(), t0);
+    assert!(camera_listed(
+        visiting,
+        reg.view_for(&visiting.address, t0).as_ref()
+    ));
+    // It stops announcing mid-event: the block STAYS (red, stale), never vanishes under the operator.
+    let late = t0 + REGISTRATION_TTL + Duration::from_secs(60);
+    let view = reg.view_for(&visiting.address, late);
+    assert!(view.as_ref().is_some_and(|v| !v.fresh));
+    assert!(camera_listed(visiting, view.as_ref()));
+}
+
+#[test]
+fn both_strih_seeds_load_in_the_service_1431() {
+    // The setup-strih seed (scripts/lib/strih-provision.sh strih_bkshading_config_text) for both strih
+    // boxes must load in the real service, visiting blocks included (a visiting block needs register:<id>).
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for (box_name, home) in [("strih-snv", 3usize), ("strih-pp", 4)] {
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(
+                "set -euo pipefail; . scripts/lib/strih-box-facts.sh; \
+                 . scripts/lib/strih-provision.sh; strih_box_load \"$1\" >/dev/null; \
+                 strih_bkshading_config_text",
+            )
+            .arg("seed")
+            .arg(box_name)
+            .current_dir(&repo)
+            .output()
+            .expect("run bash");
+        assert!(
+            out.status.success(),
+            "{box_name}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let cfg = ServiceConfig::from_toml_str(&String::from_utf8(out.stdout).unwrap())
+            .unwrap_or_else(|e| panic!("{box_name} seed does not load: {e}"));
+        assert_eq!(cfg.cameras.len(), 7, "{box_name}");
+        assert_eq!(
+            cfg.cameras.iter().filter(|c| !c.visiting).count(),
+            home,
+            "{box_name}: the venue cameras"
+        );
+    }
+}

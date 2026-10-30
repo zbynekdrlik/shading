@@ -18,9 +18,10 @@ set -euo pipefail
 #   (1) it REUSES systemd/bkshading-relay.service UNCHANGED — the SBC runs the same relay; and
 #   (2) it writes NO CAMERA_BOX_CAPTURE_FPS env: an SBC has no camera-box appliance (no
 #       camera-box.service.d drop-ins to derive from) and a handheld has no grab-rate comparison
-#       (its config carries no grab_fps). The unit's `EnvironmentFile=-` makes the absent file
-#       graceful — the relay reports capture_fps=None and the service uses its static config,
-#       never a wrong value.
+#       (its config carries no grab_fps). The relay reports capture_fps=None and the service
+#       uses its static config, never a wrong value. Its relay.env carries ONLY the register URL
+#       (owner 28.10.2026: the handheld announces itself to the venue shading service, which never
+#       needs this board's DHCP address).
 #
 # READ-ONLY ROOT (issue 808 slice B, owner ruling 5948648089: "the same as the camboxes"): the
 # handheld is unplugged after every ~3 h use, and an abrupt power-off mid-write can corrupt the ext4
@@ -112,6 +113,7 @@ REPO="$(cd "$HERE/.." && pwd)"
 UNIT_NAME="$(bkshading_relay_unit_name)"
 UNIT_SRC="$REPO/systemd/$UNIT_NAME"
 UNIT_DEST="${BKSHADING_SBC_UNIT_DEST:-/etc/systemd/system/$UNIT_NAME}"
+RELAY_ENV="${BKSHADING_SBC_RELAY_ENV:-$(bkshading_sbc_relay_env_path)}"
 RELAY_BIN="${BKSHADING_SBC_BIN:-$(bkshading_relay_bin_path)}"
 GPHOTO2="${BKSHADING_SBC_GPHOTO2:-gphoto2}"
 SYSTEMCTL="${BKSHADING_SBC_SYSTEMCTL:-systemctl}"
@@ -498,7 +500,7 @@ do_install() {
 
   # An SBC writes NO CAMERA_BOX_CAPTURE_FPS env (no appliance to derive from; a handheld has no grab
   # comparison). The predicate is the single source of truth; if it ever flips, this branch is where
-  # the env write would go — until then we deliberately do NOT create /etc/bkshading/relay.env.
+  # the capture-fps line would go. relay.env itself carries only the register URL (below).
   if [ "$(bkshading_sbc_writes_capture_fps_env)" = "yes" ]; then
     echo "  WARNING: SBC capture-fps env is enabled but this script has no derive path" >&2
   else
@@ -508,6 +510,14 @@ do_install() {
   mkdir -p "$(dirname "$UNIT_DEST")"
   install -m 0644 "$UNIT_SRC" "$UNIT_DEST"
   echo "  installed $UNIT_DEST (reused relay unit)"
+
+  # issue 808 (owner 28.10.2026): the relay announces itself to the venue shading service, so the
+  # service never needs this board's DHCP address. Written through a temp file + rename.
+  mkdir -p "$(dirname "$RELAY_ENV")"
+  bkshading_sbc_relay_env_text >"$RELAY_ENV.new"
+  chmod 0644 "$RELAY_ENV.new"
+  mv -f "$RELAY_ENV.new" "$RELAY_ENV"
+  echo "  wrote $RELAY_ENV (the relay registers with $(bkshading_sbc_register_url))"
 
   apply_wifi
 
@@ -686,6 +696,13 @@ do_check() {
     fi
   else
     echo "FAIL: unit not installed at $UNIT_DEST" >&2
+    rc=1
+  fi
+  # (2b) the relay env announces the relay to the venue shading service (issue 808, owner 28.10.2026).
+  if [ -r "$RELAY_ENV" ] && [ "$(<"$RELAY_ENV")" = "$(bkshading_sbc_relay_env_text)" ]; then
+    echo "OK: $RELAY_ENV registers the relay with $(bkshading_sbc_register_url)"
+  else
+    echo "FAIL: $RELAY_ENV missing or differs (the relay would not announce itself to the shading service) -- re-run --install" >&2
     rc=1
   fi
   # (3) gphoto2 runtime present.

@@ -9,11 +9,13 @@ use std::time::{Duration, Instant};
 
 use bkshading_proto::mapping::fps_settable;
 use bkshading_proto::wire::{
-    resolve_grab, summarize_set_request, Aggregate, CameraView, FpsSync, RelayState, SetRequest,
+    resolve_grab, summarize_set_request, Aggregate, CameraView, FpsSync, RegistrationView,
+    RelayState, SetRequest,
 };
 
 use crate::config::{CameraConfig, ServiceConfig};
 use crate::preview::store::{wall_clock_ms, PreviewStore};
+use crate::registry::RelayRegistry;
 
 /// Pure assembly of a [`CameraView`] from a camera's config and its (optional) relay state.
 /// Split out so the mapping — including "has NDI preview iff `ndi_preview` is configured"
@@ -67,7 +69,15 @@ pub fn camera_view(
         fps_sync,
         fps_align_settable,
         state,
+        registration: None,
     }
+}
+
+/// Issue 1431: whether the panel lists `cam` now. A venue camera always; a `visiting` camera
+/// (the other venue's, a joint event) only once its relay has announced itself (`registration`
+/// is `Some`, stale or fresh), so a normal event shows only the venue's own cameras.
+pub fn camera_listed(cam: &CameraConfig, registration: Option<&RegistrationView>) -> bool {
+    !cam.visiting || registration.is_some()
 }
 
 /// Rebuilds ONE camera's view (from its config + a fresh relay state) inside a copy of `current`
@@ -86,7 +96,9 @@ pub fn aggregate_with_camera_update(
 ) -> Aggregate {
     let mut agg = current.clone();
     if let Some(slot) = agg.cameras.iter_mut().find(|c| c.id == cam.id) {
+        let registration = slot.registration.take();
         *slot = camera_view(cam, Some(relay_state), slot.preview_live);
+        slot.registration = registration;
     }
     agg
 }
@@ -104,10 +116,20 @@ pub struct Aggregator {
     /// nepoklikám viackrát"). Separate client so tuning the write path never touches the poll path.
     write_client: reqwest::Client,
     version: String,
+    /// Self-registered relays (issue 808): resolves a `register:<id>` camera address.
+    registry: RelayRegistry,
 }
 
 impl Aggregator {
     pub fn new(version: impl Into<String>) -> anyhow::Result<Self> {
+        Self::with_registry(version, RelayRegistry::new())
+    }
+
+    /// An aggregator that resolves `register:<id>` addresses through `registry` (issue 808).
+    pub fn with_registry(
+        version: impl Into<String>,
+        registry: RelayRegistry,
+    ) -> anyhow::Result<Self> {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_millis(1500))
             .build()?;
@@ -119,6 +141,7 @@ impl Aggregator {
             client,
             write_client,
             version: version.into(),
+            registry,
         })
     }
 
@@ -126,22 +149,37 @@ impl Aggregator {
     /// the per-camera workers fill; each camera's `preview_live` is read from it after the relay
     /// polls, against `cfg.preview`'s freshness bound (issue 808).
     pub async fn snapshot(&self, cfg: &ServiceConfig, previews: &PreviewStore) -> Aggregate {
+        // issue 1431: a visiting camera (the other venue's) is listed, and polled, only once its
+        // relay has announced itself here; a normal event lists only the venue's own cameras.
+        let listed: Vec<&CameraConfig> = cfg
+            .cameras
+            .iter()
+            .filter(|cam| {
+                camera_listed(
+                    cam,
+                    self.registry
+                        .view_for(&cam.address, Instant::now())
+                        .as_ref(),
+                )
+            })
+            .collect();
         // Poll every relay CONCURRENTLY: /api/cameras latency is bounded by the SLOWEST relay
         // (~one client timeout), not the SUM — the normal M1 state has several relays down, and
         // each unreachable relay would otherwise burn a full connect timeout in series.
-        let states =
-            futures::future::join_all(cfg.cameras.iter().map(|cam| self.poll_state(cam))).await;
+        let states = futures::future::join_all(listed.iter().map(|cam| self.poll_state(cam))).await;
         // Read the clock AFTER the polls (up to one client timeout), so liveness is judged at the
         // moment the snapshot is published.
         let now_ms = wall_clock_ms();
+        let now = Instant::now();
         let max_age_ms = cfg.preview.max_frame_age_ms();
-        let cameras = cfg
-            .cameras
-            .iter()
+        let cameras = listed
+            .into_iter()
             .zip(states)
             .map(|(cam, state)| {
                 let live = previews.is_live(&cam.id, now_ms, max_age_ms);
-                camera_view(cam, state, live)
+                let mut view = camera_view(cam, state, live);
+                view.registration = self.registry.view_for(&cam.address, now);
+                view
             })
             .collect();
         Aggregate {
@@ -152,7 +190,15 @@ impl Aggregator {
 
     /// Reads one relay's `/api/state`, returning `None` if unreachable / malformed.
     async fn poll_state(&self, cam: &CameraConfig) -> Option<RelayState> {
-        let url = format!("http://{}/api/state", cam.address);
+        let Some(address) = self.registry.resolve_camera(
+            &cam.address,
+            cam.fallback_address.as_deref(),
+            Instant::now(),
+        ) else {
+            tracing::debug!(id = %cam.id, address = %cam.address, "relay not registered (or stale)");
+            return None;
+        };
+        let url = format!("http://{address}/api/state");
         match self.client.get(&url).send().await {
             Ok(resp) if resp.status().is_success() => resp.json::<RelayState>().await.ok(),
             Ok(resp) => {
@@ -180,8 +226,17 @@ impl Aggregator {
         cam: &CameraConfig,
         req: &SetRequest,
     ) -> anyhow::Result<Option<RelayState>> {
-        let url = format!("http://{}/api/params", cam.address);
         let params = summarize_set_request(req);
+        let Some(address) = self.registry.resolve_camera(
+            &cam.address,
+            cam.fallback_address.as_deref(),
+            Instant::now(),
+        ) else {
+            tracing::error!(id = %cam.id, params = %params, address = %cam.address,
+                "PUT /api/params -> relay not registered (or stale)");
+            anyhow::bail!("relay {} is not registered", cam.id);
+        };
+        let url = format!("http://{address}/api/params");
         let start = Instant::now();
         let result = self.write_client.put(&url).json(req).send().await;
         let latency_ms = start.elapsed().as_millis() as u64;

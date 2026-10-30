@@ -96,6 +96,8 @@ the relay/cloudflared provisioning canon but with two deliberate deltas + one go
   every cambox at its next provisioning. The image builders write through it too (issue 1400):
   `create-usb-linux.sh`'s first-boot (rw) fstab takes the canon `/var/cache` line, and
   `build-image.sh`'s overlay image the whole tmpfs set (details: `provisioning-scripts.md`).
+- **The SBC is never part of `deploy-fleet.sh`** (issue 1452: the fleet upgrade carries the relay
+  of every CAMBOX it touches; the handheld is not in any `CAMERA_SET`). Its relay is deployed by hand.
 - **Deploy uses `bkshading-deploy-relay.sh --arch arm64`.** `--arch arm64` fetches the
   `bkshading-relay-linux-arm64` artifact. The remount follows the TARGET's own root
   (`bkshading_deploy_root_opts_cmd` = `findmnt -no OPTIONS /` with a `/proc/mounts` fallback, decided
@@ -116,11 +118,11 @@ the relay/cloudflared provisioning canon but with two deliberate deltas + one go
   artifact.
 - **`--check` verifies the deployed relay binary is actually AArch64** (an ELF `e_machine` read via
   `od` — offset 18, 2 bytes LE, AArch64=183 / x86-64=62; pure helpers in `bkshading-sbc-runtime.sh`,
-  Tier-0 testable with a 20-byte fake-ELF fixture) so a mis-deployed amd64 binary is caught here,
+  testable with a 20-byte fake-ELF fixture) so a mis-deployed amd64 binary is caught here,
   not at reboot with an opaque `Exec format error`.
 - **`--check` also verifies the WiFi link is up** — a pure `bkshading_sbc_wifi_link_state
   <sysfs-root> <iface-glob>` reads `/sys/class/net/wl*/operstate` and returns `up`/`down`/`none`
-  (`BKSHADING_SBC_NET_SYSFS` injects a fake tree for Tier-0). **`operstate` is the primary signal
+  (`BKSHADING_SBC_NET_SYSFS` injects a fake tree for tests). **`operstate` is the primary signal
   but NOT the only one — `carrier==1` also counts as up.** Some drivers (notably the **Orange Pi
   Zero 2W's out-of-tree `uwe5622`**) leave `operstate` at `"unknown"`/`"dormant"` while genuinely
   associated, so operstate-alone would false-FAIL the very prototype board; a genuinely-down link is
@@ -342,6 +344,39 @@ the relay/cloudflared provisioning canon but with two deliberate deltas + one go
   is the owner's/supervisor's rig step. Transports stay USB-PTP (gphoto2/libusb) / USB-Eth REST —
   NEVER Bluetooth; a gphoto2 camera is a USB device, not a network link, so the netplan `enx*`
   CDC-NCM trap (#1155) does not touch the handheld.
+
+## The handheld registers itself; no SBC address is ever configured (owner ruling 28.10.2026)
+
+PP event 28.10.: handheld-1 came back on WiFi with DHCP 10.77.8.78 while strih-pp's service dialled
+the fact `4=sbc-relay@10.77.8.70:8771`, so cam4 shading was dead until a hand edit. Owner: "to sa malo
+pripajat na shading bridge a nie bridge na shading pc".
+- **Relay:** `--register-url` / `BKSHADING_REGISTER_URL` (+ `--relay-id`, default the hostname)
+  POSTs `{id, port}` every 10 s (`bkshading/relay/src/register.rs`, plain HTTP over a tokio
+  `TcpStream`, no client crate, so the arm64 build stays dependency-light). A failure is logged once
+  per change and retried; it never stops the relay API. Cambox relays run without the flag.
+- **Service:** `POST /api/relays/register` keeps the PEER address of the request + the announced
+  port (`bkshading/service/src/registry.rs`); a camera with `address = "register:<id>"` is reached
+  through it while it is fresh (35 s), else it reads unreachable, never a guessed address. A bad id
+  or port 0 answers 400. `main.rs` serves with `into_make_service_with_connect_info::<SocketAddr>()`.
+- **Provisioning:** the SBC writes `/etc/bkshading/relay.env` with ONLY
+  `BKSHADING_REGISTER_URL=http://strih.lan:8770/api/relays/register` (`bkshading_sbc_relay_env_text`;
+  `strih.lan` names the venue strih at every venue); `--check` grades it byte for byte.
+  `STRIH_BKSHADING_RELAYS` takes `N=sbc-relay@register:<id>` (sbc-relay only); both venues name
+  the one travelling handheld `register:handheld-1`.
+- **Reaching the PP handheld from dev1:** dev1's own 10.77.8.0/23 route is the SNV LAN, so go through
+  strih-pp: `ssh -o ProxyCommand='sshpass -p <pw> ssh -W %h:%p newlevel@strih-pp.lan' root@<ip>`.
+- **The SBC journal is RAM-only**, so a pre-reboot outage leaves no trace (the 28.10. case); shipping
+  it to the venue strih is an open item on issue 808.
+- **The panel shows the registration** (`CameraView.registration`, `RegistrationView`: relay id, the
+  announced address, `ageS` since the last announcement, `announcingS` = the unbroken streak, `fresh`).
+  The streak restarts after a gap longer than the 35 s TTL, so "beží 3 min" after an outage means
+  the relay (or its WiFi) came back 3 min ago. A stale entry stays on the block in red ("sa neohlásil
+  N min (naposledy <ip>)"): a dead handheld is visible, not just "relay offline". The immediate
+  per-camera push after a write carries the previous registration over. The relay-side uptime was
+  deliberately NOT added to `RelayState` (26 struct-literal sites); the streak is the same signal.
+- Tests: `relay/tests/register_808.rs`, `service/tests/relay_register_808.rs` (the real announcer
+  against the real router + aggregator over sockets), `tests/service.rs` registry cases, the panel
+  Playwright test "a handheld that registers itself..." (`e2e-register-config.toml`, port 8783).
 
 ### Supervisor bench checklist (run when the prototype board arrives — the HARDWARE half, UNVERIFIED in code lanes)
 The code lane ships the provisioning + `--check`; these live-hardware steps are the supervisor's:

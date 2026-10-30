@@ -18,8 +18,8 @@ pub mod wire;
 
 pub use read::{not_applied_keys, params_and_caps, plan_writes, FpsNotSettable, RawConfigs};
 pub use wire::{
-    resolve_grab, Aggregate, CameraCaps, CameraView, FpsSync, GrabResolution, RelayState,
-    ServerMsg, SetRequest, ShadingParams, Transport,
+    resolve_grab, Aggregate, CameraCaps, CameraView, FpsSync, GrabResolution, RegistrationView,
+    RelayState, ServerMsg, SetRequest, ShadingParams, Transport,
 };
 
 /// The bkshading protocol version — bumped when the wire types change incompatibly.

@@ -53,11 +53,39 @@ pub struct CameraConfig {
     /// field for now (the follow-up is deriving it from the box's live capture_fps).
     #[serde(default)]
     pub grab_fps: Option<i64>,
+    /// Issue 1431: the relay's literal `host:port`, used while a `register:<id>` address has no
+    /// fresh registration (a cambox relay that has not announced itself, an older relay). Absent
+    /// => a stale/missing registration reads unreachable, as before.
+    #[serde(default)]
+    pub fallback_address: Option<String>,
+    /// Issue 1431: a camera of the OTHER venue (a joint event). Its block is left out of the panel
+    /// until its relay has announced itself once, so a normal event lists only the venue's own
+    /// cameras (owner 26.10.2026). Needs a `register:<id>` address.
+    #[serde(default)]
+    pub visiting: bool,
 }
 
 impl ServiceConfig {
     pub fn from_toml_str(s: &str) -> anyhow::Result<Self> {
-        Ok(toml::from_str(s)?)
+        let cfg: ServiceConfig = toml::from_str(s)?;
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    /// Issue 1431: a `visiting` camera is listed only once its relay registered, so it must name
+    /// that relay by `register:<id>`; a plain address would make it a camera that never appears.
+    fn validate(&self) -> anyhow::Result<()> {
+        for cam in &self.cameras {
+            if cam.visiting && crate::registry::registered_id(&cam.address).is_none() {
+                anyhow::bail!(
+                    "camera '{}' is visiting = true but its address '{}' is not register:<id> \
+                     (a visiting camera appears only once its relay registers)",
+                    cam.id,
+                    cam.address
+                );
+            }
+        }
+        Ok(())
     }
 
     pub fn from_path(path: &std::path::Path) -> anyhow::Result<Self> {

@@ -273,6 +273,28 @@ pub struct CameraView {
     pub fps_align_settable: bool,
     /// Live state from the relay, when reachable.
     pub state: Option<RelayState>,
+    /// The self-registration of a `register:<id>` camera (issue 808): the relay id, the address
+    /// its last announcement came from, how long ago that was and how long the relay has announced
+    /// without a gap. `None` for a camera at a fixed address, or one whose relay never announced.
+    /// `#[serde(default)]`: a view from an older service reads as `None`.
+    #[serde(default)]
+    pub registration: Option<RegistrationView>,
+}
+
+/// A self-registering relay as the panel shows it (issue 808).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistrationView {
+    /// The relay id the camera config names (`register:<id>`).
+    pub relay_id: String,
+    /// The `host:port` the relay's last announcement came from.
+    pub address: String,
+    /// Seconds since that announcement.
+    pub age_s: u64,
+    /// Seconds the relay has announced without a gap longer than the registration TTL.
+    pub announcing_s: u64,
+    /// The announcement is within the TTL: the service reaches the relay at `address`.
+    pub fresh: bool,
 }
 
 /// Reconciliation of a camera's configured grab fps with the box's live reported capture rate

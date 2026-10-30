@@ -156,8 +156,11 @@ PiSugar, never raw 15 V D-tap; all candidate boards are 5 V-only**. Because PTP 
 the USB *device* (the power sink), the box can never be powered BY the camera — hence its own 5 V
 feed. The relay exposes the camera's shading to the service exactly like a cambox does (owner
 architecture, issue 808 comment 5356048130 path 2). The service already treats it as just another
-camera (`transport = "sbc-relay"`, the `handheld-1..3` records in `bkshading.example.toml`, a
-params-only block — a handheld has no NDI feed). This milestone provisions the box side.
+camera relay (`transport = "sbc-relay"`). It is never its own panel block (owner ruling
+5977504457): the panel is cam1..cam7, and a handheld drives the block of the cambox its wireless
+video reaches (in `bkshading.example.toml` cam3 on `handheld-1`, which keeps the `CAM3 (usb)`
+preview). On a strih box that block comes from the box fact `STRIH_BKSHADING_RELAYS`. This
+milestone provisions the box side.
 
 - **Per-board port/power topology (all one USB cable to the camera + a 5 V feed from the splitter):**
   - **Pi Zero 2 W** — micro-USB OTG host → camera; a separate micro-USB 5 V power-in from the
@@ -241,7 +244,8 @@ params-only block — a handheld has no NDI feed). This milestone provisions the
   flash the board's 64-bit arm64 image (Raspberry Pi OS Lite / Debian / Armbian) with headless WiFi
   + ssh, join the rig WiFi SSID (a 2.4 GHz-only board needs a 2.4 GHz SSID on site), give the box a
   stable `handheld-N` hostname via a static DHCP lease on router_snv, then deploy + `--install` +
-  reboot, then add the `handheld-N` `[[camera]]` record to the service config. **Transports stay
+  reboot, then point the `[[camera]]` block of the cambox its video reaches at it (`transport =
+  "sbc-relay"`, `address = "handheld-N.lan:8771"`; the strih box fact `STRIH_BKSHADING_RELAYS`). **Transports stay
   USB-relay / USB-Ethernet REST only — never Bluetooth** (owner hard rule): the SBC drives the
   camera over USB-PTP (`gphoto2`/libusb), so it never enumerates as a network link (the netplan
   `enx*` CDC-NCM trap that bites camboxes does not touch the handheld).

@@ -508,6 +508,22 @@ function refreshPreviews() {
   }
 }
 
+// issue 808: "4 s", "3 min", "2 h 5 min" -- a duration for the registration line.
+function formatDuration(s) {
+  if (s < 60) return `${s} s`;
+  if (s < 3600) return `${Math.floor(s / 60)} min`;
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  return m ? `${h} h ${m} min` : `${h} h`;
+}
+
+// issue 808: the registration line of a self-registering handheld, or "" for a fixed address.
+function formatRegistration(reg) {
+  if (!reg) return "";
+  if (!reg.fresh) return `${reg.relayId} sa neohlásil ${formatDuration(reg.ageS)} (naposledy ${reg.address})`;
+  return `${reg.relayId} · ${reg.address} · ohlásený pred ${formatDuration(reg.ageS)} · beží ${formatDuration(reg.announcingS)}`;
+}
+
 function updateBlock(el, cam) {
   const q = (role) => el.querySelector(`[data-role="${role}"]`);
   q("label").textContent = cam.label;
@@ -526,6 +542,13 @@ function updateBlock(el, cam) {
   q("online").textContent = !cam.reachable ? "relay offline" : online ? "online" : "kamera offline";
   q("online").className = "cam-online " + (online ? "ok" : "bad");
   el.classList.toggle("disabled", !online);
+  const regEl = q("registration");
+  if (regEl) {
+    const reg = cam.registration || null;
+    regEl.textContent = formatRegistration(reg);
+    regEl.hidden = !reg;
+    regEl.classList.toggle("stale", Boolean(reg && !reg.fresh));
+  }
 
   const p = online ? cam.state.params : {};
   const caps = online && cam.state.caps ? cam.state.caps : null;

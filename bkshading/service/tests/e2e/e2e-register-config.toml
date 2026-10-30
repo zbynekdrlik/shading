@@ -1,0 +1,10 @@
+# bkshading service config for the issue-808 self-registration panel E2E (owner ruling 28.10.2026):
+# ONE camera whose relay is named only by the id it registers with. The stdlib stub_relay.py plays
+# that relay; the spec announces it (POST /api/relays/register) and the panel must then reach it.
+bind = "127.0.0.1:8783"
+
+[[camera]]
+id = "cam4"
+label = "Cam 4"
+transport = "sbc-relay"
+address = "register:handheld-e2e"
