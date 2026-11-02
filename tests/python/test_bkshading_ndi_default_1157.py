@@ -106,7 +106,8 @@ def test_ci_windows_check_covers_the_default_ndi_path():
 def test_color_format_misnomer_stays_renamed():
     """value 0 is NDIlib_recv_color_format_BGRX_BGRA per the installed SDK header (issue 1157
     deferral 2, resolved in the #808 SBC lane) -- the misnamed constant must never come back."""
-    src = open(NDI_SOURCE, encoding="utf-8").read()
+    with open(NDI_SOURCE, encoding="utf-8") as fh:
+        src = fh.read()
     assert "COLOR_FORMAT_UYVY_BGRA" not in src, (
         "the misnamed COLOR_FORMAT_UYVY_BGRA must stay renamed -- value 0 is BGRX_BGRA per "
         "Processing.NDI.Recv.h"
@@ -122,7 +123,7 @@ def _run():
     for fn in fns:
         try:
             fn()
-        except Exception as exc:  # surface RED clearly when run directly
+        except AssertionError as exc:  # surface RED clearly when run directly
             print(f"FAIL {fn.__name__}: {exc}")
             continue
         print(f"ok  {fn.__name__}")

@@ -3,3 +3,7 @@ target/
 TARGETS.md
 *.pem
 *.key
+node_modules/
+dist/
+__pycache__/
+.venv/

@@ -47,7 +47,7 @@ def test_the_panel_is_cam1_to_cam7_and_no_handheld_panel():
     # Owner ruling 5977504457 (4.10.2026): the panel lists cam1..cam7, one block per cambox; a
     # handheld SBC is the CONTROL of the cambox its video reaches, never its own panel.
     cfg = _load()
-    assert [c["id"] for c in cfg["camera"]] == ["cam%d" % n for n in range(1, 8)]
+    assert [c["id"] for c in cfg["camera"]] == [f"cam{n}" for n in range(1, 8)]
     assert not any(c["id"].startswith("handheld") for c in cfg["camera"])
 
 
@@ -59,7 +59,7 @@ def test_a_handheld_controls_a_cambox_block_that_keeps_its_preview():
     assert cams["cam3"]["transport"] == "sbc-relay"
     assert cams["cam3"]["address"] == "register:handheld-1"
     for n in range(1, 8):
-        assert cams["cam%d" % n]["ndi_preview"] == "CAM%d (usb)" % n
+        assert cams[f"cam{n}"]["ndi_preview"] == f"CAM{n} (usb)"
 
 
 def test_preview_table_is_valid_when_present():

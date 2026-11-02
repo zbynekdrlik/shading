@@ -1,0 +1,225 @@
+name: CI
+
+# shading CI + release (shading#1). Every push to dev and every PR into main runs the full gate.
+# A push to main (= a merged dev->main PR) runs the same gate and then the `release` job, which tags
+# v<workspace version> and publishes the assets camera-box pins (docs/CONTRACT.md).
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+    branches: [main]
+
+# A newer push to the same dev/PR ref supersedes the older run. A main run is never cancelled: it
+# publishes a release, and a cancelled release job would leave a tag without its assets.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # dev must carry a version strictly above main's, so the release job of the merge can tag it.
+  version-check:
+    name: Version is above main
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Compare workspace version with main
+        run: python3 scripts/release.py version-check origin/main
+
+  bkshading:
+    name: bkshading service + relay
+    # Ported whole from camera-box's `bkshading` job (shading#1): clippy + tests in both feature
+    # configs, release builds, the panel Playwright E2E, then the deployable binaries.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: bkshading
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      # ndi is the DEFAULT service build (camera-box issue 1157), so this compiles the real NDI FFI
+      # path (src/preview/ndi_source.rs) with -D warnings. libloading is a RUNTIME dynamic load, so
+      # it compiles here without libndi installed.
+      - name: Clippy (bkshading members)
+        run: cargo clippy -p bkshading-proto -p bkshading-relay -p bkshading --all-targets -- -D warnings
+
+      # Keep the `--no-default-features` stub (libndi-free) path clippy-clean so it cannot bit-rot.
+      - name: Clippy (bkshading service, --no-default-features — stub path)
+        run: cargo clippy -p bkshading --no-default-features --all-targets -- -D warnings
+
+      - name: Test (bkshading members)
+        run: cargo test --locked -p bkshading-proto -p bkshading-relay -p bkshading
+
+      - name: Test (bkshading service, --no-default-features — stub path)
+        run: cargo test --locked -p bkshading --no-default-features
+
+      # Relay = default features (drives the camera via the gphoto2 CLI, no ndi); service =
+      # --features ndi (equals the default since camera-box issue 1157; kept explicit for intent).
+      - name: Build deployable binaries (relay default + service --features ndi)
+        run: |
+          cargo build --locked --release --bins -p bkshading-relay
+          cargo build --locked --release --features ndi --bins -p bkshading
+
+      # Real-browser E2E of the operator panel: the JUST-BUILT service against a stdlib stub relay
+      # (bkshading/service/tests/stub_relay.py). Playwright's webServer starts and stops both.
+      - name: Setup Node (panel E2E)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install Playwright chromium (panel E2E)
+        working-directory: bkshading/service/tests/e2e
+        run: |
+          npm install
+          npx playwright install --with-deps chromium
+      - name: Panel E2E
+        working-directory: bkshading/service/tests/e2e
+        env:
+          BKSHADING_BIN: ${{ github.workspace }}/target/release/bkshading
+        run: npx playwright test
+
+      # The handheld SBC is a zero-class arm64 board and cannot run the amd64 relay. The relay is
+      # pure Rust (no C link deps), so the rustup target + the gcc-aarch64-linux-gnu linker build it.
+      - name: Cross-build relay for aarch64 (SBC handheld)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          cargo build --locked --release --target aarch64-unknown-linux-gnu --bins -p bkshading-relay
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+
+      # The relay must keep its `--version` shape: camera-box reads the LAST WORD as the version
+      # (docs/CONTRACT.md). Checked on the exact binaries that ship.
+      - name: --version contract (relay + service)
+        run: |
+          python3 scripts/release.py binary-version target/release/bkshading-relay
+          python3 scripts/release.py binary-version target/release/bkshading
+
+      - name: Upload Linux binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: bkshading-linux
+          if-no-files-found: error
+          path: |
+            target/release/bkshading-relay
+            target/release/bkshading
+            target/aarch64-unknown-linux-gnu/release/bkshading-relay
+
+  bkshading-windows:
+    name: bkshading Windows build
+    # A Linux compile is not proof the Windows target builds. ndi is the default, so this compiles
+    # the real NDI path; libloading resolves Processing.NDI.Lib.x64.dll at runtime.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: bkshading-windows
+
+      - name: Check bkshading members (Windows target)
+        run: cargo check --locked -p bkshading-proto -p bkshading-relay -p bkshading
+
+      - name: Build deployable service binary (--features ndi, Windows target)
+        run: cargo build --locked --release --bins -p bkshading --features ndi
+
+      - name: Upload Windows service binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: bkshading-windows
+          if-no-files-found: error
+          path: target/release/bkshading.exe
+
+  coverage:
+    name: Coverage
+    # The gate is --fail-under-lines (default 60, repo variable COVERAGE_THRESHOLD ratchets it up,
+    # never down). The default features build the real NDI path; the stub path is covered by the
+    # --no-default-features test step of the bkshading job.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: coverage
+      - name: Install coverage tools (prebuilt)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov,cargo-nextest
+      - name: Coverage
+        run: cargo llvm-cov nextest --locked --workspace --fail-under-lines ${{ vars.COVERAGE_THRESHOLD || '60' }}
+
+  python-tests:
+    name: Python tests
+    # The version test reads `cargo metadata`, so this job carries the Rust toolchain.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install pytest + pyyaml + ruff
+        run: python -m pip install pytest==8.4.2 pyyaml==6.0.2 ruff==0.16.2
+      - name: Ruff
+        run: ruff check scripts tests
+      - name: Pytest
+        run: python -m pytest -q tests/python
+
+  release:
+    name: Release v<version>
+    # Only a push to main publishes. It needs every gate above, so a red gate never tags.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [bkshading, bkshading-windows, coverage, python-tests]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Linux binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: bkshading-linux
+          path: build/linux
+
+      - name: Download Windows binary
+        uses: actions/download-artifact@v4
+        with:
+          name: bkshading-windows
+          path: build/windows
+
+      - name: Stage release assets + .sha256
+        run: python3 scripts/release.py stage build dist
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release.py publish dist

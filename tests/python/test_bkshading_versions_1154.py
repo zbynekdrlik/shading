@@ -116,7 +116,7 @@ def test_cargo_metadata_resolves_a_uniform_version():
     out = subprocess.run(
         ["cargo", "metadata", "--no-deps", "--format-version", "1",
          "--manifest-path", ROOT_MANIFEST],
-        capture_output=True, text=True, cwd=REPO,
+        capture_output=True, text=True, cwd=REPO, check=False,
     )
     assert out.returncode == 0, (
         f"cargo metadata failed (rc={out.returncode}) -- a malformed workspace manifest "
@@ -140,7 +140,7 @@ def _run():
     for fn in fns:
         try:
             fn()
-        except Exception as exc:  # surface RED clearly when run directly
+        except AssertionError as exc:  # surface RED clearly when run directly
             print(f"FAIL {fn.__name__}: {exc}")
             continue
         print(f"ok  {fn.__name__}")
