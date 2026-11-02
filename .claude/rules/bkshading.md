@@ -84,7 +84,7 @@ dev2 MVP `pybridge/mapping.py`). Owner architecture: issue 808 comments 53558360
   `tests/python/test_release.py`.
 - CI jobs: `bkshading` (fmt, both clippy configs, both test configs, release builds, panel
   Playwright E2E, aarch64 relay cross-build, `--version` contract), `bkshading-windows` (check +
-  release exe), `coverage` (`cargo llvm-cov nextest --fail-under-lines`), `python-tests` (ruff 0.16.2
+  release exe), `coverage` (`cargo llvm-cov nextest --fail-under-lines`, 71 = first run 73.98 % minus 2; ratchet up only), `python-tests` (ruff 0.16.2
   + pytest; carries the Rust toolchain for the `cargo metadata` version test), `version-check` (PRs).
 - The strih seed test (`service/tests/service.rs` `both_strih_seeds_load_in_the_service_1431`) reads
   `service/tests/fixtures/strih-*-seed.toml`, a snapshot of camera-box's

@@ -154,7 +154,8 @@ jobs:
 
   coverage:
     name: Coverage
-    # The gate is --fail-under-lines (default 60, repo variable COVERAGE_THRESHOLD ratchets it up,
+    # The gate is --fail-under-lines (default 71 = first measured 73.98 % lines minus 2, shading#1;
+    # the repo variable COVERAGE_THRESHOLD ratchets it up,
     # never down). The default features build the real NDI path; the stub path is covered by the
     # --no-default-features test step of the bkshading job.
     runs-on: ubuntu-latest
@@ -173,7 +174,7 @@ jobs:
         with:
           tool: cargo-llvm-cov,cargo-nextest
       - name: Coverage
-        run: cargo llvm-cov nextest --locked --workspace --fail-under-lines ${{ vars.COVERAGE_THRESHOLD || '60' }}
+        run: cargo llvm-cov nextest --locked --workspace --fail-under-lines ${{ vars.COVERAGE_THRESHOLD || '71' }}
 
   python-tests:
     name: Python tests
