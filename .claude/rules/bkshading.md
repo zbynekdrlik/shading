@@ -1,13 +1,19 @@
 ---
 paths:
   - "bkshading/**"
-  - "scripts/bkshading-*"
-  - "scripts/lib/bkshading-*"
-  - "scripts/lib/ci-run-resolve.sh"
-  - "systemd/bkshading-*"
+  - "Cargo.toml"
+  - "scripts/release.py"
+  - ".github/workflows/ci.yml"
+  - "docs/CONTRACT.md"
 ---
 
 # bkshading — remote camera shading control (issue 808)
+
+> **Split from camera-box (shading#1, 2.11.2026).** This repo holds the crates, their tests and the
+> releases. Every `scripts/…`, `systemd/…`, `setup-*`/`verify-*`/`rig-mode.sh`/`recording-e2e.sh`
+> path named below lives in **camera-box**, which deploys the pinned release. Issue numbers below
+> are camera-box issues unless written `shading#N`. What camera-box reads from this repo is
+> `docs/CONTRACT.md`; a change there is a breaking change.
 
 A multiplatform Rust **service** (`bkshading`, runs on the strih PC — Windows first, Linux later)
 that aggregates per-camera **relays** into ONE operator web panel; and a cambox/SBC **relay**
@@ -62,47 +68,33 @@ dev2 MVP `pybridge/mapping.py`). Owner architecture: issue 808 comments 53558360
   `libgphoto2` FFI binding — the trait keeps FFI as a future 2nd impl). Rationale: no build-time C
   dep → clean ARM cross-build for the zero-class arm64 SBC handheld relay.
 
-## How the crates sit in the workspace WITHOUT disturbing the appliance
-The repo root `Cargo.toml` is a **single package** (the camera-box appliance). The bkshading crates
-are added as SEPARATE workspace members:
-- Root `Cargo.toml` gained `[workspace] members = ["bkshading/proto","bkshading/relay","bkshading/service"]`
-  + `resolver = "2"` (pins the SAME feature resolution the root edition-2021 package used standalone).
-- **The appliance build is untouched because every existing CI job runs cargo at the ROOT WITHOUT
-  `--workspace`** — so `cargo test`/`clippy`/`nextest`/`llvm-cov`/`mutants` still select ONLY the
-  root package. `cargo fmt --all` DOES cover the new members (so they must be fmt-clean).
-- The members get their OWN CI jobs: `bkshading` (Linux clippy/test/build) + `bkshading-windows`
-  (windows-latest `cargo check` — the service ships to the strih PC, Windows first). Both are in the
-  `notify-on-failure` needs list.
-- Deps stay OUT of the appliance tree: axum/tokio/reqwest(rustls, no openssl)/toml live only in the
-  member manifests, so the appliance's minimal deps + probe feature-gating are never touched.
-
-## Crate versions — ONE workspace source of truth (issue 1154)
-All four crates (appliance + the 3 members) inherit ONE version from root
-`[workspace.package] version = "X"` via `version.workspace = true`; NO crate hard-codes its own.
-A single edit of that ONE line bumps every crate's `CARGO_PKG_VERSION` (relay/service read it as
-`const VERSION`, which feeds the panel DOM / `/api/version` / `RelayState.version` — the
-version-on-dashboard surface). Before #1154 the members hard-coded their version and silently
-drifted after each root-only bump (root `.518` vs members `.516` live).
-- The three `^version = "X"` readers (`camera-box-version-gate.sh:169` incl. its origin/main pin,
-  `recording-e2e.sh:903` sed, `rig-status.py` `_read_version`) STILL work UNTOUCHED: each anchors
-  on the FIRST column-0 `version = "X"` line, now the `[workspace.package]` one (same value), which
-  sits before all dependency lines. `version.workspace = true` never matches that anchor (no quote
-  after `=`), and the new comment lines start with `#`.
-- **Bump discipline is now: edit the single `[workspace.package].version` line at the root.**
-- GOTCHA when bumping via sed: a blanket `sed 's/^version = "OLD"$/.../'` will ALSO rewrite the
-  `[workspace.package]` literal (it is the ONLY column-0 `version = "X"` line now). Target that
-  one line specifically (e.g. `sed '/^\[workspace.package\]$/{n;s/.../}'`).
-- The `"1.7.0-dev.516"` literals in `service/tests/service.rs` + `relay/tests/relay.rs` are INERT
-  test inputs (a version string passed INTO `CameraSession::new(...)`/a fixture and echoed back),
-  decoupled from `env!` — they do NOT track the crate version and do NOT break CI.
-- Invariant test: `tests/python/test_bkshading_versions_1154.py` (tomllib structural — runs in the
-  `python-tests` CI job, no toolchain; a skip-if-no-cargo `cargo metadata` check proves resolved
-  value-level uniformity where cargo exists).
+## Workspace, version and release (shading#1)
+- Root `Cargo.toml` is a pure workspace: `members = ["bkshading/proto","bkshading/relay","bkshading/service"]`,
+  `resolver = "2"`, camera-box's release profile (lto, codegen-units 1, strip). No root package.
+- **ONE version:** `[workspace.package].version`; every crate has `version.workspace = true`, so
+  `CARGO_PKG_VERSION` (panel DOM, `/api/version`, `RelayState.version`, `--version`) moves with one
+  edit. The line started at 0.1.0 here (camera-box was at 1.8.6). Bump it FIRST on `dev`; the PR
+  gate (`release.py version-check origin/main`) needs dev strictly above main.
+- `Cargo.lock` is committed (camera-box never had one) and every CI cargo build/test is `--locked`.
+- **Release = a push to `main`:** the `release` job needs every gate, then `scripts/release.py stage`
+  (asset machine check, names, `.sha256`) + `publish` (GitHub Release `v<version>` at the commit).
+  Published assets never change: a complete release is left alone on a re-run, a partial one fails.
+  Asset names, `--version` shape, relay keys and `--check-config` are the camera-box contract
+  (`docs/CONTRACT.md`), pinned by `relay/tests/contract.rs`, `service/tests/check_config.rs`,
+  `tests/python/test_release.py`.
+- CI jobs: `bkshading` (fmt, both clippy configs, both test configs, release builds, panel
+  Playwright E2E, aarch64 relay cross-build, `--version` contract), `bkshading-windows` (check +
+  release exe), `coverage` (`cargo llvm-cov nextest --fail-under-lines`), `python-tests` (ruff 0.16.2
+  + pytest; carries the Rust toolchain for the `cargo metadata` version test), `version-check` (PRs).
+- The strih seed test (`service/tests/service.rs` `both_strih_seeds_load_in_the_service_1431`) reads
+  `service/tests/fixtures/strih-*-seed.toml`, a snapshot of camera-box's
+  `strih_bkshading_config_text` at camera-box 390ae50. camera-box checks its live seed with
+  `bkshading --check-config` from the pinned release.
 
 ## Verifying a NEW crate
-1. Python static tests under `tests/python/test_bkshading_*.py` (stdlib only: `os`/`re`/`tomllib`) —
-   validate the web-UI structure + config schema. They are picked up automatically by the existing
-   `python-tests` CI job (pytest discovers `test_*` in `tests/python`).
+1. Python static tests under `tests/python/test_bkshading_*.py` (stdlib + `yaml`) — validate the
+   web-UI structure + config schema. The `python-tests` CI job runs ruff, then pytest over
+   `tests/python`.
    NOTE: a python static webui test CANNOT catch a CSS/JS runtime bug — the M1 review found an
    author `.block-preview{display:flex}` beating the UA `[hidden]` rule (params-only block still
    showed its preview); that needs a real Playwright E2E against a running service (M2).

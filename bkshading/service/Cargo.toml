@@ -5,7 +5,7 @@ edition = "2021"
 authors = ["zbynekdrlik"]
 description = "Camera shading-control aggregation service + operator web panel (issue 808)"
 license = "MIT"
-repository = "https://github.com/zbynekdrlik/camera-box"
+repository = "https://github.com/zbynekdrlik/shading"
 
 [lib]
 name = "bkshading"

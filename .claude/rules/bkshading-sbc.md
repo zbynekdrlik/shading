@@ -1,22 +1,11 @@
 ---
 paths:
-  - "scripts/bkshading-provision-sbc.sh"
-  - "scripts/lib/bkshading-sbc-runtime.sh"
-  - "scripts/lib/ro-root.sh"
-  - "scripts/bkshading-deploy-relay.sh"
-  - "scripts/lib/bkshading-deploy-runtime.sh"
-  - "tests/python/test_bkshading_sbc_provision_808.py"
-  - "tests/python/test_bkshading_wifi_heal_808.py"
-  - "tests/python/test_bkshading_wifi_heal_stuck_808.py"
-  - "tests/python/test_bkshading_sbc_wifi_takeover_808.py"
-  - "tests/python/bkshading_sbc_fakes_808.py"
-  - "tests/python/test_ro_root_808.py"
-  - "scripts/bkshading-wifi-heal.sh"
-  - "scripts/bkshading_sbc_netplan_wifi.py"
-  - "scripts/lib/bkshading-sbc-wifi-probe.sh"
-  - "systemd/bkshading-wifi-heal.service"
-  - "systemd/bkshading-wifi-heal.timer"
+  - "bkshading/relay/**"
 ---
+
+> **Split from camera-box (shading#1, 2.11.2026).** SBC provisioning (the scripts, units, flash
+> script, `ro-root.sh` and their tests named below) stays in **camera-box**. This repo builds the
+> arm64 relay it installs (`bkshading-relay-linux-arm64`, `docs/CONTRACT.md`); the rest is context.
 
 # bkshading handheld SBC — provisioning, the read-only root, the arm64 relay deploy (issue 808)
 
