@@ -19,6 +19,8 @@ release = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(release)
 
 SHA = "0123456789abcdef0123456789abcdef01234567"
+OTHER_SHA = "fedcba9876543210fedcba9876543210fedcba98"
+ENV = {"GITHUB_SHA": SHA, "GITHUB_REPOSITORY": "zbynekdrlik/shading"}
 
 
 def cargo_toml(version):
@@ -129,13 +131,23 @@ def elf(machine):
     return b"\x7fELF" + bytes(14) + machine.to_bytes(2, "little") + b"payload"
 
 
+def pe(machine):
+    """A minimal PE image: MZ, e_lfanew at 0x3C -> `PE\\0\\0` + the COFF Machine field."""
+    head = bytearray(0x80)
+    head[0:2] = b"MZ"
+    head[0x3C:0x40] = (0x40).to_bytes(4, "little")
+    head[0x40:0x44] = b"PE\0\0"
+    head[0x44:0x46] = machine.to_bytes(2, "little")
+    return bytes(head) + b"payload"
+
+
 def make_build(tmp_path, **override):
     build = tmp_path / "build"
     content = {
         release.RELAY_AMD64: elf(62),
         release.RELAY_ARM64: elf(183),
         release.SERVICE_LINUX: elf(62),
-        release.SERVICE_WINDOWS: b"MZ" + bytes(30),
+        release.SERVICE_WINDOWS: pe(0x8664),
     }
     content.update(override)
     for name, src in release.ASSETS.items():
@@ -184,6 +196,9 @@ def test_stage_tarball_holds_the_executable_service_and_its_web_assets(tmp_path)
         (release.RELAY_ARM64, elf(62)),  # an amd64 relay shipped as arm64
         (release.RELAY_AMD64, elf(183)),
         (release.SERVICE_WINDOWS, elf(62)),
+        (release.SERVICE_WINDOWS, b"MZ" + bytes(30)),  # DOS stub only, no PE header
+        (release.SERVICE_WINDOWS, pe(0xAA64)),  # an ARM64 exe
+        (release.SERVICE_WINDOWS, pe(0x014C)),  # a 32-bit x86 exe
         (release.SERVICE_LINUX, b"#!/bin/sh\n"),
     ],
 )
@@ -205,19 +220,31 @@ def test_the_real_panel_web_dir_exists():
 
 # --- publish ---------------------------------------------------------------------------------
 
-def fake_gh(tmp_path, monkeypatch, view_rc, view_out="", view_err=""):
-    """A `gh` on PATH: `release view` answers as given, every call is logged as a JSON line."""
+def fake_gh(tmp_path, monkeypatch, view_rc, view_out="", view_err="", tag_sha=None, api_err=None):
+    """A `gh` on PATH, every call logged as a JSON line. `release view` answers as given; `api
+    .../commits/refs/tags/<tag>` answers `tag_sha`, GitHub's 422 when it is None, or `api_err`."""
     bindir = tmp_path / "fakebin"
     bindir.mkdir()
     log = tmp_path / "gh.log"
     script = bindir / "gh"
+    if api_err is not None:
+        tag_answer = f"    sys.stderr.write({api_err!r}); sys.exit(1)\n"
+    elif tag_sha is None:
+        tag_answer = (
+            "    ref = sys.argv[2].split('/commits/')[1]\n"
+            "    sys.stderr.write(f'gh: No commit found for SHA: {ref} (HTTP 422)\\n'); sys.exit(1)\n"
+        )
+    else:
+        tag_answer = f"    print({tag_sha!r}); sys.exit(0)\n"
     script.write_text(
         "#!/usr/bin/env python3\n"
         "import json, sys\n"
         f"open({str(log)!r}, 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n"
         "if sys.argv[1:3] == ['release', 'view']:\n"
         f"    sys.stdout.write({view_out!r}); sys.stderr.write({view_err!r}); sys.exit({view_rc})\n"
-        "sys.exit(0)\n"
+        "if sys.argv[1] == 'api' and '/commits/refs/tags/' in sys.argv[2]:\n"
+        + tag_answer
+        + "sys.exit(0)\n"
     )
     script.chmod(0o755)
     monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
@@ -240,7 +267,7 @@ def staged_dist(tmp_path):
 def test_publish_creates_the_release_at_the_commit_with_every_asset(tmp_path, monkeypatch):
     dist = staged_dist(tmp_path)
     log = fake_gh(tmp_path, monkeypatch, 1, view_err="release not found\n")
-    out = release.publish(dist, repo=workspace(tmp_path, "0.1.0"), env={"GITHUB_SHA": SHA})
+    out = release.publish(dist, repo=workspace(tmp_path, "0.1.0"), env=ENV)
     assert out == f"published v0.1.0 at {SHA} with 8 files"
     create = calls(log)[-1]
     assert create[:7] == ["release", "create", "v0.1.0", "--target", SHA, "--title", "v0.1.0"]
@@ -250,8 +277,8 @@ def test_publish_creates_the_release_at_the_commit_with_every_asset(tmp_path, mo
 def test_publish_leaves_a_complete_release_unchanged(tmp_path, monkeypatch):
     dist = staged_dist(tmp_path)
     names = "\n".join(os.listdir(dist)) + "\n"
-    log = fake_gh(tmp_path, monkeypatch, 0, view_out=names)
-    out = release.publish(dist, repo=workspace(tmp_path, "0.1.0"), env={"GITHUB_SHA": SHA})
+    log = fake_gh(tmp_path, monkeypatch, 0, view_out=names, tag_sha=SHA)
+    out = release.publish(dist, repo=workspace(tmp_path, "0.1.0"), env=ENV)
     assert "left unchanged" in out
     assert not any(c[:2] == ["release", "create"] for c in calls(log))
 
@@ -260,7 +287,7 @@ def test_publish_refuses_to_touch_a_partial_release(tmp_path, monkeypatch):
     dist = staged_dist(tmp_path)
     log = fake_gh(tmp_path, monkeypatch, 0, view_out=release.RELAY_AMD64 + "\n")
     with pytest.raises(release.ReleaseError, match="never overwrite"):
-        release.publish(dist, repo=workspace(tmp_path, "0.1.0"), env={"GITHUB_SHA": SHA})
+        release.publish(dist, repo=workspace(tmp_path, "0.1.0"), env=ENV)
     assert not any(c[:2] == ["release", "create"] for c in calls(log))
 
 
@@ -268,7 +295,7 @@ def test_publish_fails_on_a_gh_error_other_than_not_found(tmp_path, monkeypatch)
     dist = staged_dist(tmp_path)
     log = fake_gh(tmp_path, monkeypatch, 1, view_err="HTTP 502: Bad Gateway\n")
     with pytest.raises(release.ReleaseError, match="502"):
-        release.publish(dist, repo=workspace(tmp_path, "0.1.0"), env={"GITHUB_SHA": SHA})
+        release.publish(dist, repo=workspace(tmp_path, "0.1.0"), env=ENV)
     assert not any(c[:2] == ["release", "create"] for c in calls(log))
 
 
@@ -277,7 +304,7 @@ def test_publish_refuses_a_missing_or_short_commit(tmp_path, monkeypatch, sha):
     dist = staged_dist(tmp_path)
     fake_gh(tmp_path, monkeypatch, 1, view_err="release not found\n")
     with pytest.raises(release.ReleaseError, match="GITHUB_SHA"):
-        release.publish(dist, repo=workspace(tmp_path, "0.1.0"), env={"GITHUB_SHA": sha})
+        release.publish(dist, repo=workspace(tmp_path, "0.1.0"), env={**ENV, "GITHUB_SHA": sha})
 
 
 def test_publish_refuses_a_dist_with_an_extra_or_missing_file(tmp_path, monkeypatch):
@@ -285,7 +312,7 @@ def test_publish_refuses_a_dist_with_an_extra_or_missing_file(tmp_path, monkeypa
     fake_gh(tmp_path, monkeypatch, 1, view_err="release not found\n")
     os.remove(os.path.join(dist, release.RELAY_ARM64 + ".sha256"))
     with pytest.raises(release.ReleaseError, match="exactly"):
-        release.publish(dist, repo=workspace(tmp_path, "0.1.0"), env={"GITHUB_SHA": SHA})
+        release.publish(dist, repo=workspace(tmp_path, "0.1.0"), env=ENV)
 
 
 def test_cli_exits_2_on_bad_usage_and_1_on_a_release_error(tmp_path):
@@ -297,3 +324,46 @@ def test_cli_exits_2_on_bad_usage_and_1_on_a_release_error(tmp_path):
     )
     assert out.returncode == 1
     assert "missing CI binaries" in out.stderr
+
+
+def test_publish_creates_a_release_for_a_tag_already_on_this_commit(tmp_path, monkeypatch):
+    dist = staged_dist(tmp_path)
+    log = fake_gh(tmp_path, monkeypatch, 1, view_err="release not found\n", tag_sha=SHA)
+    release.publish(dist, repo=workspace(tmp_path, "0.1.0"), env=ENV)
+    assert any(c[:3] == ["release", "create", "v0.1.0"] for c in calls(log))
+
+
+def test_publish_refuses_a_tag_that_points_at_another_commit(tmp_path, monkeypatch):
+    # gh release create ignores --target for an existing tag: the assets would land on old code.
+    dist = staged_dist(tmp_path)
+    log = fake_gh(tmp_path, monkeypatch, 1, view_err="release not found\n", tag_sha=OTHER_SHA)
+    with pytest.raises(release.ReleaseError, match=OTHER_SHA):
+        release.publish(dist, repo=workspace(tmp_path, "0.1.0"), env=ENV)
+    assert not any(c[:2] == ["release", "create"] for c in calls(log))
+
+
+def test_publish_refuses_a_complete_release_of_another_commit(tmp_path, monkeypatch):
+    # A main push that forgot the bump: its version is already released from older code.
+    dist = staged_dist(tmp_path)
+    names = "\n".join(os.listdir(dist)) + "\n"
+    log = fake_gh(tmp_path, monkeypatch, 0, view_out=names, tag_sha=OTHER_SHA)
+    with pytest.raises(release.ReleaseError, match="bump"):
+        release.publish(dist, repo=workspace(tmp_path, "0.1.0"), env=ENV)
+    assert not any(c[:2] == ["release", "create"] for c in calls(log))
+
+
+def test_publish_fails_when_the_tag_cannot_be_read(tmp_path, monkeypatch):
+    dist = staged_dist(tmp_path)
+    log = fake_gh(
+        tmp_path, monkeypatch, 1, view_err="release not found\n", api_err="gh: Bad credentials (HTTP 401)\n"
+    )
+    with pytest.raises(release.ReleaseError, match="401"):
+        release.publish(dist, repo=workspace(tmp_path, "0.1.0"), env=ENV)
+    assert not any(c[:2] == ["release", "create"] for c in calls(log))
+
+
+def test_publish_refuses_a_missing_repository(tmp_path, monkeypatch):
+    dist = staged_dist(tmp_path)
+    fake_gh(tmp_path, monkeypatch, 1, view_err="release not found\n")
+    with pytest.raises(release.ReleaseError, match="GITHUB_REPOSITORY"):
+        release.publish(dist, repo=workspace(tmp_path, "0.1.0"), env={"GITHUB_SHA": SHA})
