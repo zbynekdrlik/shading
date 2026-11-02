@@ -67,9 +67,9 @@ def _expected(cams, addresses):
 
 
 SNV_LIVE = _expected((2, 3, 5), {n: ("cambox-relay", "cam%d.lan:8771" % n) for n in range(1, 8)}
-                     | {3: ("sbc-relay", "register:handheld-1")})
+                     | {2: ("sbc-relay", "register:cam2-shading"), 3: ("sbc-relay", "register:cam4-shading")})
 PP_LIVE = _expected((1, 4, 6, 7), {n: ("cambox-relay", "10.77.9.6%d:8771" % n) for n in range(1, 8)}
-                    | {4: ("sbc-relay", "register:handheld-1")})
+                    | {1: ("sbc-relay", "register:cam1-shading"), 4: ("sbc-relay", "register:cam4-shading")})
 
 
 # --- the fact ---------------------------------------------------------------------------------------------------
