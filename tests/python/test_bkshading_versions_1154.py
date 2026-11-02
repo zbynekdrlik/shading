@@ -65,14 +65,13 @@ def test_root_defines_exactly_one_workspace_package_version():
     )
 
 
-def test_root_appliance_package_inherits_the_workspace_version():
-    """The appliance package must NOT hard-code its own version -- it inherits, so a
-    single bump of [workspace.package].version moves the appliance too."""
+def test_root_is_a_pure_workspace_manifest():
+    """shading's root manifest holds no package of its own (the camera-box appliance stayed in
+    camera-box, shading#1): the workspace version exists only to be inherited by the members."""
     root = _load(ROOT_MANIFEST)
-    pkg_version = root["package"]["version"]
-    assert pkg_version == _INHERIT, (
-        "root [package].version must be `version.workspace = true` (inherit), not a "
-        f"hard-coded literal, so it can never drift; got {pkg_version!r}"
+    assert "package" not in root, (
+        "root Cargo.toml must stay a pure [workspace] manifest -- a root [package] would be a "
+        "fourth crate outside the MEMBER_MANIFESTS checks"
     )
 
 
@@ -109,11 +108,9 @@ def test_cargo_metadata_resolves_a_uniform_version():
     package resolves to the SAME version, equal to [workspace.package].version. Skipped in
     the python-tests CI job (no Rust toolchain); runs locally + wherever cargo is present.
     `cargo metadata` is Tier-0-allowed (no compile)."""
-    if shutil.which("cargo") is None:
-        import pytest
-
-        pytest.skip("cargo not on PATH (e.g. the python-tests CI job) -- structural "
-                    "tomllib tests above are authoritative")
+    assert shutil.which("cargo") is not None, (
+        "cargo not on PATH -- this repo's pytest job runs with the Rust toolchain installed"
+    )
 
     expected = _load(ROOT_MANIFEST)["workspace"]["package"]["version"]
     out = subprocess.run(
@@ -127,8 +124,9 @@ def test_cargo_metadata_resolves_a_uniform_version():
     )
     meta = json.loads(out.stdout)
     resolved = {pkg["name"]: pkg["version"] for pkg in meta["packages"]}
-    # Every crate in this workspace (appliance + 3 bkshading members) is present.
-    for name in ["camera-box", *MEMBER_MANIFESTS.keys()]:
+    # Every crate in this workspace (the 3 bkshading members) is present, and nothing else.
+    assert set(resolved) == set(MEMBER_MANIFESTS), f"unexpected workspace packages: {resolved}"
+    for name in MEMBER_MANIFESTS:
         assert name in resolved, f"{name} missing from cargo metadata packages"
         assert resolved[name] == expected, (
             f"{name} resolved to {resolved[name]!r}, expected the single workspace "
