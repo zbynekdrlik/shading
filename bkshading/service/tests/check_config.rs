@@ -49,16 +49,26 @@ fn a_broken_config_fails_naming_the_file() {
     let dir = std::env::temp_dir().join(format!("bkshading-check-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let bad = dir.join("bad.toml");
-    std::fs::write(&bad, "[[cameras]]\nid = \"cam1\"\n").unwrap();
+    // A visiting camera must name its relay by register:<id> (issue 1431): the loader refuses this.
+    std::fs::write(
+        &bad,
+        "[[camera]]\nid = \"cam9\"\nlabel = \"CAM9\"\ntransport = \"cambox-relay\"\n\
+         address = \"cam9.lan:8771\"\nvisiting = true\n",
+    )
+    .unwrap();
     let out = check(&bad);
     std::fs::remove_dir_all(&dir).unwrap();
     assert!(
         !out.status.success(),
-        "a config missing required camera fields must fail"
+        "a visiting camera without register:<id> must fail"
     );
     assert!(out.stdout.is_empty(), "no `ok:` line on failure");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("bad.toml"), "stderr must name the file: {err}");
+    assert!(
+        err.contains("register:<id>"),
+        "stderr must give the reason: {err}"
+    );
 }
 
 #[test]
