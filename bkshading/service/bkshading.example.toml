@@ -1,0 +1,94 @@
+# bkshading service config (issue 808). The panel is cam1..cam7, one block per cambox (owner ruling
+# 5977504457, 4.10.2026). Each camera is a record with an id, a transport and its relay address.
+# A handheld SBC relay is never its own panel: it is the CONTROL of the cambox its video reaches, so
+# its block keeps that cambox's `ndi_preview` + `grab_fps` and only the transport/address differ.
+# `ndi_preview` is optional -- a camera with no video feed omits it and gets a params-only block.
+# setup-strih step 16c seeds the strih box's config from the box fact STRIH_BKSHADING_RELAYS
+# (scripts/lib/strih-provision.sh strih_bkshading_config_text); this example is the strih-snv state.
+# Issue 1431: a cambox relay registers itself as camN with the strih behind strih.lan, so the seed writes
+# a venue camera as `address = "register:camN"` + `fallback_address = "<its literal relay>"` (used while no
+# fresh registration exists), and a camera of the other venue as `address = "register:camN"` +
+# `visiting = true` (listed only once its relay registered, at a joint event). This example keeps the
+# literal addresses, which still work.
+
+# Web panel bind address (the operator opens http://strih.lan:8770/).
+bind = "0.0.0.0:8770"
+
+# Live-preview tuning (M2, issue 808). Optional — every field defaults sensibly. Each camera
+# with an `ndi_preview` name gets a low-bandwidth NDI receiver decimated to `fps` and served
+# as JPEG at /api/cameras/<id>/preview.jpg. A preview is a colour/exposure reference, not a
+# graded master, so a few fps at modest quality is plenty.
+[preview]
+fps = 3.0                  # target preview frame rate (2-5 is plenty for shading)
+jpeg_quality = 55          # 0-100; lower = smaller frames
+capture_timeout_ms = 1000  # how long one NDI capture blocks before looping
+reconnect_backoff_ms = 2000  # wait before rebuilding a source that dropped
+
+# cam1: camera USB -> cambox cam1, controlled by bkshading-relay on cam1.
+[[camera]]
+id = "cam1"
+label = "Cam 1"
+transport = "cambox-relay"
+address = "cam1.lan:8771"
+ndi_preview = "CAM1 (usb)"    # the cambox's NDI source name
+grab_fps = 60                 # box grabs this cam at 60 fps (issue 809) — the panel warns if
+                              # the camera's project fps (d006) drifts off 60. An explicit
+                              # "align to grab" button (never an automatic write) is offered only
+                              # when grab x100 is one of the camera's d006 choices — never for 60
+                              # on a BMPCC, whose list has no 6000 (issue 1402). Omit for a
+                              # camera whose grab rate you don't want compared.
+
+[[camera]]
+id = "cam2"
+label = "Cam 2"
+transport = "cambox-relay"
+address = "cam2.lan:8771"
+ndi_preview = "CAM2 (usb)"
+grab_fps = 60
+
+# cam3: the camera is a handheld with a Teradek whose receiver feeds cam3, so the cam3 block is
+# controlled by the bkshading-relay on that camera's SBC (handheld-1), not by the cambox. The SBC is
+# a separately powered zero-class arm64 board with WiFi (device-agnostic: Raspberry Pi Zero 2 W /
+# Radxa ZERO 3W / Orange Pi Zero 2W) running the SAME relay component the camboxes run. The SBC
+# announces itself to this service (relay --register-url, owner 28.10.2026), so its WiFi address is
+# never configured: `register:<relay id>` reaches it at the address its last announcement came from.
+# A 2.4 GHz-only board (e.g. a Pi Zero 2 W) needs a 2.4 GHz SSID on site.
+[[camera]]
+id = "cam3"
+label = "Cam 3"
+transport = "sbc-relay"
+address = "register:handheld-1"
+ndi_preview = "CAM3 (usb)"
+grab_fps = 60
+
+[[camera]]
+id = "cam4"
+label = "Cam 4"
+transport = "cambox-relay"
+address = "cam4.lan:8771"
+ndi_preview = "CAM4 (usb)"
+grab_fps = 60
+
+[[camera]]
+id = "cam5"
+label = "Cam 5"
+transport = "cambox-relay"
+address = "cam5.lan:8771"
+ndi_preview = "CAM5 (usb)"
+grab_fps = 60
+
+[[camera]]
+id = "cam6"
+label = "Cam 6"
+transport = "cambox-relay"
+address = "cam6.lan:8771"
+ndi_preview = "CAM6 (usb)"
+grab_fps = 60
+
+[[camera]]
+id = "cam7"
+label = "Cam 7"
+transport = "cambox-relay"
+address = "cam7.lan:8771"
+ndi_preview = "CAM7 (usb)"
+grab_fps = 60

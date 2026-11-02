@@ -1,0 +1,70 @@
+[Unit]
+Description=bkshading relay - Blackmagic camera shading over USB-PTP (issue 808)
+Documentation=https://github.com/zbynekdrlik/camera-box
+After=network-online.target
+Wants=network-online.target
+
+# Bound any runaway restart storm (mirrors camera-box.service #828). StartLimit* are UNIT-level
+# directives (placing them in [Service] silently no-ops). 20 starts / 5 min is a generous cap.
+StartLimitIntervalSec=300
+StartLimitBurst=20
+
+[Service]
+Type=simple
+# The relay drives the local Blackmagic camera over USB-PTP by shelling out to the `gphoto2` CLI
+# (a RUNTIME dep installed by scripts/bkshading-provision-relay.sh; NOT a build/link dep -- the
+# relay uses the Gphoto2Runner trait / shell-out, keeping a clean ARM cross-build). It runs as
+# root (no User=) for raw USB device access, exactly like camera-box.service. On a headless cambox
+# there is no gvfs-gphoto2-volume-monitor to contend for the PTP device.
+ExecStart=/usr/local/bin/bkshading-relay --bind 0.0.0.0:8771
+# issue 1228: on-failure (not always) -- restarts on a genuine crash (a non-zero exit, an
+# operation timeout, a watchdog failure, or termination by a signal OTHER than SIGHUP/SIGINT/
+# SIGTERM/SIGPIPE -- e.g. SIGSEGV/SIGABRT). It will NOT restart after a SIGTERM of ANY origin
+# (systemd treats SIGHUP/SIGINT/SIGTERM/SIGPIPE as a CLEAN exit by default, regardless of who sent
+# it -- not just when the stop was manager-requested via `systemctl stop`/the deploy flow, though
+# those also independently skip Restart= entirely). And -- the deliberate difference from `always`
+# -- it will NOT restart on a clean exit(0) either (this relay is a long-running server that
+# should never exit 0 on its own). RestartSec=5 is the ticket's own specified delay.
+Restart=on-failure
+RestartSec=5
+
+# issue 1309 -- bound the relay's fork/thread BLAST RADIUS. On 2026-09-13 a cambox went half-dead
+# after a relay (re)start (cam1 during a live production, cam2 after an E2E cleanup): dantesync +
+# the relay HTTP kept answering while anything that needs a fork -- an sshd session, the remoteos
+# MCP, a gphoto2 spawn -- failed, i.e. the box's pid space was exhausted and the box became
+# unreachable/unrepairable remotely. The healthy-box baseline measured the relay at pids.current=5
+# with the cgroup default TasksMax=18761 (the whole box's pid_max headroom), so an unbounded relay
+# runaway CAN consume the box-wide pid space and starve sshd. TasksMax=512 caps THIS unit's total
+# tasks (threads count too) far above the measured 5 / normal peak (<10, gphoto2 reads are
+# serialised + min-interval-throttled per issue 1229) but far below pid_max, so a relay leak can
+# never starve the rest of the box -- sshd (a different cgroup) keeps its forks. This CONTAINS a
+# leak; it does not prevent one (the on-box mgmt self-heal + persistent journal, same ticket, cover
+# detection + recovery). `.output()` in transport.rs already waits+reaps every gphoto2 child (no
+# zombie path), so no per-invocation timeout is added here (issue 1229 is the separate polling-vs-
+# grabber ticket); the baseline shows no leak, so this is a defensive ceiling, not a measured fix.
+TasksMax=512
+
+# issue 809: CAMERA_BOX_CAPTURE_FPS is provisioned into this file by
+# scripts/bkshading-provision-relay.sh, DERIVED from the box's own appliance capture-fps config
+# (the SAME value src/capture.rs requested_capture_denominator uses -- ONE source of truth). The
+# leading `-` makes the file OPTIONAL: if it is absent (relay not yet provisioned, or a box with no
+# camera) the relay reads no capture fps -> the aggregation service falls back to the static
+# grab_fps config instead of writing a WRONG rate.
+EnvironmentFile=-/etc/bkshading/relay.env
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bkshading-relay
+
+# Security hardening (kept light so raw USB-PTP still works -- gphoto2 needs /dev/bus/usb, which
+# these directives do not restrict; no ProtectSystem=strict/ReadOnlyPaths so libgphoto2's temp
+# handling is unaffected, and PrivateTmp isolates it anyway). ProtectHome is deliberately NOT set:
+# the gphoto2 CLI may read/write ~/.config/gphoto2 as root, and blanking $HOME can't be verified at
+# Tier-0 -- the asymmetric risk (a relay that can't talk to the camera vs marginal hardening on an
+# internal-LAN root service that already has full USB access) favours leaving $HOME accessible.
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

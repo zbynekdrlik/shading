@@ -1,0 +1,510 @@
+//! Shared wire types for the bkshading shading-control protocol.
+//!
+//! One source of truth for the JSON exchanged between the browser web panel, the
+//! `bkshading` aggregation service, and each `bkshading-relay`. Keeping these types in
+//! `bkshading-proto` (depended on by BOTH the service and the relay) prevents the exact
+//! "duplicate truth" drift the owner flagged in the MVP (Python `mapping.py` vs Kotlin
+//! `PtpMapping.kt`). Field names use `camelCase` to stay compatible with the verified
+//! dev2 MVP web-UI wire shape (`apertureAv`/`apertureNorm`/`iso`/...).
+
+use serde::{Deserialize, Serialize};
+
+/// How a camera's shading is reached (owner decision 2026-08-20: transports are USB via
+/// a relay, or USB-Ethernet REST; Bluetooth is not used at all).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Transport {
+    /// Camera USB -> cambox PC, controlled by a `bkshading-relay` on that cambox.
+    CamboxRelay,
+    /// Camera USB -> a separately powered zero-class arm64 SBC with WiFi on the cage
+    /// (device-agnostic: Pi Zero 2 W / Radxa ZERO 3W / Orange Pi Zero 2W), running the
+    /// SAME relay — a "mini-cambox without video". Handheld path.
+    SbcRelay,
+    /// Camera in REST mode via a USB-C->Ethernet adapter (Camera OS >= 8.6). Future
+    /// alternative transport; the service treats it as another relay-shaped endpoint.
+    EthernetRest,
+}
+
+/// Live shading state of a single camera. `None` fields mean "not yet known this poll
+/// cycle" (never "zero") — the server is the single source of truth.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShadingParams {
+    /// Aperture value: `AV = 2*log2(fNumber)`.
+    pub aperture_av: Option<f64>,
+    /// Aperture normalised into `[0,1]` across the camera's f-number choices.
+    pub aperture_norm: Option<f64>,
+    pub iso: Option<i64>,
+    pub kelvin: Option<i64>,
+    pub tint: Option<i64>,
+    /// Shutter speed as a denominator (e.g. `500` == 1/500 s).
+    pub shutter: Option<i64>,
+    /// PROJECT fps x100 — the d006 MENU `Current:` (issue 1402: d006 is the project rate on
+    /// every BMPCC in the fleet). The rate the camera records and outputs; it drives the
+    /// shutter angle <-> denominator conversion and the issue-809 comparison with the grab.
+    /// Settable only to one of [`CameraCaps::fps_choices`]. `None` when d006 is not read —
+    /// never the off-speed rate.
+    pub fps100: Option<i64>,
+    /// OFF-SPEED (sensor) fps x100 — the d007 RANGE `Current:` (a plain int 5..60) x100.
+    /// Readback / diagnostic only: never compared with the grab, never written.
+    pub sensor_fps100: Option<i64>,
+    /// Manual focus DISTANCE — raw gphoto2 `d003` (RANGE, ~0 = closest .. ~65536 = infinite
+    /// on the BMPCC 4K). `None` when the camera does not report it this cycle. This is the
+    /// ONLY focus-related property the BMPCC's PTP space documents (the TalOrg BMPCC-over-PTP
+    /// control-point list; the MVP `mapping.rs` maps the shading d-codes but not d003): there
+    /// is NO AF/MF focus-MODE selector and NO auto/manual exposure-MODE (program) selector
+    /// over PTP (issue 1238). So this is the honest focus signal a pre-run check can use — its
+    /// presence confirms manual focus control is reachable, and a value that is STABLE across
+    /// reads is a no-AF-hunt proxy — never a fabricated "focus mode = manual" flag.
+    ///
+    /// CONSUMER CAVEAT (issue 1229 read cache): two `/api/state` samples taken within the
+    /// relay's `min_read_interval_ms` floor (default 10 s) return the SAME cached snapshot, and
+    /// `RelayState` carries no read-timestamp/cycle id — so a naive "did it change between two
+    /// polls" check always sees "stable". A stability-based no-hunt check MUST space its samples
+    /// further apart than the floor (or a future `readAtMs`/cycle field on `RelayState` would let
+    /// a consumer distinguish a cache hit from a real read); the single-read presence check is
+    /// unaffected. READ-ONLY (deliberately never in [`SetRequest`]: a focus write during a take
+    /// is unsafe). `#[serde(default)]` so an older relay that does not send it still deserializes
+    /// (as `None`), mirroring [`RelayState::capture_fps`].
+    #[serde(default)]
+    pub focus_distance: Option<i64>,
+}
+
+/// The camera's own fine-grained value lists/ranges — the web UI rebuilds its ISO and
+/// shutter button groups from these when present.
+///
+/// Note: no `Eq` derive — [`CameraCaps::fnumber_choices`] is `Vec<f64>` and `f64` has no
+/// total order, so `Eq` is impossible. `PartialEq` is enough (and is all the whole-state
+/// `assert_eq!` round-trip tests need — `Eq` is never required as a bound anywhere).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CameraCaps {
+    pub iso_choices: Vec<i64>,
+    /// The camera's f-number choices as plain numbers (e.g. `[2.8, 4.0, 5.2, 8.0]`), ordered
+    /// like the RADIO `f-number` choices the relay reads. The panel uses the COUNT for the
+    /// aperture +/- step (`idx = round(norm*(n-1))`, step to `clamp(idx±1)`, send the absolute
+    /// `apertureNorm = idx'/(n-1)` — the inverse of [`crate::mapping::norm_to_choice_index`],
+    /// which the relay applies to the SAME choice list) and the VALUES to label the target
+    /// f-number (issue 1304). `#[serde(default)]` so an older relay that does not send it still
+    /// deserializes (empty `Vec`) — the panel then DISABLES the aperture +/- buttons rather
+    /// than fabricating a step.
+    // `rename_all = "camelCase"` would emit `fnumberChoices` (one word); the panel (app.js) and
+    // the E2E stub relay speak `fNumberChoices`, so pin the wire key explicitly.
+    #[serde(default, rename = "fNumberChoices")]
+    pub fnumber_choices: Vec<f64>,
+    pub shutter_choices: Vec<i64>,
+    /// The camera's PROJECT-fps choices x100 — the d006 MENU list, verbatim and in the
+    /// camera's order (issue 1402; both BMPCC bodies: `8, 2398, 2400, 2500, 2997, 3000,
+    /// 5000, 5994`, where `8` is a non-rate entry and the current `6000` is not listed). A
+    /// `fps` write is accepted only for one of these ([`crate::mapping::fps_settable`]); the
+    /// service offers "align to grab" only when `grab * 100` is one of them.
+    /// `#[serde(default)]`: an older relay that does not send it reads as empty, so nothing is
+    /// settable and no align is offered (its own `fps` write went to the off-speed d007).
+    #[serde(default)]
+    pub fps_choices: Vec<i64>,
+    /// The OFF-SPEED (d007) RANGE bounds — not the settable project rates (those are
+    /// [`CameraCaps::fps_choices`]).
+    pub fps_min: i64,
+    pub fps_max: i64,
+    pub kelvin_min: i64,
+    pub kelvin_max: i64,
+}
+
+/// A relay's report about the one camera it owns. Served at the relay's `GET /api/state`
+/// and forwarded by the service into each web-UI camera block.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelayState {
+    /// Camera detected and answering (gphoto2 auto-detect succeeded this cycle).
+    pub online: bool,
+    /// Camera model string from `gphoto2 --auto-detect`, when known.
+    pub camera: Option<String>,
+    pub params: ShadingParams,
+    pub caps: Option<CameraCaps>,
+    /// Whether the camera exposes its PROJECT fps (the d006 MENU, issue 1402). Exposed is not
+    /// "settable to any rate": a `fps` write is accepted only for a value in
+    /// [`CameraCaps::fps_choices`].
+    pub fps_supported: bool,
+    /// The box's own capture-mode fps, reported by the relay from its `CAMERA_BOX_CAPTURE_FPS`
+    /// environment (the relay runs on the cambox, so it reads the SAME rate the appliance
+    /// requests). `None` when the relay's environment does not set it (issue 809). This is the
+    /// box's ACTUAL grab rate — the service derives/validates the per-camera `grab_fps` against
+    /// it so a stale static config can't silently mis-compare. `#[serde(default)]` so an older
+    /// relay that doesn't send it still deserializes (as `None`).
+    #[serde(default)]
+    pub capture_fps: Option<i64>,
+    /// The relay binary's own version (for diagnostics; the service shows its own).
+    pub version: String,
+    /// The WIRE field names (`apertureNorm`, `iso`, `shutter`, `kelvin`, `tint`, `fps`) whose
+    /// write the camera did NOT apply, filled at the burst idle-close by comparing every key the
+    /// burst wrote against the authoritative readback (issue 1343). Empty when the last read was
+    /// not a burst-close, or when every write landed. The panel renders each listed value with a
+    /// `.not-applied` style so a silently-refused write (cam1 today: the BMPCC ACKs and ignores an
+    /// aperture/focus PTP write while ISO applies) is no longer invisible — today the optimistic
+    /// value just reverts. Cleared on the next burst or the next real read. `#[serde(default)]` so
+    /// an older relay that does not send it still deserializes (empty `Vec`), mirroring
+    /// [`RelayState::capture_fps`]; `rename_all = "camelCase"` emits it as `notApplied`.
+    #[serde(default)]
+    pub not_applied: Vec<String>,
+}
+
+impl RelayState {
+    /// The state a relay reports when it cannot see its camera this cycle. `capture_fps` is
+    /// `None` here (the box rate is filled in by the relay, which overrides this default with
+    /// its known env value even on a camera-offline cycle).
+    pub fn offline(version: impl Into<String>) -> Self {
+        RelayState {
+            online: false,
+            camera: None,
+            params: ShadingParams::default(),
+            caps: None,
+            fps_supported: false,
+            capture_fps: None,
+            version: version.into(),
+            not_applied: Vec::new(),
+        }
+    }
+}
+
+/// A write request from the web panel — every field optional; only present fields are
+/// applied. Aperture is set as a normalised `[0,1]` position (the panel's slider), the
+/// relay maps it back to an f-number choice.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetRequest {
+    pub aperture_norm: Option<f64>,
+    pub iso: Option<i64>,
+    pub kelvin: Option<i64>,
+    pub tint: Option<i64>,
+    /// Shutter denominator (e.g. `500` == 1/500 s).
+    pub shutter: Option<i64>,
+    /// PROJECT fps, plain (e.g. `50`). Written to d006 as `fps * 100`, and only when that is
+    /// one of the camera's [`CameraCaps::fps_choices`]; any other value refuses the whole
+    /// request (issue 1402). Never written to the off-speed d007.
+    pub fps: Option<i64>,
+    /// Trigger auto white balance (no PTP equivalent — ignored on the USB path).
+    pub auto_wb: Option<bool>,
+}
+
+/// Whether a camera's reported frame rate matches the box's grab mode (issue 809). A
+/// mismatch produces duplicate/beat artefacts at the source of the capture chain (#674
+/// duplicate-frame analysis, #685 capture-rate health), so the panel surfaces it as a
+/// visible warning and offers an explicit "align to grab" action (never an auto-write —
+/// a camera-side format change can interrupt recording).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FpsSync {
+    /// Can't judge: the camera's fps isn't known this cycle (offline / not read) or no
+    /// grab mode is configured for this camera.
+    #[default]
+    Unknown,
+    /// The camera's project fps equals the box's grab fps — no beat.
+    Synced,
+    /// The camera's project fps differs from the box's grab fps — the warning state.
+    Mismatch,
+}
+
+impl FpsSync {
+    /// Classifies a camera's reported project fps (`ShadingParams.fps100`, i.e. fps x100)
+    /// against the box's configured grab fps (plain fps, e.g. `60`). Pure — the single
+    /// source of truth for the sync verdict, shared by the service and covered by unit
+    /// tests. Compares the PROJECT fps (d006, issue 1402), because that is exactly what the
+    /// "align to grab" write changes and what the camera's HDMI output follows;
+    /// `sensor_fps100` (off-speed d007) stays a separate diagnostic. A non-positive value on
+    /// either side (an unread property, a misconfigured `grab_fps = 0`) is treated as "not
+    /// known" and yields [`FpsSync::Unknown`] rather than a false mismatch.
+    pub fn classify(camera_fps100: Option<i64>, grab_fps: Option<i64>) -> FpsSync {
+        match (camera_fps100, grab_fps) {
+            (Some(cam), Some(grab)) if cam > 0 && grab > 0 => {
+                if cam == grab * 100 {
+                    FpsSync::Synced
+                } else {
+                    FpsSync::Mismatch
+                }
+            }
+            _ => FpsSync::Unknown,
+        }
+    }
+}
+
+/// One camera as the aggregation service presents it to the web panel. A camera with no
+/// NDI preview (a handheld, or M1 where preview is not wired yet) has `has_preview =
+/// false` and the panel renders a params-only block (no preview area).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CameraView {
+    pub id: String,
+    pub label: String,
+    pub transport: Transport,
+    /// The camera has an NDI preview CONFIGURED (`ndi_preview` set): the panel renders a preview
+    /// block for it. Says nothing about whether a picture is arriving — that is `preview_live`.
+    pub has_preview: bool,
+    /// The preview has a FRESH frame right now (issue 808): the service's preview store holds a
+    /// frame younger than the freshness bound. The panel loads a frame only while this is set and
+    /// shows its placeholder otherwise, so an absent or stopped feed is never polled into console
+    /// errors and never shown frozen as if live. Always `false` without `has_preview`.
+    /// `#[serde(default)]`: a view from an older service that does not send it reads as not live.
+    #[serde(default)]
+    pub preview_live: bool,
+    /// The camera's relay was reachable this cycle.
+    pub reachable: bool,
+    /// The EFFECTIVE grab-mode fps this camera is compared against (issue 809) — the box's live
+    /// reported capture rate when the relay reports one ([`resolve_grab`] DERIVES it from the
+    /// actual capture mode), else the static per-camera config value. `None` when neither is
+    /// known — then `fps_sync` is [`FpsSync::Unknown`] and the panel shows no grab comparison.
+    pub grab_fps: Option<i64>,
+    /// The static config `grab_fps` disagrees with the box's live reported capture rate (issue
+    /// 809): a silent desync (e.g. the box's capture mode changed but the TOML wasn't updated).
+    /// The panel then compares against the LIVE rate (`grab_fps` above) and surfaces this so the
+    /// stale config gets fixed. `#[serde(default)]` for older-service wire compat.
+    #[serde(default)]
+    pub grab_fps_desync: bool,
+    /// FPS-vs-grab sync verdict (issue 809) — [`FpsSync::classify`] of the camera's
+    /// reported project fps against the EFFECTIVE `grab_fps`. Drives the panel's warning +
+    /// align button.
+    pub fps_sync: FpsSync,
+    /// The explicit "align to grab" write can be offered (issue 1402): the camera reports its
+    /// d006 project-fps choices and `grab_fps * 100` is EXACTLY one of them
+    /// ([`crate::mapping::fps_settable`], the same rule the relay's write refusal uses). False
+    /// with no grab, no caps, or a grab the camera does not list (a 60 grab on a BMPCC: `6000`
+    /// is not a d006 choice) — the relay would refuse that write, so the panel offers no button.
+    /// `#[serde(default)]`: a view from an older service reads as false (no button).
+    #[serde(default)]
+    pub fps_align_settable: bool,
+    /// Live state from the relay, when reachable.
+    pub state: Option<RelayState>,
+    /// The self-registration of a `register:<id>` camera (issue 808): the relay id, the address
+    /// its last announcement came from, how long ago that was and how long the relay has announced
+    /// without a gap. `None` for a camera at a fixed address, or one whose relay never announced.
+    /// `#[serde(default)]`: a view from an older service reads as `None`.
+    #[serde(default)]
+    pub registration: Option<RegistrationView>,
+}
+
+/// A self-registering relay as the panel shows it (issue 808).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistrationView {
+    /// The relay id the camera config names (`register:<id>`).
+    pub relay_id: String,
+    /// The `host:port` the relay's last announcement came from.
+    pub address: String,
+    /// Seconds since that announcement.
+    pub age_s: u64,
+    /// Seconds the relay has announced without a gap longer than the registration TTL.
+    pub announcing_s: u64,
+    /// The announcement is within the TTL: the service reaches the relay at `address`.
+    pub fresh: bool,
+}
+
+/// Reconciliation of a camera's configured grab fps with the box's live reported capture rate
+/// (issue 809). See [`resolve_grab`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GrabResolution {
+    /// The grab fps to compare the camera against: the box's live reported capture rate when
+    /// known (the ACTUAL capture mode), otherwise the static config value.
+    pub effective: Option<i64>,
+    /// The static config grab fps disagrees with the box's live reported capture rate — a
+    /// silent desync that would otherwise mis-compare against a stale reference.
+    pub desync: bool,
+}
+
+/// Reconciles a per-camera configured grab fps with the box's live reported capture rate
+/// (`RelayState::capture_fps`), for issue 809. DERIVES the effective grab from the box's ACTUAL
+/// capture mode when the relay reports it (a box-side mode change is then followed automatically
+/// instead of silently desyncing a static config), falling back to the config when the relay
+/// reports nothing. VALIDATES the two against each other: when both are known and differ,
+/// `desync = true` and the LIVE capture rate wins (it is the real grab). A non-positive value on
+/// either side is treated as "not known" (never a false desync).
+pub fn resolve_grab(config_grab: Option<i64>, reported_capture_fps: Option<i64>) -> GrabResolution {
+    let config = config_grab.filter(|&g| g > 0);
+    let reported = reported_capture_fps.filter(|&c| c > 0);
+    match (config, reported) {
+        (Some(cfg), Some(cap)) => GrabResolution {
+            effective: Some(cap),
+            desync: cfg != cap,
+        },
+        (None, Some(cap)) => GrabResolution {
+            effective: Some(cap),
+            desync: false,
+        },
+        (Some(cfg), None) => GrabResolution {
+            effective: Some(cfg),
+            desync: false,
+        },
+        (None, None) => GrabResolution {
+            effective: None,
+            desync: false,
+        },
+    }
+}
+
+/// The one-line telemetry note the service logs when a camera's project fps does NOT match the
+/// box's grab mode (issue 809). Names the concrete rates AND cross-references the appliance's
+/// grabber-side capture-rate health (`capture_rate_health`, issues 656/685 — captured-vs-
+/// negotiated rate on `/dev/videoN`) plus the duplicate-frame analysis (issue 674): a camera
+/// off-grab is the SAME source beat those downstream checks see, so aligning the camera fps to
+/// the grab removes it at the source. Pure so the exact wording is pinned by a test.
+pub fn fps_mismatch_note(id: &str, camera_fps100: Option<i64>, grab_fps: Option<i64>) -> String {
+    let cam = camera_fps100
+        .map(|f| format!("{:.2}", f as f64 / 100.0))
+        .unwrap_or_else(|| "?".into());
+    let grab = grab_fps
+        .map(|g| g.to_string())
+        .unwrap_or_else(|| "?".into());
+    format!(
+        "issue-809 fps mismatch on '{id}': camera project fps {cam} != box grab {grab} \
+         — source beat/duplicate class (cross-ref capture_rate_health 656/685 grabber rate, \
+         674 duplicate-frame analysis); align camera fps to grab to remove it at the source"
+    )
+}
+
+/// The one-line telemetry note logged when the static per-camera `grab_fps` config disagrees
+/// with the box's live reported capture rate (issue 809) — the "mode change silently desynced
+/// the config" case. `effective_grab` is the LIVE capture rate now being used.
+pub fn grab_desync_note(id: &str, effective_grab: Option<i64>) -> String {
+    let g = effective_grab
+        .map(|g| g.to_string())
+        .unwrap_or_else(|| "?".into());
+    format!(
+        "issue-809 grab config desync on '{id}': box live capture rate is {g} fps but the \
+         static grab_fps config differs — comparing against the live rate; update grab_fps in \
+         the TOML to match the box's capture mode"
+    )
+}
+
+/// The whole aggregate the service serves at `GET /api/cameras`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Aggregate {
+    /// The service's own version (shown in the panel header — version-on-dashboard).
+    pub version: String,
+    pub cameras: Vec<CameraView>,
+}
+
+/// A server -> client WebSocket message for the issue-808 live state push (`/ws`).
+///
+/// Internally tagged (`#[serde(tag = "type")]`), so the payload flattens the aggregate's
+/// own fields alongside a `type` discriminator — the exact `{"type":"state", ...}` shape the
+/// verified dev2 MVP web UI already speaks. That lets the browser reuse its existing
+/// `render(agg)` directly on the flattened message (`msg.version` / `msg.cameras`) instead of
+/// unwrapping a nested object. Push-only: the panel still WRITES over the HTTP
+/// `PUT /api/cameras/:id/params` surface (robust through the cloudflare remote), so no
+/// client->server variant is needed yet.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+pub enum ServerMsg {
+    /// The full aggregate, pushed on connect and again whenever it changes.
+    State(Aggregate),
+}
+
+// --- issue 1309 / 1337: shading-write single-flight FIFO queue + a shared SET summary -----------
+
+/// One-line human summary of the non-`None` params in a SET (issue 1309), for the relay + service
+/// logs (so a "crash after two SETs" is reconstructible from the log alone). Pure — unit-tested.
+pub fn summarize_set_request(req: &SetRequest) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(v) = req.aperture_norm {
+        parts.push(format!("aperture_norm={v}"));
+    }
+    if let Some(v) = req.iso {
+        parts.push(format!("iso={v}"));
+    }
+    if let Some(v) = req.kelvin {
+        parts.push(format!("kelvin={v}"));
+    }
+    if let Some(v) = req.tint {
+        parts.push(format!("tint={v}"));
+    }
+    if let Some(v) = req.shutter {
+        parts.push(format!("shutter={v}"));
+    }
+    if let Some(v) = req.fps {
+        parts.push(format!("fps={v}"));
+    }
+    if let Some(v) = req.auto_wb {
+        parts.push(format!("auto_wb={v}"));
+    }
+    if parts.is_empty() {
+        "(none)".to_string()
+    } else {
+        parts.join(" ")
+    }
+}
+
+/// The action a [`SetQueue`] decided for an incoming SET (issue 1309/1337).
+#[derive(Debug, Clone, PartialEq)]
+pub enum SubmitAction {
+    /// No write is in flight — run THIS request now (the caller then drives gphoto2 and, while it
+    /// runs, drains any SETs that queued behind it, in ORDER).
+    RunNow(SetRequest),
+    /// A write is already in flight — this request was appended to the FIFO queue and will be
+    /// applied IN ORDER by the in-flight worker. `total` is the running count of queued SETs.
+    Queued { total: u64 },
+}
+
+/// Single-flight FIFO queue for shading writes (issue 1309 single-flight; issue 1337 FIFO). The
+/// relay wraps ONE of these in a `Mutex`: the FIRST SET flips `in_flight` and runs gphoto2; any SET
+/// arriving while a write is in flight is APPENDED to `pending` (never a second parallel gphoto2
+/// fork — the issue-1309 guarantee); when the in-flight worker finishes it pops the FRONT of
+/// `pending` and runs it, else clears `in_flight`. FIFO (not the former latest-wins coalesce) so a
+/// burst of 20 rapid clicks becomes 20 in-order camera moves — the owner's issue-1337 requirement,
+/// which the persistent write-burst shell makes fast enough to run each rather than collapse them.
+/// Pure state machine — the actual gphoto2 I/O lives in the relay; this is exhaustively rustc-testable.
+#[derive(Debug, Default, Clone)]
+pub struct SetQueue {
+    in_flight: bool,
+    pending: std::collections::VecDeque<SetRequest>,
+    queued_total: u64,
+}
+
+impl SetQueue {
+    /// Decide what to do with an incoming SET. `RunNow` when idle (marks in-flight); `Queued`
+    /// (appended to the FIFO tail) when a write is already running.
+    pub fn submit(&mut self, req: SetRequest) -> SubmitAction {
+        if self.in_flight {
+            self.pending.push_back(req);
+            self.queued_total += 1;
+            SubmitAction::Queued {
+                total: self.queued_total,
+            }
+        } else {
+            self.in_flight = true;
+            SubmitAction::RunNow(req)
+        }
+    }
+
+    /// Called by the in-flight worker after each gphoto2 write completes: `Some(next)` = a queued
+    /// request is next (FIFO front), stay in-flight and run it; `None` = queue empty, clear
+    /// in-flight (idle again).
+    pub fn finish(&mut self) -> Option<SetRequest> {
+        match self.pending.pop_front() {
+            Some(next) => Some(next),
+            None => {
+                self.in_flight = false;
+                None
+            }
+        }
+    }
+
+    /// Called on a write error (or an unwind guard): drop the in-flight state AND the WHOLE queued
+    /// FIFO (writes planned against a now-uncertain camera must not run blind), returning every
+    /// dropped follow-up so the caller can log the loss — those SETs were already acknowledged to
+    /// the client. The next SET starts fresh. Idempotent: a second `abort()` returns an empty Vec.
+    pub fn abort(&mut self) -> Vec<SetRequest> {
+        self.in_flight = false;
+        self.pending.drain(..).collect()
+    }
+
+    /// Total number of SETs queued over this queue's lifetime (for diagnostics).
+    pub fn queued_total(&self) -> u64 {
+        self.queued_total
+    }
+
+    /// Whether a SET still QUEUED (not the one running) moves the aperture again (issue 1452). The
+    /// relay then defers the running click's 0x5007 read-back to the run's last aperture click, so
+    /// a quick run of clicks pays one settle, not one per click.
+    pub fn has_pending_aperture(&self) -> bool {
+        self.pending.iter().any(|req| req.aperture_norm.is_some())
+    }
+}

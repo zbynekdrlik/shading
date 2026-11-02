@@ -1,0 +1,62 @@
+[package]
+name = "bkshading"
+version.workspace = true
+edition = "2021"
+authors = ["zbynekdrlik"]
+description = "Camera shading-control aggregation service + operator web panel (issue 808)"
+license = "MIT"
+repository = "https://github.com/zbynekdrlik/camera-box"
+
+[lib]
+name = "bkshading"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bkshading"
+path = "src/main.rs"
+
+[features]
+# Real NDI receive for the live preview is ON by default (issue 1157, owner decision 2026-08-24
+# — možnosť 1; the features-default-on rule: a needed feature is on by default, never a
+# forgettable toggle). The real recv path (src/preview/ndi_source.rs) loads libndi at RUNTIME
+# via libloading and mirrors the appliance's verified src/ndi.rs at bandwidth LOWEST. libloading
+# is a dynamic load, so the DEFAULT build still compiles on CI with NO libndi installed — the
+# plain `cargo clippy/test/check -p bkshading` steps now verify the ndi path on both ship
+# targets (Linux + the strih Windows deploy). A host WITHOUT libndi degrades gracefully: the
+# preview worker logs a loud WARN naming the missing runtime + how to provision and retries with
+# backoff — it never crashes and never silently falls back to the stub (source::build_default_source
+# under `ndi` always builds the real receiver). The live end-to-end verify against a cambox NDI
+# source + libndi provisioning on the strih host are the supervisor's rig steps.
+default = ["ndi"]
+# The stub (test-pattern) source is the `--no-default-features` build: a libndi-free source for a
+# quick local compile / a host that genuinely has no NDI. CI keeps a `--no-default-features` step
+# so this path stays proven (it was the free default coverage before ndi became the default).
+ndi = ["dep:libloading"]
+
+[dependencies]
+bkshading-proto = { path = "../proto" }
+# `ws` = the /ws live state-push endpoint (issue 808 WS milestone).
+axum = { version = "0.7", features = ["ws"] }
+# `sync` = the watch channel the pump broadcasts the latest aggregate on; `time` = the pump's
+# interval ticker (issue 808 WS milestone).
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
+# Plain-HTTP LAN relay polling. rustls (pure Rust) avoids a system openssl build dep, so
+# the service cross-compiles cleanly (incl. the future Windows/ARM targets).
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+anyhow = "1"
+futures = "0.3"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Pure-Rust JPEG encoder for the preview wire format (default features = `std` only, no simd/C
+# → cross-compiles cleanly to Windows/ARM).
+jpeg-encoder = "0.7"
+# Runtime dynamic load of libndi (feature `ndi` only).
+libloading = { version = "0.8", optional = true }
+
+[dev-dependencies]
+# issue 808: the relay-registration E2E drives the real relay announcer against the real service.
+bkshading-relay = { path = "../relay" }
