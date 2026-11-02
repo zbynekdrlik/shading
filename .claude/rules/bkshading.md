@@ -88,6 +88,12 @@ dev2 MVP `pybridge/mapping.py`). Owner architecture: issue 808 comments 53558360
   Playwright E2E, aarch64 relay cross-build, `--version` contract), `bkshading-windows` (check +
   release exe), `coverage` (`cargo llvm-cov nextest --fail-under-lines`, 71 = first run 73.98 % minus 2; ratchet up only), `python-tests` (ruff 0.16.2
   + pytest; carries the Rust toolchain for the `cargo metadata` version test), `version-check` (PRs).
+- **ruff in CI is pinned (0.16.2, no project config = its defaults).** Those defaults include
+  `EXE001`: a `.py` with a shebang must be executable (`chmod +x`), and `PLW1510`: every
+  `subprocess.run` names `check=`. Run `ruff check scripts tests` locally before pushing.
+- **Release binaries link against the runner's glibc** (`ubuntu-latest`): v0.1.0 relay needs
+  GLIBC_2.39, service GLIBC_2.34 (`objdump -T <bin> | grep -oE 'GLIBC_[0-9.]+' | sort -Vu | tail -1`).
+  camera-box's old CI had the same floor. A runner image change can raise it: re-read it per release.
 - The strih seed test (`service/tests/service.rs` `both_strih_seeds_load_in_the_service_1431`) reads
   `service/tests/fixtures/strih-*-seed.toml`, a snapshot of camera-box's
   `strih_bkshading_config_text` at camera-box 390ae50. camera-box checks its live seed with

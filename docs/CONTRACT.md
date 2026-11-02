@@ -30,6 +30,10 @@ Tests that pin this contract here: `bkshading/relay/tests/contract.rs`,
 The panel web assets are also embedded in the service binary; `web/` is a copy, not needed at
 runtime.
 
+The Linux binaries are built on GitHub's `ubuntu-latest` and link dynamically against its glibc:
+v0.1.0 needs GLIBC_2.39 for the relay (amd64 and arm64) and GLIBC_2.34 for the service, the same
+floor camera-box's own CI builds had. A box with an older glibc cannot run them.
+
 ## Relay (`bkshading-relay`)
 
 - **Version:** `bkshading-relay --version` prints exactly one line, `bkshading-relay X.Y.Z`. The
