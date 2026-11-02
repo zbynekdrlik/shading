@@ -75,8 +75,8 @@ PP_LIVE = _expected((1, 4, 6, 7), {n: ("cambox-relay", "10.77.9.6%d:8771" % n) f
 # --- the fact ---------------------------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("box,want", [
-    ("strih-snv", "3=sbc-relay@register:handheld-1"),
-    ("strih-pp", "1=cambox-relay@10.77.9.61:8771 4=sbc-relay@register:handheld-1 6=cambox-relay@10.77.9.66:8771 "
+    ("strih-snv", "2=sbc-relay@register:cam2-shading 3=sbc-relay@register:cam4-shading"),
+    ("strih-pp", "1=sbc-relay@register:cam1-shading 4=sbc-relay@register:cam4-shading 6=cambox-relay@10.77.9.66:8771 "
                  "7=cambox-relay@10.77.9.67:8771"),
     ("stream-snv", "none"),
     ("stream-pp", "none"),
