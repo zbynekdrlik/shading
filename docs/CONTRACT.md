@@ -16,6 +16,8 @@ Tests that pin this contract here: `bkshading/relay/tests/contract.rs`,
   (`bkshading`, `bkshading-windows`, `coverage`, `python-tests`). The tag points at that commit.
 - **Published assets never change.** A re-run leaves a complete release alone; a partial release
   fails the job and is fixed by hand. Pin a tag and a sha256, never `latest`.
+- A tag always points at the commit whose gates built its assets: a `main` push whose version is
+  already tagged on another commit fails instead of releasing.
 - Assets, each with a `<asset>.sha256` in `sha256sum` format (`<hex>  <asset>`):
 
 | Asset | Content | Runs on |

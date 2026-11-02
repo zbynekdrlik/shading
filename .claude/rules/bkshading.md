@@ -79,6 +79,8 @@ dev2 MVP `pybridge/mapping.py`). Owner architecture: issue 808 comments 53558360
 - **Release = a push to `main`:** the `release` job needs every gate, then `scripts/release.py stage`
   (asset machine check, names, `.sha256`) + `publish` (GitHub Release `v<version>` at the commit).
   Published assets never change: a complete release is left alone on a re-run, a partial one fails.
+  A tag `v<version>` already on another commit fails the job (forgotten bump; `gh release create`
+  ignores `--target` for an existing tag).
   Asset names, `--version` shape, relay keys and `--check-config` are the camera-box contract
   (`docs/CONTRACT.md`), pinned by `relay/tests/contract.rs`, `service/tests/check_config.rs`,
   `tests/python/test_release.py`.

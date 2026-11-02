@@ -14,6 +14,8 @@ Subcommands (each exits non-zero with a message naming what is wrong):
                            Published assets never change (the intercom rule): a release that
                            already carries every asset is left alone (a CI re-run), one that
                            carries only some fails for a person to look at, none = publish.
+                           A tag v<version> already on another commit fails (the bump was
+                           forgot; gh would also attach the assets to that old commit).
 
 Asset names are a contract with camera-box: see ASSETS and docs/CONTRACT.md.
 """
@@ -115,17 +117,22 @@ def sha256_line(path):
     return f"{digest.hexdigest()}  {os.path.basename(path)}\n"
 
 
-# The machine each asset must be built for: ELF e_machine (62 = x86-64, 183 = AArch64) or "pe".
-MACHINE = {RELAY_AMD64: 62, RELAY_ARM64: 183, SERVICE_LINUX: 62, SERVICE_WINDOWS: "pe"}
+# The machine each asset must be built for: ELF e_machine (62 = x86-64, 183 = AArch64), or a PE
+# image's COFF Machine ("pe:0x8664" = x86-64).
+MACHINE = {RELAY_AMD64: 62, RELAY_ARM64: 183, SERVICE_LINUX: 62, SERVICE_WINDOWS: "pe:0x8664"}
 
 
 def binary_machine(path):
+    """ELF e_machine as an int, "pe:0x<machine>" for a PE image, None for anything else."""
     with open(path, "rb") as fh:
-        head = fh.read(20)
+        head = fh.read(4096)
     if head[:4] == b"\x7fELF" and len(head) >= 20:
         return int.from_bytes(head[18:20], "little")
-    if head[:2] == b"MZ":
-        return "pe"
+    if head[:2] == b"MZ" and len(head) >= 0x40:
+        # e_lfanew points at the `PE\0\0` signature; the COFF Machine field follows it.
+        pe_at = int.from_bytes(head[0x3C:0x40], "little")
+        if head[pe_at : pe_at + 4] == b"PE\0\0" and len(head) >= pe_at + 6:
+            return f"pe:{int.from_bytes(head[pe_at + 4 : pe_at + 6], 'little'):#06x}"
     return None
 
 
@@ -166,6 +173,23 @@ def stage(build, dist, web_dir=WEB_DIR):
     return sorted(os.listdir(dist))
 
 
+def tag_commit(github_repo, tag):
+    """The commit the remote tag points at, or None when the tag does not exist."""
+    out = subprocess.run(
+        ["gh", "api", f"repos/{github_repo}/commits/refs/tags/{tag}", "--jq", ".sha"],
+        capture_output=True, text=True, check=False,
+    )
+    if out.returncode == 0:
+        sha = out.stdout.strip()
+        if not re.fullmatch(r"[0-9a-f]{40}", sha):
+            raise ReleaseError(f"tag {tag} resolved to {sha!r}, not a commit")
+        return sha
+    # GitHub answers a missing ref with 422 "No commit found for SHA"; anything else is an error.
+    if "No commit found for SHA" in out.stderr:
+        return None
+    raise ReleaseError(f"cannot read tag {tag}: {out.stderr.strip()}")
+
+
 def publish(dist, repo=REPO, env=None):
     env = os.environ if env is None else env
     version = workspace_version(repo)
@@ -173,6 +197,9 @@ def publish(dist, repo=REPO, env=None):
     sha = env.get("GITHUB_SHA", "")
     if not re.fullmatch(r"[0-9a-f]{40}", sha):
         raise ReleaseError(f"GITHUB_SHA must be a 40-hex commit, got {sha!r}")
+    github_repo = env.get("GITHUB_REPOSITORY", "")
+    if not re.fullmatch(r"[\w.-]+/[\w.-]+", github_repo):
+        raise ReleaseError(f"GITHUB_REPOSITORY must be owner/repo, got {github_repo!r}")
     expected = sorted([*ASSETS, *(n + ".sha256" for n in ASSETS)])
     present = sorted(os.listdir(dist))
     if present != expected:
@@ -181,6 +208,16 @@ def publish(dist, repo=REPO, env=None):
         ["gh", "release", "view", tag, "--json", "assets", "-q", ".assets[].name"],
         capture_output=True, text=True, check=False,
     )
+    if view.returncode != 0 and view.stderr.strip() != "release not found":
+        # Only "release not found" means no release; any other gh error must not read as empty.
+        raise ReleaseError(f"gh release view {tag} failed: {view.stderr.strip()}")
+    # gh release create ignores --target for a tag that already exists, and a complete release of
+    # another commit means this commit's code was never released: both must stop here.
+    tagged = tag_commit(github_repo, tag)
+    if tagged is not None and tagged != sha:
+        raise ReleaseError(
+            f"tag {tag} already points at {tagged}, not {sha}: bump [workspace.package].version"
+        )
     if view.returncode == 0:
         published = set(view.stdout.split())
         if published >= set(expected):
@@ -188,9 +225,6 @@ def publish(dist, repo=REPO, env=None):
         raise ReleaseError(
             f"release {tag} exists with only {sorted(published)}: fix it by hand, never overwrite"
         )
-    # Only "release not found" means no release; any other gh error must not read as empty.
-    if view.stderr.strip() != "release not found":
-        raise ReleaseError(f"gh release view {tag} failed: {view.stderr.strip()}")
     notes = (
         f"shading {tag}. Assets and their `.sha256` files are the pinned contract camera-box "
         "deploys (docs/CONTRACT.md)."
