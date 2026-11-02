@@ -47,6 +47,20 @@ struct Args {
     /// Override the bind address from the config (host:port).
     #[arg(long)]
     bind: Option<String>,
+
+    /// Load this config file, print `ok: <N> cameras` and exit 0, or exit non-zero naming the
+    /// file and the reason. Starts nothing and binds no port: camera-box runs it from the pinned
+    /// release on its generated strih seed (shading#1, docs/CONTRACT.md).
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["config", "bind"])]
+    check_config: Option<PathBuf>,
+}
+
+/// `--check-config`: load the file exactly as a service start would, then report.
+fn check_config(path: &std::path::Path) -> Result<()> {
+    let config = ServiceConfig::from_path(path)
+        .map_err(|e| anyhow::anyhow!("config {} does not load: {e:#}", path.display()))?;
+    println!("ok: {} cameras", config.cameras.len());
+    Ok(())
 }
 
 #[tokio::main]
@@ -58,6 +72,9 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
+    if let Some(path) = &args.check_config {
+        return check_config(path);
+    }
     let mut config = match &args.config {
         Some(path) => ServiceConfig::from_path(path)?,
         None => {
