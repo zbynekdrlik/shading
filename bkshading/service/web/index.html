@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="sk">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>bkshading — riadenie shadingu kamier</title>
+  <link rel="stylesheet" href="/style.css" />
+  <!-- issue 1305: installable web app (PWA). The manifest + service worker (registered in
+       app.js) let the browser install the panel as a windowed app with its own icon. -->
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <meta name="theme-color" content="#14171c" />
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="icon" href="/icon-192.png" sizes="192x192" type="image/png" />
+  <link rel="apple-touch-icon" href="/icon-192.png" />
+</head>
+<body>
+  <header class="app-header">
+    <h1 class="app-title">bkshading</h1>
+    <!-- version-on-dashboard: the service injects its version here at serve time. -->
+    <span id="app-version" class="app-version" data-role="version" data-testid="version">v{{VERSION}}</span>
+    <span id="conn-status" class="conn-status" data-role="conn">spájam…</span>
+  </header>
+
+  <!-- issue 1343: a LOUD full-width offline banner. Shown when the panel has NO live connection to
+       the service (the WS is not open AND the last successful poll is older than 5 s), so a frozen
+       last-DOM (a device off the venue LAN) is never mistaken for a stuck relay. It carries a live
+       "last contact N s ago" counter and is cleared the moment a push or poll succeeds. The
+       steppers stay enabled — a tap still fires a PUT that may land on reconnect. -->
+  <div id="conn-banner" class="conn-banner" data-role="conn-banner" role="alert" aria-live="assertive" hidden></div>
+
+  <!-- The 4+4 blocks (up to 4 camboxes + 4 handhelds) are rendered here from /api/cameras.
+       Each block = a live NDI preview area on TOP (M2: JPEG frames from /api/cameras/<id>/
+       preview.jpg) and the shading parameters BELOW it. A camera with no NDI preview gets a
+       params-only block. -->
+  <main id="camera-grid" class="camera-grid" aria-live="polite"></main>
+  <p id="empty-note" class="empty-note" hidden>Žiadne kamery v konfigurácii.</p>
+
+  <!-- One camera block skeleton, cloned per camera by app.js. -->
+  <template id="camera-block">
+    <section class="camera-block" data-role="camera-block">
+      <div class="block-preview" data-role="preview">
+        <img class="preview-img" data-role="preview-img" alt="Živý NDI preview kamery" />
+        <div class="preview-placeholder" data-role="preview-placeholder">NDI preview — čakám…</div>
+      </div>
+      <div class="block-params" data-role="params">
+        <div class="block-head">
+          <span class="cam-label" data-role="label"></span>
+          <span class="cam-online" data-role="online">—</span>
+        </div>
+        <!-- issue 808: a self-registering handheld's announcement (address, age, how long it has
+             announced); hidden for a camera at a fixed address. -->
+        <div class="cam-registration" data-role="registration" hidden></div>
+
+        <div class="control iris-control">
+          <div class="control-head"><span>Clona</span><span class="value" data-role="fnum">f/—</span></div>
+          <!-- issue 1304: +/- step buttons. One tap = one camera f-number choice (computed by
+               app.js from caps.fNumberChoices); disabled (with a title) when the relay sends no
+               choices or at a bound. No auto-repeat on hold (issue 1229 USB-PTP bus doctrine). -->
+          <div class="slider-row">
+            <button type="button" class="btn step-btn" data-role="aperture-dec" aria-label="Clona o krok nižšie">−</button>
+            <input type="range" min="0" max="1" step="0.001" value="0.5" class="slider" data-role="aperture" aria-label="Clona" />
+            <button type="button" class="btn step-btn" data-role="aperture-inc" aria-label="Clona o krok vyššie">+</button>
+          </div>
+        </div>
+
+        <div class="control iso-control">
+          <div class="control-head"><span>ISO</span><span class="value" data-role="iso-val">—</span></div>
+          <!-- issue 1337: ISO shares the aperture-style −/slider/+ stepper (owner: "selektory na iso
+               ako samostatné tlačidlá je blbosť, daj to ako ostatné"). The slider is an INDEX over
+               caps.isoChoices; one tap = one PUT of the absolute ISO value (issue 1229 one-tap rule,
+               no auto-repeat). -->
+          <div class="slider-row">
+            <button type="button" class="btn step-btn" data-role="iso-dec" aria-label="ISO o krok nižšie">−</button>
+            <input type="range" min="0" max="1" step="1" value="0" class="slider" data-role="iso" aria-label="ISO" />
+            <button type="button" class="btn step-btn" data-role="iso-inc" aria-label="ISO o krok vyššie">+</button>
+          </div>
+        </div>
+
+        <div class="control wb-control">
+          <div class="control-head"><span>Biely bod</span><span class="value" data-role="kelvin-val">—</span></div>
+          <!-- issue 1304: biely bod krok ±100 K, clamp na rozsah slidera; disabled na hranici. -->
+          <div class="slider-row">
+            <button type="button" class="btn step-btn" data-role="kelvin-dec" aria-label="Biely bod o 100 K nižšie">−</button>
+            <input type="range" min="2500" max="10000" step="50" value="5600" class="slider" data-role="kelvin" aria-label="Biely bod (Kelvin)" />
+            <button type="button" class="btn step-btn" data-role="kelvin-inc" aria-label="Biely bod o 100 K vyššie">+</button>
+          </div>
+          <div class="control-head"><span>Tint</span><span class="value" data-role="tint-val">—</span></div>
+          <!-- issue 1304: tint krok ±1, clamp na rozsah slidera; disabled na hranici. -->
+          <div class="slider-row">
+            <button type="button" class="btn step-btn" data-role="tint-dec" aria-label="Tint o 1 nižšie">−</button>
+            <input type="range" min="-50" max="50" step="1" value="0" class="slider" data-role="tint" aria-label="Tint" />
+            <button type="button" class="btn step-btn" data-role="tint-inc" aria-label="Tint o 1 vyššie">+</button>
+          </div>
+          <button type="button" class="btn wb-auto" data-role="auto-wb">Auto WB</button>
+        </div>
+
+        <div class="control shutter-control">
+          <div class="control-head"><span>Uzávierka</span><span class="value" data-role="shutter-val">—</span></div>
+          <!-- issue 1337: uzávierka shares the aperture-style −/slider/+ stepper (owner: "uzávierka
+               tiež"). The slider is an INDEX over caps.shutterChoices; one tap = one PUT of the
+               absolute shutter value (issue 1229 one-tap rule, no auto-repeat). -->
+          <div class="slider-row">
+            <button type="button" class="btn step-btn" data-role="shutter-dec" aria-label="Uzávierka o krok nižšie">−</button>
+            <input type="range" min="0" max="1" step="1" value="0" class="slider" data-role="shutter" aria-label="Uzávierka" />
+            <button type="button" class="btn step-btn" data-role="shutter-inc" aria-label="Uzávierka o krok vyššie">+</button>
+          </div>
+        </div>
+
+        <div class="control fps-control">
+          <div class="control-head"><span>fps</span><span class="value" data-role="fps-val">—</span></div>
+          <!-- issue 809: grab-mode sync. `fps-grab` shows the box's grab fps; `fps-warn` is
+               shown only on a mismatch; `fps-set-grab` is an explicit align button (no auto-write). -->
+          <div class="fps-sync" data-role="fps-sync">
+            <span class="fps-grab" data-role="fps-grab" hidden></span>
+            <!-- issue 809: shown when the static grab_fps config disagrees with the box's live
+                 capture rate (a silent desync after a capture-mode change). -->
+            <span class="fps-desync" data-role="fps-desync" hidden></span>
+            <span class="fps-warn" data-role="fps-warn" hidden></span>
+            <button type="button" class="btn fps-set-grab" data-role="fps-set-grab" hidden></button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </template>
+
+  <script src="/app.js"></script>
+</body>
+</html>

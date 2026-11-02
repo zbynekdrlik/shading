@@ -1,0 +1,82 @@
+# bkshading service config (issue 808 / issue 1353), seeded by setup-strih step 16c. The panel lists
+# this venue's cameras (STRIH_CAMERAS: 1 4 6 7), one block per cambox; a handheld SBC relay controls the
+# block of the cambox its video reaches (owner ruling 5977504457). Edit the live camera/relay set on the box.
+# Issue 1431: every cambox relay registers itself as camN with the strih behind strih.lan. A venue camera is
+# reached through that registration, else its fallback_address; a visiting camera (the other venue's) is
+# listed only once its relay registered here, at a joint event.
+
+# Web panel bind address (the operator opens http://strih.lan:8770/).
+bind = "0.0.0.0:8770"
+
+# Live-preview tuning (M2). Optional -- every field defaults sensibly.
+[preview]
+fps = 3.0
+jpeg_quality = 55
+capture_timeout_ms = 1000
+reconnect_backoff_ms = 2000
+
+[[camera]]
+id = "cam1"
+label = "Cam 1"
+# a handheld SBC relay controls this cambox's camera (owner ruling 5977504457)
+transport = "sbc-relay"
+address = "register:cam1-shading"
+ndi_preview = "CAM1 (usb)"
+grab_fps = 60
+
+[[camera]]
+id = "cam4"
+label = "Cam 4"
+# a handheld SBC relay controls this cambox's camera (owner ruling 5977504457)
+transport = "sbc-relay"
+address = "register:cam4-shading"
+ndi_preview = "CAM4 (usb)"
+grab_fps = 60
+
+[[camera]]
+id = "cam6"
+label = "Cam 6"
+transport = "cambox-relay"
+address = "register:cam6"
+fallback_address = "10.77.9.66:8771"
+ndi_preview = "CAM6 (usb)"
+grab_fps = 60
+
+[[camera]]
+id = "cam7"
+label = "Cam 7"
+transport = "cambox-relay"
+address = "register:cam7"
+fallback_address = "10.77.9.67:8771"
+ndi_preview = "CAM7 (usb)"
+grab_fps = 60
+
+[[camera]]
+id = "cam2"
+label = "Cam 2"
+# the other venue's camera: listed once its relay registers here (issue 1431, a joint event)
+transport = "cambox-relay"
+address = "register:cam2"
+visiting = true
+ndi_preview = "CAM2 (usb)"
+grab_fps = 60
+
+[[camera]]
+id = "cam3"
+label = "Cam 3"
+# the other venue's camera: listed once its relay registers here (issue 1431, a joint event)
+transport = "cambox-relay"
+address = "register:cam3"
+visiting = true
+ndi_preview = "CAM3 (usb)"
+grab_fps = 60
+
+[[camera]]
+id = "cam5"
+label = "Cam 5"
+# the other venue's camera: listed once its relay registers here (issue 1431, a joint event)
+transport = "cambox-relay"
+address = "register:cam5"
+visiting = true
+ndi_preview = "CAM5 (usb)"
+grab_fps = 60
