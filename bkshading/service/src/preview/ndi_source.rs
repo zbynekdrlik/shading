@@ -415,8 +415,7 @@ impl Drop for NdiLib {
 pub struct NdiPreviewSource {
     lib: Arc<NdiLib>,
     receiver: *mut c_void,
-    name: String,
-    /// The lost-link window (shading#3), timed from `opened`.
+    /// Name, lost-link window and its clock (shading#3).
     state: RecvState,
 }
 
@@ -502,7 +501,6 @@ impl NdiPreviewSource {
         Ok(Self {
             lib,
             receiver,
-            name: source_name.to_string(),
             state: RecvState::new(source_name, {
                 let opened = std::time::Instant::now();
                 Box::new(move || opened.elapsed().as_millis() as u64)
@@ -513,7 +511,7 @@ impl NdiPreviewSource {
 
 impl PreviewSource for NdiPreviewSource {
     fn name(&self) -> &str {
-        &self.name
+        &self.state.name
     }
 
     fn next_frame(
@@ -573,11 +571,11 @@ struct RecvState {
     name: String,
     lost: LostLink,
     /// Monotonic milliseconds since the receiver opened (injected for tests).
-    clock: Box<dyn FnMut() -> u64>,
+    clock: Box<dyn FnMut() -> u64 + Send>,
 }
 
 impl RecvState {
-    fn new(name: &str, clock: Box<dyn FnMut() -> u64>) -> Self {
+    fn new(name: &str, clock: Box<dyn FnMut() -> u64 + Send>) -> Self {
         Self {
             name: name.to_string(),
             lost: LostLink::default(),
