@@ -77,11 +77,20 @@ pub fn run_source(
     let started = Instant::now();
     loop {
         // The source asks at frame arrival, so a frame the decimator drops is never built
-        // (shading#3) and the kept cadence does not drift.
-        let mut keep = || decim.should_emit(started.elapsed().as_millis() as u64);
-        match src.next_frame(timeout, &mut keep) {
+        // (shading#3) and the kept cadence does not drift. The slot is spent only once the frame
+        // is stored: a kept frame that could not be built or encoded leaves it for the next one.
+        let mut arrived_ms = 0u64;
+        let mut keep = || {
+            arrived_ms = started.elapsed().as_millis() as u64;
+            decim.is_due(arrived_ms)
+        };
+        let got = src.next_frame(timeout, &mut keep);
+        match got {
             Ok(Some(frame)) => match encode_jpeg(&frame, cfg.jpeg_quality) {
-                Ok(jpeg) => store.put(cam_id, jpeg, wall_clock_ms()),
+                Ok(jpeg) => {
+                    store.put(cam_id, jpeg, wall_clock_ms());
+                    decim.mark_emitted(arrived_ms);
+                }
                 Err(e) => {
                     tracing::warn!(cam = %cam_id, error = %e, "preview jpeg encode failed")
                 }

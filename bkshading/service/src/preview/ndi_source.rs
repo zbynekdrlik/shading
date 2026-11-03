@@ -115,25 +115,68 @@ pub enum CaptureOutcome {
 /// What the source does with one capture return (shading#3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureStep {
-    /// A video frame the worker keeps: copy, convert, then free.
+    /// A usable video frame the worker keeps: copy, convert, then free.
     Build,
-    /// A video frame the worker drops: free it untouched.
+    /// A video frame the worker drops, or one it cannot use: free it untouched.
     Free,
     /// No frame (timeout or an event): nothing to free.
     Nothing,
-    /// The connection was lost: fail, so the worker rebuilds the source.
+    /// The connection was lost: nothing to free.
     Lost,
 }
 
-/// Decide the [`CaptureStep`] for a raw frame type. `keep` is asked only for a video frame, so a
-/// timeout or an event never spends a decimation slot. Pure apart from `keep`.
-pub fn capture_step(frame_type: i32, keep: &mut dyn FnMut() -> bool) -> CaptureStep {
+/// Decide the [`CaptureStep`] for a raw frame type. `usable` says whether a video frame can be
+/// built (supported FourCC, pixel data present). `keep` is asked only for a usable video frame,
+/// so a timeout, an event or an unusable frame never spends a decimation slot.
+pub fn capture_step(frame_type: i32, usable: bool, keep: &mut dyn FnMut() -> bool) -> CaptureStep {
     match capture_outcome(frame_type) {
-        CaptureOutcome::Video if keep() => CaptureStep::Build,
+        CaptureOutcome::Video if usable && keep() => CaptureStep::Build,
         CaptureOutcome::Video => CaptureStep::Free,
         CaptureOutcome::Timeout | CaptureOutcome::Other(_) => CaptureStep::Nothing,
         CaptureOutcome::Lost => CaptureStep::Lost,
     }
+}
+
+/// Carry out a [`CaptureStep`]: `build` reads the SDK frame, `free` hands it back to the SDK.
+/// Every video frame is freed exactly once, after `build` read it; no other step frees. The
+/// FFI calls are the two closures, so this order is tested without libndi.
+pub fn finish_capture<T>(
+    step: CaptureStep,
+    build: impl FnOnce() -> T,
+    free: impl FnOnce(),
+) -> Option<T> {
+    match step {
+        CaptureStep::Build => {
+            let out = build();
+            free();
+            Some(out)
+        }
+        CaptureStep::Free => {
+            free();
+            None
+        }
+        CaptureStep::Nothing | CaptureStep::Lost => None,
+    }
+}
+
+/// Bytes per pixel of a FourCC the preview converts, or `None` for one it cannot.
+pub fn preview_bpp(fourcc: u32) -> Option<usize> {
+    match fourcc {
+        FOURCC_UYVY => Some(2),
+        FOURCC_BGRA | FOURCC_BGRX | FOURCC_RGBA | FOURCC_RGBX => Some(4),
+        _ => None,
+    }
+}
+
+/// Lost-link errors in a row after which the receiver is rebuilt. Fewer = a short glitch the
+/// SDK may ride out: wait [`LOST_RETRY_WAIT`] and capture again on the same receiver.
+pub const LOST_REBUILD_AFTER: u32 = 3;
+/// The wait after a lost-link error, so a dead link never spins.
+pub const LOST_RETRY_WAIT: Duration = Duration::from_millis(200);
+
+/// Rebuild the receiver after `in_row` lost-link errors in a row?
+pub fn lost_rebuilds(in_row: u32) -> bool {
+    in_row >= LOST_REBUILD_AFTER
 }
 
 /// Map a raw NDI frame type to its [`CaptureOutcome`]. Pure.
@@ -291,6 +334,10 @@ pub struct NdiPreviewSource {
     lib: Arc<NdiLib>,
     receiver: *mut c_void,
     name: String,
+    /// Lost-link errors in a row (shading#3).
+    lost_in_row: u32,
+    /// The unsupported FourCC already warned about, so a 60 fps feed logs it once.
+    warned_fourcc: Option<u32>,
 }
 
 // SAFETY: the receiver handle is only touched from the single worker thread that owns it, and
@@ -363,6 +410,8 @@ impl NdiPreviewSource {
             lib,
             receiver,
             name: source_name.to_string(),
+            lost_in_row: 0,
+            warned_fourcc: None,
         })
     }
 }
@@ -388,62 +437,59 @@ impl PreviewSource for NdiPreviewSource {
                 timeout_ms,
             )
         };
-        match capture_step(frame_type, keep) {
-            CaptureStep::Build => {}
-            CaptureStep::Free => {
-                // The worker drops this frame (decimation): free it untouched, no copy, no convert.
-                unsafe { (self.lib.recv_free_video_v2)(self.receiver, &vf) };
-                return Ok(None);
-            }
-            CaptureStep::Nothing => {
-                if frame_type != FRAME_TYPE_NONE {
-                    tracing::debug!(source = %self.name, frame_type, "NDI non-video frame");
-                }
-                return Ok(None);
-            }
-            CaptureStep::Lost => anyhow::bail!("NDI connection to '{}' lost", self.name),
-        }
-
         let width = vf.xres.max(0) as usize;
         let height = vf.yres.max(0) as usize;
         let stride = vf.line_stride_in_bytes.max(0) as usize;
         let fourcc = vf.fourcc;
+        let bpp = preview_bpp(fourcc);
+        if frame_type == FRAME_TYPE_VIDEO && bpp.is_none() && self.warned_fourcc != Some(fourcc) {
+            tracing::warn!(source = %self.name, fourcc, "unsupported NDI preview FourCC; skipping frames");
+            self.warned_fourcc = Some(fourcc);
+        }
+        let usable = bpp.is_some_and(|bpp| {
+            !vf.p_data.is_null() && width > 0 && height > 0 && stride >= width * bpp
+        });
 
-        // Copy the pixels out (the SDK reuses/free the buffer) BEFORE freeing the frame.
-        let raw = if !vf.p_data.is_null() && stride > 0 && height > 0 && width > 0 {
-            let len = stride * height;
-            Some(unsafe { std::slice::from_raw_parts(vf.p_data, len).to_vec() })
-        } else {
-            None
-        };
-        unsafe { (self.lib.recv_free_video_v2)(self.receiver, &vf) };
-
-        let Some(raw) = raw else {
-            return Ok(None);
-        };
-
-        let bpp = match fourcc {
-            FOURCC_UYVY => 2,
-            FOURCC_BGRA | FOURCC_BGRX | FOURCC_RGBA | FOURCC_RGBX => 4,
-            other => {
-                tracing::warn!(
-                    fourcc = other,
-                    "unsupported NDI preview FourCC; skipping frame"
-                );
+        let step = capture_step(frame_type, usable, keep);
+        match step {
+            CaptureStep::Lost => {
+                self.lost_in_row += 1;
+                if lost_rebuilds(self.lost_in_row) {
+                    anyhow::bail!(
+                        "NDI connection to '{}' lost ({} errors in a row)",
+                        self.name,
+                        self.lost_in_row
+                    );
+                }
+                tracing::warn!(source = %self.name, in_row = self.lost_in_row, "NDI connection lost; retrying");
+                std::thread::sleep(LOST_RETRY_WAIT);
                 return Ok(None);
             }
-        };
+            CaptureStep::Nothing if frame_type != FRAME_TYPE_NONE => {
+                tracing::debug!(source = %self.name, frame_type, "NDI non-video frame");
+            }
+            _ => {}
+        }
+        self.lost_in_row = 0;
 
-        // Strip any row padding so the pure converters see tightly-packed rows.
-        let tight = tight_rows(&raw, stride, width * bpp, height);
-        let rgb = match fourcc {
-            FOURCC_UYVY => uyvy_to_rgb(&tight, width, height),
-            FOURCC_BGRA | FOURCC_BGRX => bgra_to_rgb(&tight, width, height),
-            FOURCC_RGBA | FOURCC_RGBX => rgba_to_rgb(&tight, width, height),
-            _ => unreachable!("fourcc filtered above"),
-        };
-
-        Ok(Some(RawFrame::new(width as u32, height as u32, rgb)))
+        let lib = &self.lib;
+        let receiver = self.receiver;
+        let rgb = finish_capture(
+            step,
+            || {
+                // ONE copy: strip the row padding straight out of the SDK buffer, before the free.
+                let bpp = bpp.expect("Build only for a usable frame");
+                let data = unsafe { std::slice::from_raw_parts(vf.p_data, stride * height) };
+                let tight = tight_rows(data, stride, width * bpp, height);
+                match fourcc {
+                    FOURCC_UYVY => uyvy_to_rgb(&tight, width, height),
+                    FOURCC_BGRA | FOURCC_BGRX => bgra_to_rgb(&tight, width, height),
+                    _ => rgba_to_rgb(&tight, width, height),
+                }
+            },
+            || unsafe { (lib.recv_free_video_v2)(receiver, &vf) },
+        );
+        Ok(rgb.map(|rgb| RawFrame::new(width as u32, height as u32, rgb)))
     }
 }
 
