@@ -160,6 +160,14 @@ was reused.
   --all-targets -- -D warnings` (libloading is a RUNTIME load, so it compiles without libndi).
 - Decimation runs on a MONOTONIC `Instant` (not wall clock — immune to an NTP backward step); the
   store's `updated_ms` stays wall clock (`store::wall_clock_ms`), the clock freshness is judged on.
+- **Never build a frame the decimator drops (shading#3).** v0.1.0 copied + RGB-converted every
+  60 fps NDI frame, then kept 3 fps: ~20 % of a core per live camera, ~95 % total on strih-snv,
+  next to OBS. A source asks the worker's `keep` callback AT FRAME ARRIVAL (`next_frame(timeout,
+  keep)`); `capture_step` frees an unwanted NDI frame untouched. Asking before the blocking
+  capture drifts 3 fps to ~2.9 fps. NDI frame type 4 (error) returns at once: fail the source,
+  never retry in place. v0.1.1 live: preview threads ~2 % each, the rest is NDI's own decode.
+- `Closes #N` in a dev commit closes the ticket at merge, before camera-box deploys. Reopen it
+  and close with the live read from camera-box.
 
 ### A preview is shown only while its frame is FRESH — 204, `previewLive`, no frozen frame (issue 808, 3.10.2026)
 The panel used to reload an `<img>` at 3 Hz against an endpoint that answered `503` until a frame
