@@ -162,10 +162,20 @@ was reused.
   store's `updated_ms` stays wall clock (`store::wall_clock_ms`), the clock freshness is judged on.
 - **Never build a frame the decimator drops (shading#3).** v0.1.0 copied + RGB-converted every
   60 fps NDI frame, then kept 3 fps: ~20 % of a core per live camera, ~95 % total on strih-snv,
-  next to OBS. A source asks the worker's `keep` callback AT FRAME ARRIVAL (`next_frame(timeout,
-  keep)`); `capture_step` frees an unwanted NDI frame untouched. Asking before the blocking
-  capture drifts 3 fps to ~2.9 fps. NDI frame type 4 (error) returns at once: fail the source,
-  never retry in place. v0.1.1 live: preview threads ~2 % each, the rest is NDI's own decode.
+  next to OBS. The rules since v0.1.2:
+  - A source asks the worker's `keep` AT FRAME ARRIVAL (`next_frame(timeout, keep)`), and only
+    for a frame it can build (`frame_usable`). Asking before the blocking capture drifts the fps.
+  - `Decimator::is_due` at arrival; `mark_emitted` after the ENCODE ATTEMPT, success or not. A
+    slot spent on a frame never built starves; a slot not spent on a failed encode runs 60 fps.
+  - `run_source` calls `decim.reset()`: each connection has its own clock from 0. A stamp from
+    the old clock froze the preview for as long as the old connection ran (bug since issue 808).
+  - NDI glue lives in `capture_frame` behind the private `NdiRecv` trait; tests use a fake
+    receiver whose `free` poisons the buffer (catches free-before-copy).
+  - Lost link (frame type 4): wait 200 ms, rebuild after 3 s without video (`LostLink`); any
+    no-frame return can end the window.
+  - Logs: every recurring failure goes through the camera's `RepeatGate` (set of texts, kept
+    across reconnects, cleared by a stored frame): one warning per streak. Unusable frame shapes
+    warn once per source per process. Never log per frame.
 - `Closes #N` in a dev commit closes the ticket at merge, before camera-box deploys. Reopen it
   and close with the live read from camera-box.
 
