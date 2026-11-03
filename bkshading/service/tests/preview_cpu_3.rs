@@ -133,6 +133,30 @@ fn a_frame_that_fails_to_encode_spends_the_slot_3() {
 }
 
 #[test]
+fn a_rebuilt_source_gets_a_frame_at_once_3() {
+    // run_forever keeps one Decimator across reconnects while each run_source starts a new
+    // clock at 0. A slot stamped on the old clock must not freeze the new connection's preview
+    // for as long as the old one ran.
+    let cfg = PreviewConfig {
+        fps: 5.0,
+        ..PreviewConfig::default()
+    };
+    let store = PreviewStore::new();
+    let mut decim = Decimator::new(cfg.fps);
+    decim.mark_emitted(36_000_000); // the last frame of a 10 h connection
+
+    let mut feed = FastFeed {
+        calls: 0,
+        limit: 20,
+        built: 0,
+    };
+    run_source("cam1", &mut feed, &cfg, &store, &mut decim);
+
+    assert_eq!(feed.built, 1, "the new connection keeps its first frame");
+    assert!(store.get("cam1").is_some());
+}
+
+#[test]
 fn an_unbuildable_kept_frame_does_not_spend_the_slot_3() {
     let cfg = PreviewConfig {
         fps: 0.1, // 10 s period: every answer below falls in one slot
@@ -283,24 +307,26 @@ fn ndi_preview_bpp_knows_the_supported_fourccs_3() {
 #[cfg(feature = "ndi")]
 #[test]
 fn ndi_lost_link_rebuilds_after_a_window_without_video_3() {
-    use bkshading::preview::ndi_source::{LostLink, LOST_REBUILD_AFTER_MS};
+    use bkshading::preview::ndi_source::{LostLink, LostStep, LOST_REBUILD_AFTER_MS};
     let w = LOST_REBUILD_AFTER_MS;
     let mut link = LostLink::default();
     // The SDK reports a lost link, then timeouts while it reconnects: Lost, None, Lost, ...
-    // Timeouts do not reset the window, so it still ends in a rebuild.
-    assert!(!link.on_lost(0), "first error: wait and retry");
-    assert!(!link.on_lost(w / 2));
-    assert!(!link.on_lost(w - 1));
-    assert!(link.on_lost(w), "no video for the whole window: rebuild");
-    // A video frame closes the window; the next error starts a new one.
-    let mut link = LostLink::default();
-    assert!(!link.on_lost(0));
-    link.on_video();
-    assert!(
-        !link.on_lost(w + 5),
-        "a new window starts at the next error"
+    // Timeouts do not reset the window, so it still ends in a rebuild. Only the first error of
+    // a window is news (warn); the rest wait quietly.
+    assert_eq!(link.on_lost(0), LostStep::Opened);
+    assert_eq!(link.on_lost(w / 2), LostStep::Waiting);
+    assert_eq!(link.on_lost(w - 1), LostStep::Waiting);
+    assert_eq!(
+        link.on_lost(w),
+        LostStep::Rebuild,
+        "no video for the whole window"
     );
-    assert!(link.on_lost(2 * w + 5));
+    // A video frame closes the window; the next error opens a new one.
+    let mut link = LostLink::default();
+    assert_eq!(link.on_lost(0), LostStep::Opened);
+    link.on_video();
+    assert_eq!(link.on_lost(w + 5), LostStep::Opened);
+    assert_eq!(link.on_lost(2 * w + 5), LostStep::Rebuild);
 }
 
 #[cfg(feature = "ndi")]
