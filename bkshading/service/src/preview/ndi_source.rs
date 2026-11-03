@@ -224,6 +224,14 @@ impl LostLink {
         }
     }
 
+    /// A timeout (no frame) at `now_ms`. True = a lost-link window is open and has had no video
+    /// for [`LOST_REBUILD_AFTER_MS`]: rebuild. The SDK may report one error and then only
+    /// timeouts, so the window must also end here, not only on the next error.
+    pub fn on_quiet(&self, now_ms: u64) -> bool {
+        self.since_ms
+            .is_some_and(|since| now_ms.saturating_sub(since) >= LOST_REBUILD_AFTER_MS)
+    }
+
     /// A video frame arrived: the link is back, close the window.
     pub fn on_video(&mut self) {
         self.since_ms = None;
@@ -531,7 +539,16 @@ impl PreviewSource for NdiPreviewSource {
                 std::thread::sleep(LOST_RETRY_WAIT);
                 return Ok(None);
             }
-            CaptureStep::Nothing if frame_type != FRAME_TYPE_NONE => {
+            CaptureStep::Nothing if frame_type == FRAME_TYPE_NONE => {
+                let now_ms = self.opened.elapsed().as_millis() as u64;
+                if self.lost.on_quiet(now_ms) {
+                    anyhow::bail!(
+                        "NDI connection to '{}' lost for {LOST_REBUILD_AFTER_MS} ms",
+                        self.name
+                    );
+                }
+            }
+            CaptureStep::Nothing => {
                 tracing::debug!(source = %self.name, frame_type, "NDI non-video frame");
             }
             _ => {}

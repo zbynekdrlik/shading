@@ -8,7 +8,7 @@
 //! decision logic it composes (decimate, encode) is unit-tested separately.
 
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::preview::decimate::Decimator;
 use crate::preview::encode::encode_jpeg;
@@ -47,18 +47,29 @@ fn run_forever(
     build: SourceBuilder,
 ) {
     let mut decim = Decimator::new(cfg.fps);
+    // The last build error, so a camera that stays off (or a host without libndi) warns once
+    // per streak, not every backoff, forever (shading#3).
+    let mut last_build_error: Option<String> = None;
     loop {
         match build(source_name) {
             Ok(mut src) => {
                 tracing::info!(cam = %cam_id, source = %source_name, "preview source connected");
+                last_build_error = None;
                 run_source(cam_id, src.as_mut(), cfg, store, &mut decim);
-                tracing::warn!(cam = %cam_id, "preview source ended; reconnecting");
+                // run_source already warned why it ended.
+                tracing::debug!(cam = %cam_id, "preview source ended; reconnecting");
             }
             Err(e) => {
-                tracing::warn!(cam = %cam_id, source = %source_name, error = %e, "preview source build failed; retrying");
+                let text = format!("{e:#}");
+                if last_build_error.as_deref() != Some(text.as_str()) {
+                    tracing::warn!(cam = %cam_id, source = %source_name, error = %text, "preview source build failed; retrying (repeats log at debug)");
+                    last_build_error = Some(text);
+                } else {
+                    tracing::debug!(cam = %cam_id, source = %source_name, error = %text, "preview source build failed again");
+                }
             }
         }
-        thread::sleep(Duration::from_millis(cfg.reconnect_backoff_ms));
+        thread::sleep(cfg.reconnect_backoff());
     }
 }
 
@@ -70,7 +81,7 @@ pub fn run_source(
     store: &PreviewStore,
     decim: &mut Decimator,
 ) {
-    let timeout = Duration::from_millis(cfg.capture_timeout_ms);
+    let timeout = cfg.capture_timeout();
     // Decimation runs on a MONOTONIC clock (immune to a wall-clock / NTP backward step, which
     // would otherwise pause emission until wall time caught up); the store's `updated_ms` stays
     // wall clock, the clock the readers judge freshness against (issue 808).
