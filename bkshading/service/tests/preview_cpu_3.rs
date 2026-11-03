@@ -331,6 +331,23 @@ fn ndi_lost_link_rebuilds_after_a_window_without_video_3() {
 
 #[cfg(feature = "ndi")]
 #[test]
+fn ndi_lost_link_followed_only_by_timeouts_still_rebuilds_3() {
+    use bkshading::preview::ndi_source::{LostLink, LostStep, LOST_REBUILD_AFTER_MS};
+    let w = LOST_REBUILD_AFTER_MS;
+    let mut link = LostLink::default();
+    // No window open: a timeout is just a quiet feed, never a rebuild.
+    assert!(!link.on_quiet(10 * w));
+    // One error, then only timeouts: the window still ends in a rebuild.
+    assert_eq!(link.on_lost(0), LostStep::Opened);
+    assert!(!link.on_quiet(w - 1));
+    assert!(link.on_quiet(w));
+    // A video frame closes it.
+    link.on_video();
+    assert!(!link.on_quiet(5 * w));
+}
+
+#[cfg(feature = "ndi")]
+#[test]
 fn ndi_frame_usable_needs_data_size_stride_and_a_known_fourcc_3() {
     use bkshading::preview::ndi_source::frame_usable;
     let cc = |s: &[u8; 4]| u32::from_le_bytes(*s);
