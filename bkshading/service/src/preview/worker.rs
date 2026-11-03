@@ -47,23 +47,30 @@ fn run_forever(
     build: SourceBuilder,
 ) {
     let mut decim = Decimator::new(cfg.fps);
-    // The last build error, so a camera that stays off (or a host without libndi) warns once
-    // per streak, not every backoff, forever (shading#3).
-    let mut last_build_error: Option<String> = None;
+    // One gate for every reason this camera's preview fails (build error, capture error), kept
+    // across reconnects and cleared only when a frame gets through: a camera that stays off, or
+    // a source that is found and then fails every time, warns once per streak, not every cycle,
+    // forever (shading#3).
+    let mut trouble = RepeatGate::default();
     loop {
         match build(source_name) {
             Ok(mut src) => {
-                tracing::info!(cam = %cam_id, source = %source_name, "preview source connected");
-                last_build_error = None;
-                run_source(cam_id, src.as_mut(), cfg, store, &mut decim);
-                // run_source already warned why it ended.
-                tracing::debug!(cam = %cam_id, "preview source ended; reconnecting");
+                tracing::debug!(cam = %cam_id, source = %source_name, "preview source connected");
+                let end = run_source(cam_id, src.as_mut(), cfg, store, &mut decim);
+                if end.stored {
+                    tracing::info!(cam = %cam_id, source = %source_name, "preview source delivered frames, then ended");
+                    trouble.clear();
+                }
+                if trouble.first(&end.error) {
+                    tracing::warn!(cam = %cam_id, error = %end.error, "preview capture error; rebuilding source (repeats log at debug)");
+                } else {
+                    tracing::debug!(cam = %cam_id, error = %end.error, "preview capture error again; rebuilding source");
+                }
             }
             Err(e) => {
                 let text = format!("{e:#}");
-                if last_build_error.as_deref() != Some(text.as_str()) {
+                if trouble.first(&text) {
                     tracing::warn!(cam = %cam_id, source = %source_name, error = %text, "preview source build failed; retrying (repeats log at debug)");
-                    last_build_error = Some(text);
                 } else {
                     tracing::debug!(cam = %cam_id, source = %source_name, error = %text, "preview source build failed again");
                 }
@@ -73,6 +80,38 @@ fn run_forever(
     }
 }
 
+/// Lets each distinct error text through once, so a failure that repeats at a fixed rate logs
+/// a warning once and the repeats at debug (shading#3).
+#[derive(Debug, Default)]
+pub struct RepeatGate {
+    last: Option<String>,
+}
+
+impl RepeatGate {
+    /// True the first time `text` follows a different error (or none): worth a warning.
+    pub fn first(&mut self, text: &str) -> bool {
+        if self.last.as_deref() == Some(text) {
+            return false;
+        }
+        self.last = Some(text.to_string());
+        true
+    }
+
+    /// Something worked: the next error starts a new streak.
+    pub fn clear(&mut self) {
+        self.last = None;
+    }
+}
+
+/// Why one connection's [`run_source`] ended.
+#[derive(Debug)]
+pub struct SessionEnd {
+    /// The source error that ended it.
+    pub error: String,
+    /// Whether this connection stored at least one frame.
+    pub stored: bool,
+}
+
 /// Drive one connected source into the store until it fails. Public for the worker tests.
 pub fn run_source(
     cam_id: &str,
@@ -80,7 +119,7 @@ pub fn run_source(
     cfg: &PreviewConfig,
     store: &PreviewStore,
     decim: &mut Decimator,
-) {
+) -> SessionEnd {
     let timeout = cfg.capture_timeout();
     // Decimation runs on a MONOTONIC clock (immune to a wall-clock / NTP backward step, which
     // would otherwise pause emission until wall time caught up); the store's `updated_ms` stays
@@ -89,7 +128,8 @@ pub fn run_source(
     // This connection's clock starts at 0: a slot stamped on the previous connection's clock
     // would freeze the preview for as long as that one ran (shading#3).
     decim.reset();
-    let mut last_encode_error: Option<String> = None;
+    let mut encode_errors = RepeatGate::default();
+    let mut stored = false;
     loop {
         // The source asks at frame arrival, so a frame the decimator drops is never built
         // (shading#3) and the kept cadence does not drift. The slot is spent by an encode attempt:
@@ -106,15 +146,15 @@ pub fn run_source(
                 match encode_jpeg(&frame, cfg.jpeg_quality) {
                     Ok(jpeg) => {
                         store.put(cam_id, jpeg, wall_clock_ms());
-                        last_encode_error = None;
+                        stored = true;
+                        encode_errors.clear();
                     }
                     Err(e) => {
                         // Once per distinct error: a frame shape that fails every time must not
                         // log at the feed rate.
                         let text = format!("{e:#}");
-                        if last_encode_error.as_deref() != Some(text.as_str()) {
+                        if encode_errors.first(&text) {
                             tracing::warn!(cam = %cam_id, error = %text, "preview jpeg encode failed");
-                            last_encode_error = Some(text);
                         }
                     }
                 }
@@ -130,8 +170,11 @@ pub fn run_source(
             }
             Ok(None) => { /* timeout, an event, or a frame thinned to the target fps */ }
             Err(e) => {
-                tracing::warn!(cam = %cam_id, error = %e, "preview capture error; rebuilding source");
-                return;
+                // run_forever logs it, once per streak.
+                return SessionEnd {
+                    error: format!("{e:#}"),
+                    stored,
+                };
             }
         }
     }

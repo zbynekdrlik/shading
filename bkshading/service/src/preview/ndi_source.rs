@@ -137,6 +137,29 @@ pub fn capture_step(frame_type: i32, usable: bool, keep: &mut dyn FnMut() -> boo
     }
 }
 
+/// What a capture that brought no frame means for the lost-link window (shading#3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NothingAction {
+    /// A plain timeout: keep waiting.
+    Quiet,
+    /// An event (status change, metadata): log at debug, keep waiting.
+    Event,
+    /// An open lost-link window ran out with no video: rebuild the receiver.
+    Rebuild,
+}
+
+/// Decide a no-frame return. Any of them, timeout or event, can end a window that ran out:
+/// after a lost link the SDK may send only timeouts, or only status changes. Pure.
+pub fn after_nothing(lost: &LostLink, frame_type: i32, now_ms: u64) -> NothingAction {
+    if lost.on_quiet(now_ms) {
+        NothingAction::Rebuild
+    } else if frame_type == FRAME_TYPE_NONE {
+        NothingAction::Quiet
+    } else {
+        NothingAction::Event
+    }
+}
+
 /// Carry out a [`CaptureStep`]: `build` reads the SDK frame, `free` hands it back to the SDK.
 /// Every video frame is freed exactly once, after `build` read it; no other step frees. The
 /// FFI calls are the two closures, so this order is tested without libndi.
@@ -539,17 +562,18 @@ impl PreviewSource for NdiPreviewSource {
                 std::thread::sleep(LOST_RETRY_WAIT);
                 return Ok(None);
             }
-            CaptureStep::Nothing if frame_type == FRAME_TYPE_NONE => {
+            CaptureStep::Nothing => {
                 let now_ms = self.opened.elapsed().as_millis() as u64;
-                if self.lost.on_quiet(now_ms) {
-                    anyhow::bail!(
+                match after_nothing(&self.lost, frame_type, now_ms) {
+                    NothingAction::Rebuild => anyhow::bail!(
                         "NDI connection to '{}' lost for {LOST_REBUILD_AFTER_MS} ms",
                         self.name
-                    );
+                    ),
+                    NothingAction::Event => {
+                        tracing::debug!(source = %self.name, frame_type, "NDI non-video frame")
+                    }
+                    NothingAction::Quiet => {}
                 }
-            }
-            CaptureStep::Nothing => {
-                tracing::debug!(source = %self.name, frame_type, "NDI non-video frame");
             }
             _ => {}
         }
