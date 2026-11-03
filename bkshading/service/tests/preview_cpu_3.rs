@@ -13,7 +13,7 @@ use bkshading::preview::frame::RawFrame;
 use bkshading::preview::pattern::test_pattern_rgb;
 use bkshading::preview::source::PreviewSource;
 use bkshading::preview::store::PreviewStore;
-use bkshading::preview::worker::run_source;
+use bkshading::preview::worker::{run_source, RepeatGate};
 use bkshading::preview::PreviewConfig;
 
 /// A feed that delivers a frame on every call, as fast as the worker asks, and ends after
@@ -393,4 +393,64 @@ fn ndi_capture_outcome_maps_every_frame_type_3() {
     assert_eq!(capture_outcome(100), CaptureOutcome::Other(100));
     // Frame type error = the connection was lost: the worker must rebuild, not spin.
     assert_eq!(capture_outcome(4), CaptureOutcome::Lost);
+}
+
+#[cfg(feature = "ndi")]
+#[test]
+fn ndi_any_quiet_return_can_end_the_lost_window_3() {
+    use bkshading::preview::ndi_source::{
+        after_nothing, LostLink, NothingAction, LOST_REBUILD_AFTER_MS,
+    };
+    let w = LOST_REBUILD_AFTER_MS;
+    let idle = LostLink::default();
+    assert_eq!(after_nothing(&idle, 0, 10 * w), NothingAction::Quiet);
+    assert_eq!(after_nothing(&idle, 100, 10 * w), NothingAction::Event);
+    let mut lost = LostLink::default();
+    lost.on_lost(0);
+    assert_eq!(after_nothing(&lost, 0, w - 1), NothingAction::Quiet);
+    assert_eq!(after_nothing(&lost, 100, w - 1), NothingAction::Event);
+    // A timeout OR an event (status change, metadata) ends a window that ran out.
+    assert_eq!(after_nothing(&lost, 0, w), NothingAction::Rebuild);
+    assert_eq!(after_nothing(&lost, 100, w), NothingAction::Rebuild);
+    assert_eq!(after_nothing(&lost, 3, w), NothingAction::Rebuild);
+}
+
+#[test]
+fn repeat_gate_lets_each_new_error_through_once_3() {
+    let mut gate = RepeatGate::default();
+    assert!(gate.first("source not found"));
+    assert!(!gate.first("source not found"), "a repeat logs at debug");
+    assert!(gate.first("connection lost"), "a different error is news");
+    assert!(!gate.first("connection lost"));
+    gate.clear(); // a frame got through: the next failure starts a new streak
+    assert!(gate.first("connection lost"));
+}
+
+#[test]
+fn run_source_reports_why_it_ended_and_whether_it_stored_a_frame_3() {
+    let cfg = PreviewConfig {
+        fps: 0.1,
+        ..PreviewConfig::default()
+    };
+    let store = PreviewStore::new();
+    let mut decim = Decimator::new(cfg.fps);
+
+    let mut good = FastFeed {
+        calls: 0,
+        limit: 5,
+        built: 0,
+    };
+    let end = run_source("cam1", &mut good, &cfg, &store, &mut decim);
+    assert!(end.stored);
+    assert_eq!(end.error, "feed ended");
+
+    let mut bad = BrokenFrames {
+        answers: Vec::new(),
+    };
+    let end = run_source("cam2", &mut bad, &cfg, &store, &mut decim);
+    assert!(
+        !end.stored,
+        "a session that never stored a frame keeps the warning streak"
+    );
+    assert_eq!(end.error, "feed ended");
 }
