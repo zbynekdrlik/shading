@@ -233,7 +233,7 @@ fn ndi_preview_bpp_knows_the_supported_fourccs_3() {
 #[test]
 fn ndi_lost_link_waits_before_it_rebuilds_3() {
     use bkshading::preview::ndi_source::{lost_rebuilds, LOST_REBUILD_AFTER};
-    assert!(LOST_REBUILD_AFTER >= 2);
+    const { assert!(LOST_REBUILD_AFTER >= 2) };
     for n in 1..LOST_REBUILD_AFTER {
         assert!(
             !lost_rebuilds(n),
