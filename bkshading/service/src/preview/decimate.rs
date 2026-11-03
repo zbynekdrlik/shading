@@ -48,6 +48,13 @@ impl Decimator {
         self.last_emit_ms = Some(now_ms);
     }
 
+    /// Forget the last emit: the next frame is due at once. For a new clock (a rebuilt source
+    /// starts its own at 0), where an old stamp would block every frame until the new clock
+    /// passed it (shading#3).
+    pub fn reset(&mut self) {
+        self.last_emit_ms = None;
+    }
+
     /// Would a frame arriving at `now_ms` be emitted? Same rule as [`Self::should_emit`], but it
     /// spends nothing: the worker asks it when a frame arrives, and spends the slot with
     /// [`Self::mark_emitted`] once it tried to encode the frame (shading#3).

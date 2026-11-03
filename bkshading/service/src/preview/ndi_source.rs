@@ -192,6 +192,17 @@ pub const LOST_REBUILD_AFTER_MS: u64 = 3000;
 /// The wait after a lost-link error, so a dead link never spins.
 pub const LOST_RETRY_WAIT: Duration = Duration::from_millis(200);
 
+/// What a lost-link error means within its window (shading#3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LostStep {
+    /// The first error of a window: worth a warning.
+    Opened,
+    /// A later error within the window: wait quietly.
+    Waiting,
+    /// No video for [`LOST_REBUILD_AFTER_MS`]: rebuild the receiver.
+    Rebuild,
+}
+
 /// The lost-link window of one receiver (shading#3). Pure: the caller passes the time.
 #[derive(Debug, Default, Clone)]
 pub struct LostLink {
@@ -199,11 +210,18 @@ pub struct LostLink {
 }
 
 impl LostLink {
-    /// A lost-link error at `now_ms`. True = no video for [`LOST_REBUILD_AFTER_MS`] since the
-    /// first error of this window: rebuild the receiver.
-    pub fn on_lost(&mut self, now_ms: u64) -> bool {
-        let since = *self.since_ms.get_or_insert(now_ms);
-        now_ms.saturating_sub(since) >= LOST_REBUILD_AFTER_MS
+    /// A lost-link error at `now_ms`: opens the window, waits in it, or ends it in a rebuild.
+    pub fn on_lost(&mut self, now_ms: u64) -> LostStep {
+        match self.since_ms {
+            None => {
+                self.since_ms = Some(now_ms);
+                LostStep::Opened
+            }
+            Some(since) if now_ms.saturating_sub(since) >= LOST_REBUILD_AFTER_MS => {
+                LostStep::Rebuild
+            }
+            Some(_) => LostStep::Waiting,
+        }
     }
 
     /// A video frame arrived: the link is back, close the window.
@@ -497,13 +515,19 @@ impl PreviewSource for NdiPreviewSource {
         match step {
             CaptureStep::Lost => {
                 let now_ms = self.opened.elapsed().as_millis() as u64;
-                if self.lost.on_lost(now_ms) {
-                    anyhow::bail!(
+                match self.lost.on_lost(now_ms) {
+                    LostStep::Rebuild => anyhow::bail!(
                         "NDI connection to '{}' lost for {LOST_REBUILD_AFTER_MS} ms",
                         self.name
-                    );
+                    ),
+                    LostStep::Opened => tracing::warn!(
+                        source = %self.name,
+                        "NDI connection lost; waiting up to {LOST_REBUILD_AFTER_MS} ms for it to come back"
+                    ),
+                    LostStep::Waiting => {
+                        tracing::debug!(source = %self.name, "NDI connection still lost")
+                    }
                 }
-                tracing::warn!(source = %self.name, "NDI connection lost; waiting for it to come back");
                 std::thread::sleep(LOST_RETRY_WAIT);
                 return Ok(None);
             }

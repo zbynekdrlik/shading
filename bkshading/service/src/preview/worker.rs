@@ -75,6 +75,9 @@ pub fn run_source(
     // would otherwise pause emission until wall time caught up); the store's `updated_ms` stays
     // wall clock, the clock the readers judge freshness against (issue 808).
     let started = Instant::now();
+    // This connection's clock starts at 0: a slot stamped on the previous connection's clock
+    // would freeze the preview for as long as that one ran (shading#3).
+    decim.reset();
     let mut last_encode_error: Option<String> = None;
     loop {
         // The source asks at frame arrival, so a frame the decimator drops is never built
