@@ -13,7 +13,7 @@ use bkshading::preview::frame::RawFrame;
 use bkshading::preview::pattern::test_pattern_rgb;
 use bkshading::preview::source::PreviewSource;
 use bkshading::preview::store::PreviewStore;
-use bkshading::preview::worker::{run_source, RepeatGate};
+use bkshading::preview::worker::{cycle, run_source, RepeatGate};
 use bkshading::preview::PreviewConfig;
 
 /// A feed that delivers a frame on every call, as fast as the worker asks, and ends after
@@ -516,4 +516,59 @@ fn run_source_reports_why_it_ended_and_whether_it_stored_a_frame_3() {
         "a session that never stored a frame keeps the warning streak"
     );
     assert_eq!(end.error, "feed ended");
+}
+
+fn never_found(_: &str) -> anyhow::Result<Box<dyn PreviewSource>> {
+    anyhow::bail!("NDI source 'CAM9' not found within 5s")
+}
+
+fn found_then_broken(_: &str) -> anyhow::Result<Box<dyn PreviewSource>> {
+    Ok(Box::new(BrokenFrames {
+        answers: Vec::new(),
+    }))
+}
+
+fn found_and_working(_: &str) -> anyhow::Result<Box<dyn PreviewSource>> {
+    Ok(Box::new(FastFeed {
+        calls: 0,
+        limit: 3,
+        built: 0,
+    }))
+}
+
+#[test]
+fn reconnect_cycles_warn_once_per_streak_3() {
+    let cfg = PreviewConfig {
+        fps: 0.1,
+        ..PreviewConfig::default()
+    };
+    let store = PreviewStore::new();
+    let mut decim = Decimator::new(cfg.fps);
+    let mut trouble = RepeatGate::default();
+    let mut run = |build| {
+        cycle(
+            "cam1",
+            "CAM9",
+            &cfg,
+            &store,
+            build,
+            &mut decim,
+            &mut trouble,
+        )
+    };
+
+    // A camera that stays off: one warning, then quiet.
+    assert!(run(never_found).warned);
+    assert!(!run(never_found).warned);
+    // Found, but every frame fails and the feed ends: each new error once, repeats quiet.
+    assert!(run(found_then_broken).warned, "a new error is news");
+    assert!(!run(found_then_broken).warned);
+    assert!(!run(never_found).warned, "alternating errors stay quiet");
+    // A connection that stores frames ends the streak: the next failure warns again.
+    let ok = run(found_and_working);
+    assert!(
+        ok.recovered,
+        "a stored frame after a warned streak is a recovery"
+    );
+    assert!(run(never_found).warned);
 }

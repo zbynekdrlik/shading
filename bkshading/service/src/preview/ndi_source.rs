@@ -640,3 +640,7 @@ fn tight_rows(data: &[u8], stride: usize, row_bytes: usize, height: usize) -> Ve
     }
     out
 }
+
+#[cfg(test)]
+#[path = "ndi_source_tests.rs"]
+mod tests;
