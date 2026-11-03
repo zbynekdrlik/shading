@@ -17,9 +17,19 @@ pub trait PreviewSource: Send {
     /// Human-readable source name (for logging).
     fn name(&self) -> &str;
 
-    /// Block up to `timeout` for the next frame. `Ok(None)` = no frame yet (timeout); `Err`
-    /// = the source failed (the worker backs off and rebuilds it). Never panics.
-    fn next_frame(&mut self, timeout: Duration) -> anyhow::Result<Option<RawFrame>>;
+    /// Block up to `timeout` for the next frame. `Ok(None)` = no frame yet (timeout), or a
+    /// frame arrived that the worker does not keep; `Err` = the source failed (the worker backs
+    /// off and rebuilds it). Never panics.
+    ///
+    /// When a frame arrives, the source calls `keep` once, and builds a [`RawFrame`] only if it
+    /// returns true. Otherwise it consumes the frame untouched. A 60 fps feed thinned to 3 fps
+    /// must not pay for 57 copies and colour conversions per second (shading#3). `keep` is asked
+    /// at arrival, not before the wait, so the kept cadence does not drift.
+    fn next_frame(
+        &mut self,
+        timeout: Duration,
+        keep: &mut dyn FnMut() -> bool,
+    ) -> anyhow::Result<Option<RawFrame>>;
 }
 
 /// Default source: an animated test pattern at a fixed native rate. Gives the pipeline a
@@ -50,12 +60,19 @@ impl PreviewSource for StubSource {
         &self.name
     }
 
-    fn next_frame(&mut self, _timeout: Duration) -> anyhow::Result<Option<RawFrame>> {
+    fn next_frame(
+        &mut self,
+        _timeout: Duration,
+        keep: &mut dyn FnMut() -> bool,
+    ) -> anyhow::Result<Option<RawFrame>> {
         // Emit at the native rate so the worker's decimator sees a realistic input to thin.
         let interval = Duration::from_millis(1000 / self.native_fps.max(1));
         std::thread::sleep(interval);
-        let rgb = test_pattern_rgb(self.width, self.height, self.tick);
         self.tick = self.tick.wrapping_add(1);
+        if !keep() {
+            return Ok(None);
+        }
+        let rgb = test_pattern_rgb(self.width, self.height, self.tick);
         Ok(Some(RawFrame::new(self.width, self.height, rgb)))
     }
 }

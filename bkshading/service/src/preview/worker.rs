@@ -62,7 +62,8 @@ fn run_forever(
     }
 }
 
-fn run_source(
+/// Drive one connected source into the store until it fails. Public for the worker tests.
+pub fn run_source(
     cam_id: &str,
     src: &mut dyn PreviewSource,
     cfg: &PreviewConfig,
@@ -75,19 +76,17 @@ fn run_source(
     // wall clock, the clock the readers judge freshness against (issue 808).
     let started = Instant::now();
     loop {
-        match src.next_frame(timeout) {
-            Ok(Some(frame)) => {
-                if !decim.should_emit(started.elapsed().as_millis() as u64) {
-                    continue; // thinned to the target fps
+        // The source asks at frame arrival, so a frame the decimator drops is never built
+        // (shading#3) and the kept cadence does not drift.
+        let mut keep = || decim.should_emit(started.elapsed().as_millis() as u64);
+        match src.next_frame(timeout, &mut keep) {
+            Ok(Some(frame)) => match encode_jpeg(&frame, cfg.jpeg_quality) {
+                Ok(jpeg) => store.put(cam_id, jpeg, wall_clock_ms()),
+                Err(e) => {
+                    tracing::warn!(cam = %cam_id, error = %e, "preview jpeg encode failed")
                 }
-                match encode_jpeg(&frame, cfg.jpeg_quality) {
-                    Ok(jpeg) => store.put(cam_id, jpeg, wall_clock_ms()),
-                    Err(e) => {
-                        tracing::warn!(cam = %cam_id, error = %e, "preview jpeg encode failed")
-                    }
-                }
-            }
-            Ok(None) => { /* timeout — keep waiting for the next frame */ }
+            },
+            Ok(None) => { /* timeout, an event, or a frame thinned to the target fps */ }
             Err(e) => {
                 tracing::warn!(cam = %cam_id, error = %e, "preview capture error; rebuilding source");
                 return;
