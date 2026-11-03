@@ -122,7 +122,14 @@ fn a_frame_that_fails_to_encode_spends_the_slot_3() {
         answers: Vec::new(),
     };
 
-    run_source("cam1", &mut feed, &cfg, &store, &mut decim);
+    run_source(
+        "cam1",
+        &mut feed,
+        &cfg,
+        &store,
+        &mut decim,
+        &mut RepeatGate::default(),
+    );
 
     assert_eq!(
         feed.answers.iter().filter(|k| **k).count(),
@@ -150,7 +157,14 @@ fn a_rebuilt_source_gets_a_frame_at_once_3() {
         limit: 20,
         built: 0,
     };
-    run_source("cam1", &mut feed, &cfg, &store, &mut decim);
+    run_source(
+        "cam1",
+        &mut feed,
+        &cfg,
+        &store,
+        &mut decim,
+        &mut RepeatGate::default(),
+    );
 
     assert_eq!(feed.built, 1, "the new connection keeps its first frame");
     assert!(store.get("cam1").is_some());
@@ -169,7 +183,14 @@ fn an_unbuildable_kept_frame_does_not_spend_the_slot_3() {
         built: 0,
     };
 
-    run_source("cam1", &mut feed, &cfg, &store, &mut decim);
+    run_source(
+        "cam1",
+        &mut feed,
+        &cfg,
+        &store,
+        &mut decim,
+        &mut RepeatGate::default(),
+    );
 
     assert_eq!(
         &feed.answers[..3],
@@ -199,7 +220,14 @@ fn worker_builds_only_the_frames_it_keeps_3() {
         built: 0,
     };
 
-    run_source("cam1", &mut feed, &cfg, &store, &mut decim);
+    run_source(
+        "cam1",
+        &mut feed,
+        &cfg,
+        &store,
+        &mut decim,
+        &mut RepeatGate::default(),
+    );
 
     assert_eq!(
         feed.calls, 601,
@@ -427,6 +455,27 @@ fn repeat_gate_lets_each_new_error_through_once_3() {
 }
 
 #[test]
+fn repeat_gate_holds_alternating_errors_3() {
+    // A camera that drops on and off the network alternates "not found" and "lost": each is
+    // news once per streak, not every cycle.
+    let mut gate = RepeatGate::default();
+    assert!(!gate.in_streak());
+    assert!(gate.first("not found"));
+    assert!(gate.first("lost"));
+    for _ in 0..3 {
+        assert!(!gate.first("not found"));
+        assert!(!gate.first("lost"));
+    }
+    assert!(
+        gate.in_streak(),
+        "a recovery after this is worth an info line"
+    );
+    gate.clear();
+    assert!(!gate.in_streak());
+    assert!(gate.first("lost"));
+}
+
+#[test]
 fn run_source_reports_why_it_ended_and_whether_it_stored_a_frame_3() {
     let cfg = PreviewConfig {
         fps: 0.1,
@@ -440,14 +489,28 @@ fn run_source_reports_why_it_ended_and_whether_it_stored_a_frame_3() {
         limit: 5,
         built: 0,
     };
-    let end = run_source("cam1", &mut good, &cfg, &store, &mut decim);
+    let end = run_source(
+        "cam1",
+        &mut good,
+        &cfg,
+        &store,
+        &mut decim,
+        &mut RepeatGate::default(),
+    );
     assert!(end.stored);
     assert_eq!(end.error, "feed ended");
 
     let mut bad = BrokenFrames {
         answers: Vec::new(),
     };
-    let end = run_source("cam2", &mut bad, &cfg, &store, &mut decim);
+    let end = run_source(
+        "cam2",
+        &mut bad,
+        &cfg,
+        &store,
+        &mut decim,
+        &mut RepeatGate::default(),
+    );
     assert!(
         !end.stored,
         "a session that never stored a frame keeps the warning streak"
