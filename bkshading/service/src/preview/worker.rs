@@ -53,34 +53,74 @@ fn run_forever(
     // forever (shading#3).
     let mut trouble = RepeatGate::default();
     loop {
-        match build(source_name) {
-            Ok(mut src) => {
-                if trouble.in_streak() {
-                    tracing::info!(cam = %cam_id, source = %source_name, "preview source connected again");
-                } else {
-                    tracing::debug!(cam = %cam_id, source = %source_name, "preview source connected");
-                }
-                let end = run_source(cam_id, src.as_mut(), cfg, store, &mut decim, &mut trouble);
-                if end.stored {
-                    tracing::info!(cam = %cam_id, source = %source_name, "preview source delivered frames, then ended");
-                    trouble.clear();
-                }
-                if trouble.first(&end.error) {
-                    tracing::warn!(cam = %cam_id, error = %end.error, "preview capture error; rebuilding source (repeats log at debug)");
-                } else {
-                    tracing::debug!(cam = %cam_id, error = %end.error, "preview capture error again; rebuilding source");
-                }
+        cycle(
+            cam_id,
+            source_name,
+            cfg,
+            store,
+            build,
+            &mut decim,
+            &mut trouble,
+        );
+        thread::sleep(cfg.reconnect_backoff());
+    }
+}
+
+/// What one [`cycle`] logged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CycleLog {
+    /// It warned (a failure new in this streak).
+    pub warned: bool,
+    /// The source stored frames after a warned streak.
+    pub recovered: bool,
+}
+
+/// One turn of the reconnect loop: build the source, run it until it fails, and log the
+/// failure through the camera's `trouble` gate. Public for the worker tests.
+pub fn cycle(
+    cam_id: &str,
+    source_name: &str,
+    cfg: &PreviewConfig,
+    store: &PreviewStore,
+    build: SourceBuilder,
+    decim: &mut Decimator,
+    trouble: &mut RepeatGate,
+) -> CycleLog {
+    match build(source_name) {
+        Ok(mut src) => {
+            let was_failing = trouble.in_streak();
+            if was_failing {
+                tracing::info!(cam = %cam_id, source = %source_name, "preview source connected again");
+            } else {
+                tracing::debug!(cam = %cam_id, source = %source_name, "preview source connected");
             }
-            Err(e) => {
-                let text = format!("{e:#}");
-                if trouble.first(&text) {
-                    tracing::warn!(cam = %cam_id, source = %source_name, error = %text, "preview source build failed; retrying (repeats log at debug)");
-                } else {
-                    tracing::debug!(cam = %cam_id, source = %source_name, error = %text, "preview source build failed again");
-                }
+            let end = run_source(cam_id, src.as_mut(), cfg, store, decim, trouble);
+            let recovered = end.stored && was_failing;
+            if end.stored {
+                tracing::info!(cam = %cam_id, source = %source_name, "preview source delivered frames, then ended");
+                trouble.clear();
+            }
+            let warned = trouble.first(&end.error);
+            if warned {
+                tracing::warn!(cam = %cam_id, error = %end.error, "preview capture error; rebuilding source (repeats log at debug)");
+            } else {
+                tracing::debug!(cam = %cam_id, error = %end.error, "preview capture error again; rebuilding source");
+            }
+            CycleLog { warned, recovered }
+        }
+        Err(e) => {
+            let text = format!("{e:#}");
+            let warned = trouble.first(&text);
+            if warned {
+                tracing::warn!(cam = %cam_id, source = %source_name, error = %text, "preview source build failed; retrying (repeats log at debug)");
+            } else {
+                tracing::debug!(cam = %cam_id, source = %source_name, error = %text, "preview source build failed again");
+            }
+            CycleLog {
+                warned,
+                recovered: false,
             }
         }
-        thread::sleep(cfg.reconnect_backoff());
     }
 }
 

@@ -417,8 +417,7 @@ pub struct NdiPreviewSource {
     receiver: *mut c_void,
     name: String,
     /// The lost-link window (shading#3), timed from `opened`.
-    lost: LostLink,
-    opened: std::time::Instant,
+    state: RecvState,
 }
 
 /// Unusable frame shapes already warned about, per source, for the life of the process: a
@@ -504,8 +503,10 @@ impl NdiPreviewSource {
             lib,
             receiver,
             name: source_name.to_string(),
-            lost: LostLink::default(),
-            opened: std::time::Instant::now(),
+            state: RecvState::new(source_name, {
+                let opened = std::time::Instant::now();
+                Box::new(move || opened.elapsed().as_millis() as u64)
+            }),
         })
     }
 }
@@ -521,103 +522,162 @@ impl PreviewSource for NdiPreviewSource {
         keep: &mut dyn FnMut() -> bool,
     ) -> Result<Option<RawFrame>> {
         let timeout_ms = timeout.as_millis().min(u32::MAX as u128) as u32;
-        let mut vf: NDIlibVideoFrameV2RecvT = unsafe { std::mem::zeroed() };
-        let frame_type = unsafe {
+        let mut sdk = SdkRecv {
+            lib: &self.lib,
+            receiver: self.receiver,
+        };
+        capture_frame(&mut sdk, &mut self.state, timeout_ms, keep)
+    }
+}
+
+/// The SDK calls the capture glue makes (shading#3). [`SdkRecv`] wraps libndi; the tests drive
+/// [`capture_frame`] with a fake, so the order of copy and free is checked without libndi.
+trait NdiRecv {
+    /// `NDIlib_recv_capture_v3` for video only (audio and metadata pointers null).
+    fn capture(&mut self, vf: &mut NDIlibVideoFrameV2RecvT, timeout_ms: u32) -> c_int;
+    /// `NDIlib_recv_free_video_v2`.
+    fn free(&mut self, vf: &NDIlibVideoFrameV2RecvT);
+    /// The pause after a lost-link error.
+    fn wait(&mut self, d: Duration);
+}
+
+struct SdkRecv<'a> {
+    lib: &'a NdiLib,
+    receiver: *mut c_void,
+}
+
+impl NdiRecv for SdkRecv<'_> {
+    fn capture(&mut self, vf: &mut NDIlibVideoFrameV2RecvT, timeout_ms: u32) -> c_int {
+        unsafe {
             (self.lib.recv_capture_v3)(
                 self.receiver,
-                &mut vf,
+                vf,
                 ptr::null_mut(),
                 ptr::null_mut(),
                 timeout_ms,
             )
-        };
-        let width = vf.xres.max(0) as usize;
-        let height = vf.yres.max(0) as usize;
-        let stride = vf.line_stride_in_bytes.max(0) as usize;
-        let fourcc = vf.fourcc;
-        let bpp = frame_usable(!vf.p_data.is_null(), width, height, stride, fourcc);
-        if frame_type == FRAME_TYPE_VIDEO {
-            self.lost.on_video();
-            if bpp.is_none() {
-                let has_data = !vf.p_data.is_null();
-                let key = format!(
-                    "{}|{fourcc}|{width}x{height}|{stride}|{has_data}",
-                    self.name
-                );
-                if first_unusable(key) {
-                    tracing::warn!(
-                        source = %self.name, fourcc, width, height, stride, has_data,
-                        "NDI preview frame unusable (unknown FourCC, odd-width UYVY, no data or short stride); skipping"
-                    );
-                }
-            }
         }
-
-        let step = capture_step(frame_type, bpp.is_some(), keep);
-        match step {
-            CaptureStep::Lost => {
-                let now_ms = self.opened.elapsed().as_millis() as u64;
-                match self.lost.on_lost(now_ms) {
-                    LostStep::Rebuild => anyhow::bail!(
-                        "NDI connection to '{}' lost for {LOST_REBUILD_AFTER_MS} ms",
-                        self.name
-                    ),
-                    // debug: if it does not come back, the rebuild error reaches the worker's
-                    // warning gate, which warns once per streak, not once per reconnect.
-                    LostStep::Opened => tracing::debug!(
-                        source = %self.name,
-                        "NDI connection lost; waiting up to {LOST_REBUILD_AFTER_MS} ms for it to come back"
-                    ),
-                    LostStep::Waiting => {
-                        tracing::debug!(source = %self.name, "NDI connection still lost")
-                    }
-                }
-                std::thread::sleep(LOST_RETRY_WAIT);
-                return Ok(None);
-            }
-            CaptureStep::Nothing => {
-                let now_ms = self.opened.elapsed().as_millis() as u64;
-                match after_nothing(&self.lost, frame_type, now_ms) {
-                    NothingAction::Rebuild => anyhow::bail!(
-                        "NDI connection to '{}' lost for {LOST_REBUILD_AFTER_MS} ms",
-                        self.name
-                    ),
-                    NothingAction::Event => {
-                        tracing::debug!(source = %self.name, frame_type, "NDI non-video frame")
-                    }
-                    NothingAction::Quiet => {}
-                }
-            }
-            _ => {}
-        }
-
-        let lib = &self.lib;
-        let receiver = self.receiver;
-        // Build happens only for a usable frame, so bpp is Some there; no panic path between
-        // the copy and the free.
-        let bpp = bpp.unwrap_or(1);
-        let rgb = finish_capture(
-            step,
-            || {
-                // At most ONE copy: the converters read the SDK buffer straight when the rows are
-                // tight, and a padded buffer is packed once.
-                let data = unsafe { std::slice::from_raw_parts(vf.p_data, stride * height) };
-                let row_bytes = width * bpp;
-                let tight = if stride == row_bytes {
-                    std::borrow::Cow::Borrowed(data)
-                } else {
-                    std::borrow::Cow::Owned(tight_rows(data, stride, row_bytes, height))
-                };
-                match fourcc {
-                    FOURCC_UYVY => uyvy_to_rgb(&tight, width, height),
-                    FOURCC_BGRA | FOURCC_BGRX => bgra_to_rgb(&tight, width, height),
-                    _ => rgba_to_rgb(&tight, width, height),
-                }
-            },
-            || unsafe { (lib.recv_free_video_v2)(receiver, &vf) },
-        );
-        Ok(rgb.map(|rgb| RawFrame::new(width as u32, height as u32, rgb)))
     }
+
+    fn free(&mut self, vf: &NDIlibVideoFrameV2RecvT) {
+        unsafe { (self.lib.recv_free_video_v2)(self.receiver, vf) }
+    }
+
+    fn wait(&mut self, d: Duration) {
+        std::thread::sleep(d);
+    }
+}
+
+/// Per-receiver capture state: its name, the lost-link window and the clock that times it.
+struct RecvState {
+    name: String,
+    lost: LostLink,
+    /// Monotonic milliseconds since the receiver opened (injected for tests).
+    clock: Box<dyn FnMut() -> u64>,
+}
+
+impl RecvState {
+    fn new(name: &str, clock: Box<dyn FnMut() -> u64>) -> Self {
+        Self {
+            name: name.to_string(),
+            lost: LostLink::default(),
+            clock,
+        }
+    }
+}
+
+/// One capture: ask the SDK, decide with [`capture_step`] / [`after_nothing`], and carry it out
+/// with [`finish_capture`] (copy before free, one free per video frame) (shading#3).
+fn capture_frame(
+    recv: &mut dyn NdiRecv,
+    st: &mut RecvState,
+    timeout_ms: u32,
+    keep: &mut dyn FnMut() -> bool,
+) -> Result<Option<RawFrame>> {
+    let mut vf: NDIlibVideoFrameV2RecvT = unsafe { std::mem::zeroed() };
+    let frame_type = recv.capture(&mut vf, timeout_ms);
+    let width = vf.xres.max(0) as usize;
+    let height = vf.yres.max(0) as usize;
+    let stride = vf.line_stride_in_bytes.max(0) as usize;
+    let fourcc = vf.fourcc;
+    let has_data = !vf.p_data.is_null();
+    let bpp = frame_usable(has_data, width, height, stride, fourcc);
+    if frame_type == FRAME_TYPE_VIDEO {
+        st.lost.on_video();
+        if bpp.is_none() {
+            let key = format!("{}|{fourcc}|{width}x{height}|{stride}|{has_data}", st.name);
+            if first_unusable(key) {
+                tracing::warn!(
+                    source = %st.name, fourcc, width, height, stride, has_data,
+                    "NDI preview frame unusable (unknown FourCC, odd-width UYVY, no data or short stride); skipping"
+                );
+            }
+        }
+    }
+
+    let step = capture_step(frame_type, bpp.is_some(), keep);
+    match step {
+        CaptureStep::Lost => {
+            let now_ms = (st.clock)();
+            match st.lost.on_lost(now_ms) {
+                LostStep::Rebuild => anyhow::bail!(
+                    "NDI connection to '{}' lost for {LOST_REBUILD_AFTER_MS} ms",
+                    st.name
+                ),
+                // debug: if it does not come back, the rebuild error reaches the worker's
+                // warning gate, which warns once per streak, not once per reconnect.
+                LostStep::Opened => tracing::debug!(
+                    source = %st.name,
+                    "NDI connection lost; waiting up to {LOST_REBUILD_AFTER_MS} ms for it to come back"
+                ),
+                LostStep::Waiting => {
+                    tracing::debug!(source = %st.name, "NDI connection still lost")
+                }
+            }
+            recv.wait(LOST_RETRY_WAIT);
+            return Ok(None);
+        }
+        CaptureStep::Nothing => {
+            let now_ms = (st.clock)();
+            match after_nothing(&st.lost, frame_type, now_ms) {
+                NothingAction::Rebuild => anyhow::bail!(
+                    "NDI connection to '{}' lost for {LOST_REBUILD_AFTER_MS} ms",
+                    st.name
+                ),
+                NothingAction::Event => {
+                    tracing::debug!(source = %st.name, frame_type, "NDI non-video frame")
+                }
+                NothingAction::Quiet => {}
+            }
+            return Ok(None);
+        }
+        CaptureStep::Build | CaptureStep::Free => {}
+    }
+
+    // Build happens only for a usable frame, so bpp is Some there; no panic path between the
+    // copy and the free.
+    let bpp = bpp.unwrap_or(1);
+    let rgb = finish_capture(
+        step,
+        || {
+            // At most ONE copy: the converters read the SDK buffer straight when the rows are
+            // tight, and a padded buffer is packed once.
+            let data = unsafe { std::slice::from_raw_parts(vf.p_data, stride * height) };
+            let row_bytes = width * bpp;
+            let tight = if stride == row_bytes {
+                std::borrow::Cow::Borrowed(data)
+            } else {
+                std::borrow::Cow::Owned(tight_rows(data, stride, row_bytes, height))
+            };
+            match fourcc {
+                FOURCC_UYVY => uyvy_to_rgb(&tight, width, height),
+                FOURCC_BGRA | FOURCC_BGRX => bgra_to_rgb(&tight, width, height),
+                _ => rgba_to_rgb(&tight, width, height),
+            }
+        },
+        || recv.free(&vf),
+    );
+    Ok(rgb.map(|rgb| RawFrame::new(width as u32, height as u32, rgb)))
 }
 
 impl Drop for NdiPreviewSource {
