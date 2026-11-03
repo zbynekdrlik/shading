@@ -244,6 +244,30 @@ fn stub_source_yields_a_valid_frame() {
 }
 
 #[test]
+fn stub_source_builds_nothing_when_the_worker_does_not_keep_the_frame_3() {
+    let mut src = StubSource::new("CAM1 (usb)");
+    let got = src
+        .next_frame(Duration::from_millis(100), &mut || false)
+        .expect("no source error");
+    assert!(got.is_none());
+}
+
+#[test]
+fn preview_waits_have_a_floor_so_a_zero_config_cannot_spin_3() {
+    let cfg = PreviewConfig {
+        capture_timeout_ms: 0,
+        reconnect_backoff_ms: 0,
+        ..PreviewConfig::default()
+    };
+    assert!(cfg.capture_timeout() >= Duration::from_millis(50));
+    assert!(cfg.reconnect_backoff() >= Duration::from_millis(200));
+    // A sane value passes through unchanged.
+    let cfg = PreviewConfig::default();
+    assert_eq!(cfg.capture_timeout(), Duration::from_millis(1000));
+    assert_eq!(cfg.reconnect_backoff(), Duration::from_millis(2000));
+}
+
+#[test]
 fn preview_config_defaults_are_sane() {
     let c = PreviewConfig::default();
     assert!(c.fps >= 2.0 && c.fps <= 5.0, "default preview fps in 2..5");

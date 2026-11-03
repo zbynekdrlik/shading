@@ -64,6 +64,24 @@ pub struct PreviewConfig {
     pub reconnect_backoff_ms: u64,
 }
 
+/// The shortest capture wait the worker uses, whatever the config says: a 0 ms wait on a feed
+/// with no frames returns at once and spins a core (shading#3).
+pub const MIN_CAPTURE_TIMEOUT_MS: u64 = 50;
+/// The shortest rebuild backoff, for the same reason when a build fails at once (no libndi).
+pub const MIN_RECONNECT_BACKOFF_MS: u64 = 200;
+
+impl PreviewConfig {
+    /// `capture_timeout_ms`, floored at [`MIN_CAPTURE_TIMEOUT_MS`].
+    pub fn capture_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.capture_timeout_ms.max(MIN_CAPTURE_TIMEOUT_MS))
+    }
+
+    /// `reconnect_backoff_ms`, floored at [`MIN_RECONNECT_BACKOFF_MS`].
+    pub fn reconnect_backoff(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.reconnect_backoff_ms.max(MIN_RECONNECT_BACKOFF_MS))
+    }
+}
+
 impl Default for PreviewConfig {
     fn default() -> Self {
         Self {

@@ -13,7 +13,7 @@ use bkshading::preview::frame::RawFrame;
 use bkshading::preview::pattern::test_pattern_rgb;
 use bkshading::preview::source::PreviewSource;
 use bkshading::preview::store::PreviewStore;
-use bkshading::preview::worker::run_source;
+use bkshading::preview::worker::{cycle, run_source, RepeatGate};
 use bkshading::preview::PreviewConfig;
 
 /// A feed that delivers a frame on every call, as fast as the worker asks, and ends after
@@ -35,6 +35,11 @@ impl PreviewSource for FastFeed {
         keep: &mut dyn FnMut() -> bool,
     ) -> anyhow::Result<Option<RawFrame>> {
         self.calls += 1;
+        // A worker that ignores the error and keeps reading must fail the test, not hang it.
+        assert!(
+            self.calls <= self.limit + 1,
+            "worker kept reading after the feed failed"
+        );
         if self.calls > self.limit {
             anyhow::bail!("feed ended");
         }
@@ -44,6 +49,159 @@ impl PreviewSource for FastFeed {
         self.built += 1;
         Ok(Some(RawFrame::new(32, 18, test_pattern_rgb(32, 18, 0))))
     }
+}
+
+/// A feed whose first kept frame cannot be built (an unsupported FourCC, null data): it
+/// returns `Ok(None)` after `keep()` said yes. It records every `keep()` answer.
+struct BadFirstFrame {
+    answers: Vec<bool>,
+    built: u32,
+}
+
+impl PreviewSource for BadFirstFrame {
+    fn name(&self) -> &str {
+        "bad-first"
+    }
+
+    fn next_frame(
+        &mut self,
+        _timeout: Duration,
+        keep: &mut dyn FnMut() -> bool,
+    ) -> anyhow::Result<Option<RawFrame>> {
+        if self.answers.len() >= 50 {
+            anyhow::bail!("feed ended");
+        }
+        let kept = keep();
+        self.answers.push(kept);
+        if !kept || self.answers.len() == 1 {
+            return Ok(None); // the first kept frame turns out unbuildable
+        }
+        self.built += 1;
+        Ok(Some(RawFrame::new(32, 18, test_pattern_rgb(32, 18, 0))))
+    }
+}
+
+/// A feed whose frames all fail to encode (invalid RGB length), as an odd frame shape would.
+struct BrokenFrames {
+    answers: Vec<bool>,
+}
+
+impl PreviewSource for BrokenFrames {
+    fn name(&self) -> &str {
+        "broken"
+    }
+
+    fn next_frame(
+        &mut self,
+        _timeout: Duration,
+        keep: &mut dyn FnMut() -> bool,
+    ) -> anyhow::Result<Option<RawFrame>> {
+        if self.answers.len() >= 50 {
+            anyhow::bail!("feed ended");
+        }
+        let kept = keep();
+        self.answers.push(kept);
+        if !kept {
+            return Ok(None);
+        }
+        Ok(Some(RawFrame::new(4, 4, vec![0; 5])))
+    }
+}
+
+#[test]
+fn a_frame_that_fails_to_encode_spends_the_slot_3() {
+    // Otherwise a shape that fails on every frame is built and encoded at the full feed rate:
+    // the CPU burn this ticket fixed, back again.
+    let cfg = PreviewConfig {
+        fps: 0.1,
+        ..PreviewConfig::default()
+    };
+    let store = PreviewStore::new();
+    let mut decim = Decimator::new(cfg.fps);
+    let mut feed = BrokenFrames {
+        answers: Vec::new(),
+    };
+
+    run_source(
+        "cam1",
+        &mut feed,
+        &cfg,
+        &store,
+        &mut decim,
+        &mut RepeatGate::default(),
+    );
+
+    assert_eq!(
+        feed.answers.iter().filter(|k| **k).count(),
+        1,
+        "one attempt per slot"
+    );
+    assert!(store.get("cam1").is_none());
+}
+
+#[test]
+fn a_rebuilt_source_gets_a_frame_at_once_3() {
+    // run_forever keeps one Decimator across reconnects while each run_source starts a new
+    // clock at 0. A slot stamped on the old clock must not freeze the new connection's preview
+    // for as long as the old one ran.
+    let cfg = PreviewConfig {
+        fps: 5.0,
+        ..PreviewConfig::default()
+    };
+    let store = PreviewStore::new();
+    let mut decim = Decimator::new(cfg.fps);
+    decim.mark_emitted(36_000_000); // the last frame of a 10 h connection
+
+    let mut feed = FastFeed {
+        calls: 0,
+        limit: 20,
+        built: 0,
+    };
+    run_source(
+        "cam1",
+        &mut feed,
+        &cfg,
+        &store,
+        &mut decim,
+        &mut RepeatGate::default(),
+    );
+
+    assert_eq!(feed.built, 1, "the new connection keeps its first frame");
+    assert!(store.get("cam1").is_some());
+}
+
+#[test]
+fn an_unbuildable_kept_frame_does_not_spend_the_slot_3() {
+    let cfg = PreviewConfig {
+        fps: 0.1, // 10 s period: every answer below falls in one slot
+        ..PreviewConfig::default()
+    };
+    let store = PreviewStore::new();
+    let mut decim = Decimator::new(cfg.fps);
+    let mut feed = BadFirstFrame {
+        answers: Vec::new(),
+        built: 0,
+    };
+
+    run_source(
+        "cam1",
+        &mut feed,
+        &cfg,
+        &store,
+        &mut decim,
+        &mut RepeatGate::default(),
+    );
+
+    assert_eq!(
+        &feed.answers[..3],
+        &[true, true, false],
+        "the next good frame is kept"
+    );
+    assert_eq!(feed.built, 1);
+    assert!(
+        store.get("cam1").is_some(),
+        "the good frame reached the store"
+    );
 }
 
 #[test]
@@ -62,7 +220,14 @@ fn worker_builds_only_the_frames_it_keeps_3() {
         built: 0,
     };
 
-    run_source("cam1", &mut feed, &cfg, &store, &mut decim);
+    run_source(
+        "cam1",
+        &mut feed,
+        &cfg,
+        &store,
+        &mut decim,
+        &mut RepeatGate::default(),
+    );
 
     assert_eq!(
         feed.calls, 601,
@@ -95,27 +260,153 @@ fn decimator_says_due_without_using_up_the_slot_3() {
 
 #[cfg(feature = "ndi")]
 #[test]
-fn ndi_capture_step_builds_only_a_kept_video_frame_3() {
+fn ndi_capture_step_builds_only_a_kept_usable_video_frame_3() {
     use bkshading::preview::ndi_source::{capture_step, CaptureStep};
     let mut asked = 0;
     let mut yes = || {
         asked += 1;
         true
     };
-    assert_eq!(capture_step(1, &mut yes), CaptureStep::Build);
+    assert_eq!(capture_step(1, true, &mut yes), CaptureStep::Build);
     let mut no = || false;
     // An unwanted video frame is freed untouched: no copy, no convert.
-    assert_eq!(capture_step(1, &mut no), CaptureStep::Free);
-    // No frame: keep is never asked, so a timeout or an event cannot spend a decimation slot.
+    assert_eq!(capture_step(1, true, &mut no), CaptureStep::Free);
+    // An unusable video frame (unsupported FourCC, null data) is freed without asking keep,
+    // so it never spends a decimation slot.
+    assert_eq!(capture_step(1, false, &mut yes), CaptureStep::Free);
+    // No frame: keep is never asked, so a timeout or an event cannot spend a slot.
     for kind in [0, 2, 3, 100] {
         assert_eq!(
-            capture_step(kind, &mut yes),
+            capture_step(kind, true, &mut yes),
             CaptureStep::Nothing,
             "type {kind}"
         );
     }
-    assert_eq!(capture_step(4, &mut yes), CaptureStep::Lost);
-    assert_eq!(asked, 1, "keep is asked only for a video frame");
+    assert_eq!(capture_step(4, true, &mut yes), CaptureStep::Lost);
+    assert_eq!(asked, 1, "keep is asked only for a usable video frame");
+}
+
+#[cfg(feature = "ndi")]
+#[test]
+fn ndi_finish_capture_frees_every_video_frame_exactly_once_3() {
+    use bkshading::preview::ndi_source::{finish_capture, CaptureStep};
+    for (step, built, freed) in [
+        (CaptureStep::Build, 1, 1),
+        (CaptureStep::Free, 0, 1),
+        (CaptureStep::Nothing, 0, 0),
+        (CaptureStep::Lost, 0, 0),
+    ] {
+        let order = std::cell::RefCell::new(Vec::new());
+        let out = finish_capture(
+            step,
+            || {
+                order.borrow_mut().push("build");
+                7
+            },
+            || order.borrow_mut().push("free"),
+        );
+        let order = order.into_inner();
+        let b = order.iter().filter(|e| **e == "build").count();
+        let f = order.iter().filter(|e| **e == "free").count();
+        assert_eq!((b, f), (built, freed), "{step:?}");
+        assert_eq!(out.is_some(), built == 1, "{step:?}");
+        if step == CaptureStep::Build {
+            assert_eq!(
+                order,
+                ["build", "free"],
+                "copy the pixels before the SDK frees them"
+            );
+        }
+    }
+}
+
+#[cfg(feature = "ndi")]
+#[test]
+fn ndi_preview_bpp_knows_the_supported_fourccs_3() {
+    use bkshading::preview::ndi_source::preview_bpp;
+    let cc = |s: &[u8; 4]| u32::from_le_bytes(*s);
+    assert_eq!(preview_bpp(cc(b"UYVY")), Some(2));
+    for f in [b"BGRA", b"BGRX", b"RGBA", b"RGBX"] {
+        assert_eq!(preview_bpp(cc(f)), Some(4));
+    }
+    assert_eq!(preview_bpp(cc(b"NV12")), None);
+}
+
+#[cfg(feature = "ndi")]
+#[test]
+fn ndi_lost_link_rebuilds_after_a_window_without_video_3() {
+    use bkshading::preview::ndi_source::{LostLink, LostStep, LOST_REBUILD_AFTER_MS};
+    let w = LOST_REBUILD_AFTER_MS;
+    let mut link = LostLink::default();
+    // The SDK reports a lost link, then timeouts while it reconnects: Lost, None, Lost, ...
+    // Timeouts do not reset the window, so it still ends in a rebuild. Only the first error of
+    // a window is news (warn); the rest wait quietly.
+    assert_eq!(link.on_lost(0), LostStep::Opened);
+    assert_eq!(link.on_lost(w / 2), LostStep::Waiting);
+    assert_eq!(link.on_lost(w - 1), LostStep::Waiting);
+    assert_eq!(
+        link.on_lost(w),
+        LostStep::Rebuild,
+        "no video for the whole window"
+    );
+    // A video frame closes the window; the next error opens a new one.
+    let mut link = LostLink::default();
+    assert_eq!(link.on_lost(0), LostStep::Opened);
+    link.on_video();
+    assert_eq!(link.on_lost(w + 5), LostStep::Opened);
+    assert_eq!(link.on_lost(2 * w + 5), LostStep::Rebuild);
+}
+
+#[cfg(feature = "ndi")]
+#[test]
+fn ndi_lost_link_followed_only_by_timeouts_still_rebuilds_3() {
+    use bkshading::preview::ndi_source::{LostLink, LostStep, LOST_REBUILD_AFTER_MS};
+    let w = LOST_REBUILD_AFTER_MS;
+    let mut link = LostLink::default();
+    // No window open: a timeout is just a quiet feed, never a rebuild.
+    assert!(!link.on_quiet(10 * w));
+    // One error, then only timeouts: the window still ends in a rebuild.
+    assert_eq!(link.on_lost(0), LostStep::Opened);
+    assert!(!link.on_quiet(w - 1));
+    assert!(link.on_quiet(w));
+    // A video frame closes it.
+    link.on_video();
+    assert!(!link.on_quiet(5 * w));
+}
+
+#[cfg(feature = "ndi")]
+#[test]
+fn ndi_frame_usable_needs_data_size_stride_and_a_known_fourcc_3() {
+    use bkshading::preview::ndi_source::frame_usable;
+    let cc = |s: &[u8; 4]| u32::from_le_bytes(*s);
+    let bgra = cc(b"BGRA");
+    let uyvy = cc(b"UYVY");
+    assert_eq!(frame_usable(true, 640, 360, 2560, bgra), Some(4));
+    assert_eq!(
+        frame_usable(true, 640, 360, 2600, bgra),
+        Some(4),
+        "padded rows are fine"
+    );
+    assert_eq!(frame_usable(false, 640, 360, 2560, bgra), None, "null data");
+    assert_eq!(frame_usable(true, 0, 360, 2560, bgra), None, "zero width");
+    assert_eq!(frame_usable(true, 640, 0, 2560, bgra), None, "zero height");
+    assert_eq!(
+        frame_usable(true, 640, 360, 2559, bgra),
+        None,
+        "short stride"
+    );
+    assert_eq!(frame_usable(true, 640, 360, 1280, uyvy), Some(2));
+    // UYVY packs two pixels per four bytes: an odd width cannot convert to a valid frame.
+    assert_eq!(
+        frame_usable(true, 641, 360, 1282, uyvy),
+        None,
+        "odd-width UYVY"
+    );
+    assert_eq!(
+        frame_usable(true, 640, 360, 2560, cc(b"NV12")),
+        None,
+        "unknown FourCC"
+    );
 }
 
 #[cfg(feature = "ndi")]
@@ -130,4 +421,167 @@ fn ndi_capture_outcome_maps_every_frame_type_3() {
     assert_eq!(capture_outcome(100), CaptureOutcome::Other(100));
     // Frame type error = the connection was lost: the worker must rebuild, not spin.
     assert_eq!(capture_outcome(4), CaptureOutcome::Lost);
+}
+
+#[cfg(feature = "ndi")]
+#[test]
+fn ndi_any_quiet_return_can_end_the_lost_window_3() {
+    use bkshading::preview::ndi_source::{
+        after_nothing, LostLink, NothingAction, LOST_REBUILD_AFTER_MS,
+    };
+    let w = LOST_REBUILD_AFTER_MS;
+    let idle = LostLink::default();
+    assert_eq!(after_nothing(&idle, 0, 10 * w), NothingAction::Quiet);
+    assert_eq!(after_nothing(&idle, 100, 10 * w), NothingAction::Event);
+    let mut lost = LostLink::default();
+    lost.on_lost(0);
+    assert_eq!(after_nothing(&lost, 0, w - 1), NothingAction::Quiet);
+    assert_eq!(after_nothing(&lost, 100, w - 1), NothingAction::Event);
+    // A timeout OR an event (status change, metadata) ends a window that ran out.
+    assert_eq!(after_nothing(&lost, 0, w), NothingAction::Rebuild);
+    assert_eq!(after_nothing(&lost, 100, w), NothingAction::Rebuild);
+    assert_eq!(after_nothing(&lost, 3, w), NothingAction::Rebuild);
+}
+
+#[test]
+fn repeat_gate_lets_each_new_error_through_once_3() {
+    let mut gate = RepeatGate::default();
+    assert!(gate.first("source not found"));
+    assert!(!gate.first("source not found"), "a repeat logs at debug");
+    assert!(gate.first("connection lost"), "a different error is news");
+    assert!(!gate.first("connection lost"));
+    gate.clear(); // a frame got through: the next failure starts a new streak
+    assert!(gate.first("connection lost"));
+}
+
+#[test]
+fn repeat_gate_holds_alternating_errors_3() {
+    // A camera that drops on and off the network alternates "not found" and "lost": each is
+    // news once per streak, not every cycle.
+    let mut gate = RepeatGate::default();
+    assert!(!gate.in_streak());
+    assert!(gate.first("not found"));
+    assert!(gate.first("lost"));
+    for _ in 0..3 {
+        assert!(!gate.first("not found"));
+        assert!(!gate.first("lost"));
+    }
+    assert!(
+        gate.in_streak(),
+        "a recovery after this is worth an info line"
+    );
+    gate.clear();
+    assert!(!gate.in_streak());
+    assert!(gate.first("lost"));
+}
+
+#[test]
+fn run_source_reports_why_it_ended_and_whether_it_stored_a_frame_3() {
+    let cfg = PreviewConfig {
+        fps: 0.1,
+        ..PreviewConfig::default()
+    };
+    let store = PreviewStore::new();
+    let mut decim = Decimator::new(cfg.fps);
+
+    let mut good = FastFeed {
+        calls: 0,
+        limit: 5,
+        built: 0,
+    };
+    let end = run_source(
+        "cam1",
+        &mut good,
+        &cfg,
+        &store,
+        &mut decim,
+        &mut RepeatGate::default(),
+    );
+    assert!(end.stored);
+    assert_eq!(end.error, "feed ended");
+
+    let mut bad = BrokenFrames {
+        answers: Vec::new(),
+    };
+    let end = run_source(
+        "cam2",
+        &mut bad,
+        &cfg,
+        &store,
+        &mut decim,
+        &mut RepeatGate::default(),
+    );
+    assert!(
+        !end.stored,
+        "a session that never stored a frame keeps the warning streak"
+    );
+    assert_eq!(end.error, "feed ended");
+}
+
+fn never_found(_: &str) -> anyhow::Result<Box<dyn PreviewSource>> {
+    anyhow::bail!("NDI source 'CAM9' not found within 5s")
+}
+
+fn found_then_broken(_: &str) -> anyhow::Result<Box<dyn PreviewSource>> {
+    Ok(Box::new(BrokenFrames {
+        answers: Vec::new(),
+    }))
+}
+
+fn found_and_working(_: &str) -> anyhow::Result<Box<dyn PreviewSource>> {
+    Ok(Box::new(FastFeed {
+        calls: 0,
+        limit: 3,
+        built: 0,
+    }))
+}
+
+#[test]
+fn reconnect_cycles_warn_once_per_streak_3() {
+    let cfg = PreviewConfig {
+        fps: 0.1,
+        ..PreviewConfig::default()
+    };
+    let store = PreviewStore::new();
+    let mut decim = Decimator::new(cfg.fps);
+    let mut trouble = RepeatGate::default();
+    let mut run = |build| {
+        cycle(
+            "cam1",
+            "CAM9",
+            &cfg,
+            &store,
+            build,
+            &mut decim,
+            &mut trouble,
+        )
+    };
+
+    // A camera that stays off: one warning, then quiet.
+    assert!(run(never_found).warned);
+    assert!(!run(never_found).warned);
+    // Found, but every frame fails and the feed ends: each new error once, repeats quiet.
+    assert!(run(found_then_broken).warned, "a new error is news");
+    assert!(!run(found_then_broken).warned);
+    assert!(!run(never_found).warned, "alternating errors stay quiet");
+    // A connection that stores frames ends the streak: the next failure warns again.
+    let ok = run(found_and_working);
+    assert!(
+        ok.recovered,
+        "a stored frame after a warned streak is a recovery"
+    );
+    assert!(run(never_found).warned);
+
+    // Frames with no failure before them (a fresh gate): not a recovery.
+    let mut fresh = RepeatGate::default();
+    let log = cycle(
+        "cam2",
+        "CAM8",
+        &cfg,
+        &store,
+        found_and_working,
+        &mut Decimator::new(cfg.fps),
+        &mut fresh,
+    );
+    assert!(!log.recovered);
 }
