@@ -41,16 +41,16 @@ impl Decimator {
         true
     }
 
-    /// Record that the frame that arrived at `now_ms` was emitted. The worker calls it only
-    /// after the frame reached the store, so a kept frame that could not be built or encoded
-    /// does not spend the slot (shading#3).
+    /// Record that the frame that arrived at `now_ms` was emitted. The worker calls it after an
+    /// encode attempt, so a kept frame the source could not build does not spend the slot
+    /// (shading#3).
     pub fn mark_emitted(&mut self, now_ms: u64) {
         self.last_emit_ms = Some(now_ms);
     }
 
     /// Would a frame arriving at `now_ms` be emitted? Same rule as [`Self::should_emit`], but it
     /// spends nothing: the worker asks it when a frame arrives, and spends the slot with
-    /// [`Self::mark_emitted`] once the frame is stored (shading#3).
+    /// [`Self::mark_emitted`] once it tried to encode the frame (shading#3).
     pub fn is_due(&self, now_ms: u64) -> bool {
         match self.last_emit_ms {
             Some(prev) => now_ms.saturating_sub(prev) >= self.min_interval_ms,

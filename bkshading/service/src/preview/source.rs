@@ -22,7 +22,7 @@ pub trait PreviewSource: Send {
     /// `keep() == true` does not promise `Some`); `Err` = the source failed (the worker backs
     /// off and rebuilds it). Never panics.
     ///
-    /// When a frame arrives, the source calls `keep` once, and builds a [`RawFrame`] only if it
+    /// When a frame arrives that the source could build, it calls `keep` once, and builds a [`RawFrame`] only if it
     /// returns true. Otherwise it consumes the frame untouched. A 60 fps feed thinned to 3 fps
     /// must not pay for 57 copies and colour conversions per second (shading#3). `keep` is asked
     /// at arrival, not before the wait, so the kept cadence does not drift.

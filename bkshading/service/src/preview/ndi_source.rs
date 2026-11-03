@@ -168,15 +168,48 @@ pub fn preview_bpp(fourcc: u32) -> Option<usize> {
     }
 }
 
-/// Lost-link errors in a row after which the receiver is rebuilt. Fewer = a short glitch the
-/// SDK may ride out: wait [`LOST_RETRY_WAIT`] and capture again on the same receiver.
-pub const LOST_REBUILD_AFTER: u32 = 3;
+/// Can a video frame be built into a valid preview frame? Returns its bytes per pixel, or
+/// `None` for null data, a zero size, a stride shorter than a row, an unknown FourCC, or an
+/// odd-width UYVY (two pixels per four bytes). A frame that fails here is freed untouched and
+/// never spends a decimation slot (shading#3). Pure.
+pub fn frame_usable(
+    has_data: bool,
+    width: usize,
+    height: usize,
+    stride: usize,
+    fourcc: u32,
+) -> Option<usize> {
+    let bpp = preview_bpp(fourcc)?;
+    let fits = has_data && width > 0 && height > 0 && stride >= width * bpp;
+    let packs = fourcc != FOURCC_UYVY || width.is_multiple_of(2);
+    (fits && packs).then_some(bpp)
+}
+
+/// How long a link may report lost with no video frame before the receiver is rebuilt. The SDK
+/// answers a dropped link with an error, then timeouts while it reconnects; a window in time
+/// (not a count of errors in a row) still ends in a rebuild when it never comes back.
+pub const LOST_REBUILD_AFTER_MS: u64 = 3000;
 /// The wait after a lost-link error, so a dead link never spins.
 pub const LOST_RETRY_WAIT: Duration = Duration::from_millis(200);
 
-/// Rebuild the receiver after `in_row` lost-link errors in a row?
-pub fn lost_rebuilds(in_row: u32) -> bool {
-    in_row >= LOST_REBUILD_AFTER
+/// The lost-link window of one receiver (shading#3). Pure: the caller passes the time.
+#[derive(Debug, Default, Clone)]
+pub struct LostLink {
+    since_ms: Option<u64>,
+}
+
+impl LostLink {
+    /// A lost-link error at `now_ms`. True = no video for [`LOST_REBUILD_AFTER_MS`] since the
+    /// first error of this window: rebuild the receiver.
+    pub fn on_lost(&mut self, now_ms: u64) -> bool {
+        let since = *self.since_ms.get_or_insert(now_ms);
+        now_ms.saturating_sub(since) >= LOST_REBUILD_AFTER_MS
+    }
+
+    /// A video frame arrived: the link is back, close the window.
+    pub fn on_video(&mut self) {
+        self.since_ms = None;
+    }
 }
 
 /// Map a raw NDI frame type to its [`CaptureOutcome`]. Pure.
@@ -334,10 +367,12 @@ pub struct NdiPreviewSource {
     lib: Arc<NdiLib>,
     receiver: *mut c_void,
     name: String,
-    /// Lost-link errors in a row (shading#3).
-    lost_in_row: u32,
-    /// The unsupported FourCC already warned about, so a 60 fps feed logs it once.
-    warned_fourcc: Option<u32>,
+    /// The lost-link window (shading#3), timed from `opened`.
+    lost: LostLink,
+    opened: std::time::Instant,
+    /// An unusable frame was already logged; reset by the next usable one, so a 60 fps feed of
+    /// bad frames logs once.
+    warned_unusable: bool,
 }
 
 // SAFETY: the receiver handle is only touched from the single worker thread that owns it, and
@@ -410,8 +445,9 @@ impl NdiPreviewSource {
             lib,
             receiver,
             name: source_name.to_string(),
-            lost_in_row: 0,
-            warned_fourcc: None,
+            lost: LostLink::default(),
+            opened: std::time::Instant::now(),
+            warned_unusable: false,
         })
     }
 }
@@ -441,27 +477,33 @@ impl PreviewSource for NdiPreviewSource {
         let height = vf.yres.max(0) as usize;
         let stride = vf.line_stride_in_bytes.max(0) as usize;
         let fourcc = vf.fourcc;
-        let bpp = preview_bpp(fourcc);
-        if frame_type == FRAME_TYPE_VIDEO && bpp.is_none() && self.warned_fourcc != Some(fourcc) {
-            tracing::warn!(source = %self.name, fourcc, "unsupported NDI preview FourCC; skipping frames");
-            self.warned_fourcc = Some(fourcc);
+        let bpp = frame_usable(!vf.p_data.is_null(), width, height, stride, fourcc);
+        if frame_type == FRAME_TYPE_VIDEO {
+            self.lost.on_video();
+            match bpp {
+                Some(_) => self.warned_unusable = false,
+                None if !self.warned_unusable => {
+                    tracing::warn!(
+                        source = %self.name, fourcc, width, height, stride,
+                        "NDI preview frame unusable (unknown FourCC, odd-width UYVY, no data or short stride); skipping"
+                    );
+                    self.warned_unusable = true;
+                }
+                None => {}
+            }
         }
-        let usable = bpp.is_some_and(|bpp| {
-            !vf.p_data.is_null() && width > 0 && height > 0 && stride >= width * bpp
-        });
 
-        let step = capture_step(frame_type, usable, keep);
+        let step = capture_step(frame_type, bpp.is_some(), keep);
         match step {
             CaptureStep::Lost => {
-                self.lost_in_row += 1;
-                if lost_rebuilds(self.lost_in_row) {
+                let now_ms = self.opened.elapsed().as_millis() as u64;
+                if self.lost.on_lost(now_ms) {
                     anyhow::bail!(
-                        "NDI connection to '{}' lost ({} errors in a row)",
-                        self.name,
-                        self.lost_in_row
+                        "NDI connection to '{}' lost for {LOST_REBUILD_AFTER_MS} ms",
+                        self.name
                     );
                 }
-                tracing::warn!(source = %self.name, in_row = self.lost_in_row, "NDI connection lost; retrying");
+                tracing::warn!(source = %self.name, "NDI connection lost; waiting for it to come back");
                 std::thread::sleep(LOST_RETRY_WAIT);
                 return Ok(None);
             }
@@ -470,17 +512,24 @@ impl PreviewSource for NdiPreviewSource {
             }
             _ => {}
         }
-        self.lost_in_row = 0;
 
         let lib = &self.lib;
         let receiver = self.receiver;
+        // Build happens only for a usable frame, so bpp is Some there; no panic path between
+        // the copy and the free.
+        let bpp = bpp.unwrap_or(1);
         let rgb = finish_capture(
             step,
             || {
-                // ONE copy: strip the row padding straight out of the SDK buffer, before the free.
-                let bpp = bpp.expect("Build only for a usable frame");
+                // At most ONE copy: the converters read the SDK buffer straight when the rows are
+                // tight, and a padded buffer is packed once.
                 let data = unsafe { std::slice::from_raw_parts(vf.p_data, stride * height) };
-                let tight = tight_rows(data, stride, width * bpp, height);
+                let row_bytes = width * bpp;
+                let tight = if stride == row_bytes {
+                    std::borrow::Cow::Borrowed(data)
+                } else {
+                    std::borrow::Cow::Owned(tight_rows(data, stride, row_bytes, height))
+                };
                 match fourcc {
                     FOURCC_UYVY => uyvy_to_rgb(&tight, width, height),
                     FOURCC_BGRA | FOURCC_BGRX => bgra_to_rgb(&tight, width, height),
@@ -503,9 +552,6 @@ impl Drop for NdiPreviewSource {
 
 /// Copy `height` rows of `row_bytes` each out of a `stride`-padded buffer into a tight buffer.
 fn tight_rows(data: &[u8], stride: usize, row_bytes: usize, height: usize) -> Vec<u8> {
-    if stride == row_bytes {
-        return data.to_vec();
-    }
     let mut out = Vec::with_capacity(row_bytes * height);
     for row in 0..height {
         let start = row * stride;

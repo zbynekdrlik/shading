@@ -75,26 +75,45 @@ pub fn run_source(
     // would otherwise pause emission until wall time caught up); the store's `updated_ms` stays
     // wall clock, the clock the readers judge freshness against (issue 808).
     let started = Instant::now();
+    let mut last_encode_error: Option<String> = None;
     loop {
         // The source asks at frame arrival, so a frame the decimator drops is never built
-        // (shading#3) and the kept cadence does not drift. The slot is spent only once the frame
-        // is stored: a kept frame that could not be built or encoded leaves it for the next one.
-        let mut arrived_ms = 0u64;
+        // (shading#3) and the kept cadence does not drift. The slot is spent by an encode attempt:
+        // a kept frame the source could not build leaves it for the next one.
+        let mut arrived_ms: Option<u64> = None;
         let mut keep = || {
-            arrived_ms = started.elapsed().as_millis() as u64;
-            decim.is_due(arrived_ms)
+            let now = started.elapsed().as_millis() as u64;
+            arrived_ms = Some(now);
+            decim.is_due(now)
         };
         let got = src.next_frame(timeout, &mut keep);
         match got {
-            Ok(Some(frame)) => match encode_jpeg(&frame, cfg.jpeg_quality) {
-                Ok(jpeg) => {
-                    store.put(cam_id, jpeg, wall_clock_ms());
-                    decim.mark_emitted(arrived_ms);
+            Ok(Some(frame)) => {
+                match encode_jpeg(&frame, cfg.jpeg_quality) {
+                    Ok(jpeg) => {
+                        store.put(cam_id, jpeg, wall_clock_ms());
+                        last_encode_error = None;
+                    }
+                    Err(e) => {
+                        // Once per distinct error: a frame shape that fails every time must not
+                        // log at the feed rate.
+                        let text = format!("{e:#}");
+                        if last_encode_error.as_deref() != Some(text.as_str()) {
+                            tracing::warn!(cam = %cam_id, error = %text, "preview jpeg encode failed");
+                            last_encode_error = Some(text);
+                        }
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!(cam = %cam_id, error = %e, "preview jpeg encode failed")
+                // An encode attempt spends the slot whatever its result, so a frame that fails
+                // every time is tried once per period, never at the feed rate.
+                debug_assert!(
+                    arrived_ms.is_some(),
+                    "a source returned a frame without asking keep"
+                );
+                if let Some(at) = arrived_ms {
+                    decim.mark_emitted(at);
                 }
-            },
+            }
             Ok(None) => { /* timeout, an event, or a frame thinned to the target fps */ }
             Err(e) => {
                 tracing::warn!(cam = %cam_id, error = %e, "preview capture error; rebuilding source");
