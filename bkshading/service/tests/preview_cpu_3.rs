@@ -2,8 +2,9 @@
 //!
 //! An NDI feed arrives at 60 fps and the preview keeps 3 fps. v0.1.0 copied and converted every
 //! frame to RGB before the decimator dropped it, which burned about one CPU core on strih-snv
-//! with three live cameras. The worker now tells the source whether it wants the next frame, and
-//! a source skips the copy and convert for an unwanted one.
+//! with three live cameras. A source now asks the worker's `keep` callback when a frame arrives
+//! (the decision is made at arrival, so the 3 fps cadence does not drift), and skips the copy and
+//! convert for a frame the worker will not keep.
 
 use std::time::Duration;
 
@@ -28,12 +29,16 @@ impl PreviewSource for FastFeed {
         "fast"
     }
 
-    fn next_frame(&mut self, _timeout: Duration, want: bool) -> anyhow::Result<Option<RawFrame>> {
+    fn next_frame(
+        &mut self,
+        _timeout: Duration,
+        keep: &mut dyn FnMut() -> bool,
+    ) -> anyhow::Result<Option<RawFrame>> {
         self.calls += 1;
         if self.calls > self.limit {
             anyhow::bail!("feed ended");
         }
-        if !want {
+        if !keep() {
             return Ok(None);
         }
         self.built += 1;
@@ -44,7 +49,9 @@ impl PreviewSource for FastFeed {
 #[test]
 fn worker_builds_only_the_frames_it_keeps_3() {
     let cfg = PreviewConfig {
-        fps: 3.0,
+        // A 10 s period: the 600 instant frames below can never straddle two slots, even on a
+        // slow, instrumented CI runner.
+        fps: 0.1,
         ..PreviewConfig::default()
     };
     let store = PreviewStore::new();
@@ -61,7 +68,7 @@ fn worker_builds_only_the_frames_it_keeps_3() {
         feed.calls, 601,
         "the worker kept reading until the feed ended"
     );
-    // 600 frames arrive in far less than the 333 ms period, so only the first one is due.
+    // 600 frames arrive well inside one 10 s period, so only the first one is kept.
     assert_eq!(
         feed.built, 1,
         "the worker asked for {} frames, keeps 1",
@@ -84,6 +91,31 @@ fn decimator_says_due_without_using_up_the_slot_3() {
     assert!(d.is_due(250));
     assert!(d.should_emit(250));
     assert!(!d.is_due(260));
+}
+
+#[cfg(feature = "ndi")]
+#[test]
+fn ndi_capture_step_builds_only_a_kept_video_frame_3() {
+    use bkshading::preview::ndi_source::{capture_step, CaptureStep};
+    let mut asked = 0;
+    let mut yes = || {
+        asked += 1;
+        true
+    };
+    assert_eq!(capture_step(1, &mut yes), CaptureStep::Build);
+    let mut no = || false;
+    // An unwanted video frame is freed untouched: no copy, no convert.
+    assert_eq!(capture_step(1, &mut no), CaptureStep::Free);
+    // No frame: keep is never asked, so a timeout or an event cannot spend a decimation slot.
+    for kind in [0, 2, 3, 100] {
+        assert_eq!(
+            capture_step(kind, &mut yes),
+            CaptureStep::Nothing,
+            "type {kind}"
+        );
+    }
+    assert_eq!(capture_step(4, &mut yes), CaptureStep::Lost);
+    assert_eq!(asked, 1, "keep is asked only for a video frame");
 }
 
 #[cfg(feature = "ndi")]
