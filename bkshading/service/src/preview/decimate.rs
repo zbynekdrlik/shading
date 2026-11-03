@@ -34,12 +34,19 @@ impl Decimator {
     /// are assumed monotonic; a backwards `now_ms` (`< last`) is treated as "not enough time"
     /// (dropped) rather than emitting a burst.
     pub fn should_emit(&mut self, now_ms: u64) -> bool {
+        if !self.is_due(now_ms) {
+            return false;
+        }
+        self.last_emit_ms = Some(now_ms);
+        true
+    }
+
+    /// Would a frame arriving at `now_ms` be emitted? Same rule as [`Self::should_emit`], but it
+    /// spends nothing, so the worker can ask before it pays for a frame (shading#3).
+    pub fn is_due(&self, now_ms: u64) -> bool {
         match self.last_emit_ms {
-            Some(prev) if now_ms.saturating_sub(prev) < self.min_interval_ms => false,
-            _ => {
-                self.last_emit_ms = Some(now_ms);
-                true
-            }
+            Some(prev) => now_ms.saturating_sub(prev) >= self.min_interval_ms,
+            None => true,
         }
     }
 

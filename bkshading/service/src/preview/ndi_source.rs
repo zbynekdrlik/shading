@@ -94,7 +94,33 @@ type FnRecvCaptureV3 = unsafe extern "C" fn(
 ) -> c_int;
 type FnRecvFreeVideoV2 = unsafe extern "C" fn(*mut c_void, *const NDIlibVideoFrameV2RecvT);
 
+const FRAME_TYPE_NONE: c_int = 0;
 const FRAME_TYPE_VIDEO: c_int = 1;
+const FRAME_TYPE_ERROR: c_int = 4;
+
+/// What one `NDIlib_recv_capture_v3` return means to the preview loop (shading#3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureOutcome {
+    /// A video frame (`NDIlib_frame_type_video`).
+    Video,
+    /// The timeout passed with no frame (`NDIlib_frame_type_none`).
+    Timeout,
+    /// The connection was lost (`NDIlib_frame_type_error`). It returns at once, so the source
+    /// must be rebuilt: retrying it in place spins a core.
+    Lost,
+    /// Any other event (audio, metadata, status change): returns at once, no frame.
+    Other(i32),
+}
+
+/// Map a raw NDI frame type to its [`CaptureOutcome`]. Pure.
+pub fn capture_outcome(frame_type: i32) -> CaptureOutcome {
+    match frame_type {
+        FRAME_TYPE_VIDEO => CaptureOutcome::Video,
+        FRAME_TYPE_NONE => CaptureOutcome::Timeout,
+        FRAME_TYPE_ERROR => CaptureOutcome::Lost,
+        other => CaptureOutcome::Other(other),
+    }
+}
 // Request BGRX/BGRA = value 0 per vendor/distroav/lib/ndi/Processing.NDI.Recv.h
 // (NDIlib_recv_color_format_BGRX_BGRA = 0; UYVY_BGRA would be 1). This is the correct, live-verified
 // request (the BGRA/BGRX 4bpp path serves the JPEG preview); the actual FourCC is dispatched on
@@ -322,7 +348,7 @@ impl PreviewSource for NdiPreviewSource {
         &self.name
     }
 
-    fn next_frame(&mut self, timeout: Duration) -> Result<Option<RawFrame>> {
+    fn next_frame(&mut self, timeout: Duration, want: bool) -> Result<Option<RawFrame>> {
         let timeout_ms = timeout.as_millis().min(u32::MAX as u128) as u32;
         let mut vf: NDIlibVideoFrameV2RecvT = unsafe { std::mem::zeroed() };
         let frame_type = unsafe {
@@ -334,8 +360,19 @@ impl PreviewSource for NdiPreviewSource {
                 timeout_ms,
             )
         };
-        if frame_type != FRAME_TYPE_VIDEO {
-            return Ok(None); // timeout / audio / metadata / error — not our frame
+        match capture_outcome(frame_type) {
+            CaptureOutcome::Video => {}
+            CaptureOutcome::Timeout => return Ok(None),
+            CaptureOutcome::Lost => anyhow::bail!("NDI connection to '{}' lost", self.name),
+            CaptureOutcome::Other(kind) => {
+                tracing::debug!(source = %self.name, frame_type = kind, "NDI non-video frame");
+                return Ok(None);
+            }
+        }
+        if !want {
+            // The worker drops this frame (decimation): free it untouched, no copy, no convert.
+            unsafe { (self.lib.recv_free_video_v2)(self.receiver, &vf) };
+            return Ok(None);
         }
 
         let width = vf.xres.max(0) as usize;

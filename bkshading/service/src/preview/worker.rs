@@ -62,7 +62,8 @@ fn run_forever(
     }
 }
 
-fn run_source(
+/// Drive one connected source into the store until it fails. Public for the worker tests.
+pub fn run_source(
     cam_id: &str,
     src: &mut dyn PreviewSource,
     cfg: &PreviewConfig,
@@ -75,7 +76,9 @@ fn run_source(
     // wall clock, the clock the readers judge freshness against (issue 808).
     let started = Instant::now();
     loop {
-        match src.next_frame(timeout) {
+        // Ask before the capture, so a frame the decimator would drop is never built (shading#3).
+        let want = decim.is_due(started.elapsed().as_millis() as u64);
+        match src.next_frame(timeout, want) {
             Ok(Some(frame)) => {
                 if !decim.should_emit(started.elapsed().as_millis() as u64) {
                     continue; // thinned to the target fps

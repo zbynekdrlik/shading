@@ -57,10 +57,20 @@ fn worker_builds_only_the_frames_it_keeps_3() {
 
     run_source("cam1", &mut feed, &cfg, &store, &mut decim);
 
-    assert_eq!(feed.calls, 601, "the worker kept reading until the feed ended");
+    assert_eq!(
+        feed.calls, 601,
+        "the worker kept reading until the feed ended"
+    );
     // 600 frames arrive in far less than the 333 ms period, so only the first one is due.
-    assert_eq!(feed.built, 1, "the worker asked for {} frames, keeps 1", feed.built);
-    assert!(store.get("cam1").is_some(), "the kept frame reached the store");
+    assert_eq!(
+        feed.built, 1,
+        "the worker asked for {} frames, keeps 1",
+        feed.built
+    );
+    assert!(
+        store.get("cam1").is_some(),
+        "the kept frame reached the store"
+    );
 }
 
 #[test]
