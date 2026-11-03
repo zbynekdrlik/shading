@@ -81,6 +81,57 @@ impl PreviewSource for BadFirstFrame {
     }
 }
 
+/// A feed whose frames all fail to encode (invalid RGB length), as an odd frame shape would.
+struct BrokenFrames {
+    answers: Vec<bool>,
+}
+
+impl PreviewSource for BrokenFrames {
+    fn name(&self) -> &str {
+        "broken"
+    }
+
+    fn next_frame(
+        &mut self,
+        _timeout: Duration,
+        keep: &mut dyn FnMut() -> bool,
+    ) -> anyhow::Result<Option<RawFrame>> {
+        if self.answers.len() >= 50 {
+            anyhow::bail!("feed ended");
+        }
+        let kept = keep();
+        self.answers.push(kept);
+        if !kept {
+            return Ok(None);
+        }
+        Ok(Some(RawFrame::new(4, 4, vec![0; 5])))
+    }
+}
+
+#[test]
+fn a_frame_that_fails_to_encode_spends_the_slot_3() {
+    // Otherwise a shape that fails on every frame is built and encoded at the full feed rate:
+    // the CPU burn this ticket fixed, back again.
+    let cfg = PreviewConfig {
+        fps: 0.1,
+        ..PreviewConfig::default()
+    };
+    let store = PreviewStore::new();
+    let mut decim = Decimator::new(cfg.fps);
+    let mut feed = BrokenFrames {
+        answers: Vec::new(),
+    };
+
+    run_source("cam1", &mut feed, &cfg, &store, &mut decim);
+
+    assert_eq!(
+        feed.answers.iter().filter(|k| **k).count(),
+        1,
+        "one attempt per slot"
+    );
+    assert!(store.get("cam1").is_none());
+}
+
 #[test]
 fn an_unbuildable_kept_frame_does_not_spend_the_slot_3() {
     let cfg = PreviewConfig {
@@ -231,16 +282,60 @@ fn ndi_preview_bpp_knows_the_supported_fourccs_3() {
 
 #[cfg(feature = "ndi")]
 #[test]
-fn ndi_lost_link_waits_before_it_rebuilds_3() {
-    use bkshading::preview::ndi_source::{lost_rebuilds, LOST_REBUILD_AFTER};
-    const { assert!(LOST_REBUILD_AFTER >= 2) };
-    for n in 1..LOST_REBUILD_AFTER {
-        assert!(
-            !lost_rebuilds(n),
-            "{n} errors in a row: short wait, same receiver"
-        );
-    }
-    assert!(lost_rebuilds(LOST_REBUILD_AFTER));
+fn ndi_lost_link_rebuilds_after_a_window_without_video_3() {
+    use bkshading::preview::ndi_source::{LostLink, LOST_REBUILD_AFTER_MS};
+    let w = LOST_REBUILD_AFTER_MS;
+    let mut link = LostLink::default();
+    // The SDK reports a lost link, then timeouts while it reconnects: Lost, None, Lost, ...
+    // Timeouts do not reset the window, so it still ends in a rebuild.
+    assert!(!link.on_lost(0), "first error: wait and retry");
+    assert!(!link.on_lost(w / 2));
+    assert!(!link.on_lost(w - 1));
+    assert!(link.on_lost(w), "no video for the whole window: rebuild");
+    // A video frame closes the window; the next error starts a new one.
+    let mut link = LostLink::default();
+    assert!(!link.on_lost(0));
+    link.on_video();
+    assert!(
+        !link.on_lost(w + 5),
+        "a new window starts at the next error"
+    );
+    assert!(link.on_lost(2 * w + 5));
+}
+
+#[cfg(feature = "ndi")]
+#[test]
+fn ndi_frame_usable_needs_data_size_stride_and_a_known_fourcc_3() {
+    use bkshading::preview::ndi_source::frame_usable;
+    let cc = |s: &[u8; 4]| u32::from_le_bytes(*s);
+    let bgra = cc(b"BGRA");
+    let uyvy = cc(b"UYVY");
+    assert_eq!(frame_usable(true, 640, 360, 2560, bgra), Some(4));
+    assert_eq!(
+        frame_usable(true, 640, 360, 2600, bgra),
+        Some(4),
+        "padded rows are fine"
+    );
+    assert_eq!(frame_usable(false, 640, 360, 2560, bgra), None, "null data");
+    assert_eq!(frame_usable(true, 0, 360, 2560, bgra), None, "zero width");
+    assert_eq!(frame_usable(true, 640, 0, 2560, bgra), None, "zero height");
+    assert_eq!(
+        frame_usable(true, 640, 360, 2559, bgra),
+        None,
+        "short stride"
+    );
+    assert_eq!(frame_usable(true, 640, 360, 1280, uyvy), Some(2));
+    // UYVY packs two pixels per four bytes: an odd width cannot convert to a valid frame.
+    assert_eq!(
+        frame_usable(true, 641, 360, 1282, uyvy),
+        None,
+        "odd-width UYVY"
+    );
+    assert_eq!(
+        frame_usable(true, 640, 360, 2560, cc(b"NV12")),
+        None,
+        "unknown FourCC"
+    );
 }
 
 #[cfg(feature = "ndi")]
