@@ -193,19 +193,18 @@ fn ndi_finish_capture_frees_every_video_frame_exactly_once_3() {
         (CaptureStep::Nothing, 0, 0),
         (CaptureStep::Lost, 0, 0),
     ] {
-        let (mut b, mut f, mut order) = (0, 0, Vec::new());
+        let order = std::cell::RefCell::new(Vec::new());
         let out = finish_capture(
             step,
             || {
-                b += 1;
-                order.push("build");
+                order.borrow_mut().push("build");
                 7
             },
-            || {
-                f += 1;
-                order.push("free");
-            },
+            || order.borrow_mut().push("free"),
         );
+        let order = order.into_inner();
+        let b = order.iter().filter(|e| **e == "build").count();
+        let f = order.iter().filter(|e| **e == "free").count();
         assert_eq!((b, f), (built, freed), "{step:?}");
         assert_eq!(out.is_some(), built == 1, "{step:?}");
         if step == CaptureStep::Build {
