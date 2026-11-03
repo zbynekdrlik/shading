@@ -424,6 +424,18 @@ pub struct NdiPreviewSource {
 static WARNED_UNUSABLE: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
     std::sync::LazyLock::new(Default::default);
 
+/// The [`WARNED_UNUSABLE`] key of one source's unusable frame shape.
+fn unusable_key(
+    name: &str,
+    fourcc: u32,
+    width: usize,
+    height: usize,
+    stride: usize,
+    has_data: bool,
+) -> String {
+    format!("{name}|{fourcc}|{width}x{height}|{stride}|{has_data}")
+}
+
 /// True the first time this source sends this unusable frame shape.
 fn first_unusable(key: String) -> bool {
     // A poisoned lock only means another preview thread panicked mid-insert; the set is still
@@ -603,7 +615,7 @@ fn capture_frame(
     if frame_type == FRAME_TYPE_VIDEO {
         st.lost.on_video();
         if bpp.is_none() {
-            let key = format!("{}|{fourcc}|{width}x{height}|{stride}|{has_data}", st.name);
+            let key = unusable_key(&st.name, fourcc, width, height, stride, has_data);
             if first_unusable(key) {
                 tracing::warn!(
                     source = %st.name, fourcc, width, height, stride, has_data,

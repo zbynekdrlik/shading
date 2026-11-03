@@ -571,4 +571,17 @@ fn reconnect_cycles_warn_once_per_streak_3() {
         "a stored frame after a warned streak is a recovery"
     );
     assert!(run(never_found).warned);
+
+    // Frames with no failure before them (a fresh gate): not a recovery.
+    let mut fresh = RepeatGate::default();
+    let log = cycle(
+        "cam2",
+        "CAM8",
+        &cfg,
+        &store,
+        found_and_working,
+        &mut Decimator::new(cfg.fps),
+        &mut fresh,
+    );
+    assert!(!log.recovered);
 }

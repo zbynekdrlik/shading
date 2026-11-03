@@ -194,7 +194,17 @@ fn an_unusable_video_frame_also_closes_the_lost_window() {
 
 #[test]
 fn an_unusable_shape_warns_once_per_source() {
-    let key = |src: &str| format!("{src}|0|4x2|4|true");
+    // The source names here are reserved for this test: WARNED_UNUSABLE is process-global.
+    let key = |src: &str| unusable_key(src, 0, 4, 2, 4, true);
+    assert_ne!(
+        key("TEST-A (gate)"),
+        key("TEST-B (gate)"),
+        "the source is part of the key"
+    );
+    assert_ne!(
+        key("TEST-A (gate)"),
+        unusable_key("TEST-A (gate)", 0, 4, 2, 4, false)
+    );
     assert!(first_unusable(key("TEST-A (gate)")));
     assert!(
         !first_unusable(key("TEST-A (gate)")),
