@@ -235,7 +235,7 @@ fn stub_source_yields_a_valid_frame() {
     let mut src = StubSource::new("CAM1 (usb)");
     assert_eq!(src.name(), "CAM1 (usb)");
     let frame = src
-        .next_frame(Duration::from_millis(100), true)
+        .next_frame(Duration::from_millis(100), &mut || true)
         .expect("no source error")
         .expect("a frame");
     assert!(frame.is_valid());

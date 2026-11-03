@@ -112,6 +112,30 @@ pub enum CaptureOutcome {
     Other(i32),
 }
 
+/// What the source does with one capture return (shading#3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureStep {
+    /// A video frame the worker keeps: copy, convert, then free.
+    Build,
+    /// A video frame the worker drops: free it untouched.
+    Free,
+    /// No frame (timeout or an event): nothing to free.
+    Nothing,
+    /// The connection was lost: fail, so the worker rebuilds the source.
+    Lost,
+}
+
+/// Decide the [`CaptureStep`] for a raw frame type. `keep` is asked only for a video frame, so a
+/// timeout or an event never spends a decimation slot. Pure apart from `keep`.
+pub fn capture_step(frame_type: i32, keep: &mut dyn FnMut() -> bool) -> CaptureStep {
+    match capture_outcome(frame_type) {
+        CaptureOutcome::Video if keep() => CaptureStep::Build,
+        CaptureOutcome::Video => CaptureStep::Free,
+        CaptureOutcome::Timeout | CaptureOutcome::Other(_) => CaptureStep::Nothing,
+        CaptureOutcome::Lost => CaptureStep::Lost,
+    }
+}
+
 /// Map a raw NDI frame type to its [`CaptureOutcome`]. Pure.
 pub fn capture_outcome(frame_type: i32) -> CaptureOutcome {
     match frame_type {
@@ -348,7 +372,11 @@ impl PreviewSource for NdiPreviewSource {
         &self.name
     }
 
-    fn next_frame(&mut self, timeout: Duration, want: bool) -> Result<Option<RawFrame>> {
+    fn next_frame(
+        &mut self,
+        timeout: Duration,
+        keep: &mut dyn FnMut() -> bool,
+    ) -> Result<Option<RawFrame>> {
         let timeout_ms = timeout.as_millis().min(u32::MAX as u128) as u32;
         let mut vf: NDIlibVideoFrameV2RecvT = unsafe { std::mem::zeroed() };
         let frame_type = unsafe {
@@ -360,19 +388,20 @@ impl PreviewSource for NdiPreviewSource {
                 timeout_ms,
             )
         };
-        match capture_outcome(frame_type) {
-            CaptureOutcome::Video => {}
-            CaptureOutcome::Timeout => return Ok(None),
-            CaptureOutcome::Lost => anyhow::bail!("NDI connection to '{}' lost", self.name),
-            CaptureOutcome::Other(kind) => {
-                tracing::debug!(source = %self.name, frame_type = kind, "NDI non-video frame");
+        match capture_step(frame_type, keep) {
+            CaptureStep::Build => {}
+            CaptureStep::Free => {
+                // The worker drops this frame (decimation): free it untouched, no copy, no convert.
+                unsafe { (self.lib.recv_free_video_v2)(self.receiver, &vf) };
                 return Ok(None);
             }
-        }
-        if !want {
-            // The worker drops this frame (decimation): free it untouched, no copy, no convert.
-            unsafe { (self.lib.recv_free_video_v2)(self.receiver, &vf) };
-            return Ok(None);
+            CaptureStep::Nothing => {
+                if frame_type != FRAME_TYPE_NONE {
+                    tracing::debug!(source = %self.name, frame_type, "NDI non-video frame");
+                }
+                return Ok(None);
+            }
+            CaptureStep::Lost => anyhow::bail!("NDI connection to '{}' lost", self.name),
         }
 
         let width = vf.xres.max(0) as usize;
