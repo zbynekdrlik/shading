@@ -55,8 +55,12 @@ fn run_forever(
     loop {
         match build(source_name) {
             Ok(mut src) => {
-                tracing::debug!(cam = %cam_id, source = %source_name, "preview source connected");
-                let end = run_source(cam_id, src.as_mut(), cfg, store, &mut decim);
+                if trouble.in_streak() {
+                    tracing::info!(cam = %cam_id, source = %source_name, "preview source connected again");
+                } else {
+                    tracing::debug!(cam = %cam_id, source = %source_name, "preview source connected");
+                }
+                let end = run_source(cam_id, src.as_mut(), cfg, store, &mut decim, &mut trouble);
                 if end.stored {
                     tracing::info!(cam = %cam_id, source = %source_name, "preview source delivered frames, then ended");
                     trouble.clear();
@@ -80,26 +84,27 @@ fn run_forever(
     }
 }
 
-/// Lets each distinct error text through once, so a failure that repeats at a fixed rate logs
-/// a warning once and the repeats at debug (shading#3).
+/// Lets each distinct error text through once per failure streak, so a failure that repeats
+/// at a fixed rate, or two that alternate, warn once and the repeats log at debug (shading#3).
 #[derive(Debug, Default)]
 pub struct RepeatGate {
-    last: Option<String>,
+    seen: std::collections::HashSet<String>,
 }
 
 impl RepeatGate {
-    /// True the first time `text` follows a different error (or none): worth a warning.
+    /// True the first time `text` appears in this streak: worth a warning.
     pub fn first(&mut self, text: &str) -> bool {
-        if self.last.as_deref() == Some(text) {
-            return false;
-        }
-        self.last = Some(text.to_string());
-        true
+        self.seen.insert(text.to_string())
+    }
+
+    /// Has anything failed since the last [`Self::clear`]?
+    pub fn in_streak(&self) -> bool {
+        !self.seen.is_empty()
     }
 
     /// Something worked: the next error starts a new streak.
     pub fn clear(&mut self) {
-        self.last = None;
+        self.seen.clear();
     }
 }
 
@@ -112,13 +117,15 @@ pub struct SessionEnd {
     pub stored: bool,
 }
 
-/// Drive one connected source into the store until it fails. Public for the worker tests.
+/// Drive one connected source into the store until it fails. `trouble` is the camera's
+/// warning gate, shared across reconnects: a stored frame clears it. Public for the worker tests.
 pub fn run_source(
     cam_id: &str,
     src: &mut dyn PreviewSource,
     cfg: &PreviewConfig,
     store: &PreviewStore,
     decim: &mut Decimator,
+    trouble: &mut RepeatGate,
 ) -> SessionEnd {
     let timeout = cfg.capture_timeout();
     // Decimation runs on a MONOTONIC clock (immune to a wall-clock / NTP backward step, which
@@ -128,7 +135,6 @@ pub fn run_source(
     // This connection's clock starts at 0: a slot stamped on the previous connection's clock
     // would freeze the preview for as long as that one ran (shading#3).
     decim.reset();
-    let mut encode_errors = RepeatGate::default();
     let mut stored = false;
     loop {
         // The source asks at frame arrival, so a frame the decimator drops is never built
@@ -147,13 +153,13 @@ pub fn run_source(
                     Ok(jpeg) => {
                         store.put(cam_id, jpeg, wall_clock_ms());
                         stored = true;
-                        encode_errors.clear();
+                        trouble.clear();
                     }
                     Err(e) => {
                         // Once per distinct error: a frame shape that fails every time must not
                         // log at the feed rate.
                         let text = format!("{e:#}");
-                        if encode_errors.first(&text) {
+                        if trouble.first(&text) {
                             tracing::warn!(cam = %cam_id, error = %text, "preview jpeg encode failed");
                         }
                     }

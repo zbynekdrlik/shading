@@ -419,9 +419,19 @@ pub struct NdiPreviewSource {
     /// The lost-link window (shading#3), timed from `opened`.
     lost: LostLink,
     opened: std::time::Instant,
-    /// An unusable frame was already logged; reset by the next usable one, so a 60 fps feed of
-    /// bad frames logs once.
-    warned_unusable: bool,
+}
+
+/// Unusable frame shapes already warned about, per source, for the life of the process: a
+/// 60 fps feed of bad frames, reconnecting or not, warns once per shape (shading#3).
+static WARNED_UNUSABLE: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// True the first time this source sends this unusable frame shape.
+fn first_unusable(key: String) -> bool {
+    // A poisoned lock only means another preview thread panicked mid-insert; the set is still
+    // a valid set, so keep using it.
+    let mut seen = WARNED_UNUSABLE.lock().unwrap_or_else(|e| e.into_inner());
+    seen.insert(key)
 }
 
 // SAFETY: the receiver handle is only touched from the single worker thread that owns it, and
@@ -496,7 +506,6 @@ impl NdiPreviewSource {
             name: source_name.to_string(),
             lost: LostLink::default(),
             opened: std::time::Instant::now(),
-            warned_unusable: false,
         })
     }
 }
@@ -529,16 +538,18 @@ impl PreviewSource for NdiPreviewSource {
         let bpp = frame_usable(!vf.p_data.is_null(), width, height, stride, fourcc);
         if frame_type == FRAME_TYPE_VIDEO {
             self.lost.on_video();
-            match bpp {
-                Some(_) => self.warned_unusable = false,
-                None if !self.warned_unusable => {
+            if bpp.is_none() {
+                let has_data = !vf.p_data.is_null();
+                let key = format!(
+                    "{}|{fourcc}|{width}x{height}|{stride}|{has_data}",
+                    self.name
+                );
+                if first_unusable(key) {
                     tracing::warn!(
-                        source = %self.name, fourcc, width, height, stride,
+                        source = %self.name, fourcc, width, height, stride, has_data,
                         "NDI preview frame unusable (unknown FourCC, odd-width UYVY, no data or short stride); skipping"
                     );
-                    self.warned_unusable = true;
                 }
-                None => {}
             }
         }
 
@@ -551,7 +562,9 @@ impl PreviewSource for NdiPreviewSource {
                         "NDI connection to '{}' lost for {LOST_REBUILD_AFTER_MS} ms",
                         self.name
                     ),
-                    LostStep::Opened => tracing::warn!(
+                    // debug: if it does not come back, the rebuild error reaches the worker's
+                    // warning gate, which warns once per streak, not once per reconnect.
+                    LostStep::Opened => tracing::debug!(
                         source = %self.name,
                         "NDI connection lost; waiting up to {LOST_REBUILD_AFTER_MS} ms for it to come back"
                     ),
