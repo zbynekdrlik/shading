@@ -295,7 +295,7 @@ function stepEnum(el, id, cfg, dir) {
 
 // issue 1304: step a linear slider (kelvin by KELVIN_STEP K, tint by TINT_STEP) by `amount`,
 // clamped to the slider's own min/max, sending the ABSOLUTE new value. One tap = one PUT, no
-// auto-repeat on hold (the issue-1229 USB-PTP bus doctrine: one write = one gphoto2 session).
+// auto-repeat on hold (the issue-1229 shared-bus doctrine: one tap = one camera write).
 function stepLinear(el, id, role, key, amount, dir) {
   const s = el.querySelector(`[data-role="${role}"]`);
   const min = Number(s.min);

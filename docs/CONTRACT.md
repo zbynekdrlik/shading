@@ -48,21 +48,97 @@ floor camera-box's own CI builds had. A box with an older glibc cannot run them.
   - `CAMERA_BOX_CAPTURE_FPS` — the box's grab rate, reported to the service.
   - `BKSHADING_RELAY_MIN_READ_INTERVAL_MS` — tunes the camera read floor (default 10 000 ms; it
     can never be switched off).
-- **gphoto2 keys.** The relay drives the camera through the `gphoto2` CLI with these key names,
-  and camera-box's E2E test-camera step uses the same names directly while the relay is stopped.
-  Names and raw gphoto2 values stay byte-stable:
+  - `BKSHADING_CAMERA` — optional fixed camera address `host[:port]` (`--camera`); unset = find
+    the camera on its `cdc_ncm` link (below).
+- **Camera transport (since v0.2.0, shading#6 — breaking).** The relay no longer uses `gphoto2`
+  or PTP. It drives the camera through the official Blackmagic REST API, over the camera's own
+  USB-C network link (CDC-NCM, Camera OS 9.x), with no authentication:
+  `http://<camera>:80/control/api/v1/<endpoint>`.
+  - `gphoto2` is no longer a runtime dependency of the relay, and the `--gphoto2` flag is gone. A
+    unit that passes it fails to start; camera-box's unit does not pass it.
+  - **Finding the camera.** By default the relay looks at every network interface whose kernel
+    driver is `cdc_ncm` (the kernel names it `enx<mac>`). It takes the DHCP server address from
+    systemd-networkd's lease `/run/systemd/netif/leases/<ifindex>` (`SERVER_ADDRESS`, else
+    `ROUTER`). The camera is that DHCP server: it hands the box one address of a /30 (cam5:
+    camera `172.25.77.161`, box `.162`). The relay confirms the address with `GET system/product`.
+  - **Override.** `BKSHADING_CAMERA=<host[:port]>` (or `--camera`) skips discovery and uses that
+    address.
+- **The camera link — camera-box installs this `.network` file** on every box that runs the relay
+  (camboxes and the handheld SBC). It must be on the box and `systemd-networkd` enabled for
+  discovery to work. The link comes up DOWN and NetworkManager leaves it unmanaged; networkd
+  brings it up. Leases live in `/run`, so the read-only root is fine.
+  - DHCP only: no default route, no DNS, no NTP, nothing else from the camera, and the box never
+    waits for the link at boot.
+  - The `05-` prefix sorts it before netplan's `10-netplan-*` files. No other netplan, networkd or
+    NetworkManager match on `enx*` may claim this link (camera-box's issue-1155 netplan trap).
 
-| Key | Meaning | camera-box E2E |
-|---|---|---|
-| `iso` | ISO | read + set |
-| `d002` | shutter angle × 100 | read + set |
-| `d004` | white balance, Kelvin | read + set |
-| `f-number` | aperture | read + set (optional) |
-| `d005` | tint | read + set (optional) |
-| `d006` | project fps × 100 | read only |
-| `d007` | off-speed fps | never read |
-| `d003` | manual focus distance (relay reads it best-effort) | — |
+```ini
+# /etc/systemd/network/05-bkshading-camera.network
+# shading#6: the Blackmagic camera's USB-C network link (CDC-NCM). The camera is the DHCP server
+# of a /30; the bkshading relay reads its address from this link's lease.
+[Match]
+Driver=cdc_ncm
 
+[Link]
+RequiredForOnline=no
+
+[Network]
+DHCP=ipv4
+LinkLocalAddressing=no
+IPv6AcceptRA=no
+
+[DHCPv4]
+UseRoutes=no
+UseGateway=no
+UseDNS=no
+UseNTP=no
+UseHostname=no
+UseDomains=no
+```
+
+- **REST endpoints.** The relay uses these endpoints, and camera-box's E2E test-camera step should
+  read and set the camera through the same ones while the relay is stopped; the gphoto2 keys are
+  gone. Field names are Blackmagic's (`RESTAPIforBlackmagicCameras.pdf`).
+
+| Endpoint | JSON | Relay use | Was (gphoto2) |
+|---|---|---|---|
+| `system/product` | `{deviceName, productName, softwareVersion}` | read: proves a camera answers; `productName` is the reported model | `--auto-detect` |
+| `video/iso` | `{iso}` | read + set | `iso` |
+| `video/supportedISOs` | `{supportedISOs: [int]}` | read (the ISO choices) | `iso` choices |
+| `video/shutter` | `{shutterSpeed}` (1/N s) or `{shutterAngle}` (degrees × 100) | read + set, in the unit the camera reports | `d002` (angle × 100) |
+| `video/supportedShutters` | `{shutterSpeeds}` or `{shutterAngles}` | read (the shutter choices) | — |
+| `video/whiteBalance` | `{whiteBalance}` (Kelvin) | read + set | `d004` |
+| `video/whiteBalance/description` | `{whiteBalance: {min, max}}` | read (the Kelvin range) | `d004` range |
+| `video/whiteBalance/doAuto` | no body | set (`autoWb: true`) | — |
+| `video/whiteBalanceTint` | `{whiteBalanceTint}` | read + set | `d005` |
+| `lens/iris` | `{apertureStop, normalised, apertureNumber, continuousApertureAutoExposure}` | read + set, **set `apertureStop` only** (the other two answer 204 and do not move the iris, live on cam5) | `f-number` / `0x5007` |
+| `lens/iris/description` | `{controllable, apertureStop: {min, max}}` | read (the aperture grid's ends) | `f-number` choices |
+| `lens/focus` | `{normalised}` | read only | `d003` |
+| `system/format` | `{codec, frameRate, offSpeedFrameRate, min/maxOffSpeedFrameRate, recordResolution, …}` | read; set `{frameRate}` | `d006` / `d007` |
+| `system/supportedFormats` | `{supportedFormats: [{codecs, frameRates, recordResolution}]}` | read (the settable frame rates) | `d006` choices |
+
+- **What changes for a reader of `GET /api/state`:**
+  - `params.focusDistance` (the raw PTP `d003`) is always `null` now. The focus position is the
+    new `params.focusNorm` (`lens/focus normalised`, 0..1, read only).
+    - camera-box's issue-1238 preflight prints its `d003=` line only when `focusDistance` is
+      present, so it prints nothing until it reads `focusNorm` instead.
+  - `caps.fNumberChoices` is the nominal 1/3-stop grid between the lens's min and max f-number,
+    which come from `lens/iris/description`.
+  - The camera snaps a write to the lens's own step. `params.apertureAv` is the true displayed
+    f-stop.
+  - `caps.fpsChoices` are the frame rates the camera lists for its current codec and resolution,
+    × 100 (`"23.98"` = 2398).
+  - `params.sensorFps100` is the off-speed rate (`offSpeedFrameRate` × 100).
+  - `camera` is the product name (`Blackmagic Pocket Cinema Camera 4K`). It was the gphoto2
+    `--auto-detect` model.
+- **What changes for a writer of `PUT /api/params`:** the request shape is unchanged.
+  - The answer is now the state read back from the camera after the write (after ~1 s when the
+    iris was written), not a projection.
+  - `fps` is accepted only for a rate in `caps.fpsChoices`; any other value answers 422
+    `fps-not-settable`.
+  - `autoWb: true` now runs the camera's auto white balance.
+  - A camera that refuses a write (e.g. 403 while auto exposure owns the iris) answers 502 with
+    the camera's own status and text.
 - **Read-only root.** The relay writes nothing to disk at runtime, so it runs on a read-only root.
   The deploy procedure stays camera-box's (`scripts/bkshading-deploy-relay.sh`): rig-busy gated,
   stop a running relay before the swap, stage then atomic `mv`, close the root read-only through
