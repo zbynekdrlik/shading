@@ -354,7 +354,44 @@ fn the_product_names_the_camera_6() {
 fn unknown_fields_and_missing_ones_still_decode_6() {
     let iris: rest::Iris = de(r#"{"apertureStop":2.8,"somethingNew":1}"#);
     assert_eq!(iris.aperture_stop, Some(2.8));
-    assert_eq!(iris.normalised, None);
     let fmt: Format = de("{}");
     assert_eq!(fmt, Format::default());
+}
+
+#[test]
+fn an_aperture_step_skips_the_nominal_value_the_lens_would_snap_back_from_6() {
+    use bkshading_proto::mapping::aperture_step;
+    let g = fnumber_grid(Some(4.4), Some(22.0)); // 4.4 5.0 5.6 6.3 7.1 8 9 10 ...
+    let at = |f: f64| g.iter().position(|c| *c == f).unwrap();
+    // A lens on 4.9 (its own step): "+" to the nominal 5.0 would land back on 4.9, so 5.6.
+    assert_eq!(aperture_step(4.9, &g, 1), Some(at(5.6)));
+    // A lens on 7.3: "-" to 7.1 would land back on 7.3, so 6.3; "+" is 8.0 (1/4 stop away).
+    assert_eq!(aperture_step(7.3, &g, -1), Some(at(6.3)));
+    assert_eq!(aperture_step(7.3, &g, 1), Some(at(8.0)));
+    // On a nominal value it is a plain one-step move.
+    assert_eq!(aperture_step(5.6, &g, 1), Some(at(6.3)));
+    assert_eq!(aperture_step(5.6, &g, -1), Some(at(5.0)));
+    // The ends clamp (the panel disables the button there); an empty grid is None.
+    assert_eq!(aperture_step(22.0, &g, 1), Some(g.len() - 1));
+    assert_eq!(aperture_step(21.0, &g, 1), Some(g.len() - 1));
+    assert_eq!(aperture_step(4.4, &g, -1), Some(0));
+    assert_eq!(
+        aperture_step(4.0, &g, 1),
+        Some(0),
+        "below the grid: + goes onto it"
+    );
+    assert_eq!(aperture_step(5.0, &[], 1), None);
+    assert_eq!(aperture_step(5.0, &[5.6], -1), Some(0));
+}
+
+#[test]
+fn integer_fields_accept_a_float_the_camera_might_send_6() {
+    let iso: rest::Iso = de(r#"{"iso":400.0}"#);
+    assert_eq!(iso.iso, Some(400));
+    let isos: rest::SupportedIsos = de(r#"{"supportedISOs":[100,200.0]}"#);
+    assert_eq!(isos.supported_isos, vec![100, 200]);
+    let fmt: Format = de(r#"{"recordResolution":{"width":3840.0,"height":2160}}"#);
+    assert_eq!(fmt.record_resolution.unwrap().width, Some(3840));
+    let wb: rest::WhiteBalanceDescription = de(r#"{"whiteBalance":{"min":2500.4,"max":1e4}}"#);
+    assert_eq!(wb.white_balance.unwrap().max, Some(10000));
 }

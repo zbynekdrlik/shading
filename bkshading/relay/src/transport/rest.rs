@@ -45,10 +45,15 @@ impl fmt::Display for CameraAddr {
 }
 
 /// Parses `host`, `host:port` or `http://host[:port][/]` (the `--camera` flag). Only plain
-/// `http`; the host is an IPv4 address or a DNS name.
+/// `http`. Give an IPv4 address: a DNS name works, but its lookup runs outside the request deadline
+/// (std has no bounded resolver) and only its first address is tried.
 pub fn parse_camera_addr(raw: &str) -> Result<CameraAddr, String> {
     let t = raw.trim();
-    let rest = t.strip_prefix("http://").unwrap_or(t).trim_end_matches('/');
+    let rest = match t.get(..7) {
+        Some(scheme) if scheme.eq_ignore_ascii_case("http://") => &t[7..],
+        _ => t,
+    }
+    .trim_end_matches('/');
     if rest.contains("://") || rest.contains('/') {
         return Err(format!(
             "camera address must be host[:port] or http://host[:port] (got {raw:?})"
@@ -165,6 +170,11 @@ pub fn decode_chunked(mut data: &[u8]) -> Result<Option<Vec<u8>>, String> {
         if size == 0 {
             return Ok(Some(out));
         }
+        if size > MAX_RESPONSE_BYTES {
+            return Err(format!(
+                "chunk of {size} bytes is over the {MAX_RESPONSE_BYTES}-byte cap"
+            ));
+        }
         if data.len() < size + 2 {
             return Ok(None);
         }
@@ -187,6 +197,15 @@ pub fn parse_response(raw: &[u8], eof: bool) -> Result<Option<HttpResponse>, Str
         };
     };
     let head = String::from_utf8_lossy(&raw[..end]);
+    // An interim 1xx answer (100 Continue) is followed by the real one: parse what comes after it.
+    if head.starts_with("HTTP/1.")
+        && head
+            .split_whitespace()
+            .nth(1)
+            .is_some_and(|c| c.starts_with('1') && c.len() == 3)
+    {
+        return parse_response(&raw[end..], eof);
+    }
     let status = {
         let line = head.lines().next().unwrap_or("");
         let mut parts = line.split_whitespace();
@@ -223,7 +242,7 @@ pub fn parse_response(raw: &[u8], eof: bool) -> Result<Option<HttpResponse>, Str
             };
         }
         body[..len].to_vec()
-    } else if status == 204 || status == 304 || (100..200).contains(&status) {
+    } else if status == 204 || status == 304 {
         Vec::new()
     } else if eof {
         body.to_vec()

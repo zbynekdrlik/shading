@@ -57,9 +57,11 @@ floor camera-box's own CI builds had. A box with an older glibc cannot run them.
   - `gphoto2` is no longer a runtime dependency of the relay, and the `--gphoto2` flag is gone. A
     unit that passes it fails to start; camera-box's unit does not pass it.
   - **Finding the camera.** By default the relay looks at every network interface whose kernel
-    driver is `cdc_ncm` (the kernel names it `enx<mac>`). It takes the DHCP server address from
-    systemd-networkd's lease `/run/systemd/netif/leases/<ifindex>` (`SERVER_ADDRESS`, else
-    `ROUTER`). The camera is that DHCP server: it hands the box one address of a /30 (cam5:
+    driver is `cdc_ncm` (the kernel names it `enx<mac>`) on a Blackmagic USB device (vendor id
+    `1edb`; a 2.5G dongle or a tethered phone on the same driver is skipped). It takes the DHCP
+    server address from systemd-networkd's lease `/run/systemd/netif/leases/<ifindex>`
+    (`SERVER_ADDRESS`, else `ROUTER`). Without a lease file it falls back to the other host of the
+    link's own /30 (`ip -4 -o addr show dev <iface>`). The camera is that DHCP server: it hands the box one address of a /30 (cam5:
     camera `172.25.77.161`, box `.162`). The relay confirms the address with `GET system/product`.
   - **Override.** `BKSHADING_CAMERA=<host[:port]>` (or `--camera`) skips discovery and uses that
     address.
@@ -71,6 +73,8 @@ floor camera-box's own CI builds had. A box with an older glibc cannot run them.
     waits for the link at boot.
   - The `05-` prefix sorts it before netplan's `10-netplan-*` files. No other netplan, networkd or
     NetworkManager match on `enx*` may claim this link (camera-box's issue-1155 netplan trap).
+  - It matches the driver AND Blackmagic's USB vendor id. A `Driver=cdc_ncm` match alone would
+    also claim a cdc_ncm uplink (an RTL8156 2.5G dongle, a dock) and strip its route and DNS.
 
 ```ini
 # /etc/systemd/network/05-bkshading-camera.network
@@ -78,6 +82,7 @@ floor camera-box's own CI builds had. A box with an older glibc cannot run them.
 # of a /30; the bkshading relay reads its address from this link's lease.
 [Match]
 Driver=cdc_ncm
+Property=ID_VENDOR_ID=1edb
 
 [Link]
 RequiredForOnline=no
@@ -131,6 +136,16 @@ UseDomains=no
   - `params.sensorFps100` is the off-speed rate (`offSpeedFrameRate` × 100).
   - `camera` is the product name (`Blackmagic Pocket Cinema Camera 4K`). It was the gphoto2
     `--auto-detect` model.
+- **Verified live vs. from the manual.** Only `system/product`, `lens/iris` GET and PUT
+  `{apertureStop}`, `lens/zoom` and `lens/focus` were read on a camera (SNV cam5, Pocket 4K,
+  fw 9.8). The following come from Blackmagic's manual and are UNVERIFIED on a camera until the
+  first live run:
+  - the `PUT system/format` body with `frameRate` alone;
+  - `doAuto` (its read-back may still show the Kelvin from before auto WB finished);
+  - `PUT video/shutter`;
+  - the `supportedFormats` / `supportedShutters` shapes;
+  - systemd-networkd's lease path on the box;
+  - the `Property=ID_VENDOR_ID` match (`1edb` itself was read live).
 - **What changes for a writer of `PUT /api/params`:** the request shape is unchanged.
   - The answer is now the state read back from the camera after the write (after ~1 s when the
     iris was written), not a projection.

@@ -478,6 +478,14 @@ impl SetQueue {
         }
     }
 
+    /// The next queued SET, FIFO, WITHOUT ending the flight when the queue is empty (shading#6): the
+    /// relay pops with this while it writes, keeps the gate shut through its read-back, and only
+    /// then calls [`SetQueue::finish`] — so a SET that arrives during the read-back queues instead
+    /// of starting a second drain whose writes would land inside the first one's read-back.
+    pub fn pop_pending(&mut self) -> Option<SetRequest> {
+        self.pending.pop_front()
+    }
+
     /// Called on a write error (or an unwind guard): drop the in-flight state AND the WHOLE queued
     /// FIFO (writes planned against a now-uncertain camera must not run blind), returning every
     /// dropped follow-up so the caller can log the loss — those SETs were already acknowledged to

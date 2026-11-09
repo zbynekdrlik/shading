@@ -30,7 +30,10 @@ pub mod discover;
 mod reads;
 pub mod rest;
 
-pub use discover::{camera_links, parse_lease, CameraLink, DiscoverPaths, CAMERA_LINK_DRIVER};
+pub use discover::{
+    camera_links, parse_inet, parse_lease, peer_of, CameraLink, DiscoverPaths,
+    BLACKMAGIC_USB_VENDOR, CAMERA_LINK_DRIVER,
+};
 pub use reads::{
     parse_capture_fps_env, parse_min_read_interval_env, read_is_fresh, InstantClock, MonoClock,
     DEFAULT_MIN_READ_INTERVAL_MS, MAX_MIN_READ_INTERVAL_MS,
@@ -131,9 +134,11 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// One cached read (issue 1229): the state and when it was read.
+/// One cached read (issue 1229): the state, the write basis it gave (when the camera answered) and
+/// when it was read. A write inside the read floor plans on this basis instead of reading again.
 struct CachedRead {
     state: RelayState,
+    basis: Option<WriteBasis>,
     read_at_ms: u64,
 }
 
@@ -357,16 +362,49 @@ impl CameraSession {
         self.note_online_transition(&reading.state);
         *cache = Some(CachedRead {
             state: reading.state.clone(),
+            basis: reading.basis,
             read_at_ms: now_ms,
         });
         reading.state
     }
 
+    /// What a write plans on, and the camera it goes to: the cached read's basis while it is inside
+    /// the read floor (no extra camera traffic per click), else one real read, which also refreshes
+    /// the cache. `None` = the camera is offline.
+    fn write_basis(&self) -> Option<(WriteBasis, Link)> {
+        let mut cache = lock(&self.read_cache);
+        let now_ms = self.clock.now_ms();
+        let cached = cache
+            .as_ref()
+            .filter(|c| read_is_fresh(Some(c.read_at_ms), now_ms, self.min_read_interval_ms))
+            .and_then(|c| c.basis.clone());
+        let basis = match cached {
+            Some(b) => {
+                tracing::debug!("write planned on the cached read (inside the read floor)");
+                b
+            }
+            None => {
+                let reading = self.read_now();
+                self.note_online_transition(&reading.state);
+                *cache = Some(CachedRead {
+                    state: reading.state,
+                    basis: reading.basis.clone(),
+                    read_at_ms: now_ms,
+                });
+                reading.basis?
+            }
+        };
+        drop(cache);
+        let link = lock(&self.link).clone()?;
+        Some((basis, link))
+    }
+
     /// Submits a shading write through the single-flight FIFO gate (issue 1309/1337) — the entry
-    /// point of `PUT /api/params`. With no write in flight this call reads the camera once (the
-    /// write basis), writes this SET and every SET that queues behind it IN ORDER, then reads the
-    /// camera back (after [`APERTURE_READBACK_DELAY_MS`] when the iris was written) and returns that
-    /// state with `notApplied` filled. With a write in flight the SET is queued and `Queued`
+    /// point of `PUT /api/params`. With no write in flight this call plans on the cached read (one
+    /// real read when it is older than the floor), writes this SET and every SET that queues behind
+    /// it IN ORDER, then reads the camera back (after [`APERTURE_READBACK_DELAY_MS`] when the iris
+    /// was written) and returns that state with `notApplied` filled. The gate stays shut through
+    /// the read-back; a SET that arrived during it is written in a further round. With a write in flight the SET is queued and `Queued`
     /// returned at once.
     pub fn submit(&self, req: &SetRequest) -> Result<ApplyOutcome> {
         let mut current = match lock(&self.set_queue).submit(req.clone()) {
@@ -383,50 +421,68 @@ impl CameraSession {
             queue: &self.set_queue,
             armed: true,
         };
-        let opened = self.read_now();
-        let (Some(mut basis), Some(link)) = (opened.basis, lock(&self.link).clone()) else {
+        let Some((mut basis, link)) = self.write_basis() else {
             guard.disarm_and_abort("the camera is offline");
             *lock(&self.read_cache) = None;
             anyhow::bail!("camera offline: no camera answers its REST API, nothing written");
         };
-        let before_stop = basis.aperture_stop;
+        let mut before_stop = basis.aperture_stop;
         let mut log = DrainLog::default();
+        let mut count = 0usize;
         let mut own_refusal: Option<anyhow::Error> = None;
         let mut own_set = true;
-        loop {
-            match self.apply_one(&link, &mut basis, &current, &mut log) {
-                Ok(()) => {}
-                Err(e) if e.is::<FpsNotSettable>() => {
-                    // The CLIENT's error, decided before any write: the camera is untouched, so the
-                    // queued follow-ups (other clients' SETs, already acknowledged) still run.
-                    if own_set {
-                        own_refusal = Some(e);
+        let state = loop {
+            // Write every queued SET, in order. The gate stays shut through the read-back below, so
+            // a SET arriving meanwhile queues instead of writing inside this drain's read-back.
+            loop {
+                match self.apply_one(&link, &mut basis, &current, &mut log) {
+                    Ok(()) => {}
+                    Err(e) if e.is::<FpsNotSettable>() => {
+                        // The CLIENT's error, decided before any write: the camera is untouched,
+                        // so the queued follow-ups (other clients' SETs, already acknowledged) run.
+                        if own_set {
+                            own_refusal = Some(e);
+                        }
+                    }
+                    Err(e) => {
+                        guard.disarm_and_abort("a camera write failed");
+                        *lock(&self.read_cache) = None;
+                        return Err(e);
                     }
                 }
-                Err(e) => {
-                    guard.disarm_and_abort("a camera write failed");
-                    *lock(&self.read_cache) = None;
-                    return Err(e);
+                own_set = false;
+                match lock(&self.set_queue).pop_pending() {
+                    Some(next) => {
+                        tracing::info!(set = %summarize_set_request(&next), "draining queued shading SET (FIFO, in order)");
+                        current = next;
+                    }
+                    None => break,
                 }
             }
-            own_set = false;
+            let (state, read_basis) = self.read_back(&log, before_stop);
+            count += log.count;
             match lock(&self.set_queue).finish() {
                 Some(next) => {
-                    tracing::info!(set = %summarize_set_request(&next), "draining queued shading SET (FIFO, in order)");
+                    // A SET arrived during the read-back: another round, planned on what was read.
+                    tracing::info!(set = %summarize_set_request(&next), "shading SET arrived during the read-back; writing it next");
                     current = next;
+                    if let Some(b) = read_basis {
+                        basis = b;
+                    }
+                    before_stop = basis.aperture_stop;
+                    log = DrainLog::default();
                 }
                 None => {
                     guard.armed = false;
-                    break;
+                    break state;
                 }
             }
-        }
-        let state = self.read_back(&log, before_stop);
+        };
         if let Some(refused) = own_refusal {
             return Err(refused);
         }
         Ok(ApplyOutcome::Applied {
-            count: log.count,
+            count,
             state: Box::new(state),
         })
     }
@@ -453,8 +509,12 @@ impl CameraSession {
                 if matches!(e, RestError::Transport(_)) {
                     self.forget_link("a write got no answer");
                 }
+                let what = match e {
+                    RestError::Transport(_) => "did not answer",
+                    _ => "refused",
+                };
                 anyhow::bail!(
-                    "camera {} refused PUT {}{} {}: {e}",
+                    "camera {} {what} PUT {}{} {}: {e}",
                     link.client.addr,
                     bkshading_proto::rest::API_PREFIX,
                     w.path(),
@@ -481,12 +541,17 @@ impl CameraSession {
     }
 
     /// The authoritative read after a drain: it replaces the cache and carries `notApplied`.
-    fn read_back(&self, log: &DrainLog, before_stop: Option<f64>) -> RelayState {
+    fn read_back(
+        &self,
+        log: &DrainLog,
+        before_stop: Option<f64>,
+    ) -> (RelayState, Option<WriteBasis>) {
         if log.aperture_written && self.aperture_readback_delay_ms > 0 {
             std::thread::sleep(Duration::from_millis(self.aperture_readback_delay_ms));
         }
         let mut cache = lock(&self.read_cache);
-        let mut state = self.read_now().state;
+        let reading = self.read_now();
+        let mut state = reading.state;
         self.note_online_transition(&state);
         if state.online {
             let grid: Vec<f64> = state
@@ -514,9 +579,10 @@ impl CameraSession {
         }
         *cache = Some(CachedRead {
             state: state.clone(),
+            basis: reading.basis.clone(),
             read_at_ms: self.clock.now_ms(),
         });
-        state
+        (state, reading.basis)
     }
 }
 

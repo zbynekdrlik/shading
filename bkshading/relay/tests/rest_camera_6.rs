@@ -17,8 +17,8 @@ use bkshading_relay::transport::rest::{
     build_request, decode_chunked, parse_response, write_body, HttpResponse,
 };
 use bkshading_relay::transport::{
-    camera_links, parse_camera_addr, parse_capture_fps_env, parse_lease,
-    parse_min_read_interval_env, read_is_fresh, ApplyOutcome, CameraAddr, CameraLocator,
+    camera_links, parse_camera_addr, parse_capture_fps_env, parse_inet, parse_lease,
+    parse_min_read_interval_env, peer_of, read_is_fresh, ApplyOutcome, CameraAddr, CameraLocator,
     CameraSession, DiscoverPaths, MonoClock, CAMERA_HTTP_PORT,
 };
 use serde_json::json;
@@ -44,6 +44,19 @@ struct FakeClock(Arc<AtomicU64>);
 impl MonoClock for FakeClock {
     fn now_ms(&self) -> u64 {
         self.0.load(Ordering::SeqCst)
+    }
+}
+
+/// Waits (bounded) until the fake camera has received a PUT on `path` — a sync point instead of a
+/// guessed sleep, so a loaded CI runner cannot reorder the test's threads.
+fn wait_for_put(cam: &FakeCamera, path: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !cam.puts().iter().any(|(p, _)| p == path) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no PUT {path} within 10 s"
+        );
+        std::thread::sleep(Duration::from_millis(5));
     }
 }
 
@@ -397,7 +410,7 @@ fn a_shutter_angle_camera_gets_its_exact_angle_back_6() {
 fn sets_that_arrive_during_a_write_queue_and_run_in_order_1337() {
     let mut c = Cam::default();
     c.put_delay
-        .insert("/video/iso".into(), Duration::from_millis(400));
+        .insert("/video/iso".into(), Duration::from_millis(600));
     let cam = FakeCamera::start(c);
     let s = Arc::new(session(&cam));
     let first = {
@@ -409,8 +422,8 @@ fn sets_that_arrive_during_a_write_queue_and_run_in_order_1337() {
             })
         })
     };
-    // Let the first SET reach its slow PUT, then send two more.
-    std::thread::sleep(Duration::from_millis(150));
+    // Once the first SET is inside its slow PUT, send two more.
+    wait_for_put(&cam, "/video/iso");
     let q1 = s
         .submit(&SetRequest {
             iso: Some(1600),
@@ -477,6 +490,13 @@ impl NetTree {
         )
         .unwrap();
         std::fs::write(dir.join("ifindex"), format!("{ifindex}\n")).unwrap();
+        // `device/..` is the USB device (here the iface dir itself, `device` being a plain dir).
+        self.vendor(name, "1edb");
+    }
+
+    fn vendor(&self, name: &str, vendor: &str) {
+        let dir = self.root.join("net").join(name);
+        std::fs::write(dir.join("idVendor"), format!("{vendor}\n")).unwrap();
     }
 
     fn lease(&self, ifindex: u32, text: &str) {
@@ -487,6 +507,8 @@ impl NetTree {
         DiscoverPaths {
             sysfs_net: self.root.join("net"),
             leases_dir: self.root.join("leases"),
+            // No `ip` here: the /30 fallback finds nothing, so the lease alone decides.
+            ip_cmd: self.root.join("no-ip-binary"),
         }
     }
 }
@@ -510,8 +532,17 @@ fn the_camera_is_the_dhcp_server_on_the_cdc_ncm_link_6() {
         "# This is private data. Do not parse.\nADDRESS=127.0.0.2\nNETMASK=255.255.255.252\n\
          ROUTER=127.0.0.9\nSERVER_ADDRESS=127.0.0.1\nLIFETIME=86400\n",
     );
+    // A 2.5G USB dongle on the same driver is not the camera.
+    net.iface("enx00e04c680001", "cdc_ncm", 8);
+    net.vendor("enx00e04c680001", "0bda");
+    net.lease(8, "SERVER_ADDRESS=127.0.0.3\n");
     let links = camera_links(&net.paths());
-    assert_eq!(links.len(), 1, "only the cdc_ncm interface: {links:?}");
+    assert_eq!(
+        links.len(),
+        1,
+        "only the Blackmagic cdc_ncm interface: {links:?}"
+    );
+    assert_eq!(links[0].source, Some("lease"));
     assert_eq!(links[0].iface, "enx7c2e0d123456");
     assert_eq!(links[0].camera_ip, Some("127.0.0.1".parse().unwrap()));
     let s = CameraSession::new(
@@ -561,6 +592,7 @@ fn no_link_or_no_lease_reads_offline_6() {
     let gone = DiscoverPaths {
         sysfs_net: net.root.join("nope"),
         leases_dir: net.root.join("nope"),
+        ip_cmd: net.root.join("nope"),
     };
     assert!(camera_links(&gone).is_empty());
 }
@@ -583,6 +615,8 @@ fn the_lease_names_the_server_else_the_router_6() {
 #[test]
 fn the_camera_flag_takes_host_and_port_6() {
     let a = parse_camera_addr("172.25.77.161").unwrap();
+    assert_eq!((a.host.as_str(), a.port), ("172.25.77.161", 80));
+    let a = parse_camera_addr("HTTP://172.25.77.161").unwrap();
     assert_eq!((a.host.as_str(), a.port), ("172.25.77.161", 80));
     let a = parse_camera_addr("http://cam5.local:8080/").unwrap();
     assert_eq!((a.host.as_str(), a.port), ("cam5.local", 8080));
@@ -645,6 +679,15 @@ fn requests_and_answers_are_plain_http11_6() {
         })
     );
     assert!(parse_response(b"SSH-2.0-OpenSSH\r\n\r\n", true).is_err());
+    // An interim 100 Continue is skipped; the real answer follows it.
+    let interim = b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 204 No Content\r\n\r\n";
+    assert_eq!(parse_response(interim, false).unwrap().unwrap().status, 204);
+    assert_eq!(
+        parse_response(b"HTTP/1.1 100 Continue\r\n\r\n", false).unwrap(),
+        None
+    );
+    // A chunk size a camera could never mean is refused, not an overflow panic.
+    assert!(decode_chunked(b"ffffffffffffffff\r\nab\r\n").is_err());
     assert!(parse_response(b"HTTP/1.1 200", true).is_err());
     assert_eq!(decode_chunked(b"3\r\nabc\r\n").unwrap(), None);
     assert!(decode_chunked(b"zz\r\n").is_err());
@@ -685,4 +728,131 @@ fn env_parsers_keep_their_rules_809_1229() {
     assert!(read_is_fresh(Some(0), 9_999, 10_000));
     assert!(!read_is_fresh(Some(0), 10_000, 10_000));
     assert!(read_is_fresh(Some(100), 50, 10_000));
+}
+
+#[test]
+fn the_slash30_peer_is_the_fallback_address_6() {
+    let out = "7: enx7c2e0d123456    inet 172.25.77.162/30 brd 172.25.77.163 scope global dynamic enx7c2e0d123456\\       valid_lft 86000sec preferred_lft 86000sec\n";
+    assert_eq!(
+        parse_inet(out),
+        Some(("172.25.77.162".parse().unwrap(), 30))
+    );
+    assert_eq!(parse_inet(""), None);
+    assert_eq!(parse_inet("7: enx inet6 fe80::1/64 scope link"), None);
+    let p = |a: &str, n| peer_of(a.parse().unwrap(), n).map(|ip| ip.to_string());
+    assert_eq!(p("172.25.77.162", 30).as_deref(), Some("172.25.77.161"));
+    assert_eq!(p("172.25.77.161", 30).as_deref(), Some("172.25.77.162"));
+    assert_eq!(p("172.25.77.160", 30), None, "the network address");
+    assert_eq!(p("172.25.77.163", 30), None, "the broadcast address");
+    assert_eq!(p("10.0.0.0", 31).as_deref(), Some("10.0.0.1"));
+    assert_eq!(p("10.77.9.20", 24), None, "not a point-to-point subnet");
+}
+
+#[test]
+fn a_camera_that_stops_answering_goes_offline_within_the_deadline_6() {
+    let cam = FakeCamera::start(Cam::default());
+    let clock = FakeClock::default();
+    let s = session(&cam).with_clock(Box::new(clock.clone()));
+    assert!(s.read_state().online);
+    cam.cam()
+        .get_delay
+        .insert("/lens/iris".into(), Duration::from_secs(10));
+    clock.0.store(20_000, Ordering::SeqCst);
+    let started = std::time::Instant::now();
+    let st = s.read_state();
+    let took = started.elapsed();
+    assert!(!st.online, "a read that gets no answer is offline");
+    assert_eq!(
+        st.camera.as_deref(),
+        Some("Blackmagic Pocket Cinema Camera 4K")
+    );
+    assert!(
+        took < Duration::from_secs(4),
+        "bounded by the 1 s request deadline: {took:?}"
+    );
+    // The link was dropped: the next read probes the camera again, and finds it.
+    cam.cam().get_delay.clear();
+    clock.0.store(40_000, Ordering::SeqCst);
+    assert!(s.read_state().online);
+    assert_eq!(cam.gets_of("/system/product"), 2);
+}
+
+#[test]
+fn a_set_that_arrives_during_the_read_back_waits_for_it_6() {
+    let cam = FakeCamera::start(Cam::default());
+    let s = Arc::new(session(&cam).with_aperture_readback_delay_ms(2000));
+    let first = {
+        let s = s.clone();
+        std::thread::spawn(move || {
+            s.submit(&SetRequest {
+                aperture_norm: Some(1.0),
+                ..Default::default()
+            })
+        })
+    };
+    // The iris PUT has landed; this arrives inside the 2 s read-back wait.
+    wait_for_put(&cam, "/lens/iris");
+    let q = s
+        .submit(&SetRequest {
+            iso: Some(1600),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(
+        q,
+        ApplyOutcome::Queued,
+        "the gate stays shut through the read-back"
+    );
+    let (count, st) = applied(first.join().unwrap().unwrap());
+    assert_eq!(count, 2, "the late SET was written in a second round");
+    assert_eq!(st.params.iso, Some(1600));
+    assert_eq!(
+        cam.puts().into_iter().map(|(p, _)| p).collect::<Vec<_>>(),
+        vec!["/lens/iris".to_string(), "/video/iso".to_string()]
+    );
+}
+
+#[test]
+fn every_panel_aperture_tap_moves_the_lens_6() {
+    // The panel steps with `aperture_step` from the real f-number and sends the grid position; the
+    // fake lens snaps to its own 1/3-stop steps (4.4 4.9 5.6 6.3 7.3 8 ... 22), none of which is
+    // the nominal 5.0 or 7.1. Every tap must move the iris, all the way up and all the way down.
+    use bkshading_proto::mapping::aperture_step;
+    let cam = FakeCamera::start(Cam::default());
+    let s = session(&cam);
+    let grid = s.read_state().caps.unwrap().fnumber_choices;
+    let n = grid.len() as f64 - 1.0;
+    let mut cur = 7.3;
+    let mut seen = vec![cur];
+    for dir in [1, -1] {
+        loop {
+            let at_end = if dir > 0 { cur >= 22.0 } else { cur <= 4.4 };
+            if at_end {
+                break;
+            }
+            let idx = aperture_step(cur, &grid, dir).unwrap();
+            let (_, st) = applied(
+                s.submit(&SetRequest {
+                    aperture_norm: Some(idx as f64 / n),
+                    ..Default::default()
+                })
+                .unwrap(),
+            );
+            let landed = 2f64.powf(st.params.aperture_av.unwrap() / 2.0);
+            let moved = if dir > 0 {
+                landed > cur + 0.01
+            } else {
+                landed < cur - 0.01
+            };
+            assert!(
+                moved,
+                "tap {dir:+} from {cur} asked {} and landed {landed}",
+                grid[idx]
+            );
+            assert!(st.not_applied.is_empty(), "{:?}", st.not_applied);
+            cur = landed;
+            seen.push(cur);
+        }
+    }
+    assert!(seen.len() > 12, "walked the lens: {seen:?}");
 }

@@ -263,6 +263,25 @@ def _run():
         fn()
         print(f"ok  {fn.__name__}")
     print(f"\n{len(fns)} passed")
+def test_app_js_aperture_step_skips_a_nominal_stop_the_lens_snaps_back_from_6():
+    # shading#6: the REST relay's aperture grid is nominal 1/3-stop f-numbers, and the lens snaps a
+    # write to its own step. The aperture step must target at least 1/6 stop away (the proto
+    # `mapping::aperture_step`), or a lens on 4.9 asked for 5.0 lands back on 4.9 forever.
+    js = _read("app.js")
+    m = re.search(r"const FNUMBER_STEP_MIN_RATIO = ([0-9.]+);", js)
+    assert m, "the aperture step ratio constant is declared"
+    assert abs(float(m.group(1)) - 2 ** (1 / 12)) < 1e-15, "1/6 stop = 2^(1/12)"
+    with open(os.path.join(HERE, "..", "..", "bkshading", "proto", "src", "mapping.rs")) as f:
+        mapping = f.read()
+    rust = re.search(r"pub const FNUMBER_GRID_MIN_RATIO: f64 = ([0-9_.]+);", mapping)
+    assert rust, "the proto ratio constant is declared"
+    assert abs(float(rust.group(1).replace("_", "")) - float(m.group(1))) < 1e-15, "JS == Rust"
+    ap = _js_fn_body(js, "function stepAperture(")
+    assert "stepChoice(curFnum, choices, dir, FNUMBER_STEP_MIN_RATIO)" in ap
+    body = _js_fn_body(js, "function stepChoice(")
+    assert "c >= currentFnum * minRatio" in body and "<= currentFnum / minRatio" in body
+
+
 def test_app_js_aperture_steps_from_real_fnumber_1337():
     # issue 1337: the aperture step must start from the camera's REAL current f-number (an off-grid
     # lens reports slider norm 0, which the old code stepped from -> "clona sa nezdvihne"). The panel

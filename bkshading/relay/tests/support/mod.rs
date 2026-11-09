@@ -49,6 +49,8 @@ pub struct Cam {
     pub not_implemented: Vec<String>,
     /// A pause before answering a PUT on this path.
     pub put_delay: HashMap<String, Duration>,
+    /// A pause before answering a GET on this path (a camera that stops answering).
+    pub get_delay: HashMap<String, Duration>,
     pub auto_wb_kelvin: i64,
 }
 
@@ -69,8 +71,9 @@ impl Default for Cam {
             kelvin: 5600,
             tint: 0,
             aperture: 7.3,
+            // 1/3-stop steps (cam5's lens has only 1/3 steps), displayed off the nominal values.
             lens_stops: vec![
-                4.4, 4.9, 5.6, 6.3, 7.3, 8.0, 9.0, 10.0, 11.0, 13.0, 16.0, 22.0,
+                4.4, 4.9, 5.6, 6.3, 7.3, 8.0, 9.0, 10.0, 11.0, 13.0, 14.0, 16.0, 18.0, 20.0, 22.0,
             ],
             iris_ignores_writes: false,
             focus: 0.42,
@@ -81,6 +84,7 @@ impl Default for Cam {
             refuse: HashMap::new(),
             not_implemented: Vec::new(),
             put_delay: HashMap::new(),
+            get_delay: HashMap::new(),
             auto_wb_kelvin: 4800,
         }
     }
@@ -210,6 +214,10 @@ async fn handle(State(sh): State<Arc<Shared>>, method: Method, uri: Uri, body: B
     }
     if method != Method::GET {
         return StatusCode::METHOD_NOT_ALLOWED.into_response();
+    }
+    let delay = sh.cam.lock().unwrap().get_delay.get(&path).copied();
+    if let Some(d) = delay {
+        tokio::time::sleep(d).await;
     }
     let cam = sh.cam.lock().unwrap().clone();
     if cam.not_implemented.contains(&path) {

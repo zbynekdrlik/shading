@@ -12,7 +12,38 @@
 //!
 //! These paths are a pinned contract with camera-box (`docs/CONTRACT.md`).
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
+
+/// A JSON number the camera may send as an integer or with a fraction (`400` or `400.0`). The
+/// manual types these fields `integer`, but one float would otherwise fail the WHOLE endpoint's
+/// decode, so integer fields read either and round.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Num {
+    Int(i64),
+    Float(f64),
+}
+
+impl Num {
+    fn round(self) -> Option<i64> {
+        match self {
+            Num::Int(i) => Some(i),
+            Num::Float(f) if f.is_finite() && f.abs() < 1e15 => Some(f.round() as i64),
+            Num::Float(_) => None,
+        }
+    }
+}
+
+fn int_opt<'de, D: Deserializer<'de>>(d: D) -> Result<Option<i64>, D::Error> {
+    Ok(Option::<Num>::deserialize(d)?.and_then(Num::round))
+}
+
+fn int_vec<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<i64>, D::Error> {
+    Ok(Vec::<Num>::deserialize(d)?
+        .into_iter()
+        .filter_map(Num::round)
+        .collect())
+}
 
 /// Every endpoint below lives under this prefix (`http://<camera>/control/api/v1/...`).
 pub const API_PREFIX: &str = "/control/api/v1";
@@ -24,7 +55,7 @@ pub const ISO: &str = "/video/iso";
 /// `GET` `{supportedISOs: [int]}`.
 pub const SUPPORTED_ISOS: &str = "/video/supportedISOs";
 /// `GET`/`PUT` `{shutterSpeed}` or `{shutterAngle}` (x100), whichever measurement the camera's
-/// setup uses; `GET` also carries `continuousShutterAutoExposure`.
+/// setup uses; `GET` also carries `continuousShutterAutoExposure` (not read).
 pub const SHUTTER: &str = "/video/shutter";
 /// `GET` `{shutterSpeeds: [int]}` or `{shutterAngles: [number]}` for the current setup.
 pub const SUPPORTED_SHUTTERS: &str = "/video/supportedShutters";
@@ -36,7 +67,8 @@ pub const WHITE_BALANCE_DESCRIPTION: &str = "/video/whiteBalance/description";
 pub const WHITE_BALANCE_AUTO: &str = "/video/whiteBalance/doAuto";
 /// `GET`/`PUT` `{whiteBalanceTint}`.
 pub const TINT: &str = "/video/whiteBalanceTint";
-/// `GET` `{apertureStop, normalised, apertureNumber, continuousApertureAutoExposure}`;
+/// `GET` `{apertureStop, normalised, apertureNumber, continuousApertureAutoExposure}` (the relay
+/// reads `apertureStop`);
 /// `PUT` `{apertureStop}`. Only an `apertureStop` write moves the iris on cam5 (an
 /// `apertureNumber` or `normalised` write answers 204 and does nothing).
 pub const IRIS: &str = "/lens/iris";
@@ -90,13 +122,14 @@ impl Product {
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Iso {
+    #[serde(deserialize_with = "int_opt")]
     pub iso: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct SupportedIsos {
-    #[serde(rename = "supportedISOs")]
+    #[serde(rename = "supportedISOs", deserialize_with = "int_vec")]
     pub supported_isos: Vec<i64>,
 }
 
@@ -104,15 +137,16 @@ pub struct SupportedIsos {
 #[serde(default, rename_all = "camelCase")]
 pub struct Shutter {
     /// 1/N seconds, when the camera measures shutter as a speed.
+    #[serde(deserialize_with = "int_opt")]
     pub shutter_speed: Option<i64>,
     /// Degrees x100 (18000 = 180 deg), when the camera measures shutter as an angle.
     pub shutter_angle: Option<f64>,
-    pub continuous_shutter_auto_exposure: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct SupportedShutters {
+    #[serde(deserialize_with = "int_vec")]
     pub shutter_speeds: Vec<i64>,
     /// Degrees x100.
     pub shutter_angles: Vec<f64>,
@@ -121,13 +155,16 @@ pub struct SupportedShutters {
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct WhiteBalance {
+    #[serde(deserialize_with = "int_opt")]
     pub white_balance: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct IntRange {
+    #[serde(deserialize_with = "int_opt")]
     pub min: Option<i64>,
+    #[serde(deserialize_with = "int_opt")]
     pub max: Option<i64>,
 }
 
@@ -147,6 +184,7 @@ pub struct WhiteBalanceDescription {
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Tint {
+    #[serde(deserialize_with = "int_opt")]
     pub white_balance_tint: Option<i64>,
 }
 
@@ -155,9 +193,6 @@ pub struct Tint {
 pub struct Iris {
     /// The f-number the camera displays (`7.3`).
     pub aperture_stop: Option<f64>,
-    pub normalised: Option<f64>,
-    pub aperture_number: Option<i64>,
-    pub continuous_aperture_auto_exposure: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -176,7 +211,9 @@ pub struct Focus {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct Resolution {
+    #[serde(deserialize_with = "int_opt")]
     pub width: Option<i64>,
+    #[serde(deserialize_with = "int_opt")]
     pub height: Option<i64>,
 }
 
