@@ -14,10 +14,11 @@
 //! 0x5007 aperture converge/settle (issue 1452). `GET lens/iris` returns the f-stop the lens
 //! actually landed on.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Result;
+use bkshading_proto::mapping::aperture_probe_target;
 use bkshading_proto::read::{
     fps_supported, iris_moved, not_applied_keys, params_and_caps, plan_writes, FpsNotSettable,
     RestWrite, WriteBasis,
@@ -45,6 +46,23 @@ pub use rest::{
 /// How long the relay waits after a write that moved the iris before reading it back: the iris
 /// motor takes about a second to land (live on cam5), and the read-back is what the panel shows.
 pub const APERTURE_READBACK_DELAY_MS: u64 = 1000;
+
+/// A write drain that has run this long answers its caller and hands any still-queued SETs to a
+/// background drain (shading#6): the service's write client gives up at 10 s, and a run of aperture
+/// steps costs ~1-5 s per press.
+pub const DRAIN_ANSWER_BUDGET_MS: u64 = 6000;
+
+/// How long an `apertureStep` probe waits for the iris to leave its current f-stop before it widens
+/// the target (shading#6, 0.2.1). The iris lands in about a second (live on cam5).
+pub const IRIS_PROBE_WAIT_MS: u64 = 1200;
+
+/// The most probes one `apertureStep` writes that the iris does not follow before the press gives
+/// up (1/16 stop each, so 3/8 stop of travel). The first probe that crosses the midpoint to the
+/// next native step lands, so a lens with steps up to 3/4 stop apart still lands within this;
+/// cam5's widest live case (its zoom-shifted 4.4 end against a description min of 4.1) needs 4.
+/// An iris that follows nothing (auto exposure, a manual lens, a cam7-class body) costs at most
+/// this many waits and is reported in `notApplied` as `apertureStep`.
+pub const MAX_DEAD_APERTURE_PROBES: u32 = 6;
 
 /// A write drain that has run this long reads back WITHOUT the iris wait from then on (shading#6):
 /// SETs that keep arriving during read-backs add rounds, and the first caller's PUT must answer
@@ -170,6 +188,14 @@ struct DrainLog {
     count: usize,
     written: SetRequest,
     aperture_written: bool,
+    /// Keys to report as not applied that the read-back comparison cannot see (an `apertureStep`
+    /// the iris did not follow).
+    not_applied: Vec<String>,
+    /// An `apertureStep` ran in this round.
+    stepped: bool,
+    /// An absolute iris write (`apertureNorm`) may still be travelling: the next step waits it out
+    /// once, then clears this.
+    iris_travelling: bool,
 }
 
 /// One camera the relay owns, driven through its REST API.
@@ -184,6 +210,8 @@ pub struct CameraSession {
     timeout: Duration,
     aperture_readback_delay_ms: u64,
     drain_settle_budget_ms: u64,
+    iris_probe_wait_ms: u64,
+    drain_answer_budget_ms: u64,
     /// The last real read. The lock is held ACROSS a read, so concurrent `/api/state` requests
     /// coalesce to one camera read per floor.
     read_cache: Mutex<Option<CachedRead>>,
@@ -209,6 +237,8 @@ impl CameraSession {
             timeout: REST_TIMEOUT,
             aperture_readback_delay_ms: APERTURE_READBACK_DELAY_MS,
             drain_settle_budget_ms: DRAIN_SETTLE_BUDGET_MS,
+            iris_probe_wait_ms: IRIS_PROBE_WAIT_MS,
+            drain_answer_budget_ms: DRAIN_ANSWER_BUDGET_MS,
             read_cache: Mutex::new(None),
             last_online: Mutex::new(None),
             link: Mutex::new(None),
@@ -246,6 +276,20 @@ impl CameraSession {
     /// [`DRAIN_SETTLE_BUDGET_MS`]; tests shorten it.
     pub fn with_drain_settle_budget_ms(mut self, ms: u64) -> Self {
         self.drain_settle_budget_ms = ms;
+        self
+    }
+
+    /// Sets how long an `apertureStep` probe waits for the iris to move before widening. Production
+    /// keeps [`IRIS_PROBE_WAIT_MS`]; tests shorten it.
+    pub fn with_iris_probe_wait_ms(mut self, ms: u64) -> Self {
+        self.iris_probe_wait_ms = ms;
+        self
+    }
+
+    /// Sets the drain time after which the caller is answered and the rest of the queue drains in
+    /// the background. Production keeps [`DRAIN_ANSWER_BUDGET_MS`]; tests shorten it.
+    pub fn with_drain_answer_budget_ms(mut self, ms: u64) -> Self {
+        self.drain_answer_budget_ms = ms;
         self
     }
 
@@ -430,8 +474,8 @@ impl CameraSession {
     /// was written) and returns that state with `notApplied` filled. The gate stays shut through
     /// the read-back; a SET that arrived during it is written in a further round. With a write in flight the SET is queued and `Queued`
     /// returned at once.
-    pub fn submit(&self, req: &SetRequest) -> Result<ApplyOutcome> {
-        let mut current = match lock(&self.set_queue).submit(req.clone()) {
+    pub fn submit(self: &Arc<Self>, req: &SetRequest) -> Result<ApplyOutcome> {
+        let current = match lock(&self.set_queue).submit(req.clone()) {
             SubmitAction::Queued { total } => {
                 tracing::info!(
                     set = %summarize_set_request(req), queued_total = total,
@@ -441,6 +485,15 @@ impl CameraSession {
             }
             SubmitAction::RunNow(r) => r,
         };
+        self.drain(current, true)
+    }
+
+    /// Runs the in-flight drain from `current` (the gate is already shut for it). `own` = this
+    /// thread answers a caller whose SET is `current` (its refusal is that caller's answer). Once
+    /// the drain has run [`DRAIN_ANSWER_BUDGET_MS`] with SETs still queued (a run of aperture steps
+    /// is ~1-5 s each), the caller is answered and the rest is drained IN ORDER on a handoff
+    /// thread that keeps the gate shut, so the service's 10 s write client never times out.
+    fn drain(self: &Arc<Self>, mut current: SetRequest, own: bool) -> Result<ApplyOutcome> {
         let mut guard = FlightGuard {
             queue: &self.set_queue,
             armed: true,
@@ -452,10 +505,12 @@ impl CameraSession {
         };
         let mut before_stop = basis.aperture_stop;
         let drain_started = std::time::Instant::now();
+        let over_answer_budget =
+            || drain_started.elapsed() >= Duration::from_millis(self.drain_answer_budget_ms);
         let mut log = DrainLog::default();
         let mut count = 0usize;
         let mut own_refusal: Option<anyhow::Error> = None;
-        let mut own_set = true;
+        let mut own_set = own;
         let state = loop {
             // Write every queued SET, in order. The gate stays shut through the read-back below, so
             // a SET arriving meanwhile queues instead of writing inside this drain's read-back.
@@ -476,6 +531,13 @@ impl CameraSession {
                     }
                 }
                 own_set = false;
+                // The caller is answered after its OWN aperture press (a press can take up to
+                // ~8.5 s) or once the drain passes the budget; what is still queued then goes to
+                // the background handoff below, so the service's 10 s write client never waits on
+                // a later press.
+                if own && (current.aperture_step.is_some() || over_answer_budget()) {
+                    break;
+                }
                 match lock(&self.set_queue).pop_pending() {
                     Some(next) => {
                         tracing::info!(set = %summarize_set_request(&next), "draining queued shading SET (FIFO, in order)");
@@ -498,6 +560,31 @@ impl CameraSession {
                 break state;
             }
             match next {
+                Some(next) if own && (log.stepped || over_answer_budget()) => {
+                    // Hand the rest of the FIFO to a thread that keeps the gate shut and answers
+                    // nobody; this caller gets its answer now. Only a caller-facing drain hands
+                    // off: a background drain simply keeps going.
+                    tracing::info!(
+                        next = %summarize_set_request(&next), budget_ms = self.drain_answer_budget_ms,
+                        "answering the caller; the rest of the write queue continues in the background"
+                    );
+                    let me = Arc::clone(self);
+                    let spawned = std::thread::Builder::new()
+                        .name("bkshading-write-drain".into())
+                        .spawn(move || match me.drain(next, false) {
+                            Ok(_) => tracing::info!("background write drain finished"),
+                            Err(e) => tracing::warn!(error = %e, "background write drain failed"),
+                        });
+                    match spawned {
+                        // The background drain owns the shut gate now.
+                        Ok(_) => guard.armed = false,
+                        Err(e) => {
+                            tracing::error!(error = %e, "cannot start the background write drain");
+                            guard.disarm_and_abort("the background write drain could not start");
+                        }
+                    }
+                    break state;
+                }
                 Some(next) => {
                     // A SET arrived during the read-back: another round, planned on what was read.
                     tracing::info!(set = %summarize_set_request(&next), "shading SET arrived during the read-back; writing it next");
@@ -567,13 +654,151 @@ impl CameraSession {
                 }
                 RestWrite::ApertureStop(f) => {
                     log.aperture_written = true;
+                    log.iris_travelling = true;
                     basis.aperture_stop = Some(*f);
                 }
                 _ => {}
             }
         }
+        if let Some(dir) = req.aperture_step.filter(|d| *d != 0) {
+            let landed = self.step_iris(link, basis, dir, log)?;
+            if landed.is_some() {
+                basis.aperture_stop = landed;
+            }
+        }
         merge_written(&mut log.written, req);
         Ok(())
+    }
+
+    /// One `apertureStep` press (shading#6, 0.2.1): from the camera's TRUE current f-stop, write a
+    /// target [`APERTURE_PROBE_STOPS`] away, wait for the iris, and widen by the same increment
+    /// until the iris lands on a different f-stop or the target reaches the lens range. The
+    /// increment is below half of two adjacent native gaps, so the first landing is always the
+    /// NEXT native step (1/3- or 1/6-stop lens, any zoom). Returns where the iris landed, `None`
+    /// when the lens has no further step that way.
+    fn step_iris(
+        &self,
+        link: &Link,
+        basis: &WriteBasis,
+        dir: i64,
+        log: &mut DrainLog,
+    ) -> Result<Option<f64>> {
+        let range = basis.aperture_range;
+        if basis.aperture_controllable == Some(false) {
+            tracing::warn!(
+                dir,
+                "aperture step refused: lens/iris/description says controllable=false"
+            );
+            log.not_applied.push("apertureStep".into());
+            return Ok(None);
+        }
+        // An absolute iris write earlier in this round is still travelling: let it land first, so
+        // the step starts from where the iris IS, not from a value it is passing through.
+        if log.iris_travelling && self.aperture_readback_delay_ms > 0 {
+            std::thread::sleep(Duration::from_millis(self.aperture_readback_delay_ms));
+        }
+        log.iris_travelling = false;
+        log.stepped = true;
+        let started = std::time::Instant::now();
+        let start = self.read_iris(link)?;
+        let mut probes = 0u32;
+        for k in 1..=MAX_DEAD_APERTURE_PROBES {
+            let Some(target) = aperture_probe_target(start, dir, k, range) else {
+                tracing::info!(
+                    dir,
+                    from = start,
+                    ?range,
+                    probes,
+                    duration_ms = started.elapsed().as_millis() as u64,
+                    "aperture step: the lens has no further step this way"
+                );
+                return Ok(None);
+            };
+            let w = RestWrite::ApertureStop(target);
+            if let Err(e) = link.client.write(&w) {
+                if matches!(e, RestError::Transport(_)) {
+                    self.forget_link("an aperture probe got no answer");
+                }
+                anyhow::bail!(
+                    "camera {} refused the aperture step PUT {}{} {}: {e}",
+                    link.client.addr,
+                    bkshading_proto::rest::API_PREFIX,
+                    w.path(),
+                    rest::write_body(&w).unwrap_or_default()
+                );
+            }
+            probes += 1;
+            log.count += 1;
+            if let Some(landed) = self.wait_iris_move(link, start)? {
+                tracing::info!(
+                    dir,
+                    from = start,
+                    to = landed,
+                    last_target = target,
+                    probes,
+                    duration_ms = started.elapsed().as_millis() as u64,
+                    "aperture step landed on the next lens step"
+                );
+                return Ok(Some(landed));
+            }
+            tracing::debug!(
+                dir,
+                from = start,
+                target,
+                probe = k,
+                "aperture probe: the iris did not move; widening"
+            );
+        }
+        log.not_applied.push("apertureStep".into());
+        tracing::warn!(
+            dir,
+            from = start,
+            probes,
+            "aperture step: no move after the probe limit"
+        );
+        Ok(None)
+    }
+
+    /// The iris's true f-stop now (`GET lens/iris`), never a cached value.
+    fn read_iris(&self, link: &Link) -> Result<f64> {
+        let iris: bkshading_proto::rest::Iris = link
+            .client
+            .get_json(bkshading_proto::rest::IRIS)
+            .map_err(|e| {
+            if matches!(e, RestError::Transport(_)) {
+                self.forget_link("an iris read got no answer");
+            }
+            anyhow::anyhow!("camera {} iris read failed: {e}", link.client.addr)
+        })?;
+        iris.aperture_stop
+            .filter(|f| f.is_finite() && *f > 0.0)
+            .ok_or_else(|| anyhow::anyhow!("camera {} reports no apertureStop", link.client.addr))
+    }
+
+    /// Waits up to `iris_probe_wait_ms` for the iris to leave `from`; once it has, until two reads in
+    /// a row agree (it has landed). `None` = it never left `from` in time.
+    fn wait_iris_move(&self, link: &Link, from: f64) -> Result<Option<f64>> {
+        let poll = Duration::from_millis((self.iris_probe_wait_ms / 4).clamp(5, 100));
+        let deadline = std::time::Instant::now() + Duration::from_millis(self.iris_probe_wait_ms);
+        let mut last: Option<f64> = None;
+        loop {
+            std::thread::sleep(poll);
+            let now = self.read_iris(link)?;
+            let moved = (now - from).abs() > 0.005;
+            if moved && last.is_some_and(|l| (l - now).abs() <= 0.005) {
+                return Ok(Some(now));
+            }
+            last = moved.then_some(now);
+            // A moving iris gets one more wait window to land; a still one gives up at the deadline.
+            let limit = if moved {
+                deadline + Duration::from_millis(self.iris_probe_wait_ms)
+            } else {
+                deadline
+            };
+            if std::time::Instant::now() >= limit {
+                return Ok(last);
+            }
+        }
     }
 
     /// The authoritative read after a drain: it replaces the cache and carries `notApplied`.
@@ -616,6 +841,13 @@ impl CameraSession {
                     "aperture read back after the write"
                 );
             }
+            // Refusals the comparison cannot see (an apertureStep the iris did not follow) go into
+            // the state BEFORE it is cached, so the next /api/state still carries them.
+            for k in &log.not_applied {
+                if !not_applied.contains(k) {
+                    not_applied.push(k.clone());
+                }
+            }
             if !not_applied.is_empty() {
                 tracing::warn!(not_applied = ?not_applied, "shading write(s) NOT applied by the camera");
             }
@@ -653,5 +885,8 @@ fn merge_written(acc: &mut SetRequest, req: &SetRequest) {
     }
     if req.auto_wb.is_some() {
         acc.auto_wb = req.auto_wb;
+    }
+    if req.aperture_step.is_some() {
+        acc.aperture_step = req.aperture_step;
     }
 }

@@ -228,29 +228,46 @@ pub fn step_choice(current_fnumber: f64, choices: &[f64], dir: i32) -> Option<us
     }
 }
 
-/// The aperture +/- step over the nominal grid (shading#6): like [`step_choice`], but the target must
-/// be at least 1/6 stop ([`FNUMBER_GRID_MIN_RATIO`]) away from the current f-number. The lens
-/// snaps every write to its OWN step, which is rarely the nominal value: a lens on 4.9 asked for
-/// the "next" nominal 5.0 lands back on 4.9, and the button would never move. Requiring 1/6 stop
-/// (half a grid step) sends 5.6 instead, which lands on the lens's next step. "+" = the first choice
-/// at or above `current * ratio`, "-" = the last at or below `current / ratio`; past either end of
-/// the grid the end itself (the panel disables the button there). `None` for an empty grid. The
-/// panel's JS `stepChoice(cur, choices, dir, FNUMBER_STEP_MIN_RATIO)` mirrors it.
-pub fn aperture_step(current_fnumber: f64, choices: &[f64], dir: i32) -> Option<usize> {
-    let n = choices.len();
-    if n == 0 {
+/// How far each `apertureStep` probe moves the target, in stops (shading#6, 0.2.1). The camera
+/// snaps a written `apertureStop` to the NEAREST native lens step, so a probe only lands past the
+/// next step when it crosses the midpoint between the next step and the one after it. An increment
+/// below half the sum of two adjacent native gaps can therefore never skip a step. The smallest
+/// gaps seen live are about 0.09 stop (the PP 6K's 3.1 -> 3.2 -> 3.3, as the camera reports them to
+/// 0.1, so the true gaps may be a little smaller), so 1/16 stop (0.0625) is safe there. It is also
+/// below the coordinator's "about 1/12". The argument assumes the iris shows a move within the
+/// relay's probe wait; an iris slower than that could see the next probe written mid-travel.
+pub const APERTURE_PROBE_STOPS: f64 = 1.0 / 16.0;
+
+/// The f-number of the `k`-th probe (1-based) of an `apertureStep` from `current` (the camera's
+/// TRUE f-stop) in direction `dir` (sign only): `current * 2^(k * APERTURE_PROBE_STOPS / 2)` (one
+/// stop is a factor sqrt 2 in f-number), clamped to the lens `range` from `lens/iris/description`,
+/// rounded to 0.01. `None` when this probe makes no progress (the previous one already reached the
+/// end of the range, or `current` is already there): the lens has no further step that way.
+pub fn aperture_probe_target(
+    current: f64,
+    dir: i64,
+    k: u32,
+    range: Option<(f64, f64)>,
+) -> Option<f64> {
+    if !(current.is_finite() && current > 0.0) || dir == 0 || k == 0 {
         return None;
     }
-    if n == 1 || dir == 0 {
-        return Some(0);
-    }
-    if dir > 0 {
-        let at_least = current_fnumber * FNUMBER_GRID_MIN_RATIO;
-        Some(choices.iter().position(|&c| c >= at_least).unwrap_or(n - 1))
+    let (lo, hi) = match range {
+        Some((lo, hi)) if lo > 0.0 && hi >= lo => (lo, hi),
+        _ => (0.0, f64::INFINITY),
+    };
+    let sign = dir.signum() as f64;
+    let at =
+        |k: u32| (current * 2f64.powf(sign * k as f64 * APERTURE_PROBE_STOPS / 2.0)).clamp(lo, hi);
+    let target = at(k);
+    let previous = if k == 1 { current } else { at(k - 1) };
+    let progresses = if sign > 0.0 {
+        target > previous + 1e-9 && target > current
     } else {
-        let at_most = current_fnumber / FNUMBER_GRID_MIN_RATIO;
-        Some(choices.iter().rposition(|&c| c <= at_most).unwrap_or(0))
-    }
+        target < previous - 1e-9 && target < current
+    };
+    // Round to 0.01, then clamp again, so a range end like 16.666 is never overshot by the rounding.
+    progresses.then(|| ((target * 100.0).round() / 100.0).clamp(lo, hi))
 }
 
 // --- frame rate --------------------------------------------------------------

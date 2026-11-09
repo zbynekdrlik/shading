@@ -177,10 +177,11 @@ def test_index_has_aperture_kelvin_tint_step_buttons_1304():
 
 
 def test_app_js_step_handlers_send_absolute_values_1304():
-    # issue 1304: the aperture step sends apertureNorm; kelvin/tint steps send kelvin/tint.
+    # issue 1304: kelvin/tint steps send absolute kelvin/tint. Since shading#6 (0.2.1) the aperture
+    # step sends a direction (`apertureStep`), the relay walking the lens's own steps.
     js = _read("app.js")
     ap = _js_fn_body(js, "function stepAperture(")
-    assert "{ apertureNorm: norm }" in ap, "aperture step sends an absolute apertureNorm"
+    assert "{ apertureStep: dir }" in ap, "aperture step sends the direction"
     lin = _js_fn_body(js, "function stepLinear(")
     assert "{ [key]: next }" in lin, "linear step sends an absolute value for its key"
     # the step buttons are wired to kelvin/tint via stepLinear.
@@ -263,23 +264,23 @@ def _run():
         fn()
         print(f"ok  {fn.__name__}")
     print(f"\n{len(fns)} passed")
-def test_app_js_aperture_step_skips_a_nominal_stop_the_lens_snaps_back_from_6():
-    # shading#6: the REST relay's aperture grid is nominal 1/3-stop f-numbers, and the lens snaps a
-    # write to its own step. The aperture step must target at least 1/6 stop away (the proto
-    # `mapping::aperture_step`), or a lens on 4.9 asked for 5.0 lands back on 4.9 forever.
+def test_app_js_aperture_step_sends_a_direction_not_a_grid_position_6():
+    # shading#6 (0.2.1): lens steps depend on the lens and the zoom, so the panel's +/- never pick a
+    # grid value: they send `apertureStep` (the direction) and the relay walks the lens. The label
+    # holds the pre-tap value as pending until a push shows a DIFFERENT f-stop.
     js = _read("app.js")
-    m = re.search(r"const FNUMBER_STEP_MIN_RATIO = ([0-9.]+);", js)
-    assert m, "the aperture step ratio constant is declared"
-    assert abs(float(m.group(1)) - 2 ** (1 / 12)) < 1e-15, "1/6 stop = 2^(1/12)"
-    with open(os.path.join(HERE, "..", "..", "bkshading", "proto", "src", "mapping.rs")) as f:
-        mapping = f.read()
-    rust = re.search(r"pub const FNUMBER_GRID_MIN_RATIO: f64 = ([0-9_.]+);", mapping)
-    assert rust, "the proto ratio constant is declared"
-    assert abs(float(rust.group(1).replace("_", "")) - float(m.group(1))) < 1e-15, "JS == Rust"
     ap = _js_fn_body(js, "function stepAperture(")
-    assert "stepChoice(curFnum, choices, dir, FNUMBER_STEP_MIN_RATIO)" in ap
-    body = _js_fn_body(js, "function stepChoice(")
-    assert "c >= currentFnum * minRatio" in body and "<= currentFnum / minRatio" in body
+    assert "setParam(id, { apertureStep: dir })" in ap
+    assert "apertureNorm" not in ap, "+/- never send a grid position"
+    assert "stepChoice(" not in ap
+    hold = _js_fn_body(js, "function reconcileStepHold(")
+    assert "pushedText !== pend.target" in hold, "the hold ends on a different f-stop"
+    assert "STEP_HOLD_MS" in hold and "refused" in hold
+    ub0 = _js_fn_body(js, "function updateBlock(")
+    assert 'notApplied.includes("apertureStep")' in ub0, "a press the iris did not follow is shown"
+    ub = _js_fn_body(js, "function updateBlock(")
+    assert "reconcileStepHold(" in ub
+    assert "FNUMBER_STEP_MIN_RATIO" not in js
 
 
 def test_app_js_aperture_steps_from_real_fnumber_1337():
@@ -289,9 +290,9 @@ def test_app_js_aperture_steps_from_real_fnumber_1337():
     # and updateBlock stores that dataset from apertureAv.
     js = _read("app.js")
     assert "function stepChoice(" in js, "JS mirror of proto step_choice present"
-    ap = _js_fn_body(js, "function stepAperture(")
-    assert "dataset.apertureFnum" in ap, "stepAperture steps from the real f-number, not the norm"
-    assert "stepChoice(" in ap, "stepAperture uses the stepChoice mirror"
+    # shading#6 (0.2.1): the aperture +/- no longer step this grid at all (they send apertureStep,
+    # test_app_js_aperture_step_sends_a_direction_not_a_grid_position_6); the real f-number still
+    # drives the display and the disable logic below.
     # updateBlock stores the real f-number on the dataset for the step handler + disable logic.
     ub = _js_fn_body(js, "function updateBlock(")
     assert "dataset.apertureFnum" in ub, "updateBlock stores the current f-number on the dataset"

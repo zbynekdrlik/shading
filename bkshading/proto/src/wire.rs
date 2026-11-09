@@ -176,6 +176,14 @@ pub struct SetRequest {
     pub fps: Option<i64>,
     /// `true` runs the camera's auto white balance (`video/whiteBalance/doAuto`, shading#6).
     pub auto_wb: Option<bool>,
+    /// Step the aperture by ONE of the lens's own steps (shading#6, 0.2.1): the sign is the
+    /// direction (`1` = to a larger f-number, `-1` = smaller), the size is ignored. The relay starts
+    /// from the camera's true current f-stop and walks to the next step the lens actually lands on,
+    /// so no native step is skipped on a 1/3- or 1/6-stop lens at any zoom. The panel's +/- send
+    /// this; `apertureNorm` stays the absolute slider write (which may snap). An older relay
+    /// ignores the field.
+    #[serde(default)]
+    pub aperture_step: Option<i64>,
 }
 
 /// Whether a camera's reported frame rate matches the box's grab mode (issue 809). A
@@ -416,6 +424,9 @@ pub fn summarize_set_request(req: &SetRequest) -> String {
     }
     if let Some(v) = req.auto_wb {
         parts.push(format!("auto_wb={v}"));
+    }
+    if let Some(v) = req.aperture_step {
+        parts.push(format!("aperture_step={v}"));
     }
     if parts.is_empty() {
         "(none)".to_string()

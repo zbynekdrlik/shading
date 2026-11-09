@@ -38,8 +38,18 @@ pub struct Cam {
     pub aperture: f64,
     /// The lens's own stops; an `apertureStop` write lands on the nearest.
     pub lens_stops: Vec<f64>,
+    /// What `lens/iris/description` reports as `apertureStop.min/max`; `None` = the ends of
+    /// `lens_stops`. A zoom lens reports its wide-end min (4.1 on cam5 at 108 mm) while it lands on
+    /// steps anchored elsewhere (4.4).
+    pub iris_range: Option<(f64, f64)>,
     /// The iris ACKs a write and does not move.
     pub iris_ignores_writes: bool,
+    /// `lens/iris/description controllable`.
+    pub iris_controllable: bool,
+    /// How long after an `apertureStop` PUT the iris reports its new position (a moving iris).
+    pub iris_latency: Duration,
+    /// An accepted iris write still travelling: the landing and when it was written.
+    pub iris_travel: Option<(f64, std::time::Instant)>,
     pub focus: f64,
     pub frame_rate: String,
     pub frame_rates: Vec<String>,
@@ -75,7 +85,11 @@ impl Default for Cam {
             lens_stops: vec![
                 4.4, 4.9, 5.6, 6.3, 7.3, 8.0, 9.0, 10.0, 11.0, 13.0, 14.0, 16.0, 18.0, 20.0, 22.0,
             ],
+            iris_range: None,
             iris_ignores_writes: false,
+            iris_controllable: true,
+            iris_latency: Duration::ZERO,
+            iris_travel: None,
             focus: 0.42,
             frame_rate: "25".into(),
             frame_rates: ["23.98", "24", "25", "29.97", "30", "50", "59.94", "60"]
@@ -166,6 +180,35 @@ impl FakeCamera {
     }
 }
 
+/// cam5's zoom lens at 108 mm, read live: 1/3-stop steps anchored on the zoom's wide end (4.4), not
+/// on the standard marks, while `lens/iris/description` says min 4.1.
+pub fn zoom_third_stop_lens() -> Cam {
+    Cam {
+        aperture: 4.4,
+        lens_stops: vec![
+            4.4, 4.8, 5.2, 5.6, 6.2, 6.7, 7.3, 8.0, 8.7, 9.5, 10.4, 11.3, 12.3, 13.5, 14.6, 16.0,
+            17.4, 19.0, 20.7, 22.0,
+        ],
+        iris_range: Some((4.1, 22.0)),
+        ..Cam::default()
+    }
+}
+
+/// The PP Pocket 6K lens: 1/6-stop steps near open (2.8 2.9 3.1 3.2 3.3 3.5, read live), with some
+/// gaps under 0.1 stop (3.9 -> 4.0).
+pub fn sixth_stop_lens() -> Cam {
+    Cam {
+        aperture: 2.8,
+        lens_stops: vec![
+            2.8, 2.9, 3.1, 3.2, 3.3, 3.5, 3.7, 3.9, 4.0, 4.2, 4.5, 4.8, 5.0, 5.3, 5.6, 6.0, 6.3,
+            6.7, 7.1, 7.6, 8.0, 8.5, 9.0, 9.5, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0,
+            18.0, 19.0, 20.0, 22.0,
+        ],
+        iris_range: Some((2.8, 22.0)),
+        ..Cam::default()
+    }
+}
+
 fn nearest(stops: &[f64], want: f64) -> f64 {
     stops
         .iter()
@@ -219,6 +262,16 @@ async fn handle(State(sh): State<Arc<Shared>>, method: Method, uri: Uri, body: B
     if let Some(d) = delay {
         tokio::time::sleep(d).await;
     }
+    {
+        // A travelling iris arrives once its latency has passed.
+        let mut cam = sh.cam.lock().unwrap();
+        if let Some((to, at)) = cam.iris_travel {
+            if at.elapsed() >= cam.iris_latency {
+                cam.aperture = to;
+                cam.iris_travel = None;
+            }
+        }
+    }
     let cam = sh.cam.lock().unwrap().clone();
     if cam.not_implemented.contains(&path) {
         return (StatusCode::NOT_IMPLEMENTED, "not implemented").into_response();
@@ -254,10 +307,15 @@ async fn handle(State(sh): State<Arc<Shared>>, method: Method, uri: Uri, body: B
             "continuousApertureAutoExposure": false,
             "normalised": 0.3158
         })),
-        "/lens/iris/description" => ok(json!({
-            "controllable": true,
-            "apertureStop": { "min": cam.lens_stops.first(), "max": cam.lens_stops.last() }
-        })),
+        "/lens/iris/description" => {
+            let (min, max) = cam.iris_range.unwrap_or((
+                *cam.lens_stops.first().unwrap(),
+                *cam.lens_stops.last().unwrap(),
+            ));
+            ok(
+                json!({ "controllable": cam.iris_controllable, "apertureStop": { "min": min, "max": max } }),
+            )
+        }
         "/lens/focus" => ok(json!({ "normalised": cam.focus })),
         "/system/format" => ok(json!({
             "codec": "BRaw:Q0",
@@ -315,7 +373,12 @@ fn put(sh: &Shared, path: &str, body: Option<Value>) -> Response {
             // Live cam5: only apertureStop moves the iris; the other two keys are ACKed and ignored.
             if let Some(f) = b.get("apertureStop").and_then(Value::as_f64) {
                 if !cam.iris_ignores_writes {
-                    cam.aperture = nearest(&cam.lens_stops, f);
+                    let to = nearest(&cam.lens_stops, f);
+                    if cam.iris_latency.is_zero() {
+                        cam.aperture = to;
+                    } else {
+                        cam.iris_travel = Some((to, std::time::Instant::now()));
+                    }
                 }
             }
         }

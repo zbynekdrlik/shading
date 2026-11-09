@@ -127,10 +127,16 @@ UseDomains=no
     new `params.focusNorm` (`lens/focus normalised`, 0..1, read only).
     - camera-box's issue-1238 preflight prints its `d003=` line only when `focusDistance` is
       present, so it prints nothing until it reads `focusNorm` instead.
-  - `caps.fNumberChoices` is the nominal 1/3-stop grid between the lens's min and max f-number,
-    which come from `lens/iris/description`.
-  - The camera snaps a write to the lens's own step. `params.apertureAv` is the true displayed
-    f-stop.
+  - `params.apertureAv` is always the camera's TRUE f-stop (`lens/iris apertureStop`). The
+    display shows it as it is.
+  - `caps.fNumberChoices` is NOT the lens's steps. It is only the positions the absolute aperture
+    slider writes: the nominal 1/3-stop marks between the ends of `lens/iris/description` (the
+    first and last entries are those ends). The camera snaps such a write to its nearest own step.
+    - Lens steps depend on the lens AND the zoom. cam5 at 108 mm lands on 4.4 4.8 5.2 5.6 6.2
+      6.7 7.3 8.0 while its description says min 4.1. The PP 6K has 1/6 steps near open (2.8
+      2.9 3.1 3.2 3.3 3.5). No grid can list them, so +/- never step this grid: see
+      `apertureStep` below.
+    - `params.apertureNorm` is the slider position nearest the true f-stop.
   - `caps.fpsChoices` are the frame rates the camera lists for its current codec and resolution,
     × 100 (`"23.98"` = 2398).
   - `params.sensorFps100` is the off-speed rate (`offSpeedFrameRate` × 100).
@@ -146,9 +152,43 @@ UseDomains=no
   - the `supportedFormats` / `supportedShutters` shapes;
   - systemd-networkd's lease path on the box;
   - the `Property=ID_VENDOR_ID` match (`1edb` itself was read live).
-- **What changes for a writer of `PUT /api/params`:** the request shape is unchanged.
-  - The answer is now the state read back from the camera after the write (after ~1 s when the
-    iris was written), not a projection.
+- **What changes for a writer of `PUT /api/params`:**
+  - **New field `apertureStep` (v0.2.1, additive).** Its SIGN is the direction (`1` = a larger
+    f-number, `-1` = smaller); the size is ignored. It moves the aperture by exactly ONE of the
+    lens's own steps.
+    - The relay reads the TRUE current f-stop and writes a target 1/16 stop away.
+    - It waits up to 1.2 s for the iris. If the iris has not moved, it widens the target by
+      another 1/16 stop, until the iris lands on a different f-stop or the target reaches the
+      `lens/iris/description` min or max.
+    - The increment is smaller than half of two adjacent native gaps, so the first landing is
+      always the next native step: none is skipped, on a 1/3- or 1/6-stop lens, at any zoom.
+    - At the end of the lens (the target reached the description min/max) a press answers with
+      the same f-stop. That is not an error, and it is not `notApplied`.
+    - An iris that follows none of up to 6 probes with range left, or a lens whose description
+      says `controllable: false`, is reported as `notApplied: ["apertureStep"]`. A
+      `controllable: false` lens is not probed at all.
+    - **Cost:** each probe the iris does not follow waits 1.2 s; the landing itself about 1 s.
+      cam5's lens 4.4 -> 4.8 is about 3.5 s, and its zoom-shifted end (4.4 against a description
+      min of 4.1) about 5 s. The worst case is an iris that follows nothing: 6 waits, about 7 s.
+    - **Queued presses:** a caller is answered right after its OWN press (worst about 8.5 s: an
+      earlier absolute iris write waited out, then 6 dead probes), or once its drain has run 6 s.
+      SETs still queued then run IN ORDER on a background drain that keeps the gate shut. So the
+      service's 10 s write client never waits on a later press. Their results, `notApplied`
+      included, reach the panel through `/api/state`.
+    - An older relay ignores the field.
+  - `apertureNorm` stays the absolute slider write. It snaps to the lens, which is fine for a
+    drag.
+  - **The answer shape:**
+    - `200 {"applied": <number of camera PUTs>, "state": <RelayState>}`. `state` is read back
+      from the camera after the writes (after ~1 s when the iris was written with
+      `apertureNorm`), and its `notApplied` lists the keys the camera did not take (`apertureNorm`,
+      `apertureStep`, `iso`, `shutter`, `kelvin`, `tint`, `fps`).
+    - `202 {"queued": true}` when the SET queued behind a write in flight. It is applied in order
+      by that write; the next `/api/state` shows it.
+    - `422 <text starting "fps-not-settable:">` for an `fps` the camera does not list. Nothing was
+      written.
+    - `502 <text>` when the camera is offline, did not answer, or refused a write. The text names
+      the PUT and the camera's own status and body.
   - `fps` is accepted only for a rate in `caps.fpsChoices`; any other value answers 422
     `fps-not-settable`.
   - `autoWb: true` now runs the camera's auto white balance.

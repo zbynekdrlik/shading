@@ -68,9 +68,10 @@ test("panel +/- step buttons PUT the expected absolute values, console clean", a
     .toBeGreaterThanOrEqual(5);
 
   const recorded = await (await page.request.get(`${STUB}/__recorded`)).json();
-  // Aperture: server norm 2/3 -> choice index 2 (f/5.2) of 4; "+" steps to index 3 (f/8.0),
-  // i.e. an absolute apertureNorm of 1.0.
-  expect(recorded.some((b) => b.apertureNorm === 1), "aperture + -> apertureNorm 1.0").toBeTruthy();
+  // Aperture (shading#6, 0.2.1): "+" sends the direction; the relay walks the lens's own steps.
+  expect(recorded.some((b) => b.apertureStep === 1), "aperture + -> apertureStep 1").toBeTruthy();
+  // The service forwards the typed SetRequest, so absent fields arrive as null.
+  expect(recorded.some((b) => b.apertureNorm != null), "+/- never send a grid position").toBeFalsy();
   // Biely bod: 5600 + 100 K.
   expect(recorded.some((b) => b.kelvin === 5700), "kelvin + -> 5700").toBeTruthy();
   // Tint: 0 + 1.
@@ -286,10 +287,11 @@ test("an optimistic tap holds its target against a stale pump snapshot, clears o
   await expect(fnum).toHaveText("f/5.2");
   await expect(kval).toHaveText("5600K");
 
-  // Tap clona + (f/5.2 -> f/8.0) and biely bod + (5600 -> 5700). The optimistic target shows pending.
+  // Tap clona + and biely bod + (5600 -> 5700). The aperture landing is unknown until the relay
+  // answers (shading#6: it walks the lens), so clona keeps f/5.2 marked pending; kelvin shows its target.
   await page.locator('[data-role="aperture-inc"]').click();
   await page.locator('[data-role="kelvin-inc"]').click();
-  await expect(fnum).toHaveText("f/8.0");
+  await expect(fnum).toHaveText("f/5.2");
   await expect(fnum).toHaveClass(/pending/);
   await expect(kval).toHaveText("5700K");
   await expect(kval).toHaveClass(/pending/);
@@ -298,13 +300,13 @@ test("an optimistic tap holds its target against a stale pump snapshot, clears o
   // panel must NOT flip the number down — it holds the target with .pending (issue 1350; the bug this
   // fixes is the down-then-back flicker, so this render is what was RED before the fix).
   await page.evaluate((agg) => window.render(agg), makeFixture({ apertureAv: 4.78, kelvin: 5600 }));
-  await expect(fnum).toHaveText("f/8.0");
+  await expect(fnum).toHaveText("f/5.2");
   await expect(fnum).toHaveClass(/pending/);
   await expect(kval).toHaveText("5700K");
   await expect(kval).toHaveClass(/pending/);
 
-  // The confirming push (the camera applied the write; f/8.0 <- apertureAv 6.0, 5700 K) matches the
-  // held target -> .pending clears and the number is solid.
+  // The confirming push (the lens moved: f/8.0 <- apertureAv 6.0; 5700 K) -> .pending clears and the
+  // number is the camera's true f-stop.
   await page.evaluate((agg) => window.render(agg), makeFixture({ apertureAv: 6.0, kelvin: 5700 }));
   await expect(fnum).toHaveText("f/8.0");
   await expect(fnum).not.toHaveClass(/pending/);
@@ -335,17 +337,17 @@ test("a not-applied push after an optimistic tap surfaces the refusal (clears th
   const fnum = page.locator('[data-role="fnum"]');
   await expect(fnum).toHaveText("f/5.2");
 
-  // Tap clona + -> optimistic pending target f/8.0.
+  // Tap clona + -> the current f/5.2 held as pending until the relay reports the landing.
   await page.locator('[data-role="aperture-inc"]').click();
-  await expect(fnum).toHaveText("f/8.0");
+  await expect(fnum).toHaveText("f/5.2");
   await expect(fnum).toHaveClass(/pending/);
 
-  // The relay reports the camera REFUSED the aperture write (issue 1343 notApplied) while the pump
+  // The relay reports the iris did NOT follow the +/- press (shading#6: notApplied apertureStep) while the pump
   // snapshot still carries the OLD value. The pending hold must NOT swallow the refusal: it clears,
   // the reverted server value shows, and the .not-applied style + title surface immediately.
   await page.evaluate(
     (agg) => window.render(agg),
-    makeFixture({ apertureAv: 4.78, notApplied: ["apertureNorm"] })
+    makeFixture({ apertureAv: 4.78, notApplied: ["apertureStep"] })
   );
   await expect(fnum).toHaveText("f/5.2");
   await expect(fnum).not.toHaveClass(/pending/);

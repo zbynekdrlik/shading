@@ -241,6 +241,7 @@ fn every_wire_field_plans_its_rest_write_in_order_6() {
         shutter: Some(60),
         fps: Some(50),
         auto_wb: Some(true),
+        aperture_step: None,
     };
     let w = plan_writes(&req, &basis).expect("50 is listed");
     assert_eq!(
@@ -359,32 +360,6 @@ fn unknown_fields_and_missing_ones_still_decode_6() {
 }
 
 #[test]
-fn an_aperture_step_skips_the_nominal_value_the_lens_would_snap_back_from_6() {
-    use bkshading_proto::mapping::aperture_step;
-    let g = fnumber_grid(Some(4.4), Some(22.0)); // 4.4 5.0 5.6 6.3 7.1 8 9 10 ...
-    let at = |f: f64| g.iter().position(|c| *c == f).unwrap();
-    // A lens on 4.9 (its own step): "+" to the nominal 5.0 would land back on 4.9, so 5.6.
-    assert_eq!(aperture_step(4.9, &g, 1), Some(at(5.6)));
-    // A lens on 7.3: "-" to 7.1 would land back on 7.3, so 6.3; "+" is 8.0 (1/4 stop away).
-    assert_eq!(aperture_step(7.3, &g, -1), Some(at(6.3)));
-    assert_eq!(aperture_step(7.3, &g, 1), Some(at(8.0)));
-    // On a nominal value it is a plain one-step move.
-    assert_eq!(aperture_step(5.6, &g, 1), Some(at(6.3)));
-    assert_eq!(aperture_step(5.6, &g, -1), Some(at(5.0)));
-    // The ends clamp (the panel disables the button there); an empty grid is None.
-    assert_eq!(aperture_step(22.0, &g, 1), Some(g.len() - 1));
-    assert_eq!(aperture_step(21.0, &g, 1), Some(g.len() - 1));
-    assert_eq!(aperture_step(4.4, &g, -1), Some(0));
-    assert_eq!(
-        aperture_step(4.0, &g, 1),
-        Some(0),
-        "below the grid: + goes onto it"
-    );
-    assert_eq!(aperture_step(5.0, &[], 1), None);
-    assert_eq!(aperture_step(5.0, &[5.6], -1), Some(0));
-}
-
-#[test]
 fn integer_fields_accept_a_float_the_camera_might_send_6() {
     let iso: rest::Iso = de(r#"{"iso":400.0}"#);
     assert_eq!(iso.iso, Some(400));
@@ -394,4 +369,71 @@ fn integer_fields_accept_a_float_the_camera_might_send_6() {
     assert_eq!(fmt.record_resolution.unwrap().width, Some(3840));
     let wb: rest::WhiteBalanceDescription = de(r#"{"whiteBalance":{"min":2500.4,"max":1e4}}"#);
     assert_eq!(wb.white_balance.unwrap().max, Some(10000));
+}
+
+#[test]
+fn aperture_probes_creep_out_from_the_true_f_stop_and_stop_at_the_range_6() {
+    use bkshading_proto::mapping::{aperture_probe_target, APERTURE_PROBE_STOPS};
+    let r = Some((4.1, 22.0));
+    // Each probe is 1/16 stop further: f = 4.4 * 2^(k/32).
+    let p1 = aperture_probe_target(4.4, 1, 1, r).unwrap();
+    let p2 = aperture_probe_target(4.4, 1, 2, r).unwrap();
+    assert_eq!(p1, 4.50);
+    assert_eq!(p2, 4.59);
+    assert!((2f64.powf(APERTURE_PROBE_STOPS / 2.0) - 1.021_897).abs() < 1e-6);
+    assert_eq!(aperture_probe_target(4.4, -1, 1, r), Some(4.31));
+    // Downward from 4.4 the range min 4.1 is reached at the 4th probe; the 5th makes no progress.
+    assert_eq!(aperture_probe_target(4.4, -1, 4, r), Some(4.1));
+    assert_eq!(aperture_probe_target(4.4, -1, 5, r), None);
+    // At an end there is nothing to probe.
+    assert_eq!(aperture_probe_target(22.0, 1, 1, r), None);
+    assert_eq!(aperture_probe_target(4.1, -1, 1, r), None);
+    // Without a range the probes never stop on their own (the relay caps the count).
+    assert!(aperture_probe_target(22.0, 1, 1, None).unwrap() > 22.0);
+    // Degenerate input.
+    assert_eq!(aperture_probe_target(0.0, 1, 1, r), None);
+    assert_eq!(aperture_probe_target(4.4, 0, 1, r), None);
+    assert_eq!(aperture_probe_target(4.4, 1, 0, r), None);
+    assert_eq!(aperture_probe_target(f64::NAN, 1, 1, r), None);
+    // Any positive direction is +1, any negative -1.
+    assert_eq!(aperture_probe_target(4.4, 7, 1, r), Some(4.50));
+}
+
+#[test]
+fn a_probe_increment_never_crosses_past_the_next_native_step_6() {
+    // The safety argument behind APERTURE_PROBE_STOPS: the first probe that lands somewhere else
+    // lands on the NEXT step. Simulated over both live lenses with the camera's nearest-step snap.
+    use bkshading_proto::mapping::aperture_probe_target;
+    let snap = |stops: &[f64], f: f64| {
+        *stops
+            .iter()
+            .min_by(|a, b| {
+                ((*a / f).log2().abs())
+                    .partial_cmp(&(*b / f).log2().abs())
+                    .unwrap()
+            })
+            .unwrap()
+    };
+    let cam5 = [4.4, 4.8, 5.2, 5.6, 6.2, 6.7, 7.3, 8.0];
+    let pp6k = [2.8, 2.9, 3.1, 3.2, 3.3, 3.5, 3.7, 3.9, 4.0, 4.2];
+    for stops in [&cam5[..], &pp6k[..]] {
+        let range = Some((stops[0], *stops.last().unwrap()));
+        for (i, &c) in stops.iter().enumerate() {
+            for dir in [1i64, -1] {
+                let next = stops.get((i as i64 + dir) as usize).copied();
+                let mut landed = None;
+                for k in 1..=64 {
+                    let Some(t) = aperture_probe_target(c, dir, k, range) else {
+                        break;
+                    };
+                    let s = snap(stops, t);
+                    if s != c {
+                        landed = Some(s);
+                        break;
+                    }
+                }
+                assert_eq!(landed, next, "from {c} dir {dir}");
+            }
+        }
+    }
 }
