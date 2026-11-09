@@ -961,6 +961,8 @@ fn an_iris_that_follows_no_probe_gives_up_bounded_and_says_so_6() {
         6,
         "MAX_DEAD_APERTURE_PROBES writes, never the 64 of a whole lens"
     );
+    // The refusal is in the cached state too, so the next /api/state poll still carries it.
+    assert_eq!(s.read_state().not_applied, vec!["apertureStep".to_string()]);
 }
 
 #[test]
@@ -991,15 +993,16 @@ fn a_slow_iris_is_waited_for_and_still_lands_on_the_next_step_6() {
 
 #[test]
 fn presses_queued_past_the_answer_budget_finish_in_the_background_in_order_6() {
+    // The iris takes 300 ms to land (under the 1 s REST timeout), which keeps the first press in
+    // flight long enough for the two queued submits on a loaded runner.
     let cam = FakeCamera::start(Cam {
-        iris_latency: Duration::from_millis(40),
+        iris_latency: Duration::from_millis(300),
         ..support::zoom_third_stop_lens()
     });
     let s = Arc::new(
         session(&cam)
-            .with_iris_probe_wait_ms(150)
-            .with_min_read_interval_ms(1)
-            .with_drain_answer_budget_ms(0),
+            .with_iris_probe_wait_ms(600)
+            .with_min_read_interval_ms(1),
     );
     let first = {
         let s = s.clone();
@@ -1015,7 +1018,7 @@ fn presses_queued_past_the_answer_budget_finish_in_the_background_in_order_6() {
             .unwrap();
         assert_eq!(q, ApplyOutcome::Queued);
     }
-    // The first caller is answered after its own press (budget 0), not after all three.
+    // The first caller is answered after its own press, not after all three.
     assert_eq!(fstop(&first.join().unwrap()), 4.8);
     // The two queued presses still run, in order, one native step each: 5.2, then 5.6.
     let deadline = std::time::Instant::now() + Duration::from_secs(10);

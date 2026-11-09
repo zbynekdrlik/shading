@@ -191,6 +191,11 @@ struct DrainLog {
     /// Keys to report as not applied that the read-back comparison cannot see (an `apertureStep`
     /// the iris did not follow).
     not_applied: Vec<String>,
+    /// An `apertureStep` ran in this round.
+    stepped: bool,
+    /// An absolute iris write (`apertureNorm`) may still be travelling: the next step waits it out
+    /// once, then clears this.
+    iris_travelling: bool,
 }
 
 /// One camera the relay owns, driven through its REST API.
@@ -506,7 +511,6 @@ impl CameraSession {
         let mut count = 0usize;
         let mut own_refusal: Option<anyhow::Error> = None;
         let mut own_set = own;
-        let mut not_applied_extra: Vec<String> = Vec::new();
         let state = loop {
             // Write every queued SET, in order. The gate stays shut through the read-back below, so
             // a SET arriving meanwhile queues instead of writing inside this drain's read-back.
@@ -527,8 +531,12 @@ impl CameraSession {
                     }
                 }
                 own_set = false;
-                if over_answer_budget() {
-                    break; // answer now; what is still queued goes to the handoff below
+                // The caller is answered after its OWN aperture press (a press can take up to
+                // ~8.5 s) or once the drain passes the budget; what is still queued then goes to
+                // the background handoff below, so the service's 10 s write client never waits on
+                // a later press.
+                if own && (current.aperture_step.is_some() || over_answer_budget()) {
+                    break;
                 }
                 match lock(&self.set_queue).pop_pending() {
                     Some(next) => {
@@ -540,13 +548,7 @@ impl CameraSession {
             }
             let settle =
                 drain_started.elapsed() < Duration::from_millis(self.drain_settle_budget_ms);
-            not_applied_extra.append(&mut log.not_applied);
-            let (mut state, read_basis) = self.read_back(&log, before_stop, settle);
-            for k in &not_applied_extra {
-                if state.online && !state.not_applied.contains(k) {
-                    state.not_applied.push(k.clone());
-                }
-            }
+            let (state, read_basis) = self.read_back(&log, before_stop, settle);
             count += log.count;
             let next = lock(&self.set_queue).finish();
             if let (Some(next), None) = (&next, &read_basis) {
@@ -558,19 +560,29 @@ impl CameraSession {
                 break state;
             }
             match next {
-                Some(next) if over_answer_budget() => {
+                Some(next) if own && (log.stepped || over_answer_budget()) => {
                     // Hand the rest of the FIFO to a thread that keeps the gate shut and answers
-                    // nobody; this caller gets its answer now.
-                    guard.armed = false;
+                    // nobody; this caller gets its answer now. Only a caller-facing drain hands
+                    // off: a background drain simply keeps going.
                     tracing::info!(
                         next = %summarize_set_request(&next), budget_ms = self.drain_answer_budget_ms,
-                        "write drain over its answer budget: the rest of the queue continues in the background"
+                        "answering the caller; the rest of the write queue continues in the background"
                     );
                     let me = Arc::clone(self);
-                    std::thread::spawn(move || match me.drain(next, false) {
-                        Ok(_) => tracing::info!("background write drain finished"),
-                        Err(e) => tracing::warn!(error = %e, "background write drain failed"),
-                    });
+                    let spawned = std::thread::Builder::new()
+                        .name("bkshading-write-drain".into())
+                        .spawn(move || match me.drain(next, false) {
+                            Ok(_) => tracing::info!("background write drain finished"),
+                            Err(e) => tracing::warn!(error = %e, "background write drain failed"),
+                        });
+                    match spawned {
+                        // The background drain owns the shut gate now.
+                        Ok(_) => guard.armed = false,
+                        Err(e) => {
+                            tracing::error!(error = %e, "cannot start the background write drain");
+                            guard.disarm_and_abort("the background write drain could not start");
+                        }
+                    }
                     break state;
                 }
                 Some(next) => {
@@ -582,7 +594,6 @@ impl CameraSession {
                     }
                     before_stop = basis.aperture_stop;
                     log = DrainLog::default();
-                    not_applied_extra.clear();
                 }
                 None => {
                     guard.armed = false;
@@ -643,6 +654,7 @@ impl CameraSession {
                 }
                 RestWrite::ApertureStop(f) => {
                     log.aperture_written = true;
+                    log.iris_travelling = true;
                     basis.aperture_stop = Some(*f);
                 }
                 _ => {}
@@ -682,9 +694,11 @@ impl CameraSession {
         }
         // An absolute iris write earlier in this round is still travelling: let it land first, so
         // the step starts from where the iris IS, not from a value it is passing through.
-        if log.aperture_written && self.aperture_readback_delay_ms > 0 {
+        if log.iris_travelling && self.aperture_readback_delay_ms > 0 {
             std::thread::sleep(Duration::from_millis(self.aperture_readback_delay_ms));
         }
+        log.iris_travelling = false;
+        log.stepped = true;
         let started = std::time::Instant::now();
         let start = self.read_iris(link)?;
         let mut probes = 0u32;
@@ -826,6 +840,13 @@ impl CameraSession {
                     before = ?before_stop, after = ?after_stop, moved = ?moved,
                     "aperture read back after the write"
                 );
+            }
+            // Refusals the comparison cannot see (an apertureStep the iris did not follow) go into
+            // the state BEFORE it is cached, so the next /api/state still carries them.
+            for k in &log.not_applied {
+                if !not_applied.contains(k) {
+                    not_applied.push(k.clone());
+                }
             }
             if !not_applied.is_empty() {
                 tracing::warn!(not_applied = ?not_applied, "shading write(s) NOT applied by the camera");

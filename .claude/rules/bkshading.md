@@ -122,9 +122,11 @@ the camera's USB-C CDC-NCM link (since v0.2.0, shading#6; before that over USB-P
   - an iris that follows none of `MAX_DEAD_APERTURE_PROBES` (6) probes with range left, or
     `controllable: false`, reports `notApplied: ["apertureStep"]`; reaching the range end is quiet;
   - an absolute `apertureNorm` earlier in the same round is waited out before a step reads its start;
-  - `submit` takes `&Arc<Self>`: past `DRAIN_ANSWER_BUDGET_MS` (6 s) the caller is answered and the
-    rest of the FIFO continues on a background drain (gate stays shut), so queued presses never
-    push the service's 10 s write client over;
+  - `submit` takes `&Arc<Self>`: a caller is answered after its OWN press, or past
+    `DRAIN_ANSWER_BUDGET_MS` (6 s); the rest of the FIFO continues on a background drain
+    (`std::thread::Builder`, the gate stays shut; a spawn failure aborts the queue, never wedges it),
+    so queued presses never push the service's 10 s write client over. Step refusals go into the
+    state before it is cached, so a background drain's refusal still reaches the panel;
   - the panel holds a press `STEP_HOLD_MS` (8 s) and flags `apertureStep` like `apertureNorm`;
   - the fake camera's `iris_latency` models a travelling iris; the service forwards a typed
     `SetRequest`, so absent fields reach the stub as `null` (assert `!= null`, not `in`).

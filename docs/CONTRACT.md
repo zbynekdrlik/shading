@@ -170,9 +170,11 @@ UseDomains=no
     - **Cost:** each probe the iris does not follow waits 1.2 s; the landing itself about 1 s.
       cam5's lens 4.4 -> 4.8 is about 3.5 s, and its zoom-shifted end (4.4 against a description
       min of 4.1) about 5 s. The worst case is an iris that follows nothing: 6 waits, about 7 s.
-    - **Queued presses:** a write drain answers its caller once it has run 6 s. SETs still queued
-      then run IN ORDER on a background drain that keeps the gate shut, so the service's 10 s
-      write client never times out. Their results reach the panel through `/api/state`.
+    - **Queued presses:** a caller is answered right after its OWN press (worst about 8.5 s: an
+      earlier absolute iris write waited out, then 6 dead probes), or once its drain has run 6 s.
+      SETs still queued then run IN ORDER on a background drain that keeps the gate shut. So the
+      service's 10 s write client never waits on a later press. Their results, `notApplied`
+      included, reach the panel through `/api/state`.
     - An older relay ignores the field.
   - `apertureNorm` stays the absolute slider write. It snaps to the lens, which is fine for a
     drag.
