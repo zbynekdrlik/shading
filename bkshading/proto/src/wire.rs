@@ -39,35 +39,28 @@ pub struct ShadingParams {
     pub tint: Option<i64>,
     /// Shutter speed as a denominator (e.g. `500` == 1/500 s).
     pub shutter: Option<i64>,
-    /// PROJECT fps x100 — the d006 MENU `Current:` (issue 1402: d006 is the project rate on
-    /// every BMPCC in the fleet). The rate the camera records and outputs; it drives the
-    /// shutter angle <-> denominator conversion and the issue-809 comparison with the grab.
-    /// Settable only to one of [`CameraCaps::fps_choices`]. `None` when d006 is not read —
-    /// never the off-speed rate.
+    /// PROJECT fps x100 — `system/format frameRate` (shading#6; the d006 MENU under PTP, issue
+    /// 1402). The rate the camera records and outputs; it drives the shutter angle <->
+    /// denominator conversion and the issue-809 comparison with the grab. Settable only to one
+    /// of [`CameraCaps::fps_choices`]. `None` when the format is not read — never the off-speed
+    /// rate.
     pub fps100: Option<i64>,
-    /// OFF-SPEED (sensor) fps x100 — the d007 RANGE `Current:` (a plain int 5..60) x100.
-    /// Readback / diagnostic only: never compared with the grab, never written.
+    /// OFF-SPEED (sensor) fps x100 — `system/format offSpeedFrameRate` x100. Readback /
+    /// diagnostic only: never compared with the grab, never written.
     pub sensor_fps100: Option<i64>,
-    /// Manual focus DISTANCE — raw gphoto2 `d003` (RANGE, ~0 = closest .. ~65536 = infinite
-    /// on the BMPCC 4K). `None` when the camera does not report it this cycle. This is the
-    /// ONLY focus-related property the BMPCC's PTP space documents (the TalOrg BMPCC-over-PTP
-    /// control-point list; the MVP `mapping.rs` maps the shading d-codes but not d003): there
-    /// is NO AF/MF focus-MODE selector and NO auto/manual exposure-MODE (program) selector
-    /// over PTP (issue 1238). So this is the honest focus signal a pre-run check can use — its
-    /// presence confirms manual focus control is reachable, and a value that is STABLE across
-    /// reads is a no-AF-hunt proxy — never a fabricated "focus mode = manual" flag.
-    ///
-    /// CONSUMER CAVEAT (issue 1229 read cache): two `/api/state` samples taken within the
-    /// relay's `min_read_interval_ms` floor (default 10 s) return the SAME cached snapshot, and
-    /// `RelayState` carries no read-timestamp/cycle id — so a naive "did it change between two
-    /// polls" check always sees "stable". A stability-based no-hunt check MUST space its samples
-    /// further apart than the floor (or a future `readAtMs`/cycle field on `RelayState` would let
-    /// a consumer distinguish a cache hit from a real read); the single-read presence check is
-    /// unaffected. READ-ONLY (deliberately never in [`SetRequest`]: a focus write during a take
-    /// is unsafe). `#[serde(default)]` so an older relay that does not send it still deserializes
-    /// (as `None`), mirroring [`RelayState::capture_fps`].
+    /// Manual focus DISTANCE as the raw PTP `d003` (issue 1238). The REST relay (shading#6) does
+    /// not report it: REST's `lens/focus` gives a normalised position, which is
+    /// [`ShadingParams::focus_norm`]. Kept so an older relay still deserializes; `None` from a
+    /// REST relay. `#[serde(default)]`.
     #[serde(default)]
     pub focus_distance: Option<i64>,
+    /// Lens focus position normalised to `[0,1]` — `lens/focus normalised` (shading#6). READ-ONLY
+    /// (never in [`SetRequest`]: a focus write during a take is unsafe, issue 1238). Its presence
+    /// confirms the lens reports focus; a value STABLE across reads spaced beyond the relay's read
+    /// floor is a no-AF-hunt proxy. It is not a focus MODE. `None` when the lens does not answer.
+    /// `#[serde(default)]` so an older relay still deserializes.
+    #[serde(default)]
+    pub focus_norm: Option<f64>,
 }
 
 /// The camera's own fine-grained value lists/ranges — the web UI rebuilds its ISO and
@@ -93,16 +86,16 @@ pub struct CameraCaps {
     #[serde(default, rename = "fNumberChoices")]
     pub fnumber_choices: Vec<f64>,
     pub shutter_choices: Vec<i64>,
-    /// The camera's PROJECT-fps choices x100 — the d006 MENU list, verbatim and in the
-    /// camera's order (issue 1402; both BMPCC bodies: `8, 2398, 2400, 2500, 2997, 3000,
-    /// 5000, 5994`, where `8` is a non-rate entry and the current `6000` is not listed). A
+    /// The camera's PROJECT-fps choices x100 — the frame rates `system/supportedFormats` lists
+    /// for the current codec and resolution, ascending (shading#6; under PTP the d006 MENU, issue
+    /// 1402). A
     /// `fps` write is accepted only for one of these ([`crate::mapping::fps_settable`]); the
     /// service offers "align to grab" only when `grab * 100` is one of them.
     /// `#[serde(default)]`: an older relay that does not send it reads as empty, so nothing is
-    /// settable and no align is offered (its own `fps` write went to the off-speed d007).
+    /// settable and no align is offered (an old PTP relay wrote `fps` to the off-speed d007).
     #[serde(default)]
     pub fps_choices: Vec<i64>,
-    /// The OFF-SPEED (d007) RANGE bounds — not the settable project rates (those are
+    /// The OFF-SPEED range (`system/format min/maxOffSpeedFrameRate`) — not the settable project rates (those are
     /// [`CameraCaps::fps_choices`]).
     pub fps_min: i64,
     pub fps_max: i64,
@@ -115,13 +108,13 @@ pub struct CameraCaps {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RelayState {
-    /// Camera detected and answering (gphoto2 auto-detect succeeded this cycle).
+    /// Camera found and answering its REST API this cycle (shading#6).
     pub online: bool,
-    /// Camera model string from `gphoto2 --auto-detect`, when known.
+    /// Camera model string (`system/product productName`), when known.
     pub camera: Option<String>,
     pub params: ShadingParams,
     pub caps: Option<CameraCaps>,
-    /// Whether the camera exposes its PROJECT fps (the d006 MENU, issue 1402). Exposed is not
+    /// Whether the camera exposes its PROJECT fps (`system/format`, issue 1402). Exposed is not
     /// "settable to any rate": a `fps` write is accepted only for a value in
     /// [`CameraCaps::fps_choices`].
     pub fps_supported: bool,
@@ -136,12 +129,11 @@ pub struct RelayState {
     /// The relay binary's own version (for diagnostics; the service shows its own).
     pub version: String,
     /// The WIRE field names (`apertureNorm`, `iso`, `shutter`, `kelvin`, `tint`, `fps`) whose
-    /// write the camera did NOT apply, filled at the burst idle-close by comparing every key the
-    /// burst wrote against the authoritative readback (issue 1343). Empty when the last read was
-    /// not a burst-close, or when every write landed. The panel renders each listed value with a
-    /// `.not-applied` style so a silently-refused write (cam1 today: the BMPCC ACKs and ignores an
-    /// aperture/focus PTP write while ISO applies) is no longer invisible — today the optimistic
-    /// value just reverts. Cleared on the next burst or the next real read. `#[serde(default)]` so
+    /// write the camera did NOT apply, filled after a write by comparing every key it wrote
+    /// against the read-back that follows it (issue 1343, shading#6). Empty after a plain read,
+    /// or when every write landed. The panel renders each listed value with a `.not-applied`
+    /// style so a silently-refused write is visible instead of the optimistic value just
+    /// reverting. Cleared on the next real read. `#[serde(default)]` so
     /// an older relay that does not send it still deserializes (empty `Vec`), mirroring
     /// [`RelayState::capture_fps`]; `rename_all = "camelCase"` emits it as `notApplied`.
     #[serde(default)]
@@ -178,11 +170,11 @@ pub struct SetRequest {
     pub tint: Option<i64>,
     /// Shutter denominator (e.g. `500` == 1/500 s).
     pub shutter: Option<i64>,
-    /// PROJECT fps, plain (e.g. `50`). Written to d006 as `fps * 100`, and only when that is
+    /// PROJECT fps, plain (e.g. `50`). Written as the camera's own frame rate, only when `fps * 100` is
     /// one of the camera's [`CameraCaps::fps_choices`]; any other value refuses the whole
-    /// request (issue 1402). Never written to the off-speed d007.
+    /// request (issue 1402). Never rounded to a neighbour.
     pub fps: Option<i64>,
-    /// Trigger auto white balance (no PTP equivalent — ignored on the USB path).
+    /// `true` runs the camera's auto white balance (`video/whiteBalance/doAuto`, shading#6).
     pub auto_wb: Option<bool>,
 }
 
@@ -435,7 +427,7 @@ pub fn summarize_set_request(req: &SetRequest) -> String {
 /// The action a [`SetQueue`] decided for an incoming SET (issue 1309/1337).
 #[derive(Debug, Clone, PartialEq)]
 pub enum SubmitAction {
-    /// No write is in flight — run THIS request now (the caller then drives gphoto2 and, while it
+    /// No write is in flight — run THIS request now (the caller then drives the camera and, while it
     /// runs, drains any SETs that queued behind it, in ORDER).
     RunNow(SetRequest),
     /// A write is already in flight — this request was appended to the FIFO queue and will be
@@ -444,13 +436,12 @@ pub enum SubmitAction {
 }
 
 /// Single-flight FIFO queue for shading writes (issue 1309 single-flight; issue 1337 FIFO). The
-/// relay wraps ONE of these in a `Mutex`: the FIRST SET flips `in_flight` and runs gphoto2; any SET
-/// arriving while a write is in flight is APPENDED to `pending` (never a second parallel gphoto2
-/// fork — the issue-1309 guarantee); when the in-flight worker finishes it pops the FRONT of
+/// relay wraps ONE of these in a `Mutex`: the FIRST SET flips `in_flight` and writes to the camera; any SET
+/// arriving while a write is in flight is APPENDED to `pending` (never a second parallel camera write —
+/// the issue-1309 guarantee); when the in-flight worker finishes it pops the FRONT of
 /// `pending` and runs it, else clears `in_flight`. FIFO (not the former latest-wins coalesce) so a
-/// burst of 20 rapid clicks becomes 20 in-order camera moves — the owner's issue-1337 requirement,
-/// which the persistent write-burst shell makes fast enough to run each rather than collapse them.
-/// Pure state machine — the actual gphoto2 I/O lives in the relay; this is exhaustively rustc-testable.
+/// burst of 20 rapid clicks becomes 20 in-order camera moves — the owner's issue-1337 requirement.
+/// Pure state machine — the camera I/O lives in the relay; this is exhaustively rustc-testable.
 #[derive(Debug, Default, Clone)]
 pub struct SetQueue {
     in_flight: bool,
@@ -474,7 +465,7 @@ impl SetQueue {
         }
     }
 
-    /// Called by the in-flight worker after each gphoto2 write completes: `Some(next)` = a queued
+    /// Called by the in-flight worker after each write completes: `Some(next)` = a queued
     /// request is next (FIFO front), stay in-flight and run it; `None` = queue empty, clear
     /// in-flight (idle again).
     pub fn finish(&mut self) -> Option<SetRequest> {
@@ -499,12 +490,5 @@ impl SetQueue {
     /// Total number of SETs queued over this queue's lifetime (for diagnostics).
     pub fn queued_total(&self) -> u64 {
         self.queued_total
-    }
-
-    /// Whether a SET still QUEUED (not the one running) moves the aperture again (issue 1452). The
-    /// relay then defers the running click's 0x5007 read-back to the run's last aperture click, so
-    /// a quick run of clicks pays one settle, not one per click.
-    pub fn has_pending_aperture(&self) -> bool {
-        self.pending.iter().any(|req| req.aperture_norm.is_some())
     }
 }

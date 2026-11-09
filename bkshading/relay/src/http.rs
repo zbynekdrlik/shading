@@ -1,8 +1,8 @@
 //! The relay's local HTTP API, consumed by the `bkshading` aggregation service.
 //!
 //! Mirrors the dev2 MVP `pybridge` endpoint shape (`/healthz`, live state, write) so the
-//! service can treat a cambox relay and a future SBC relay uniformly. Blocking gphoto2
-//! work runs in `spawn_blocking` so the async runtime is never stalled.
+//! service can treat a cambox relay and a future SBC relay uniformly. The blocking camera
+//! REST calls run in `spawn_blocking` so the async runtime is never stalled.
 
 use std::sync::Arc;
 
@@ -56,11 +56,11 @@ async fn set_params(
     Json(req): Json<SetRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
     let s = session.clone();
-    // issue 1309/1337: funnel through the single-flight FIFO gate + write-burst so rapid SETs never
-    // fork two concurrent gphoto2 processes. An `Applied` write returns 200 with the applied count
-    // AND the projected resulting state (`{"applied": n, "state": {...}}`) so the service can push
-    // an immediate confirmation to the panel; a SET that queued behind an in-flight burst returns
-    // 202 `{"queued": true}` (it is applied in order by the in-flight worker).
+    // issue 1309/1337: funnel through the single-flight FIFO gate so rapid SETs never write to the
+    // camera at once. An `Applied` write returns 200 with the applied count AND the state read back
+    // after it (`{"applied": n, "state": {...}}`) so the service can push an immediate confirmation
+    // to the panel; a SET that queued behind an in-flight write returns 202 `{"queued": true}` (it
+    // is applied in order by the in-flight worker).
     match tokio::task::spawn_blocking(move || s.submit(&req)).await {
         Ok(Ok(ApplyOutcome::Applied { count, state })) => Ok((
             StatusCode::OK,
@@ -75,11 +75,11 @@ async fn set_params(
     }
 }
 
-/// The HTTP status a failed `PUT /api/params` answers with. A `fps` the camera's d006 does not list
+/// The HTTP status a failed `PUT /api/params` answers with. A `fps` the camera does not list
 /// (issue 1402, [`FpsNotSettable`]) is the CLIENT's error, decided before anything reached the
 /// camera: `422 Unprocessable Entity`, with the named message listing the camera's own choices.
-/// Every other failure is a gphoto2 error (camera unplugged / busy), an upstream failure, not our
-/// bug: `502 Bad Gateway`. Pure, so the mapping is unit-tested without an HTTP server.
+/// Every other failure is the camera's (offline, no answer, a refused PUT), an upstream failure,
+/// not our bug: `502 Bad Gateway`. Pure, so the mapping is unit-tested without an HTTP server.
 pub fn set_error_status(e: &anyhow::Error) -> StatusCode {
     if e.is::<FpsNotSettable>() {
         StatusCode::UNPROCESSABLE_ENTITY
