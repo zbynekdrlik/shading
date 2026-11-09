@@ -114,7 +114,11 @@ fn an_endpoint_the_body_does_not_implement_is_just_unknown_6() {
     let st = session(&cam).read_state();
     assert!(st.online, "a 501 endpoint never makes the camera offline");
     assert_eq!(st.params.focus_norm, None);
-    assert!(st.caps.unwrap().iso_choices.is_empty());
+    // 0.2.2 (coordinator, live 6K fw 8.6): a missing ISO list falls back to the standard Pocket list.
+    assert_eq!(
+        st.caps.unwrap().iso_choices,
+        bkshading_proto::mapping::POCKET_ISO_CHOICES.to_vec()
+    );
     assert_eq!(st.params.iso, Some(400));
 }
 
@@ -506,6 +510,11 @@ impl NetTree {
     fn vendor(&self, name: &str, vendor: &str) {
         let usb_dev = self.root.join("usb").join(name);
         std::fs::write(usb_dev.join("idVendor"), format!("{vendor}\n")).unwrap();
+    }
+
+    fn usb_product(&self, name: &str, product: &str) {
+        let usb_dev = self.root.join("usb").join(name);
+        std::fs::write(usb_dev.join("product"), format!("{product}\n")).unwrap();
     }
 
     fn lease(&self, ifindex: u32, text: &str) {
@@ -1050,4 +1059,195 @@ fn presses_queued_past_the_answer_budget_finish_in_the_background_in_order_6() {
             }
         }
     }
+}
+
+#[test]
+fn a_pocket_6k_at_fw_8_6_is_detected_read_set_and_stepped_6() {
+    // The coordinator's live endpoint subset of SNV cam3 (no system/product, no lists, no
+    // descriptions), found through discovery so the USB product string names it.
+    let cam = FakeCamera::start(support::pocket_6k_fw86());
+    let stops = cam.cam().lens_stops.clone();
+    let net = NetTree::new("6k86");
+    net.iface("enx7c2e0d6k0086", "cdc_ncm", 11);
+    net.usb_product("enx7c2e0d6k0086", "Pocket Cinema Camera 6K");
+    net.lease(11, "SERVER_ADDRESS=127.0.0.1\n");
+    let s = Arc::new(
+        CameraSession::new(
+            CameraLocator::Discover {
+                paths: net.paths(),
+                port: cam.addr.port(),
+            },
+            VERSION,
+        )
+        .with_aperture_readback_delay_ms(0)
+        .with_iris_probe_wait_ms(30),
+    );
+    // detect: confirmed by lens/iris, named by the USB product string.
+    assert_eq!(s.detect().as_deref(), Some("Pocket Cinema Camera 6K"));
+    // state: every value read, every missing list replaced by a sane default.
+    let st = s.read_state();
+    assert!(st.online);
+    assert_eq!(st.params.iso, Some(1000));
+    assert_eq!(st.params.shutter, Some(100));
+    assert_eq!(st.params.kelvin, Some(4850));
+    assert_eq!(st.params.fps100, Some(6000));
+    assert_eq!(fstop(&st), 9.5);
+    let caps = st.caps.clone().unwrap();
+    assert!(
+        caps.iso_choices.contains(&1000) && caps.iso_choices.len() > 10,
+        "{:?}",
+        caps.iso_choices
+    );
+    assert!(
+        caps.shutter_choices.contains(&100),
+        "{:?}",
+        caps.shutter_choices
+    );
+    assert_eq!((caps.kelvin_min, caps.kelvin_max), (2500, 10000));
+    assert!(caps.fnumber_choices.len() > 5, "the slider gets a range");
+    assert!(caps.fps_choices.contains(&6000));
+    // set: plain values land.
+    let (_, st) = applied(
+        s.submit(&SetRequest {
+            iso: Some(800),
+            kelvin: Some(5600),
+            shutter: Some(50),
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+    assert_eq!(
+        (st.params.iso, st.params.kelvin, st.params.shutter),
+        (Some(800), Some(5600), Some(50))
+    );
+    assert!(st.not_applied.is_empty(), "{:?}", st.not_applied);
+    // step: one press = the next native step, down to the end of the lens and back up, quietly
+    // stopping at both ends although the lens range is unknown.
+    let at = stops.iter().position(|f| *f == 9.5).unwrap();
+    for want in stops[..at].iter().rev() {
+        assert_eq!(fstop(&press(&s, -1)), *want);
+    }
+    let st = press(&s, -1);
+    assert_eq!(fstop(&st), 4.0, "the end of the lens");
+    assert!(
+        st.not_applied.is_empty(),
+        "the end of an unknown range is quiet: {:?}",
+        st.not_applied
+    );
+    for want in &stops[1..] {
+        assert_eq!(fstop(&press(&s, 1)), *want);
+    }
+}
+
+#[test]
+fn a_fixed_address_camera_without_system_product_is_a_blackmagic_camera_6() {
+    let cam = FakeCamera::start(support::pocket_6k_fw86());
+    let s = Arc::new(session(&cam));
+    assert_eq!(s.detect().as_deref(), Some("Blackmagic camera"));
+    assert!(s.read_state().online);
+    assert_eq!(
+        cam.gets_of("/system/product"),
+        1,
+        "probed once, then the link is kept"
+    );
+}
+
+#[test]
+fn a_probe_the_camera_refuses_as_out_of_range_is_the_end_of_the_lens_6() {
+    let mut c = support::pocket_6k_fw86();
+    c.refuse
+        .insert("/lens/iris".into(), (400, "Bad Request".into()));
+    let cam = FakeCamera::start(c);
+    let s = Arc::new(session(&cam).with_iris_probe_wait_ms(30));
+    let st = press(&s, 1);
+    assert_eq!(fstop(&st), 9.5);
+    assert!(st.not_applied.is_empty(), "{:?}", st.not_applied);
+    assert_eq!(
+        cam.puts().len(),
+        1,
+        "no widening after an out-of-range answer"
+    );
+}
+
+#[test]
+fn something_that_is_not_a_camera_is_not_taken_for_one_6() {
+    let cam = FakeCamera::start(Cam {
+        not_found: ["/system/product", "/lens/iris"].map(String::from).to_vec(),
+        not_implemented: vec!["/system".into()],
+        ..Cam::default()
+    });
+    let s = Arc::new(session(&cam));
+    assert_eq!(s.detect(), None);
+    assert!(!s.read_state().online);
+}
+
+#[test]
+fn a_lens_iris_answer_without_an_f_stop_or_an_html_system_page_is_no_camera_6() {
+    let mut c = support::pocket_6k_fw86();
+    c.get_override
+        .insert("/lens/iris".into(), (200, "{}".into()));
+    c.get_override.insert(
+        "/system".into(),
+        (200, "<html><body>router login</body></html>".into()),
+    );
+    let cam = FakeCamera::start(c);
+    let s = Arc::new(session(&cam));
+    assert_eq!(s.detect(), None);
+}
+
+#[test]
+fn a_booting_camera_answering_500_is_probed_again_not_named_by_default_6() {
+    let mut c = Cam::default();
+    c.get_override
+        .insert("/system/product".into(), (503, "starting".into()));
+    let cam = FakeCamera::start(c);
+    let s = Arc::new(session(&cam));
+    assert_eq!(
+        s.detect(),
+        None,
+        "a 503 is not 'not served': no fallback name"
+    );
+    cam.cam().get_override.clear();
+    assert_eq!(
+        s.detect().as_deref(),
+        Some("Blackmagic Pocket Cinema Camera 4K"),
+        "the next probe names it properly"
+    );
+}
+
+#[test]
+fn without_a_lens_range_the_slider_keeps_every_f_stop_seen_6() {
+    let mut c = support::pocket_6k_fw86();
+    c.lens_stops = vec![1.8, 2.0, 2.2, 2.5, 2.8];
+    c.aperture = 1.8;
+    let cam = FakeCamera::start(c);
+    let s = Arc::new(session(&cam).with_iris_probe_wait_ms(30));
+    let grid0 = s.read_state().caps.unwrap().fnumber_choices;
+    assert_eq!(grid0.first(), Some(&1.8));
+    let st = press(&s, 1);
+    assert_eq!(fstop(&st), 2.0);
+    let grid1 = st.caps.unwrap().fnumber_choices;
+    assert_eq!(
+        grid1, grid0,
+        "the grid does not shrink once the iris left 1.8"
+    );
+}
+
+#[test]
+fn a_slider_position_past_an_unknown_lens_end_is_not_applied_not_an_error_6() {
+    let mut c = support::pocket_6k_fw86();
+    c.refuse
+        .insert("/lens/iris".into(), (400, "Bad Request".into()));
+    let cam = FakeCamera::start(c);
+    let s = Arc::new(session(&cam));
+    let (_, st) = applied(
+        s.submit(&SetRequest {
+            aperture_norm: Some(0.0),
+            iso: Some(800),
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+    assert_eq!(st.not_applied, vec!["apertureNorm".to_string()]);
+    assert_eq!(st.params.iso, Some(800), "the rest of the SET still landed");
 }

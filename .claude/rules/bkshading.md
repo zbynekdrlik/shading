@@ -144,6 +144,29 @@ the camera's USB-C CDC-NCM link (since v0.2.0, shading#6; before that over USB-P
     them through the dropped link.
   - Timing tests sync on the fake's recorded PUT (`wait_for_put`), never on a guessed sleep.
     Every fake delay stays under `REST_TIMEOUT` (1 s), or the client times out.
+- **Not every firmware serves every endpoint (v0.2.2, live 6K fw 8.6 = SNV cam3).** That body
+  answers 404 to `system/product`, `video/supportedISOs`, `video/supportedShutters`,
+  `video/whiteBalance/description`, `lens/iris/description`, `video/shutter/description` and 501 to
+  `video/ndFilter`, `system/supportedCodecFormats`, `system/supportedVideoFormats`; `/system` = 204.
+  REST is served at all only with Camera Setup → Network access → **Web media manager** on.
+  - Detection (`CameraSession::probe_camera`): `system/product`, else `lens/iris` 200, else
+    `/system` 2xx; the name falls back to the USB product string (`CameraLink.usb_product`,
+    `device/../product`), else `FALLBACK_CAMERA_MODEL`.
+  - Every capability endpoint is optional; `read_all` returns the missing ones and
+    `note_missing` logs each ONCE at INFO (`reported_missing`). Defaults: `POCKET_ISO_CHOICES`,
+    `shutter_choices_for_fps`, Kelvin 2500-10000, slider `DEFAULT_APERTURE_RANGE` widened to the
+    reported f-stop.
+  - Only 404/501 = "not served" (`not_served`, logged once; the once-set resets with the link). A
+    500/503/undecodable body is a failure: WARN every cycle, and a 503 `system/product` never falls
+    back to a default name (the next detect probes again). `lens/iris` confirms only with a real
+    `apertureStop` (`Iris` decodes `{}`), `/system` only as 204 or a 2xx with an empty/JSON body.
+  - No lens range (`WriteBasis.aperture_range = None`): an `apertureStep` that 6 probes do not move
+    is the END of the lens (quiet, not `notApplied`); a probe answered 400 is the end too. With a
+    known range a 400 stays a refused write. The slider grid is `DEFAULT_APERTURE_RANGE` widened
+    STICKY to every f-stop the link has seen (`seen_stops`, `widen_slider_grid`: caps grid, slider
+    position and write basis stay one grid); a slider write 400 = `notApplied: apertureNorm`.
+  - Test profile `support::pocket_6k_fw86()` carries the exact 404/501 set and the lens's live
+    1/6-stop steps (4.0 .. 11.0 at 24 mm); `NetTree::usb_product` writes the USB product string.
 - **Decoding:** integer fields go through a lenient int (`400.0` reads as 400), and fields the
   relay does not use are not declared, so one odd value cannot fail a whole endpoint.
 

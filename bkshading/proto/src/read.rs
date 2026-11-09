@@ -132,10 +132,24 @@ fn read_frame_rates(read: &RestRead) -> Vec<FrameRateChoice> {
     }
 }
 
-/// The aperture grid for this camera's lens ([`fnumber_grid`] over `lens/iris/description`).
+/// The aperture grid for this camera's lens ([`fnumber_grid`] over `lens/iris/description`). A
+/// firmware without the description (the 6K at fw 8.6) gets [`DEFAULT_APERTURE_RANGE`] widened to
+/// the f-stop the lens reports now; the relay widens it further to every f-stop the link has seen.
+/// The slider's positions only.
 pub fn read_fnumber_grid(read: &RestRead) -> Vec<f64> {
-    let range = read.iris_description.as_ref().and_then(|d| d.aperture_stop);
-    fnumber_grid(range.and_then(|r| r.min), range.and_then(|r| r.max))
+    let range = read
+        .iris_description
+        .as_ref()
+        .and_then(|d| d.aperture_stop)
+        .and_then(|r| Some((r.min?, r.max?)));
+    let (lo, hi) = range.unwrap_or_else(|| {
+        let (lo, hi) = DEFAULT_APERTURE_RANGE;
+        match read.iris.as_ref().and_then(|i| i.aperture_stop) {
+            Some(f) if f.is_finite() && f > 0.0 => (lo.min(f), hi.max(f)),
+            _ => (lo, hi),
+        }
+    });
+    fnumber_grid(Some(lo), Some(hi))
 }
 
 /// How the camera measures its shutter (`video/shutter` answers one or the other).
@@ -248,11 +262,13 @@ pub fn params_and_caps(read: &RestRead) -> (ShadingParams, CameraCaps) {
             .and_then(|f| f.normalised)
             .filter(|v| v.is_finite()),
     };
+    // A firmware without `video/supportedISOs` (the 6K at fw 8.6) gets the standard Pocket list.
     let mut iso_choices: Vec<i64> = read
         .supported_isos
         .as_ref()
         .map(|s| s.supported_isos.clone())
-        .unwrap_or_default();
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| POCKET_ISO_CHOICES.to_vec());
     iso_choices.sort_unstable();
     iso_choices.dedup();
     let wb = read

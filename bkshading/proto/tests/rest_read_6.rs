@@ -127,10 +127,13 @@ fn an_empty_read_degrades_to_unknown_never_a_panic_6() {
     assert_eq!(p.iso, None);
     assert_eq!(p.shutter, None);
     assert_eq!(p.fps100, None, "never the fallback rate");
+    // 0.2.2 (coordinator, live 6K fw 8.6): no lens range -> the default 2.8..22 slider range.
+    assert_eq!(caps.fnumber_choices.first(), Some(&2.8));
+    assert_eq!(caps.fnumber_choices.last(), Some(&22.0));
     assert_eq!(
-        caps.fnumber_choices,
-        THIRD_STOP_FNUMBERS.to_vec(),
-        "no lens range -> nominal list"
+        caps.iso_choices,
+        bkshading_proto::mapping::POCKET_ISO_CHOICES.to_vec(),
+        "no supportedISOs -> the standard Pocket list"
     );
     assert!(caps.fps_choices.is_empty());
     assert!(
