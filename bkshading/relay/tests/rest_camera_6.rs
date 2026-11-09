@@ -114,7 +114,11 @@ fn an_endpoint_the_body_does_not_implement_is_just_unknown_6() {
     let st = session(&cam).read_state();
     assert!(st.online, "a 501 endpoint never makes the camera offline");
     assert_eq!(st.params.focus_norm, None);
-    assert!(st.caps.unwrap().iso_choices.is_empty());
+    // 0.2.2 (coordinator, live 6K fw 8.6): a missing ISO list falls back to the standard Pocket list.
+    assert_eq!(
+        st.caps.unwrap().iso_choices,
+        bkshading_proto::mapping::POCKET_ISO_CHOICES.to_vec()
+    );
     assert_eq!(st.params.iso, Some(400));
 }
 
