@@ -134,7 +134,8 @@ fn read_frame_rates(read: &RestRead) -> Vec<FrameRateChoice> {
 
 /// The aperture grid for this camera's lens ([`fnumber_grid`] over `lens/iris/description`). A
 /// firmware without the description (the 6K at fw 8.6) gets [`DEFAULT_APERTURE_RANGE`] widened to
-/// the f-stop the lens reports: the slider's positions only, the camera snaps to its own steps.
+/// the f-stop the lens reports now; the relay widens it further to every f-stop the link has seen.
+/// The slider's positions only.
 pub fn read_fnumber_grid(read: &RestRead) -> Vec<f64> {
     let range = read
         .iris_description

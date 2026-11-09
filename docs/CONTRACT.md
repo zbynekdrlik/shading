@@ -65,7 +65,9 @@ floor camera-box's own CI builds had. A box with an older glibc cannot run them.
     camera `172.25.77.161`, box `.162`).
   - **Confirming and naming it (v0.2.2).** `GET system/product` names the camera when the firmware
     serves it. Otherwise (the Pocket 6K at fw 8.6 answers 404) the camera is confirmed by `GET
-    lens/iris` 200, else `GET /system` 2xx. It is then named by the USB product string of the
+    lens/iris` 200 carrying a real `apertureStop`, else `GET /system` 204 (or a 2xx with an empty or
+    JSON body; an HTML page is not a camera). A 500 or 503 from `system/product` is not taken as
+    "not served": the next read probes again. A camera found this way is named by the USB product string of the
     vendor-1edb device behind the link (`Pocket Cinema Camera 6K`), else "Blackmagic camera".
   - **Camera-side prerequisite:** the camera serves REST only with **Blackmagic Camera Setup →
     Network access → "Web media manager" enabled** (live on the 6K at fw 8.6). Without it the link
@@ -149,14 +151,21 @@ UseDomains=no
   - `params.sensorFps100` is the off-speed rate (`offSpeedFrameRate` × 100).
   - `camera` is the product name (`Blackmagic Pocket Cinema Camera 4K`). It was the gphoto2
     `--auto-detect` model.
-- **Not every firmware serves every endpoint.** Every capability endpoint is optional. A missing
-  one (404/501) is logged once at INFO, and the relay falls back to:
+- **Not every firmware serves every endpoint.** Every capability endpoint is optional. One the
+  firmware does not serve (404/501) is logged once at INFO. Any other failure (a 500 while
+  booting, a body that does not decode) is logged every cycle, and is never taken for "not served".
+  The relay falls back to:
   - ISO: the standard Pocket list 100 .. 25600 in 1/3 steps;
   - shutter: the standard denominators no faster than the frame rate;
   - white balance: 2500 .. 10000 K;
-  - lens range: unknown. The absolute slider uses f/2.8 .. f/22, widened to any f-stop the lens
-    reports. For `apertureStep`, a press the iris does not follow then means the end of the lens
-    (quiet), and a probe the camera refuses with 400 is the end of the lens too.
+  - lens range: unknown.
+    - The absolute slider uses f/2.8 .. f/22, widened to every f-stop the lens has reported on
+      this link.
+    - A slider position past the real end of the lens may be refused with 400. The relay reports
+      that as `notApplied: apertureNorm`, not as an error.
+    - For `apertureStep`, a press the iris does not follow means the end of the lens (quiet), and
+      a probe the camera refuses with 400 is the end of the lens too. With a KNOWN range, a 400 is
+      a refused write (502), as before.
 
   What two bodies serve, read live:
 
@@ -166,7 +175,8 @@ UseDomains=no
 | `system` | — | 204 |
 | `lens/iris`, `lens/focus`, `lens/zoom` | 200 | 200 |
 | `lens/iris/description` | 200 | **404** |
-| `video/iso`, `video/shutter`, `video/whiteBalance`, `video/whiteBalanceTint`, `video/gain` | 200 | 200 |
+| `video/iso`, `video/whiteBalance`, `video/whiteBalanceTint` | 200 (PUT landed live) | 200 |
+| `video/shutter`, `video/gain` | manual | 200 |
 | `video/supportedISOs`, `video/supportedShutters` | manual | **404** |
 | `video/whiteBalance/description`, `video/shutter/description` | manual | **404** |
 | `system/format`, `system/supportedFormats` | manual | 200 |

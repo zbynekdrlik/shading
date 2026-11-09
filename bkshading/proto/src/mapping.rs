@@ -53,8 +53,9 @@ pub const POCKET_ISO_CHOICES: [i64; 25] = [
 ];
 
 /// The aperture slider's range when the firmware does not serve `lens/iris/description` (the 6K at
-/// fw 8.6): f/2.8 .. f/22, widened to include the f-stop the lens reports. The camera snaps a
-/// slider write to its own nearest step, so a range wider than the lens is harmless.
+/// fw 8.6): f/2.8 .. f/22, widened (sticky, per link) to every f-stop the lens has reported. A
+/// slider position past the end of the actual lens either snaps to the lens's end or is refused
+/// with 400 (not yet seen live); the relay reports a refusal as `notApplied: apertureNorm`.
 pub const DEFAULT_APERTURE_RANGE: (f64, f64) = (2.8, 22.0);
 
 /// Two f-numbers closer than this ratio (1/6 stop, `2^(1/12)`) are one stop of the grid: a nominal

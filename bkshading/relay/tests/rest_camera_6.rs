@@ -1180,3 +1180,74 @@ fn something_that_is_not_a_camera_is_not_taken_for_one_6() {
     assert_eq!(s.detect(), None);
     assert!(!s.read_state().online);
 }
+
+#[test]
+fn a_lens_iris_answer_without_an_f_stop_or_an_html_system_page_is_no_camera_6() {
+    let mut c = support::pocket_6k_fw86();
+    c.get_override
+        .insert("/lens/iris".into(), (200, "{}".into()));
+    c.get_override.insert(
+        "/system".into(),
+        (200, "<html><body>router login</body></html>".into()),
+    );
+    let cam = FakeCamera::start(c);
+    let s = Arc::new(session(&cam));
+    assert_eq!(s.detect(), None);
+}
+
+#[test]
+fn a_booting_camera_answering_500_is_probed_again_not_named_by_default_6() {
+    let mut c = Cam::default();
+    c.get_override
+        .insert("/system/product".into(), (503, "starting".into()));
+    let cam = FakeCamera::start(c);
+    let s = Arc::new(session(&cam));
+    assert_eq!(
+        s.detect(),
+        None,
+        "a 503 is not 'not served': no fallback name"
+    );
+    cam.cam().get_override.clear();
+    assert_eq!(
+        s.detect().as_deref(),
+        Some("Blackmagic Pocket Cinema Camera 4K"),
+        "the next probe names it properly"
+    );
+}
+
+#[test]
+fn without_a_lens_range_the_slider_keeps_every_f_stop_seen_6() {
+    let mut c = support::pocket_6k_fw86();
+    c.lens_stops = vec![1.8, 2.0, 2.2, 2.5, 2.8];
+    c.aperture = 1.8;
+    let cam = FakeCamera::start(c);
+    let s = Arc::new(session(&cam).with_iris_probe_wait_ms(30));
+    let grid0 = s.read_state().caps.unwrap().fnumber_choices;
+    assert_eq!(grid0.first(), Some(&1.8));
+    let st = press(&s, 1);
+    assert_eq!(fstop(&st), 2.0);
+    let grid1 = st.caps.unwrap().fnumber_choices;
+    assert_eq!(
+        grid1, grid0,
+        "the grid does not shrink once the iris left 1.8"
+    );
+}
+
+#[test]
+fn a_slider_position_past_an_unknown_lens_end_is_not_applied_not_an_error_6() {
+    let mut c = support::pocket_6k_fw86();
+    c.refuse
+        .insert("/lens/iris".into(), (400, "Bad Request".into()));
+    let cam = FakeCamera::start(c);
+    let s = Arc::new(session(&cam));
+    let (_, st) = applied(
+        s.submit(&SetRequest {
+            aperture_norm: Some(0.0),
+            iso: Some(800),
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+    assert_eq!(st.not_applied, vec!["apertureNorm".to_string()]);
+    assert_eq!(st.params.iso, Some(800), "the rest of the SET still landed");
+}

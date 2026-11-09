@@ -156,8 +156,15 @@ the camera's USB-C CDC-NCM link (since v0.2.0, shading#6; before that over USB-P
     `note_missing` logs each ONCE at INFO (`reported_missing`). Defaults: `POCKET_ISO_CHOICES`,
     `shutter_choices_for_fps`, Kelvin 2500-10000, slider `DEFAULT_APERTURE_RANGE` widened to the
     reported f-stop.
+  - Only 404/501 = "not served" (`not_served`, logged once; the once-set resets with the link). A
+    500/503/undecodable body is a failure: WARN every cycle, and a 503 `system/product` never falls
+    back to a default name (the next detect probes again). `lens/iris` confirms only with a real
+    `apertureStop` (`Iris` decodes `{}`), `/system` only as 204 or a 2xx with an empty/JSON body.
   - No lens range (`WriteBasis.aperture_range = None`): an `apertureStep` that 6 probes do not move
-    is the END of the lens (quiet, not `notApplied`); a probe answered 400 is the end too.
+    is the END of the lens (quiet, not `notApplied`); a probe answered 400 is the end too. With a
+    known range a 400 stays a refused write. The slider grid is `DEFAULT_APERTURE_RANGE` widened
+    STICKY to every f-stop the link has seen (`seen_stops`, `widen_slider_grid`: caps grid, slider
+    position and write basis stay one grid); a slider write 400 = `notApplied: apertureNorm`.
   - Test profile `support::pocket_6k_fw86()` carries the exact 404/501 set and the lens's live
     1/6-stop steps (4.0 .. 11.0 at 24 mm); `NetTree::usb_product` writes the USB product string.
 - **Decoding:** integer fields go through a lenient int (`400.0` reads as 400), and fields the

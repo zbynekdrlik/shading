@@ -61,6 +61,8 @@ pub struct Cam {
     pub not_found: Vec<String>,
     /// A pause before answering a PUT on this path.
     pub put_delay: HashMap<String, Duration>,
+    /// A fixed answer `(status, body)` to a GET on this path, instead of the modelled one.
+    pub get_override: HashMap<String, (u16, String)>,
     /// A pause before answering a GET on this path (a camera that stops answering).
     pub get_delay: HashMap<String, Duration>,
     pub auto_wb_kelvin: i64,
@@ -102,6 +104,7 @@ impl Default for Cam {
             not_found: Vec::new(),
             put_delay: HashMap::new(),
             get_delay: HashMap::new(),
+            get_override: HashMap::new(),
             auto_wb_kelvin: 4800,
         }
     }
@@ -317,6 +320,9 @@ async fn handle(State(sh): State<Arc<Shared>>, method: Method, uri: Uri, body: B
     let cam = sh.cam.lock().unwrap().clone();
     if cam.not_implemented.contains(&path) {
         return (StatusCode::NOT_IMPLEMENTED, "not implemented").into_response();
+    }
+    if let Some((status, body)) = cam.get_override.get(&path) {
+        return (StatusCode::from_u16(*status).unwrap(), body.clone()).into_response();
     }
     if cam.not_found.contains(&path) {
         return (StatusCode::NOT_FOUND, "Not Found").into_response();

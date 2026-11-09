@@ -237,6 +237,9 @@ pub struct CameraSession {
     last_discovery: Mutex<Option<String>>,
     /// Endpoints already logged as not served by this camera (logged once each).
     reported_missing: Mutex<std::collections::BTreeSet<String>>,
+    /// The lowest and highest f-stop this link has reported, for the slider grid of a lens with
+    /// no `lens/iris/description`. Reset with the link.
+    seen_stops: Mutex<Option<(f64, f64)>>,
     /// Single-flight FIFO gate for writes (issue 1309/1337).
     set_queue: Mutex<SetQueue>,
 }
@@ -259,6 +262,7 @@ impl CameraSession {
             link: Mutex::new(None),
             last_discovery: Mutex::new(None),
             reported_missing: Mutex::new(std::collections::BTreeSet::new()),
+            seen_stops: Mutex::new(None),
             set_queue: Mutex::new(SetQueue::default()),
         }
     }
@@ -381,36 +385,61 @@ impl CameraSession {
                 }
             }
             Err(RestError::Transport(e)) => return Err(e),
-            Err(e) => self.note_missing(bkshading_proto::rest::PRODUCT, &e.to_string()),
+            Err(e) if not_served(&e) => self.note_missing(bkshading_proto::rest::PRODUCT, &e),
+            // A 500/503 (a camera still booting) or a body that does not decode: not a firmware
+            // fact. Do not settle for a fallback name; the next read probes again.
+            Err(e) => return Err(format!("system/product: {e}")),
         }
         match client.get_json::<bkshading_proto::rest::Iris>(bkshading_proto::rest::IRIS) {
-            Ok(_) => return Ok((fallback(), "lens/iris")),
+            // Only a real f-stop proves a camera: `Iris` decodes any JSON object (every field is
+            // optional), so `{}` or an error object must not pass.
+            Ok(i) if i.aperture_stop.is_some_and(|f| f.is_finite() && f > 0.0) => {
+                return Ok((fallback(), "lens/iris"))
+            }
+            Ok(_) => {}
             Err(RestError::Transport(e)) => return Err(e),
-            Err(e) => self.note_missing(bkshading_proto::rest::IRIS, &e.to_string()),
+            Err(e) if not_served(&e) => self.note_missing(bkshading_proto::rest::IRIS, &e),
+            Err(e) => return Err(format!("lens/iris: {e}")),
         }
         match client.request("GET", "/system", None) {
-            Ok(r) if (200..300).contains(&r.status) => Ok((fallback(), "/system")),
+            // The 6K answers 204; a 2xx with an empty or JSON-object body counts too. A catch-all web
+            // server answering HTML does not.
+            Ok(r) if r.status == 204
+                || ((200..300).contains(&r.status)
+                    && (r.body.trim().is_empty() || r.body.trim_start().starts_with('{'))) =>
+            {
+                Ok((fallback(), "/system"))
+            }
             Ok(r) => Err(format!(
-                "not a Blackmagic REST camera: system/product, lens/iris and /system all refused (/system: status {})",
+                "not a Blackmagic REST camera: system/product, lens/iris and /system gave no camera answer (/system: status {})",
                 r.status
             )),
             Err(e) => Err(e),
         }
     }
 
-    /// Logs an endpoint the camera does not serve, ONCE per relay run, at INFO: it is a firmware
-    /// fact (the 6K at fw 8.6 has no lists or descriptions), not an error, and repeats every read.
-    fn note_missing(&self, path: &str, reason: &str) {
+    /// Logs an endpoint the camera does not serve (404/501), ONCE per relay run, at INFO: it is a
+    /// firmware fact (the 6K at fw 8.6 has no lists or descriptions), not an error, and repeats
+    /// every read. Anything else (a 500, an undecodable body) is not a firmware fact: it goes to
+    /// [`Self::note_endpoint_failure`].
+    fn note_missing(&self, path: &str, e: &RestError) {
         if lock(&self.reported_missing).insert(path.to_string()) {
             tracing::info!(
                 endpoint = path,
-                reason,
+                reason = %e,
                 "camera does not serve this REST endpoint; using a default"
             );
         }
     }
 
+    /// An endpoint that failed this cycle for a reason other than "not served": logged every time.
+    fn note_endpoint_failure(&self, path: &str, e: &RestError) {
+        tracing::warn!(endpoint = path, error = %e, "camera REST endpoint failed this cycle; its value is unknown");
+    }
+
     fn forget_link(&self, why: &str) {
+        *lock(&self.seen_stops) = None;
+        lock(&self.reported_missing).clear();
         if let Some(l) = lock(&self.link).take() {
             tracing::warn!(camera = %l.client.addr, model = %l.model, why, "camera link dropped; it is looked up again on the next read");
         }
@@ -432,10 +461,16 @@ impl CameraSession {
         };
         match link.client.read_all() {
             Ok((read, missing)) => {
-                for (path, reason) in &missing {
-                    self.note_missing(path, reason);
+                for (path, e) in &missing {
+                    if not_served(e) {
+                        self.note_missing(path, e);
+                    } else {
+                        self.note_endpoint_failure(path, e);
+                    }
                 }
-                let (params, caps) = params_and_caps(&read);
+                let (mut params, mut caps) = params_and_caps(&read);
+                let mut basis = WriteBasis::from_read(&read);
+                self.widen_slider_grid(&read, &mut params, &mut caps, &mut basis);
                 Reading {
                     state: RelayState {
                         online: true,
@@ -447,7 +482,7 @@ impl CameraSession {
                         version: self.version.clone(),
                         not_applied: Vec::new(),
                     },
-                    basis: Some(WriteBasis::from_read(&read)),
+                    basis: Some(basis),
                 }
             }
             Err(e) => {
@@ -459,6 +494,44 @@ impl CameraSession {
                 }
             }
         }
+    }
+
+    /// No `lens/iris/description` (the 6K at fw 8.6): the slider grid spans the default range
+    /// widened to EVERY f-stop this link has seen (sticky), so a fast lens's 1.8 stays on the slider
+    /// after the iris left it and the grid does not change length between reads. The caps grid, the
+    /// reported slider position and the write basis stay ONE grid.
+    fn widen_slider_grid(
+        &self,
+        read: &bkshading_proto::rest::RestRead,
+        params: &mut bkshading_proto::wire::ShadingParams,
+        caps: &mut bkshading_proto::wire::CameraCaps,
+        basis: &mut WriteBasis,
+    ) {
+        if basis.aperture_range.is_some() {
+            return;
+        }
+        let stop = read
+            .iris
+            .as_ref()
+            .and_then(|i| i.aperture_stop)
+            .filter(|f| f.is_finite() && *f > 0.0);
+        let mut seen = lock(&self.seen_stops);
+        if let Some(f) = stop {
+            *seen = Some(match *seen {
+                Some((lo, hi)) => (lo.min(f), hi.max(f)),
+                None => (f, f),
+            });
+        }
+        let (lo, hi) = bkshading_proto::mapping::DEFAULT_APERTURE_RANGE;
+        let (lo, hi) = match *seen {
+            Some((a, b)) => (lo.min(a), hi.max(b)),
+            None => (lo, hi),
+        };
+        let grid = bkshading_proto::mapping::fnumber_grid(Some(lo), Some(hi));
+        params.aperture_norm =
+            stop.and_then(|f| bkshading_proto::mapping::nearest_choice_norm(f, &grid));
+        caps.fnumber_choices = grid.clone();
+        basis.fnumber_choices = grid;
     }
 
     fn note_online_transition(&self, state: &RelayState) {
@@ -693,6 +766,17 @@ impl CameraSession {
         );
         for w in &writes {
             if let Err(e) = link.client.write(w) {
+                // A slider position past the end of a lens with no description (the default range
+                // 2.8..22 on an f/4 lens) may be refused as out of range: the camera did not take
+                // that value, which is `notApplied`, not a failed write.
+                if matches!(w, RestWrite::ApertureStop(_))
+                    && basis.aperture_range.is_none()
+                    && matches!(e, RestError::Status { status: 400, .. })
+                {
+                    tracing::info!(write = ?w, "aperture slider position refused as out of range (no lens range known)");
+                    log.not_applied.push("apertureNorm".into());
+                    continue;
+                }
                 if matches!(e, RestError::Transport(_)) {
                     self.forget_link("a write got no answer");
                 }
@@ -783,7 +867,7 @@ impl CameraSession {
                 // 400 = "out of range" (the manual): the target is past the end of the lens, which
                 // a firmware without `lens/iris/description` only finds out this way. The end of
                 // the lens, not an error.
-                if matches!(e, RestError::Status { status: 400, .. }) {
+                if range.is_none() && matches!(e, RestError::Status { status: 400, .. }) {
                     tracing::info!(dir, from = start, target, probes, "aperture step: the camera refuses the target as out of range; the end of the lens");
                     return Ok(None);
                 }
@@ -825,7 +909,7 @@ impl CameraSession {
             // iris that follows none of the probes is at its end. Quiet, like a known end.
             tracing::info!(
                 dir, from = start, probes,
-                "aperture step: no move after the probe limit and no lens range; the end of the lens"
+                "aperture step: no move after the probe limit and no lens range; the end of the lens (or an iris that ignores writes)"
             );
             return Ok(None);
         }
@@ -940,6 +1024,18 @@ impl CameraSession {
         });
         (state, reading.basis)
     }
+}
+
+/// Whether an endpoint error means "this firmware does not serve it" (404/501), a fact to log
+/// once, rather than a failure.
+fn not_served(e: &RestError) -> bool {
+    matches!(
+        e,
+        RestError::Status {
+            status: 404 | 501,
+            ..
+        }
+    )
 }
 
 /// Merges every present field of `req` into `acc` — a later SET's value wins — so the read-back

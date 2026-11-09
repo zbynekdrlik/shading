@@ -380,24 +380,25 @@ impl RestClient {
     /// (`Err`: the camera is gone, the caller goes offline); an endpoint that answers an error
     /// status or an undecodable body is just missing this cycle, never a failed read. Every
     /// capability endpoint is optional (the 6K at fw 8.6 serves no lists or descriptions); the
-    /// missing ones come back as `(path, reason)` so the session logs each ONCE.
-    pub fn read_all(&self) -> Result<(RestRead, Vec<(String, String)>), String> {
+    /// missing ones come back with their error so the session can tell "not served" (404/501,
+    /// logged ONCE) from a failure (logged every cycle).
+    pub fn read_all(&self) -> Result<(RestRead, Vec<(String, RestError)>), String> {
         fn one<T: DeserializeOwned>(
             c: &RestClient,
             path: &str,
-            missing: &mut Vec<(String, String)>,
+            missing: &mut Vec<(String, RestError)>,
         ) -> Result<Option<T>, String> {
             match c.get_json::<T>(path) {
                 Ok(v) => Ok(Some(v)),
                 Err(RestError::Transport(e)) => Err(format!("GET {path}: {e}")),
                 Err(e) => {
-                    missing.push((path.to_string(), e.to_string()));
+                    missing.push((path.to_string(), e));
                     Ok(None)
                 }
             }
         }
         let started = Instant::now();
-        let mut missing: Vec<(String, String)> = Vec::new();
+        let mut missing: Vec<(String, RestError)> = Vec::new();
         let m = &mut missing;
         let read = RestRead {
             iso: one(self, rest::ISO, m)?,
