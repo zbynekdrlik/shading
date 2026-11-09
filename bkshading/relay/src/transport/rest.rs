@@ -186,26 +186,31 @@ pub fn decode_chunked(mut data: &[u8]) -> Result<Option<Vec<u8>>, String> {
 /// Parses a raw HTTP/1.x response. `Ok(None)` = not complete yet; `eof` = the peer closed, so a
 /// body without a length ends here.
 pub fn parse_response(raw: &[u8], eof: bool) -> Result<Option<HttpResponse>, String> {
-    let Some(end) = header_end(raw) else {
-        return if eof {
-            Err(format!(
-                "connection closed before the headers ended ({} bytes)",
-                raw.len()
-            ))
-        } else {
-            Ok(None)
+    // Interim 1xx answers (100 Continue) come before the real one: skip them, in a loop (a broken
+    // peer sending thousands must not recurse the stack away).
+    let mut raw = raw;
+    let (end, head) = loop {
+        let Some(end) = header_end(raw) else {
+            return if eof {
+                Err(format!(
+                    "connection closed before the headers ended ({} bytes)",
+                    raw.len()
+                ))
+            } else {
+                Ok(None)
+            };
         };
+        let head = String::from_utf8_lossy(&raw[..end]).into_owned();
+        let interim = head.starts_with("HTTP/1.")
+            && head
+                .split_whitespace()
+                .nth(1)
+                .is_some_and(|c| c.starts_with('1') && c.len() == 3);
+        if !interim {
+            break (end, head);
+        }
+        raw = &raw[end..];
     };
-    let head = String::from_utf8_lossy(&raw[..end]);
-    // An interim 1xx answer (100 Continue) is followed by the real one: parse what comes after it.
-    if head.starts_with("HTTP/1.")
-        && head
-            .split_whitespace()
-            .nth(1)
-            .is_some_and(|c| c.starts_with('1') && c.len() == 3)
-    {
-        return parse_response(&raw[end..], eof);
-    }
     let status = {
         let line = head.lines().next().unwrap_or("");
         let mut parts = line.split_whitespace();

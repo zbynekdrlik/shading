@@ -481,22 +481,27 @@ impl NetTree {
         NetTree { root }
     }
 
+    /// Like real sysfs: `net/<if>/device` is a SYMLINK to the USB interface dir
+    /// (`usb/<dev>/<dev>:1.0`), whose parent, the USB device, holds `idVendor`.
     fn iface(&self, name: &str, driver: &str, ifindex: u32) {
-        let dir = self.root.join("net").join(name);
-        std::fs::create_dir_all(dir.join("device")).unwrap();
+        let usb_dev = self.root.join("usb").join(name);
+        let usb_if = usb_dev.join(format!("{name}:1.0"));
+        std::fs::create_dir_all(&usb_if).unwrap();
         symlink(
             self.root.join("drivers").join(driver),
-            dir.join("device/driver"),
+            usb_if.join("driver"),
         )
         .unwrap();
+        let dir = self.root.join("net").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        symlink(&usb_if, dir.join("device")).unwrap();
         std::fs::write(dir.join("ifindex"), format!("{ifindex}\n")).unwrap();
-        // `device/..` is the USB device (here the iface dir itself, `device` being a plain dir).
         self.vendor(name, "1edb");
     }
 
     fn vendor(&self, name: &str, vendor: &str) {
-        let dir = self.root.join("net").join(name);
-        std::fs::write(dir.join("idVendor"), format!("{vendor}\n")).unwrap();
+        let usb_dev = self.root.join("usb").join(name);
+        std::fs::write(usb_dev.join("idVendor"), format!("{vendor}\n")).unwrap();
     }
 
     fn lease(&self, ifindex: u32, text: &str) {
@@ -855,4 +860,69 @@ fn every_panel_aperture_tap_moves_the_lens_6() {
         }
     }
     assert!(seen.len() > 12, "walked the lens: {seen:?}");
+}
+
+#[test]
+fn a_late_set_is_never_written_through_a_camera_that_went_offline_6() {
+    let cam = FakeCamera::start(Cam::default());
+    let s = Arc::new(session(&cam).with_aperture_readback_delay_ms(1500));
+    let first = {
+        let s = s.clone();
+        std::thread::spawn(move || {
+            s.submit(&SetRequest {
+                aperture_norm: Some(1.0),
+                ..Default::default()
+            })
+        })
+    };
+    wait_for_put(&cam, "/lens/iris");
+    let q = s
+        .submit(&SetRequest {
+            iso: Some(1600),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(q, ApplyOutcome::Queued);
+    // The camera stops answering before the read-back runs.
+    cam.cam()
+        .get_delay
+        .insert("/video/iso".into(), Duration::from_secs(10));
+    let (count, st) = applied(first.join().unwrap().unwrap());
+    assert_eq!(count, 1, "only the caller's own write");
+    assert!(!st.online);
+    assert_eq!(
+        cam.puts().into_iter().map(|(p, _)| p).collect::<Vec<_>>(),
+        vec!["/lens/iris".to_string()],
+        "the late SET was dropped, not written blind"
+    );
+    // The gate is idle again.
+    cam.cam().get_delay.clear();
+    assert!(s
+        .submit(&SetRequest {
+            iso: Some(800),
+            ..Default::default()
+        })
+        .is_ok());
+}
+
+#[test]
+fn a_drain_over_its_settle_budget_skips_the_iris_wait_6() {
+    let cam = FakeCamera::start(Cam::default());
+    let s = session(&cam)
+        .with_aperture_readback_delay_ms(3000)
+        .with_drain_settle_budget_ms(0);
+    let started = std::time::Instant::now();
+    let (_, st) = applied(
+        s.submit(&SetRequest {
+            aperture_norm: Some(1.0),
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(2500),
+        "no 3 s iris wait past the budget: {:?}",
+        started.elapsed()
+    );
+    assert!(st.online);
 }

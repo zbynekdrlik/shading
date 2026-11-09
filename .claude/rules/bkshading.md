@@ -112,6 +112,15 @@ the camera's USB-C CDC-NCM link (since v0.2.0, shading#6; before that over USB-P
   `notApplied` from it (a moved iris is never flagged). The gate stays shut through the read-back
   (`SetQueue::pop_pending` while writing, `finish` after): a SET that arrives during it is written
   in a second round, never inside the first round's read-back.
+  - A cached basis is used only while younger than `WRITE_BASIS_MAX_AGE_MS` (2 s), so a change
+    on the camera body just before a click is seen.
+  - A drain older than `DRAIN_SETTLE_BUDGET_MS` (4 s) reads back without the 1 s iris wait:
+    steady clicking adds rounds, and the first PUT must answer inside the service's 10 s
+    write-client timeout.
+  - A read-back that finds the camera offline drops (and logs) the late SETs instead of writing
+    them through the dropped link.
+  - Timing tests sync on the fake's recorded PUT (`wait_for_put`), never on a guessed sleep.
+    Every fake delay stays under `REST_TIMEOUT` (1 s), or the client times out.
 - **Decoding:** integer fields go through a lenient int (`400.0` reads as 400), and fields the
   relay does not use are not declared, so one odd value cannot fail a whole endpoint.
 

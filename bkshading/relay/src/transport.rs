@@ -46,6 +46,15 @@ pub use rest::{
 /// motor takes about a second to land (live on cam5), and the read-back is what the panel shows.
 pub const APERTURE_READBACK_DELAY_MS: u64 = 1000;
 
+/// A write drain that has run this long reads back WITHOUT the iris wait from then on (shading#6):
+/// SETs that keep arriving during read-backs add rounds, and the first caller's PUT must answer
+/// well inside the service's 10 s write-client timeout. The next poll shows the landed iris.
+pub const DRAIN_SETTLE_BUDGET_MS: u64 = 4000;
+
+/// The longest a cached read is used as a write's basis (shading#6), shorter than the read floor:
+/// a format, shutter-unit or iris change made on the camera body shortly before a click is seen.
+pub const WRITE_BASIS_MAX_AGE_MS: u64 = 2000;
+
 /// How the relay finds its camera.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CameraLocator {
@@ -174,6 +183,7 @@ pub struct CameraSession {
     clock: Box<dyn MonoClock>,
     timeout: Duration,
     aperture_readback_delay_ms: u64,
+    drain_settle_budget_ms: u64,
     /// The last real read. The lock is held ACROSS a read, so concurrent `/api/state` requests
     /// coalesce to one camera read per floor.
     read_cache: Mutex<Option<CachedRead>>,
@@ -198,6 +208,7 @@ impl CameraSession {
             clock: Box::new(InstantClock::new()),
             timeout: REST_TIMEOUT,
             aperture_readback_delay_ms: APERTURE_READBACK_DELAY_MS,
+            drain_settle_budget_ms: DRAIN_SETTLE_BUDGET_MS,
             read_cache: Mutex::new(None),
             last_online: Mutex::new(None),
             link: Mutex::new(None),
@@ -228,6 +239,13 @@ impl CameraSession {
     /// [`APERTURE_READBACK_DELAY_MS`]; tests shorten it.
     pub fn with_aperture_readback_delay_ms(mut self, ms: u64) -> Self {
         self.aperture_readback_delay_ms = ms;
+        self
+    }
+
+    /// Sets the drain time after which read-backs skip the iris wait. Production keeps
+    /// [`DRAIN_SETTLE_BUDGET_MS`]; tests shorten it.
+    pub fn with_drain_settle_budget_ms(mut self, ms: u64) -> Self {
+        self.drain_settle_budget_ms = ms;
         self
     }
 
@@ -376,7 +394,13 @@ impl CameraSession {
         let now_ms = self.clock.now_ms();
         let cached = cache
             .as_ref()
-            .filter(|c| read_is_fresh(Some(c.read_at_ms), now_ms, self.min_read_interval_ms))
+            .filter(|c| {
+                read_is_fresh(
+                    Some(c.read_at_ms),
+                    now_ms,
+                    self.min_read_interval_ms.min(WRITE_BASIS_MAX_AGE_MS),
+                )
+            })
             .and_then(|c| c.basis.clone());
         let basis = match cached {
             Some(b) => {
@@ -427,6 +451,7 @@ impl CameraSession {
             anyhow::bail!("camera offline: no camera answers its REST API, nothing written");
         };
         let mut before_stop = basis.aperture_stop;
+        let drain_started = std::time::Instant::now();
         let mut log = DrainLog::default();
         let mut count = 0usize;
         let mut own_refusal: Option<anyhow::Error> = None;
@@ -459,9 +484,20 @@ impl CameraSession {
                     None => break,
                 }
             }
-            let (state, read_basis) = self.read_back(&log, before_stop);
+            let settle =
+                drain_started.elapsed() < Duration::from_millis(self.drain_settle_budget_ms);
+            let (state, read_basis) = self.read_back(&log, before_stop, settle);
             count += log.count;
-            match lock(&self.set_queue).finish() {
+            let next = lock(&self.set_queue).finish();
+            if let (Some(next), None) = (&next, &read_basis) {
+                // The camera went away during the read-back: never write a late SET blind through
+                // a dropped link. It (and anything queued behind it) is dropped and logged; this
+                // caller's own SET was written and gets its answer.
+                tracing::warn!(dropped = %summarize_set_request(next), "shading SET dropped: the camera went offline at the read-back");
+                guard.disarm_and_abort("the camera went offline at the read-back");
+                break state;
+            }
+            match next {
                 Some(next) => {
                     // A SET arrived during the read-back: another round, planned on what was read.
                     tracing::info!(set = %summarize_set_request(&next), "shading SET arrived during the read-back; writing it next");
@@ -545,9 +581,17 @@ impl CameraSession {
         &self,
         log: &DrainLog,
         before_stop: Option<f64>,
+        settle: bool,
     ) -> (RelayState, Option<WriteBasis>) {
         if log.aperture_written && self.aperture_readback_delay_ms > 0 {
-            std::thread::sleep(Duration::from_millis(self.aperture_readback_delay_ms));
+            if settle {
+                std::thread::sleep(Duration::from_millis(self.aperture_readback_delay_ms));
+            } else {
+                tracing::info!(
+                    budget_ms = self.drain_settle_budget_ms,
+                    "write drain over its settle budget: reading back without the iris wait"
+                );
+            }
         }
         let mut cache = lock(&self.read_cache);
         let reading = self.read_now();
