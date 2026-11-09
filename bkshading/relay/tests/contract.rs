@@ -59,3 +59,16 @@ fn listens_on_8771_and_reads_its_registration_from_relay_env() {
     assert!(help.contains("[env: BKSHADING_CAMERA="), "{help}");
     assert!(!help.contains("gphoto2"), "{help}");
 }
+
+#[test]
+fn the_aperture_step_field_is_aperture_step_on_the_wire_6() {
+    // shading#6 (v0.2.1): the +/- press is `{"apertureStep": ±1}` in PUT /api/params.
+    let req: bkshading_proto::wire::SetRequest =
+        serde_json::from_str(r#"{"apertureStep": -1}"#).unwrap();
+    assert_eq!(req.aperture_step, Some(-1));
+    let req: bkshading_proto::wire::SetRequest = serde_json::from_str("{}").unwrap();
+    assert_eq!(
+        req.aperture_step, None,
+        "an older client simply leaves it out"
+    );
+}

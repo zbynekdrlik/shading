@@ -19,8 +19,8 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # The RelayState fixture the service deserializes (camelCase wire, matching bkshading-proto).
-# apertureNorm = 2/3 -> f-number choice index 2 (f/5.2) of 4; a "+" tap steps to index 3 (f/8.0),
-# i.e. an absolute apertureNorm of 1.0. kelvin 5600 (+100 -> 5700), tint 0 (+1 -> 1).
+# apertureNorm = 2/3 -> f-number choice index 2 (f/5.2) of 4; a "+" tap sends apertureStep 1
+# (shading#6: the relay walks the lens's own steps; this stub only records the body). kelvin 5600 (+100 -> 5700), tint 0 (+1 -> 1).
 STATE = {
     "online": True,
     "camera": "Blackmagic Design Pocket Cinema Camera 4K",

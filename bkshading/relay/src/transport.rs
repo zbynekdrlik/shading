@@ -18,6 +18,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::Result;
+use bkshading_proto::mapping::aperture_probe_target;
 use bkshading_proto::read::{
     fps_supported, iris_moved, not_applied_keys, params_and_caps, plan_writes, FpsNotSettable,
     RestWrite, WriteBasis,
@@ -49,6 +50,9 @@ pub const APERTURE_READBACK_DELAY_MS: u64 = 1000;
 /// How long an `apertureStep` probe waits for the iris to leave its current f-stop before it widens
 /// the target (shading#6, 0.2.1). The iris lands in about a second (live on cam5).
 pub const IRIS_PROBE_WAIT_MS: u64 = 1200;
+
+/// The most probes one `apertureStep` writes before giving up (1/16 stop each: 4 stops of travel).
+pub const MAX_APERTURE_PROBES: u32 = 64;
 
 /// A write drain that has run this long reads back WITHOUT the iris wait from then on (shading#6):
 /// SETs that keep arriving during read-backs add rounds, and the first caller's PUT must answer
@@ -585,8 +589,128 @@ impl CameraSession {
                 _ => {}
             }
         }
+        if let Some(dir) = req.aperture_step.filter(|d| *d != 0) {
+            let landed = self.step_iris(link, basis.aperture_range, dir, log)?;
+            if landed.is_some() {
+                basis.aperture_stop = landed;
+            }
+        }
         merge_written(&mut log.written, req);
         Ok(())
+    }
+
+    /// One `apertureStep` press (shading#6, 0.2.1): from the camera's TRUE current f-stop, write a
+    /// target [`APERTURE_PROBE_STOPS`] away, wait for the iris, and widen by the same increment
+    /// until the iris lands on a different f-stop or the target reaches the lens range. The
+    /// increment is below half of two adjacent native gaps, so the first landing is always the
+    /// NEXT native step (1/3- or 1/6-stop lens, any zoom). Returns where the iris landed, `None`
+    /// when the lens has no further step that way.
+    fn step_iris(
+        &self,
+        link: &Link,
+        range: Option<(f64, f64)>,
+        dir: i64,
+        log: &mut DrainLog,
+    ) -> Result<Option<f64>> {
+        let started = std::time::Instant::now();
+        let start = self.read_iris(link)?;
+        let mut probes = 0u32;
+        for k in 1..=MAX_APERTURE_PROBES {
+            let Some(target) = aperture_probe_target(start, dir, k, range) else {
+                tracing::info!(
+                    dir,
+                    from = start,
+                    ?range,
+                    probes,
+                    duration_ms = started.elapsed().as_millis() as u64,
+                    "aperture step: the lens has no further step this way"
+                );
+                return Ok(None);
+            };
+            let w = RestWrite::ApertureStop(target);
+            if let Err(e) = link.client.write(&w) {
+                if matches!(e, RestError::Transport(_)) {
+                    self.forget_link("an aperture probe got no answer");
+                }
+                anyhow::bail!(
+                    "camera {} refused the aperture step PUT {}{} {}: {e}",
+                    link.client.addr,
+                    bkshading_proto::rest::API_PREFIX,
+                    w.path(),
+                    rest::write_body(&w).unwrap_or_default()
+                );
+            }
+            probes += 1;
+            log.count += 1;
+            if let Some(landed) = self.wait_iris_move(link, start)? {
+                tracing::info!(
+                    dir,
+                    from = start,
+                    to = landed,
+                    last_target = target,
+                    probes,
+                    duration_ms = started.elapsed().as_millis() as u64,
+                    "aperture step landed on the next lens step"
+                );
+                return Ok(Some(landed));
+            }
+            tracing::debug!(
+                dir,
+                from = start,
+                target,
+                probe = k,
+                "aperture probe: the iris did not move; widening"
+            );
+        }
+        tracing::warn!(
+            dir,
+            from = start,
+            probes,
+            "aperture step: no move after the probe limit"
+        );
+        Ok(None)
+    }
+
+    /// The iris's true f-stop now (`GET lens/iris`), never a cached value.
+    fn read_iris(&self, link: &Link) -> Result<f64> {
+        let iris: bkshading_proto::rest::Iris = link
+            .client
+            .get_json(bkshading_proto::rest::IRIS)
+            .map_err(|e| {
+            if matches!(e, RestError::Transport(_)) {
+                self.forget_link("an iris read got no answer");
+            }
+            anyhow::anyhow!("camera {} iris read failed: {e}", link.client.addr)
+        })?;
+        iris.aperture_stop
+            .filter(|f| f.is_finite() && *f > 0.0)
+            .ok_or_else(|| anyhow::anyhow!("camera {} reports no apertureStop", link.client.addr))
+    }
+
+    /// Waits up to `iris_probe_wait_ms` for the iris to leave `from`; once it has, until two reads in
+    /// a row agree (it has landed). `None` = it never left `from` in time.
+    fn wait_iris_move(&self, link: &Link, from: f64) -> Result<Option<f64>> {
+        let poll = Duration::from_millis((self.iris_probe_wait_ms / 4).clamp(5, 100));
+        let deadline = std::time::Instant::now() + Duration::from_millis(self.iris_probe_wait_ms);
+        let mut last: Option<f64> = None;
+        loop {
+            std::thread::sleep(poll);
+            let now = self.read_iris(link)?;
+            let moved = (now - from).abs() > 0.005;
+            if moved && last.is_some_and(|l| (l - now).abs() <= 0.005) {
+                return Ok(Some(now));
+            }
+            last = moved.then_some(now);
+            // A moving iris gets one more wait window to land; a still one gives up at the deadline.
+            let limit = if moved {
+                deadline + Duration::from_millis(self.iris_probe_wait_ms)
+            } else {
+                deadline
+            };
+            if std::time::Instant::now() >= limit {
+                return Ok(last);
+            }
+        }
     }
 
     /// The authoritative read after a drain: it replaces the cache and carries `notApplied`.

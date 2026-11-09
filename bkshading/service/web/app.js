@@ -87,9 +87,6 @@ async function setParam(id, patch) {
 // issue 1304: +/- step amounts. Aperture steps by ONE camera f-number choice (computed from
 // caps.fNumberChoices); the white balance and tint step by a fixed operator-sized amount.
 const KELVIN_STEP = 100; // K per tap
-// shading#6: an aperture step targets at least 1/6 stop (2^(1/12)) away from the lens's real
-// f-number — the proto `FNUMBER_GRID_MIN_RATIO` (`mapping::aperture_step`).
-const FNUMBER_STEP_MIN_RATIO = 1.0594630943592953;
 const TINT_STEP = 1; // tint units per tap
 
 // A block's enumerated choice list, stored on its dataset by updateBlock. Empty/absent -> the
@@ -149,9 +146,10 @@ function refreshStepDisabled(el) {
       b.title = "Kroky clony nie sú dostupné (relay neposiela voľby clony)";
     }
   } else {
-    // issue 1337: bounds from the REAL current f-number, not the slider norm. On-grid at an extreme
-    // disables that direction; off-grid (open below/above the grid, or between two stops) leaves
-    // BOTH enabled so the first step moves the lens onto the grid (the owner's "-" must work).
+    // issue 1337 + shading#6: bounds from the REAL current f-number. The choices' first and last
+    // are the lens range's exact ends (`lens/iris/description`), so the lens AT an end disables
+    // that direction; anywhere else both stay enabled (a zoom lens can sit above the range min and
+    // still have no further step: the relay then answers with the same f-stop).
     const n = choices.length;
     const cur = currentFnum(el);
     const onGridIdx = Number.isFinite(cur)
@@ -197,26 +195,15 @@ function refreshStepDisabled(el) {
 }
 
 // issue 1337: JS mirror of the proto `mapping::step_choice` — the target choice INDEX stepping from
-// the camera's REAL current value across the enumerated grid. "+" = the first choice strictly ABOVE
-// the current value, "-" = the last strictly BELOW; a value below the first choice clamps to the
-// min choice from either direction (so the FIRST step moves it ONTO the grid, never the pre-fix
-// nearest-snap-to-idx-0 +1 that owner reported as "clona sa nezdvihne"). Ascending choices.
-// shading#6: with `minRatio` > 1 it mirrors `mapping::aperture_step` instead — the target must be at
-// least that ratio away (the aperture passes FNUMBER_STEP_MIN_RATIO, 1/6 stop), because the lens
-// snaps a write to its own step and a nominal value just above it would land back where it started.
-function stepChoice(currentFnum, choices, dir, minRatio = 1) {
+// the camera's REAL current value across the enumerated grid (ISO / shutter). "+" = the first choice
+// strictly ABOVE the current value, "-" = the last strictly BELOW; a value below the first choice
+// clamps to the min choice from either direction (so the FIRST step moves it ONTO the grid).
+// Ascending choices. The aperture does not step a grid any more (shading#6, `stepAperture`).
+function stepChoice(currentFnum, choices, dir) {
   const n = choices.length;
   if (n === 0) return null;
   if (n === 1) return 0;
   if (dir === 0) return 0; // parity with the Rust step_choice (dir 0 is never sent by the panel)
-  if (minRatio > 1) {
-    if (dir > 0) {
-      const i = choices.findIndex((c) => c >= currentFnum * minRatio);
-      return i === -1 ? n - 1 : i;
-    }
-    for (let i = n - 1; i >= 0; i--) if (choices[i] <= currentFnum / minRatio) return i;
-    return 0;
-  }
   if (dir > 0) {
     const i = choices.findIndex((c) => c > currentFnum);
     return i === -1 ? n - 1 : i;
@@ -232,31 +219,33 @@ function currentFnum(el) {
   return raw === "" || raw == null ? NaN : Number(raw);
 }
 
-// issue 1304 + 1337: step the aperture by ONE f-number choice, from the camera's REAL current
-// f-number (stored on the dataset from apertureAv) — NOT from the slider's normalised position,
-// which an off-grid lens reports as 0 (the #1337 bug). The target index comes from stepChoice; the
-// panel sets the slider locally + shows the target f-number as an OPTIMISTIC pending confirmation
-// (reconciled by the next server push), and PUTs the ABSOLUTE apertureNorm = idx/(n-1) — the exact
-// inverse of the relay's norm_to_choice_index over the SAME choice list. One tap = one PUT.
+// shading#6 (0.2.1): +/- move the aperture by ONE of the lens's OWN steps. Lens steps depend on the
+// lens and the zoom (cam5 at 108 mm: 4.4 4.8 5.2 ...; the PP 6K: 2.8 2.9 3.1 ...), so no grid the
+// panel knows can be right: the panel sends the direction (`apertureStep`), the relay walks the lens
+// from the camera's true f-stop and answers with where it landed. The number keeps the current
+// value, marked pending, until a push shows a different f-stop (a stale pump snapshot with the old
+// value does not end the hold). One tap = one PUT.
 function stepAperture(el, id, dir) {
-  const choices = readFnumChoices(el);
-  if (choices.length < 2) return; // no choices -> no fabricated step (the button is disabled)
-  const n = choices.length;
-  const s = el.querySelector('[data-role="aperture"]');
-  const curFnum = currentFnum(el);
-  const idx = Number.isFinite(curFnum)
-    ? stepChoice(curFnum, choices, dir, FNUMBER_STEP_MIN_RATIO)
-    : Math.min(n - 1, Math.max(0, Math.round(Number(s.value) * (n - 1)) + dir));
-  const norm = idx / (n - 1);
-  s.value = norm;
-  // Optimistic: show the target f-number immediately (pending) so the number moves on the first tap.
   const fnEl = el.querySelector('[data-role="fnum"]');
-  fnEl.textContent = "f/" + choices[idx].toFixed(1);
   fnEl.classList.add("pending");
-  markPending(id, "apertureNorm", fnEl.textContent); // issue 1350: hold the target until confirmed
-  el.dataset.apertureFnum = String(choices[idx]);
-  setParam(id, { apertureNorm: norm });
-  refreshStepDisabled(el);
+  markPending(id, "apertureStep", fnEl.textContent); // the target is the f-stop to leave
+  setParam(id, { apertureStep: dir });
+}
+
+// shading#6: the hold of an aperture step — the landing is unknown until the relay answers, so the
+// pending entry's `target` is the f-stop shown at the tap, and the label waits for a push whose
+// f-stop DIFFERS from it (or a refusal, or the timeout). Returns true while holding.
+function reconcileStepHold(cameraId, valEl, pushedText, refused) {
+  const pkey = `${cameraId}:apertureStep`;
+  const pend = pending.get(pkey);
+  if (!pend) return false;
+  if (refused || pushedText !== pend.target || Date.now() - pend.ts >= PENDING_HOLD_MS) {
+    pending.delete(pkey);
+    return false;
+  }
+  valEl.textContent = pend.target;
+  valEl.classList.add("pending");
+  return true;
 }
 
 // issue 1337: a block's REAL current enumerated value (ISO/shutter), or NaN when unknown. Guards
@@ -575,9 +564,11 @@ function updateBlock(el, cam) {
   // pending value from a step with this authoritative push.
   const fn = fNumberFromAv(p.apertureAv);
   const fnumEl = q("fnum");
-  const apHeld = reconcileLabel(
-    cam.id, "apertureNorm", fnumEl,
-    fn == null ? "f/—" : "f/" + fn.toFixed(1), notApplied.includes("apertureNorm"));
+  const fnText = fn == null ? "f/—" : "f/" + fn.toFixed(1);
+  const apRefused = notApplied.includes("apertureNorm");
+  const apHeld =
+    reconcileStepHold(cam.id, fnumEl, fnText, apRefused) ||
+    reconcileLabel(cam.id, "apertureNorm", fnumEl, fnText, apRefused);
   // issue 1350: while the write is held, keep the stepper base + slider at the optimistic target too
   // (a stale push must not corrupt the next step or flick the slider down).
   if (!apHeld) el.dataset.apertureFnum = fn == null ? "" : String(fn);

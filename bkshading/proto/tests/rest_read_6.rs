@@ -396,3 +396,70 @@ fn integer_fields_accept_a_float_the_camera_might_send_6() {
     let wb: rest::WhiteBalanceDescription = de(r#"{"whiteBalance":{"min":2500.4,"max":1e4}}"#);
     assert_eq!(wb.white_balance.unwrap().max, Some(10000));
 }
+
+#[test]
+fn aperture_probes_creep_out_from_the_true_f_stop_and_stop_at_the_range_6() {
+    use bkshading_proto::mapping::{aperture_probe_target, APERTURE_PROBE_STOPS};
+    let r = Some((4.1, 22.0));
+    // Each probe is 1/16 stop further: f = 4.4 * 2^(k/32).
+    let p1 = aperture_probe_target(4.4, 1, 1, r).unwrap();
+    let p2 = aperture_probe_target(4.4, 1, 2, r).unwrap();
+    assert_eq!(p1, 4.50);
+    assert_eq!(p2, 4.59);
+    assert!((2f64.powf(APERTURE_PROBE_STOPS / 2.0) - 1.021_897).abs() < 1e-6);
+    assert_eq!(aperture_probe_target(4.4, -1, 1, r), Some(4.31));
+    // Downward from 4.4 the range min 4.1 is reached at the 4th probe; the 5th makes no progress.
+    assert_eq!(aperture_probe_target(4.4, -1, 4, r), Some(4.1));
+    assert_eq!(aperture_probe_target(4.4, -1, 5, r), None);
+    // At an end there is nothing to probe.
+    assert_eq!(aperture_probe_target(22.0, 1, 1, r), None);
+    assert_eq!(aperture_probe_target(4.1, -1, 1, r), None);
+    // Without a range the probes never stop on their own (the relay caps the count).
+    assert!(aperture_probe_target(22.0, 1, 1, None).unwrap() > 22.0);
+    // Degenerate input.
+    assert_eq!(aperture_probe_target(0.0, 1, 1, r), None);
+    assert_eq!(aperture_probe_target(4.4, 0, 1, r), None);
+    assert_eq!(aperture_probe_target(4.4, 1, 0, r), None);
+    assert_eq!(aperture_probe_target(f64::NAN, 1, 1, r), None);
+    // Any positive direction is +1, any negative -1.
+    assert_eq!(aperture_probe_target(4.4, 7, 1, r), Some(4.50));
+}
+
+#[test]
+fn a_probe_increment_never_crosses_past_the_next_native_step_6() {
+    // The safety argument behind APERTURE_PROBE_STOPS: the first probe that lands somewhere else
+    // lands on the NEXT step. Simulated over both live lenses with the camera's nearest-step snap.
+    use bkshading_proto::mapping::aperture_probe_target;
+    let snap = |stops: &[f64], f: f64| {
+        *stops
+            .iter()
+            .min_by(|a, b| {
+                ((*a / f).log2().abs())
+                    .partial_cmp(&(*b / f).log2().abs())
+                    .unwrap()
+            })
+            .unwrap()
+    };
+    let cam5 = [4.4, 4.8, 5.2, 5.6, 6.2, 6.7, 7.3, 8.0];
+    let pp6k = [2.8, 2.9, 3.1, 3.2, 3.3, 3.5, 3.7, 3.9, 4.0, 4.2];
+    for stops in [&cam5[..], &pp6k[..]] {
+        let range = Some((stops[0], *stops.last().unwrap()));
+        for (i, &c) in stops.iter().enumerate() {
+            for dir in [1i64, -1] {
+                let next = stops.get((i as i64 + dir) as usize).copied();
+                let mut landed = None;
+                for k in 1..=64 {
+                    let Some(t) = aperture_probe_target(c, dir, k, range) else {
+                        break;
+                    };
+                    let s = snap(stops, t);
+                    if s != c {
+                        landed = Some(s);
+                        break;
+                    }
+                }
+                assert_eq!(landed, next, "from {c} dir {dir}");
+            }
+        }
+    }
+}

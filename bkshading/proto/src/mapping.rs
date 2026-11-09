@@ -253,6 +253,45 @@ pub fn aperture_step(current_fnumber: f64, choices: &[f64], dir: i32) -> Option<
     }
 }
 
+/// How far each `apertureStep` probe moves the target, in stops (shading#6, 0.2.1). The camera
+/// snaps a written `apertureStop` to the NEAREST native lens step, so a probe only lands past the
+/// next step when it crosses the midpoint between the next step and the one after it. An increment
+/// below half the sum of two adjacent native gaps can therefore never skip a step. The smallest
+/// gaps seen live are about 0.09 stop (the PP 6K's 3.1 -> 3.2 -> 3.3), so 1/16 stop (0.0625) is
+/// safe there. It is also below the coordinator's "about 1/12".
+pub const APERTURE_PROBE_STOPS: f64 = 1.0 / 16.0;
+
+/// The f-number of the `k`-th probe (1-based) of an `apertureStep` from `current` (the camera's
+/// TRUE f-stop) in direction `dir` (sign only): `current * 2^(k * APERTURE_PROBE_STOPS / 2)` (one
+/// stop is a factor sqrt 2 in f-number), clamped to the lens `range` from `lens/iris/description`,
+/// rounded to 0.01. `None` when this probe makes no progress (the previous one already reached the
+/// end of the range, or `current` is already there): the lens has no further step that way.
+pub fn aperture_probe_target(
+    current: f64,
+    dir: i64,
+    k: u32,
+    range: Option<(f64, f64)>,
+) -> Option<f64> {
+    if !(current.is_finite() && current > 0.0) || dir == 0 || k == 0 {
+        return None;
+    }
+    let (lo, hi) = match range {
+        Some((lo, hi)) if lo > 0.0 && hi >= lo => (lo, hi),
+        _ => (0.0, f64::INFINITY),
+    };
+    let sign = dir.signum() as f64;
+    let at =
+        |k: u32| (current * 2f64.powf(sign * k as f64 * APERTURE_PROBE_STOPS / 2.0)).clamp(lo, hi);
+    let target = at(k);
+    let previous = if k == 1 { current } else { at(k - 1) };
+    let progresses = if sign > 0.0 {
+        target > previous + 1e-9 && target > current
+    } else {
+        target < previous - 1e-9 && target < current
+    };
+    progresses.then(|| (target * 100.0).round() / 100.0)
+}
+
 // --- frame rate --------------------------------------------------------------
 
 /// A Blackmagic REST frame-rate string (`"23.98"`, `"24"`, `"24.00"`, `"59.94"`, `"120"`) as fps
