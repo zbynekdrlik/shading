@@ -38,6 +38,10 @@ pub struct Cam {
     pub aperture: f64,
     /// The lens's own stops; an `apertureStop` write lands on the nearest.
     pub lens_stops: Vec<f64>,
+    /// What `lens/iris/description` reports as `apertureStop.min/max`; `None` = the ends of
+    /// `lens_stops`. A zoom lens reports its wide-end min (4.1 on cam5 at 108 mm) while it lands on
+    /// steps anchored elsewhere (4.4).
+    pub iris_range: Option<(f64, f64)>,
     /// The iris ACKs a write and does not move.
     pub iris_ignores_writes: bool,
     pub focus: f64,
@@ -75,6 +79,7 @@ impl Default for Cam {
             lens_stops: vec![
                 4.4, 4.9, 5.6, 6.3, 7.3, 8.0, 9.0, 10.0, 11.0, 13.0, 14.0, 16.0, 18.0, 20.0, 22.0,
             ],
+            iris_range: None,
             iris_ignores_writes: false,
             focus: 0.42,
             frame_rate: "25".into(),
@@ -166,6 +171,35 @@ impl FakeCamera {
     }
 }
 
+/// cam5's zoom lens at 108 mm, read live: 1/3-stop steps anchored on the zoom's wide end (4.4), not
+/// on the standard marks, while `lens/iris/description` says min 4.1.
+pub fn zoom_third_stop_lens() -> Cam {
+    Cam {
+        aperture: 4.4,
+        lens_stops: vec![
+            4.4, 4.8, 5.2, 5.6, 6.2, 6.7, 7.3, 8.0, 8.7, 9.5, 10.4, 11.3, 12.3, 13.5, 14.6, 16.0,
+            17.4, 19.0, 20.7, 22.0,
+        ],
+        iris_range: Some((4.1, 22.0)),
+        ..Cam::default()
+    }
+}
+
+/// The PP Pocket 6K lens: 1/6-stop steps near open (2.8 2.9 3.1 3.2 3.3 3.5, read live), with some
+/// gaps under 0.1 stop (3.9 -> 4.0).
+pub fn sixth_stop_lens() -> Cam {
+    Cam {
+        aperture: 2.8,
+        lens_stops: vec![
+            2.8, 2.9, 3.1, 3.2, 3.3, 3.5, 3.7, 3.9, 4.0, 4.2, 4.5, 4.8, 5.0, 5.3, 5.6, 6.0, 6.3,
+            6.7, 7.1, 7.6, 8.0, 8.5, 9.0, 9.5, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0,
+            18.0, 19.0, 20.0, 22.0,
+        ],
+        iris_range: Some((2.8, 22.0)),
+        ..Cam::default()
+    }
+}
+
 fn nearest(stops: &[f64], want: f64) -> f64 {
     stops
         .iter()
@@ -254,10 +288,13 @@ async fn handle(State(sh): State<Arc<Shared>>, method: Method, uri: Uri, body: B
             "continuousApertureAutoExposure": false,
             "normalised": 0.3158
         })),
-        "/lens/iris/description" => ok(json!({
-            "controllable": true,
-            "apertureStop": { "min": cam.lens_stops.first(), "max": cam.lens_stops.last() }
-        })),
+        "/lens/iris/description" => {
+            let (min, max) = cam.iris_range.unwrap_or((
+                *cam.lens_stops.first().unwrap(),
+                *cam.lens_stops.last().unwrap(),
+            ));
+            ok(json!({ "controllable": true, "apertureStop": { "min": min, "max": max } }))
+        }
         "/lens/focus" => ok(json!({ "normalised": cam.focus })),
         "/system/format" => ok(json!({
             "codec": "BRaw:Q0",

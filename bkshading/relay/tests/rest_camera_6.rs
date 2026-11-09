@@ -926,3 +926,45 @@ fn a_drain_over_its_settle_budget_skips_the_iris_wait_6() {
     );
     assert!(st.online);
 }
+
+/// Presses +/- (`apertureStep`) from one end of the lens to the other and back, and checks every
+/// press lands on EXACTLY the next native step: no step skipped, none repeated.
+fn walk_the_lens(cam_model: Cam) {
+    let stops = cam_model.lens_stops.clone();
+    let cam = FakeCamera::start(cam_model);
+    let s = session(&cam).with_iris_probe_wait_ms(30);
+    let fnum = |st: &bkshading_proto::wire::RelayState| {
+        let f = 2f64.powf(st.params.aperture_av.unwrap() / 2.0);
+        (f * 100.0).round() / 100.0
+    };
+    assert_eq!(fnum(&s.read_state()), stops[0], "starts wide open");
+    let press = |dir: i64| {
+        let (_, st) = applied(
+            s.submit(&SetRequest {
+                aperture_step: Some(dir),
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+        assert!(st.not_applied.is_empty(), "{:?}", st.not_applied);
+        fnum(&st)
+    };
+    for want in &stops[1..] {
+        assert_eq!(press(1), *want, "+ from the previous step");
+    }
+    for want in stops[..stops.len() - 1].iter().rev() {
+        assert_eq!(press(-1), *want, "- from the previous step");
+    }
+    // At the ends a press stays put (the lens has no further step), never an error.
+    assert_eq!(press(-1), stops[0]);
+}
+
+#[test]
+fn one_press_is_the_next_step_of_a_zoom_anchored_third_stop_lens_6() {
+    walk_the_lens(support::zoom_third_stop_lens());
+}
+
+#[test]
+fn one_press_is_the_next_step_of_a_sixth_stop_lens_6() {
+    walk_the_lens(support::sixth_stop_lens());
+}

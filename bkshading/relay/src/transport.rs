@@ -46,6 +46,10 @@ pub use rest::{
 /// motor takes about a second to land (live on cam5), and the read-back is what the panel shows.
 pub const APERTURE_READBACK_DELAY_MS: u64 = 1000;
 
+/// How long an `apertureStep` probe waits for the iris to leave its current f-stop before it widens
+/// the target (shading#6, 0.2.1). The iris lands in about a second (live on cam5).
+pub const IRIS_PROBE_WAIT_MS: u64 = 1200;
+
 /// A write drain that has run this long reads back WITHOUT the iris wait from then on (shading#6):
 /// SETs that keep arriving during read-backs add rounds, and the first caller's PUT must answer
 /// well inside the service's 10 s write-client timeout. The next poll shows the landed iris.
@@ -184,6 +188,7 @@ pub struct CameraSession {
     timeout: Duration,
     aperture_readback_delay_ms: u64,
     drain_settle_budget_ms: u64,
+    iris_probe_wait_ms: u64,
     /// The last real read. The lock is held ACROSS a read, so concurrent `/api/state` requests
     /// coalesce to one camera read per floor.
     read_cache: Mutex<Option<CachedRead>>,
@@ -209,6 +214,7 @@ impl CameraSession {
             timeout: REST_TIMEOUT,
             aperture_readback_delay_ms: APERTURE_READBACK_DELAY_MS,
             drain_settle_budget_ms: DRAIN_SETTLE_BUDGET_MS,
+            iris_probe_wait_ms: IRIS_PROBE_WAIT_MS,
             read_cache: Mutex::new(None),
             last_online: Mutex::new(None),
             link: Mutex::new(None),
@@ -246,6 +252,13 @@ impl CameraSession {
     /// [`DRAIN_SETTLE_BUDGET_MS`]; tests shorten it.
     pub fn with_drain_settle_budget_ms(mut self, ms: u64) -> Self {
         self.drain_settle_budget_ms = ms;
+        self
+    }
+
+    /// Sets how long an `apertureStep` probe waits for the iris to move before widening. Production
+    /// keeps [`IRIS_PROBE_WAIT_MS`]; tests shorten it.
+    pub fn with_iris_probe_wait_ms(mut self, ms: u64) -> Self {
+        self.iris_probe_wait_ms = ms;
         self
     }
 
@@ -653,5 +666,8 @@ fn merge_written(acc: &mut SetRequest, req: &SetRequest) {
     }
     if req.auto_wb.is_some() {
         acc.auto_wb = req.auto_wb;
+    }
+    if req.aperture_step.is_some() {
+        acc.aperture_step = req.aperture_step;
     }
 }

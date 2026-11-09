@@ -241,6 +241,7 @@ fn every_wire_field_plans_its_rest_write_in_order_6() {
         shutter: Some(60),
         fps: Some(50),
         auto_wb: Some(true),
+        aperture_step: None,
     };
     let w = plan_writes(&req, &basis).expect("50 is listed");
     assert_eq!(
