@@ -72,7 +72,7 @@ jobs:
       - name: Test (bkshading service, --no-default-features — stub path)
         run: cargo test --locked -p bkshading --no-default-features
 
-      # Relay = default features (drives the camera via the gphoto2 CLI, no ndi); service =
+      # Relay = default features (drives the camera via its REST API, no ndi); service =
       # --features ndi (equals the default since camera-box issue 1157; kept explicit for intent).
       - name: Build deployable binaries (relay default + service --features ndi)
         run: |

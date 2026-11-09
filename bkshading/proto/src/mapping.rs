@@ -1,58 +1,54 @@
-//! Pure PTP <-> wire mapping for the Blackmagic Pocket Cinema Camera 4K and 6K
-//! (gphoto2 2.5.28, firmware 8.1).
+//! Pure conversions between the Blackmagic camera's values and the bkshading wire.
 //!
-//! Ported byte-for-byte from the dev2 bkshading MVP `pybridge/mapping.py`, which
-//! itself mirrors the verified Kotlin `PtpMapping.kt` gphoto2 semantics. Keeping the
-//! conversions here — dependency-free (`std` only, no serde, no IO) — makes them
-//! independently unit-testable WITHOUT spawning gphoto2 or standing up a camera, and
-//! (per the camera-box Tier-0 build policy, issue 557) compilable/runnable with a
-//! standalone `rustc --test` when cargo build is unavailable locally.
+//! Since shading#6 the relay drives the camera through Blackmagic's REST API
+//! (`/control/api/v1/...`, [`crate::rest`]). What is left here is camera-model math with no
+//! transport in it: the aperture choice grid and its normalised position, the shutter angle
+//! <-> denominator conversion, the frame-rate string <-> fps x100 conversion and the
+//! settable-fps rule. It is dependency-free (`std` only, no IO), so every conversion is
+//! unit-tested without a camera.
 //!
-//! The PTP facts (the `mapping.py` KDoc's list, with the frame-rate pair corrected by
-//! issue 1402 from live reads of both bodies in the fleet):
-//!   - `iso`       RADIO, plain integer values (100..25600, camera clamps)
-//!   - `f-number`  RADIO, choice strings like `f/5.2`
-//!   - `d002`      shutter angle x100, RANGE 173..36000 (18000 = 180 deg)
-//!   - `d004`      WB Kelvin (RANGE)
-//!   - `d005`      tint (MENU -50..50)
-//!   - `d006`      PROJECT fps x100 (MENU of the camera's own timebases, e.g. `6000` =
-//!     60.00 fps) — the rate the camera records and outputs, and the only settable
-//!     frame rate. Its choices on both bodies are `8, 2398, 2400, 2500, 2997, 3000,
-//!     5000, 5994` (`8` is a non-rate entry); the current `6000` is NOT one of them.
-//!   - `d007`      OFF-SPEED (sensor) fps, a plain int (RANGE 5..60) — readback only
-//!
-//! The MVP had `d006` and `d007` the other way round. It went unnoticed while both
-//! read the same rate, until the Pocket 6K on handheld-1 ran a project 60 with an
-//! off-speed 50 (issue 1402).
+//! The shutter and fps facts come from the PTP era (dev2 MVP `pybridge/mapping.py`, issue
+//! 1402) and still hold over REST: `video/shutter` reports either a speed denominator or an
+//! angle x100 (18000 = 180 deg), and the project frame rate is the one the camera records
+//! and outputs.
 
-// d002's documented gphoto2 RANGE.
+// The documented shutter-angle range x100 (1.73 .. 360 deg).
 pub const SHUTTER_ANGLE_MIN: i64 = 173;
 pub const SHUTTER_ANGLE_MAX: i64 = 36000;
 
 /// Fallback fps x100 (25.00 fps) for the shutter angle <-> denominator conversion in the
-/// tiny startup window before the first poll cycle has learned the camera's real project
-/// fps (d006) — matches PtpTransport.kt's DEFAULT_FPS100. Never reported as the camera's
-/// fps: `ShadingParams.fps100` stays `None` until d006 is read.
+/// window before a read has learned the camera's real project fps. Never reported as the
+/// camera's fps: `ShadingParams.fps100` stays `None` until `system/format` is read.
 pub const DEFAULT_FPS100: i64 = 2500;
 
-/// Values below this are treated as gphoto2 junk/placeholder ISO Choice entries
-/// rather than real camera sensitivities.
-pub const MIN_VALID_ISO: i64 = 25;
-
-/// BMPCC/Pocket Control shutter-speed denominator granularity (1/N seconds).
+/// BMPCC/Pocket Control shutter-speed denominator granularity (1/N seconds). The fallback
+/// shutter list when the camera does not answer `video/supportedShutters`.
 pub const STANDARD_SHUTTER_DENOMS: [i64; 23] = [
     24, 25, 30, 40, 50, 60, 80, 100, 120, 125, 160, 200, 240, 250, 320, 400, 500, 640, 800, 1000,
     1250, 1600, 2000,
 ];
 
-// Fallback ranges when a camera's d007 (OFF-SPEED fps) / d004 (Kelvin) RANGE has no
-// parseable Bottom/Top — matches the web UI's own hardcoded slider bounds. The fps pair
-// bounds the off-speed rate only; the settable PROJECT rates are the d006 choices
-// ([`parse_fps100_choices`], issue 1402).
+// Fallback ranges when the camera does not describe its off-speed fps / Kelvin range —
+// matches the web UI's own hardcoded slider bounds.
 pub const FPS_MIN_FALLBACK: i64 = 5;
 pub const FPS_MAX_FALLBACK: i64 = 60;
 pub const KELVIN_MIN_FALLBACK: i64 = 2500;
 pub const KELVIN_MAX_FALLBACK: i64 = 10000;
+
+/// The nominal 1/3-stop f-numbers (shading#6). REST gives a lens's aperture RANGE
+/// (`lens/iris/description` `apertureStop.min/max`), not its list of stops, so the relay offers
+/// these between the lens's min and max as the panel's aperture grid. The camera snaps every
+/// `PUT lens/iris {"apertureStop": x}` to the lens's own step, and the read-back carries the
+/// true value.
+pub const THIRD_STOP_FNUMBERS: [f64; 28] = [
+    1.0, 1.1, 1.2, 1.4, 1.6, 1.8, 2.0, 2.2, 2.5, 2.8, 3.2, 3.5, 4.0, 4.5, 5.0, 5.6, 6.3, 7.1, 8.0,
+    9.0, 10.0, 11.0, 13.0, 14.0, 16.0, 18.0, 20.0, 22.0,
+];
+
+/// Two f-numbers closer than this ratio (1/6 stop, `2^(1/12)`) are one stop of the grid: a nominal
+/// value this close to the lens's own min or max is left out, so a step from the end of the lens
+/// moves at least 1/6 stop instead of snapping back onto the end.
+pub const FNUMBER_GRID_MIN_RATIO: f64 = 1.059_463_094_359_295_3;
 
 /// Rounds ties towards positive infinity, matching Kotlin's `Double.roundToInt()`
 /// (and `mapping.py`'s `_round_half_up`). Rust's `f64::round()` also rounds half away
@@ -93,7 +89,7 @@ pub fn fnumber_to_av(f_number: f64) -> Option<f64> {
     Some(2.0 * f_number.log2())
 }
 
-// --- shutter angle (d002, x100) <-> speed denominator -----------------------
+// --- shutter angle (x100) <-> speed denominator -----------------------
 
 /// Converts between a shutter-speed denominator (e.g. `50` for 1/50s) and a shutter
 /// angle x100 (e.g. `18000` = 180 deg) at a given `fps100` — the SAME formula both
@@ -107,14 +103,14 @@ pub fn convert_angle_or_denom(value: i64, fps100: i64) -> i64 {
 }
 
 /// [`convert_angle_or_denom`] specialised for denom -> angle100, additionally clamped
-/// to the camera's documented `d002` RANGE ([`SHUTTER_ANGLE_MIN`]..[`SHUTTER_ANGLE_MAX`]).
+/// to the camera's documented angle range ([`SHUTTER_ANGLE_MIN`]..[`SHUTTER_ANGLE_MAX`]).
 pub fn shutter_denom_to_angle100(denom: i64, fps100: i64) -> i64 {
     convert_angle_or_denom(denom, fps100).clamp(SHUTTER_ANGLE_MIN, SHUTTER_ANGLE_MAX)
 }
 
 /// The fine-grained shutter-speed denominator list ("shutterChoices" caps) at a given
 /// fps: every [`STANDARD_SHUTTER_DENOMS`] entry that is both no faster than the frame
-/// rate itself (`denom >= fps`) AND representable within the camera's documented `d002`
+/// rate itself (`denom >= fps`) AND representable within the camera's documented
 /// angle RANGE at this fps. Ascending.
 pub fn shutter_choices_for_fps(fps100: i64) -> Vec<i64> {
     let fps = fps100 as f64 / 100.0;
@@ -131,111 +127,62 @@ pub fn shutter_choices_for_fps(fps100: i64) -> Vec<i64> {
     choices
 }
 
-// --- gphoto2 "get-config" text-block parsing --------------------------------
+// --- aperture grid (REST: a range, not a list of stops) ----------------------
 
-/// Extracts the value after `Current:` from one `get-config` response block, or `None`
-/// if no such line is present (malformed/empty gphoto2 output).
-pub fn parse_current(output: &str) -> Option<String> {
-    for raw in output.lines() {
-        let line = raw.trim();
-        if let Some(rest) = line.strip_prefix("Current:") {
-            let value = rest.trim();
-            return if value.is_empty() {
-                None
-            } else {
-                Some(value.to_string())
-            };
+/// The aperture grid between a lens's min and max f-number (shading#6): the lens's own `min` and
+/// `max`, plus every [`THIRD_STOP_FNUMBERS`] value strictly between them that is at least 1/6 stop
+/// ([`FNUMBER_GRID_MIN_RATIO`]) away from both ends. Ascending. With no usable range (the camera
+/// did not describe its iris, or a nonsense range) the whole nominal list is the grid.
+pub fn fnumber_grid(min: Option<f64>, max: Option<f64>) -> Vec<f64> {
+    let (lo, hi) = match (min, max) {
+        (Some(lo), Some(hi)) if lo > 0.0 && hi >= lo && lo.is_finite() && hi.is_finite() => {
+            (lo, hi)
+        }
+        _ => return THIRD_STOP_FNUMBERS.to_vec(),
+    };
+    let mut grid = vec![lo];
+    for &f in THIRD_STOP_FNUMBERS.iter() {
+        if f >= lo * FNUMBER_GRID_MIN_RATIO && f * FNUMBER_GRID_MIN_RATIO <= hi {
+            grid.push(f);
         }
     }
-    None
-}
-
-/// Splits a trimmed `Choice: N label` body into `(N, label)` if `N` is an integer and
-/// there is at least a whitespace separator — mirrors `mapping.py`'s
-/// `_CHOICE_LINE = r"Choice:\s*(\d+)\s+(.*)"` (a bare `Choice: 3` with no label does
-/// not match).
-fn parse_choice_line(line: &str) -> Option<(i64, String)> {
-    let rest = line.trim().strip_prefix("Choice:")?;
-    // The regex requires `\s+` between the index and the (possibly empty) label, so the
-    // body after "Choice:" must contain a whitespace-separated index token first.
-    let rest = rest.trim_start();
-    let mut it = rest.splitn(2, char::is_whitespace);
-    let n: i64 = it.next()?.parse().ok()?;
-    let label = it.next()?.trim().to_string();
-    Some((n, label))
-}
-
-/// Extracts every `Choice: N label` line's label, ordered by `N` ascending.
-pub fn parse_choices(output: &str) -> Vec<String> {
-    let mut pairs: Vec<(i64, String)> = output.lines().filter_map(parse_choice_line).collect();
-    pairs.sort_by_key(|p| p.0);
-    pairs.into_iter().map(|(_, label)| label).collect()
-}
-
-/// Sub-`f/0.5` f-number choices are gphoto2/PTP junk placeholders (`f/0`, `f/0.2`) that no real
-/// lens exposes; the threshold keeps genuine fast lenses (an `f/0.95`). Used to drop them from the
-/// canonical choice grid (issue 1306).
-pub const MIN_VALID_FNUMBER: f64 = 0.5;
-
-/// The f-number RADIO choices that parse as REAL f-numbers, preserving order — any non-`f/N.N`
-/// entry (a stray `Auto`/`Unknown`/`—`) AND any junk placeholder below [`MIN_VALID_FNUMBER`]
-/// (`f/0`, `f/0.2`, issue 1306) is dropped. This is the ONE canonical basis for the aperture
-/// choice index (issue 1304): the readback `aperture_norm`, the caps `fnumber_choices`, AND the
-/// relay's write `plan_writes` all derive their count from THIS same filtered list, so the panel's
-/// +/- step count can never diverge from the write count (and a step near 0 can never write `f/0`).
-pub fn parse_fnumber_labels(output: &str) -> Vec<String> {
-    parse_choices(output)
-        .into_iter()
-        .filter(|c| parse_fnumber(c).is_some_and(|f| f >= MIN_VALID_FNUMBER))
-        .collect()
-}
-
-/// Extracts the raw F-Number value from a gphoto2 `--summary` `F-Number(0x5007)` line, e.g.
-/// `F-Number(0x5007):(readwrite) (type=0x4) Enumeration [...] value: f/4 (400)` -> `400`. The raw
-/// is the PTP F-Number x100 (`400` = f/4.0). Returns `None` if the line or its trailing
-/// parenthesised integer is absent (fail-safe). This is the ONLY honest current-aperture signal
-/// when libgphoto2 prints `Current: (null)` for the `f-number` RADIO because the lens sits open
-/// below the camera's first enumerated stop (issue 1306).
-pub fn parse_summary_fnumber_raw(summary: &str) -> Option<i64> {
-    for line in summary.lines() {
-        if line.contains("0x5007") {
-            // The value is the LAST parenthesised integer on the line: `... value: f/4 (400)`.
-            let open = line.rfind('(')?;
-            let inner = &line[open + 1..];
-            let close = inner.find(')')?;
-            return inner[..close].trim().parse::<i64>().ok();
-        }
+    if hi > lo {
+        grid.push(hi);
     }
-    None
+    grid
 }
 
-/// The normalised slider position of the choice whose f-number is NEAREST to `value` — used when
-/// the camera's current aperture (read from `--summary`) is NOT one of its enumerated choices
-/// (the lens is open below the first enumerated stop, issue 1306), so the slider still shows a
-/// sensible position. `labels` must be the parsed f-number choice labels (e.g. from
-/// [`parse_fnumber_labels`]); `None` when there are no parseable choices.
-pub fn nearest_choice_norm(value: f64, labels: &[String]) -> Option<f64> {
-    let n = labels.len();
-    if n == 0 {
+/// The normalised slider position of the grid choice NEAREST to `value` (an f-number). The lens
+/// lands on its own step, which need not be a grid value, so the slider shows the closest one.
+/// `None` for an empty grid.
+pub fn nearest_choice_norm(value: f64, choices: &[f64]) -> Option<f64> {
+    nearest_choice_index(value, choices).map(|i| choices_to_norm(i as i64, choices.len() as i64))
+}
+
+/// The index of the grid choice nearest to `value`, by stops (`log2`), so 4.4 vs 4.0/5.0 is judged
+/// the way the eye reads an aperture. `None` for an empty grid or a non-positive value.
+pub fn nearest_choice_index(value: f64, choices: &[f64]) -> Option<usize> {
+    if choices.is_empty() || value <= 0.0 || !value.is_finite() {
         return None;
     }
-    let mut best_i = 0usize;
+    let mut best = 0usize;
     let mut best_d = f64::INFINITY;
-    for (i, c) in labels.iter().enumerate() {
-        if let Some(f) = parse_fnumber(c) {
-            let d = (f - value).abs();
-            if d < best_d {
-                best_d = d;
-                best_i = i;
-            }
+    for (i, &c) in choices.iter().enumerate() {
+        if c <= 0.0 {
+            continue;
+        }
+        let d = (c / value).log2().abs();
+        if d < best_d {
+            best_d = d;
+            best = i;
         }
     }
-    Some(choices_to_norm(best_i as i64, n as i64))
+    Some(best)
 }
 
 /// Target choice INDEX when stepping the aperture from the camera's REAL current f-number across
 /// the enumerated choice grid, in direction `dir` (+1 = one stop up in f-number, -1 = one down).
-/// `choices` are the camera's f-number choices, ascending (the [`parse_fnumber_labels`] order).
+/// `choices` are the camera's f-number choices, ascending (the [`fnumber_grid`] order).
 /// "+" = the FIRST choice STRICTLY ABOVE `current_fnumber`; "-" = the LAST choice STRICTLY BELOW it.
 ///
 /// The point (issue 1337): step from the camera's actual f-number, NOT from a normalised slider
@@ -281,78 +228,51 @@ pub fn step_choice(current_fnumber: f64, choices: &[f64], dir: i32) -> Option<us
     }
 }
 
-/// Parses an f-number choice string like `"f/5.2"` into `5.2`, or `None` if unparseable
-/// — matches `mapping.py`'s `re.fullmatch(r"f/(\d+(?:\.\d+)?)")`.
-pub fn parse_fnumber(s: &str) -> Option<f64> {
-    let num = s.trim().strip_prefix("f/")?;
-    // fullmatch of `\d+(\.\d+)?`: digits, optionally a dot followed by more digits.
-    // Rejects "5." and ".5" (which the reference regex also rejects), and "5.2.1".
-    let (int_part, frac_part) = match num.split_once('.') {
-        Some((a, b)) => (a, Some(b)),
-        None => (num, None),
-    };
-    if int_part.is_empty() || !int_part.bytes().all(|b| b.is_ascii_digit()) {
+/// The aperture +/- step over the nominal grid (shading#6): like [`step_choice`], but the target must
+/// be at least 1/6 stop ([`FNUMBER_GRID_MIN_RATIO`]) away from the current f-number. The lens
+/// snaps every write to its OWN step, which is rarely the nominal value: a lens on 4.9 asked for
+/// the "next" nominal 5.0 lands back on 4.9, and the button would never move. Requiring 1/6 stop
+/// (half a grid step) sends 5.6 instead, which lands on the lens's next step. "+" = the first choice
+/// at or above `current * ratio`, "-" = the last at or below `current / ratio`; past either end of
+/// the grid the end itself (the panel disables the button there). `None` for an empty grid. The
+/// panel's JS `stepChoice(cur, choices, dir, FNUMBER_STEP_MIN_RATIO)` mirrors it.
+pub fn aperture_step(current_fnumber: f64, choices: &[f64], dir: i32) -> Option<usize> {
+    let n = choices.len();
+    if n == 0 {
         return None;
     }
-    if let Some(frac) = frac_part {
-        if frac.is_empty() || !frac.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
+    if n == 1 || dir == 0 {
+        return Some(0);
     }
-    num.parse::<f64>().ok()
+    if dir > 0 {
+        let at_least = current_fnumber * FNUMBER_GRID_MIN_RATIO;
+        Some(choices.iter().position(|&c| c >= at_least).unwrap_or(n - 1))
+    } else {
+        let at_most = current_fnumber / FNUMBER_GRID_MIN_RATIO;
+        Some(choices.iter().rposition(|&c| c <= at_most).unwrap_or(0))
+    }
 }
 
-/// Extracts every ISO `Choice: N value` line's value as an int, ascending — drops
-/// anything unparseable and anything below [`MIN_VALID_ISO`].
-pub fn parse_iso_choices(output: &str) -> Vec<i64> {
-    let mut values: Vec<i64> = output
-        .lines()
-        .filter_map(parse_choice_line)
-        .filter_map(|(_, label)| label.trim().parse::<i64>().ok())
-        .filter(|&v| v >= MIN_VALID_ISO)
-        .collect();
-    values.sort_unstable();
-    values
+// --- frame rate --------------------------------------------------------------
+
+/// A Blackmagic REST frame-rate string (`"23.98"`, `"24"`, `"24.00"`, `"59.94"`, `"120"`) as fps
+/// x100 (`2398`, `2400`, `2400`, `5994`, `12000`). `None` for anything that is not a positive
+/// decimal number.
+pub fn parse_frame_rate100(s: &str) -> Option<i64> {
+    let t = s.trim();
+    if t.is_empty() || !t.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
+        return None;
+    }
+    let v: f64 = t.parse().ok()?;
+    let x100 = round_half_up(v * 100.0);
+    (x100 > 0).then_some(x100)
 }
 
-/// The camera's PROJECT-fps choices x100, from the d006 MENU block (issue 1402): every
-/// `Choice: N value` line's integer value, in choice-index order. Kept VERBATIM as the
-/// camera lists them — nothing is rounded, filtered or invented — so the `8` non-rate
-/// entry both BMPCC bodies list first stays in (it is one of the camera's own choices,
-/// and a refused write names the list exactly as the camera reports it). An unparseable
-/// label is dropped. Empty when the camera exposes no d006 (or a RANGE block is passed).
-pub fn parse_fps100_choices(output: &str) -> Vec<i64> {
-    let mut pairs: Vec<(i64, i64)> = output
-        .lines()
-        .filter_map(parse_choice_line)
-        .filter_map(|(n, label)| label.trim().parse::<i64>().ok().map(|v| (n, v)))
-        .collect();
-    pairs.sort_by_key(|p| p.0);
-    pairs.into_iter().map(|(_, v)| v).collect()
-}
-
-/// Whether the PROJECT fps (d006) can be set to `wanted_fps100` (fps x100) — the ONE
-/// rule both the relay's `fps` write and the service's "align to grab" offer use
-/// (issue 1402): the camera exposes d006 (non-empty `fps_choices`) AND `wanted_fps100`
-/// is EXACTLY one of its choices. A value the camera does not list (`6000` on the BMPCC) is
-/// never settable: it is not rounded to a neighbour (`5994`) and never redirected to the
-/// off-speed d007. A non-positive value never is.
+/// Whether the project fps can be set to `wanted_fps100` (fps x100) — the ONE rule both the
+/// relay's `fps` write and the service's "align to grab" offer use: the camera lists a
+/// frame rate (non-empty `fps_choices`) AND `wanted_fps100` is EXACTLY one of them. A value the
+/// camera does not list is never settable: it is not rounded to a neighbour (`5994` for 60) and
+/// never written as an off-speed rate. A non-positive value never is.
 pub fn fps_settable(fps_choices: &[i64], wanted_fps100: i64) -> bool {
     wanted_fps100 > 0 && fps_choices.contains(&wanted_fps100)
-}
-
-/// Extracts `(Bottom, Top)` from a RANGE property's `get-config` output (d007 off-speed
-/// fps, d004 Kelvin), or `None` if either bound line is missing/unparseable.
-pub fn parse_range(output: &str) -> Option<(i64, i64)> {
-    let mut bottom: Option<i64> = None;
-    let mut top: Option<i64> = None;
-    for raw in output.lines() {
-        let line = raw.trim();
-        if let Some(rest) = line.strip_prefix("Bottom:") {
-            bottom = rest.trim().parse().ok();
-        } else if let Some(rest) = line.strip_prefix("Top:") {
-            top = rest.trim().parse().ok();
-        }
-    }
-    Some((bottom?, top?))
 }

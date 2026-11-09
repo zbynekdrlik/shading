@@ -16,8 +16,9 @@ remote. Implements the owner architecture decided 2026-08-20 (issue 808 comments
 
 - **Transports (owner decision): USB via a relay, or USB-Ethernet REST. Never Bluetooth.**
 - One **relay** per camera runs on the box its USB is plugged into (a cambox, or a mini SBC
-  on a handheld cage — the SAME component, ARM-friendly). It drives the camera over USB-PTP
-  via the `gphoto2` CLI and exposes its shading over a small HTTP API.
+  on a handheld cage — the SAME component, ARM-friendly). It drives the camera through the
+  official Blackmagic REST API over the camera's own USB-C network link (CDC-NCM; shading#6, it
+  used `gphoto2`/PTP before) and exposes its shading over a small HTTP API.
 - The **service** runs on the strih PC (Windows first, Linux after the frame-loss P0),
   aggregates every relay, and serves ONE operator web panel: 4+4 blocks stacked, each with a
   camera preview on top and the shading parameters below. Opened at `strih.lan` locally, and
@@ -27,8 +28,8 @@ remote. Implements the owner architecture decided 2026-08-20 (issue 808 comments
 
 | Crate | What |
 |---|---|
-| `bkshading-proto` | Shared wire types + the byte-verified Blackmagic PTP mapping (ported from the dev2 MVP `pybridge/mapping.py`). Pure, no IO — one source of truth for both sides. |
-| `bkshading-relay` | The cambox/SBC USB relay. `gphoto2` transport behind a trait, small HTTP API (`/healthz`, `/api/state`, `/api/detect`, `PUT /api/params`). |
+| `bkshading-proto` | Shared wire types + the Blackmagic camera REST mapping (endpoints, JSON shapes, assembly, write planning). Pure, no IO — one source of truth for both sides. |
+| `bkshading-relay` | The cambox/SBC camera relay. Blackmagic REST transport (plain HTTP/1.1, the camera found as the DHCP server of its `cdc_ncm` link), small HTTP API (`/healthz`, `/api/state`, `/api/detect`, `PUT /api/params`). |
 | `bkshading` | The aggregation service + operator web panel (`GET /`, `/api/cameras`, `PUT /api/cameras/<id>/params`, and the M2 live preview `GET /api/cameras/<id>/preview.jpg`). |
 
 ## M1 scope (this milestone)
@@ -39,7 +40,7 @@ remote. Implements the owner architecture decided 2026-08-20 (issue 808 comments
   WB, shutter, fps) with the service version shown in the DOM (version-on-dashboard).
 - Config-driven camera list (id, transport, address, optional NDI preview). A camera with no
   preview renders a params-only block.
-- The relay's `gphoto2` read + write logic, fully unit-tested with a fake runner (no camera).
+- The relay's read + write logic, tested against a local fake camera REST server (no camera; shading#6).
 
 ## M2 scope (live preview)
 
@@ -76,6 +77,10 @@ remote. Implements the owner architecture decided 2026-08-20 (issue 808 comments
   DONE (see "SBC / handheld image" below).
 
 ## Relay provisioning (issue 808) — systemd unit + gphoto2 + the issue-809 env
+
+> **shading#6 (v0.2.0):** the relay no longer needs `gphoto2`; it needs the camera-link
+> `.network` file from `docs/CONTRACT.md` and systemd-networkd. The provisioning below is
+> camera-box's and still describes the PTP-era install.
 
 The relay BINARY already reads `CAMERA_BOX_CAPTURE_FPS` from its env and reports it as
 `RelayState.capture_fps` (the service's issue-809 grab derive consumes it), but nothing ran it on a
@@ -260,6 +265,6 @@ scripts/bkshading-provision-sbc.sh --check     # verify gphoto2 + unit enabled +
 
 ```
 scripts/bkshading-provision-relay.sh --install --rig-mode test  # on the cambox: gphoto2 + unit + env; enable-state per rig mode (setup-device.sh does this on a fresh install)
-bkshading-relay --bind 0.0.0.0:8771            # what the unit runs (needs gphoto2 installed)
+bkshading-relay --bind 0.0.0.0:8771            # what the unit runs (finds the camera on its cdc_ncm link; --camera <host> to pin it)
 bkshading --config bkshading/service/bkshading.example.toml   # on the strih PC
 ```

@@ -72,3 +72,25 @@ fn summarize_lists_only_set_params() {
     assert!(!s.contains("kelvin"));
     assert_eq!(summarize_set_request(&SetRequest::default()), "(none)");
 }
+
+#[test]
+fn pop_pending_keeps_the_flight_open_until_finish_6() {
+    use bkshading_proto::wire::{SetQueue, SetRequest, SubmitAction};
+    let set = |iso| SetRequest {
+        iso: Some(iso),
+        ..Default::default()
+    };
+    let mut q = SetQueue::default();
+    assert!(matches!(q.submit(set(100)), SubmitAction::RunNow(_)));
+    assert!(matches!(q.submit(set(200)), SubmitAction::Queued { .. }));
+    assert_eq!(q.pop_pending(), Some(set(200)));
+    assert_eq!(q.pop_pending(), None);
+    // Still in flight: a SET during the relay's read-back queues.
+    assert!(matches!(q.submit(set(300)), SubmitAction::Queued { .. }));
+    assert_eq!(q.finish(), Some(set(300)));
+    assert_eq!(q.finish(), None);
+    assert!(
+        matches!(q.submit(set(400)), SubmitAction::RunNow(_)),
+        "idle after finish"
+    );
+}

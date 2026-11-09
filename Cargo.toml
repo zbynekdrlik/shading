@@ -7,7 +7,7 @@ resolver = "2"
 # Single source of truth for the version of all three crates (CARGO_PKG_VERSION).
 # `bkshading-relay --version` prints it as its last word: a pinned contract (docs/CONTRACT.md).
 [workspace.package]
-version = "0.1.2"
+version = "0.2.0"
 
 [profile.release]
 lto = true

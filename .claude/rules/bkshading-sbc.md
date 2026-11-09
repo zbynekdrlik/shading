@@ -6,6 +6,10 @@ paths:
 > **Split from camera-box (shading#1, 2.11.2026).** SBC provisioning (the scripts, units, flash
 > script, `ro-root.sh` and their tests named below) stays in **camera-box**. This repo builds the
 > arm64 relay it installs (`bkshading-relay-linux-arm64`, `docs/CONTRACT.md`); the rest is context.
+>
+> **shading#6 (v0.2.0):** the relay reaches the camera over REST on its USB-C CDC-NCM link, not
+> PTP/gphoto2. The SBC needs the `05-bkshading-camera.network` file from `docs/CONTRACT.md`
+> (networkd) instead of gphoto2; the gphoto2/PTP mentions below are history.
 
 # bkshading handheld SBC — provisioning, the read-only root, the arm64 relay deploy (issue 808)
 

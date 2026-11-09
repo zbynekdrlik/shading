@@ -3,7 +3,7 @@ name = "bkshading-proto"
 version.workspace = true
 edition = "2021"
 authors = ["zbynekdrlik"]
-description = "Shared wire types + byte-verified Blackmagic PTP mapping for bkshading (issue 808)"
+description = "Shared wire types + the Blackmagic camera REST mapping for bkshading (issue 808, shading#6)"
 license = "MIT"
 repository = "https://github.com/zbynekdrlik/shading"
 

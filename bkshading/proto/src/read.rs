@@ -1,33 +1,23 @@
-//! Pure assembly of live shading state from raw gphoto2 `get-config` text, and pure
-//! planning of the gphoto2 `set-config` writes for a [`SetRequest`]. No IO — the relay
-//! shells out to gphoto2 and hands the captured text/plan here, so every transform stays
-//! unit-testable without a camera (and standalone-`rustc`-testable under Tier-0).
+//! Pure assembly of live shading state from the camera's REST answers ([`RestRead`]), and pure
+//! planning of the REST writes for a [`SetRequest`] (shading#6). No IO: the relay fetches the
+//! JSON and executes the plan, so every transform is unit-tested without a camera.
 
-use crate::aperture::fnumber_raw_from_block;
 use crate::mapping::*;
+use crate::rest::{self, Format, RestRead, SupportedFormats};
 use crate::wire::{CameraCaps, SetRequest, ShadingParams};
 
-/// Compares each key a write burst WROTE (`written`) against the camera's authoritative readback
-/// (`readback`) and returns the WIRE field names whose write the camera did NOT apply (issue 1343).
-///
-/// The relay fills [`crate::wire::RelayState::not_applied`] with this at the burst idle-close (using
-/// the SAME `params_and_caps` readback basis the panel already reconciles against), so a camera that
-/// ACKs a `set-config` and silently ignores it — cam1 today: the BMPCC drops aperture AND focus PTP
-/// writes while ISO applies — surfaces as a per-key `.not-applied` flag instead of the optimistic
-/// value just reverting with no signal.
+/// Compares each key a write WROTE (`written`) against the camera's read-back (`readback`) and
+/// returns the WIRE field names whose write the camera did NOT apply (issue 1343).
 ///
 /// Per key. APERTURE (`apertureNorm`) is compared via the CHOICE INDEX, not the raw float norm:
-/// the written norm and the readback `aperture_norm` are each mapped onto the SAME f-number choice
-/// grid via [`norm_to_choice_index`], and a mismatch (or a missing readback) flags it. This catches
-/// both a fully-dropped write and the off-grid case (a current f-number like cam1's f/4 that sits
-/// below a 4.5-minimum grid readback-snaps to a different nearest choice than the requested on-grid
-/// one); an empty `fnumber_choices` means "cannot judge" (never a false flag). ISO / SHUTTER /
-/// KELVIN / TINT / FPS are compared BY VALUE against the readback (`fps` is written to d006 as
-/// `fps*100` and compared with the readback `fps100`, the d006 project fps, issue 1402); a `None`
-/// readback for a written key flags it (the camera did not report the value it should now hold).
+/// the written norm and the read-back `aperture_norm` are each mapped onto the SAME f-number grid
+/// via [`norm_to_choice_index`], and a mismatch (or a missing read-back) flags it; an empty grid
+/// means "cannot judge" (never a false flag). The relay drops the aperture flag again when the
+/// iris moved (it landed on the lens's own step, which is the camera applying the write). ISO /
+/// SHUTTER / KELVIN / TINT / FPS are compared BY VALUE (`fps` against the read-back `fps100` as
+/// `fps*100`); a `None` read-back for a written key flags it.
 ///
-/// Only keys PRESENT in `written` are compared — an unwritten key never appears. Pure — no IO, no
-/// camera; exhaustively rustc/Tier-0 testable.
+/// Only keys PRESENT in `written` are compared — an unwritten key never appears.
 pub fn not_applied_keys(
     written: &SetRequest,
     readback: &ShadingParams,
@@ -72,186 +62,275 @@ pub fn not_applied_keys(
     out
 }
 
-/// The raw `gphoto2 --get-config <key>` text blocks the relay captured this cycle, one
-/// per shading property. Empty strings are tolerated (a property the camera did not
-/// answer degrades to `None`, never a crash).
-#[derive(Debug, Default, Clone)]
-pub struct RawConfigs {
-    /// `iso` — RADIO, plain integer Choice values.
-    pub iso: String,
-    /// `f-number` — RADIO, choice strings like `f/5.2`.
-    pub fnumber: String,
-    /// `d002` — shutter angle x100 (RANGE 173..36000).
-    pub shutter_angle: String,
-    /// `d004` — WB Kelvin (RANGE).
-    pub kelvin: String,
-    /// `d005` — tint (MENU -50..50).
-    pub tint: String,
-    /// `d006` — PROJECT fps x100: a MENU of the camera's own timebases (`Current: 6000`,
-    /// `Choice: N 2398` …). The rate the camera records and outputs, and the only settable
-    /// frame rate (issue 1402).
-    pub project_fps: String,
-    /// `d007` — OFF-SPEED (sensor) fps, a plain int (RANGE 5..60). Readback only.
-    pub sensor_fps: String,
-    /// `d003` — manual focus DISTANCE (RANGE, ~0=closest..65536=infinite). The only
-    /// focus-related property the BMPCC's PTP space documents (issue 1238); read
-    /// best-effort by the relay, so an empty block (a camera that does not answer it)
-    /// degrades to a `None` `focus_distance`, never a crash.
-    pub focus_distance: String,
-    /// `gphoto2 --summary` text, read best-effort in the SAME session as `d003` (issue 1306).
-    /// Its `F-Number(0x5007) … value: f/4 (400)` line carries the raw current aperture (x100)
-    /// that libgphoto2 OMITS from the `f-number` RADIO `Current:` when the lens is open below the
-    /// camera's first enumerated stop (`Current: (null)`). Empty when unavailable — the aperture
-    /// then simply falls back to the RADIO `Current:` (i.e. the pre-1306 behaviour), never a crash.
-    pub summary: String,
-    /// `gphoto2 --get-config 5007` block (issue 1371): the PTP F-Number property itself, a MENU
-    /// whose `Current:` is the raw aperture x100 (`Current: 400` = f/4.00) even when the `f-number`
-    /// RADIO prints `Current: (null)` for a lens open below the first enumerated stop. The relay's
-    /// paced read takes it in place of the `--summary` dump (one property instead of every
-    /// property in one burst). Empty when unavailable; preferred over `summary` when present.
-    pub fnumber_raw: String,
+fn round_i64(v: f64) -> Option<i64> {
+    (v.is_finite() && v.abs() < 1e12).then(|| v.round() as i64)
 }
 
-fn current_i64(block: &str) -> Option<i64> {
-    parse_current(block).and_then(|s| s.parse::<i64>().ok())
+/// The camera's project frame rate x100, from `system/format` `frameRate`.
+fn project_fps100(read: &RestRead) -> Option<i64> {
+    read.format
+        .as_ref()
+        .and_then(|f| f.frame_rate.as_deref())
+        .and_then(parse_frame_rate100)
 }
 
-/// The RADIO `Current:` only when it names a real f-number; libgphoto2 prints `Current: (null)`
-/// (-> parse_fnumber None) when the lens is open below the camera's first enumerated stop.
-fn current_fnumber_label(raw: &RawConfigs) -> Option<String> {
-    parse_current(&raw.fnumber).filter(|c| parse_fnumber(c).is_some())
+/// One frame rate the camera lists for its current setup: x100 and the camera's own string,
+/// which is what a `PUT system/format` sends back verbatim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameRateChoice {
+    pub fps100: i64,
+    pub label: String,
 }
 
-/// The camera's current f-number: the RADIO `Current:` when it names a real f-number, else the raw
-/// 0x5007 value / 100 — the only honest current-aperture signal in the off-grid case (issue 1306).
-/// The `5007` property block (issue 1371, the relay's paced read) wins over the `--summary` line;
-/// a non-positive raw is no value.
-fn current_fnumber(raw: &RawConfigs) -> Option<f64> {
-    let summary_fnumber = fnumber_raw_from_block(&raw.fnumber_raw)
-        .or_else(|| parse_summary_fnumber_raw(&raw.summary))
-        .map(|raw_x100| raw_x100 as f64 / 100.0);
-    current_fnumber_label(raw)
-        .as_deref()
-        .and_then(parse_fnumber)
-        .or(summary_fnumber)
-}
-
-/// The camera's current aperture as the raw PTP value x100 (`450` = f/4.5), from the same source
-/// [`params_and_caps`] reports (issue 1452): the relay's write burst starts its aperture
-/// convergence from it, comparing it with the 0x5007 read-back after a write.
-pub fn current_fnumber_x100(raw: &RawConfigs) -> Option<i64> {
-    current_fnumber(raw).map(|f| (f * 100.0).round() as i64)
-}
-
-/// Builds `(ShadingParams, CameraCaps)` from the raw gphoto2 config blocks.
-///
-/// Frame rates (issue 1402, read live on both BMPCC bodies in the fleet): `fps100` is the
-/// **project fps** = the d006 MENU `Current:` (already x100). It is what the camera records
-/// and outputs, what the shutter angle <-> denominator conversion runs at, and what the
-/// issue-809 sync compares against the grab. `sensor_fps100` is the **off-speed fps** = the
-/// d007 RANGE `Current:` x100, a diagnostic only. The two never stand in for each other: with
-/// no d006 the project fps is `None` (not known), never the off-speed rate — reporting the
-/// off-speed rate as the project rate is exactly the issue-1402 bug. The conversion then runs
-/// at [`DEFAULT_FPS100`] for that cycle.
-pub fn params_and_caps(raw: &RawConfigs) -> (ShadingParams, CameraCaps) {
-    let project_fps100 = current_i64(&raw.project_fps);
-    // checked: a junk Current must degrade to "not known", never panic a read.
-    let sensor_fps100 = current_i64(&raw.sensor_fps).and_then(|f| f.checked_mul(100));
-    let fps100 = project_fps100.unwrap_or(DEFAULT_FPS100);
-
-    // Aperture: current f-number -> AV + normalised position within the choices.
-    // Use the PARSEABLE-ONLY choice list as the single canonical basis (issue 1304): the readback
-    // `aperture_norm`, the caps `fnumber_choices` below, and the relay's `plan_writes` all count
-    // from THIS same list, so the panel's +/- step index can never diverge from the write index.
-    let fnumber_labels = parse_fnumber_labels(&raw.fnumber);
-    let current_label = current_fnumber_label(raw);
-    let current_fnumber_value = current_fnumber(raw);
-    let aperture_av = current_fnumber_value.and_then(fnumber_to_av);
-    let aperture_norm = match &current_label {
-        // An exact enumerated choice -> its exact position in the (filtered) choice list. If the
-        // reported `Current:` string is NOT among the filtered choices (e.g. a `f/4` vs `f/4.0`
-        // spelling drift, or a value that got junk-filtered), fall back to the NEAREST choice by
-        // f-number so the slider is never dead while `aperture_av` is known (review finding #1306).
-        Some(cur) => fnumber_labels
+/// The frame rates the camera can switch to WITHOUT changing codec or resolution: the
+/// `frameRates` of every `supportedFormats` entry for the current `recordResolution` whose
+/// `codecs` list the current codec. When no entry names the codec the resolution alone decides;
+/// when no entry matches the resolution either, nothing is settable (an empty list refuses every
+/// `fps` write, which is safer than a rate that would also change the resolution). Ascending,
+/// one entry per rate (the first string the camera gave for it).
+pub fn frame_rate_choices(format: &Format, supported: &SupportedFormats) -> Vec<FrameRateChoice> {
+    let res = format.record_resolution;
+    let same_res: Vec<&rest::SupportedFormat> = supported
+        .supported_formats
+        .iter()
+        .filter(|s| res.is_none() || s.record_resolution == res)
+        .collect();
+    let with_codec: Vec<&rest::SupportedFormat> = match format.codec.as_deref() {
+        Some(codec) => same_res
             .iter()
-            .position(|c| c == cur)
-            .map(|i| choices_to_norm(i as i64, fnumber_labels.len() as i64))
-            .or_else(|| {
-                current_fnumber_value.and_then(|v| nearest_choice_norm(v, &fnumber_labels))
-            }),
-        // No exact choice (the summary-derived off-grid case) -> the NEAREST choice by f-number,
-        // so the slider still shows a sensible position rather than staying dead (issue 1306).
-        None => current_fnumber_value.and_then(|v| nearest_choice_norm(v, &fnumber_labels)),
-    };
-
-    let iso = current_i64(&raw.iso);
-    let shutter =
-        current_i64(&raw.shutter_angle).map(|angle| convert_angle_or_denom(angle, fps100));
-    let kelvin = current_i64(&raw.kelvin);
-    let tint = current_i64(&raw.tint);
-    // d003 manual focus distance (issue 1238): reported verbatim as the raw current value.
-    // An empty/absent block -> None (the camera did not answer d003 this cycle), never 0.
-    let focus_distance = current_i64(&raw.focus_distance);
-
-    let params = ShadingParams {
-        aperture_av,
-        aperture_norm,
-        iso,
-        kelvin,
-        tint,
-        shutter,
-        fps100: project_fps100,
-        sensor_fps100,
-        focus_distance,
-    };
-
-    // The OFF-SPEED d007 RANGE bounds; the settable PROJECT rates are `fps_choices` below.
-    let (fps_min, fps_max) =
-        parse_range(&raw.sensor_fps).unwrap_or((FPS_MIN_FALLBACK, FPS_MAX_FALLBACK));
-    let (kelvin_min, kelvin_max) =
-        parse_range(&raw.kelvin).unwrap_or((KELVIN_MIN_FALLBACK, KELVIN_MAX_FALLBACK));
-    let caps = CameraCaps {
-        iso_choices: parse_iso_choices(&raw.iso),
-        // issue 1304: expose the f-number choices as plain numbers, from the SAME parseable-only
-        // `fnumber_labels` basis used for `aperture_norm` above and for the relay's `plan_writes`
-        // (transport.rs also derives its write list via `parse_fnumber_labels`). Every label here
-        // parses by construction, so this count EQUALS the write-path count — the panel's +/- step
-        // index can never diverge and step to the wrong f-stop.
-        fnumber_choices: fnumber_labels
-            .iter()
-            .filter_map(|c| parse_fnumber(c))
+            .copied()
+            .filter(|s| s.codecs.iter().any(|c| c == codec))
             .collect(),
-        shutter_choices: shutter_choices_for_fps(fps100),
-        // issue 1402: the d006 project-fps choices, verbatim — the list a `fps` write must hit
-        // exactly (`fps_settable`), carried to the service for its "align to grab" offer.
-        fps_choices: parse_fps100_choices(&raw.project_fps),
-        fps_min,
-        fps_max,
-        kelvin_min,
-        kelvin_max,
+        None => Vec::new(),
     };
+    let pick = if with_codec.is_empty() {
+        same_res
+    } else {
+        with_codec
+    };
+    let mut out: Vec<FrameRateChoice> = Vec::new();
+    for s in pick {
+        for label in &s.frame_rates {
+            if let Some(fps100) = parse_frame_rate100(label) {
+                if !out.iter().any(|c| c.fps100 == fps100) {
+                    out.push(FrameRateChoice {
+                        fps100,
+                        label: label.clone(),
+                    });
+                }
+            }
+        }
+    }
+    out.sort_by_key(|c| c.fps100);
+    out
+}
 
+fn read_frame_rates(read: &RestRead) -> Vec<FrameRateChoice> {
+    match (&read.format, &read.supported_formats) {
+        (Some(f), Some(s)) => frame_rate_choices(f, s),
+        _ => Vec::new(),
+    }
+}
+
+/// The aperture grid for this camera's lens ([`fnumber_grid`] over `lens/iris/description`).
+pub fn read_fnumber_grid(read: &RestRead) -> Vec<f64> {
+    let range = read.iris_description.as_ref().and_then(|d| d.aperture_stop);
+    fnumber_grid(range.and_then(|r| r.min), range.and_then(|r| r.max))
+}
+
+/// How the camera measures its shutter (`video/shutter` answers one or the other).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShutterMeasure {
+    /// `shutterSpeed`, 1/N s — the wire's own unit.
+    Speed,
+    /// `shutterAngle` x100 — converted at the project fps.
+    Angle,
+}
+
+fn shutter_measure(read: &RestRead) -> ShutterMeasure {
+    match read.shutter.as_ref() {
+        Some(s) if s.shutter_speed.is_none() && s.shutter_angle.is_some() => ShutterMeasure::Angle,
+        _ => ShutterMeasure::Speed,
+    }
+}
+
+/// The camera's supported shutter ANGLES as `(denominator, angle x100)` at `fps100`, so a write of a
+/// listed denominator sends the camera's exact angle back (a round trip through the formula could
+/// miss it by a hundredth of a degree).
+fn angle_choices(read: &RestRead, fps100: i64) -> Vec<(i64, i64)> {
+    let mut out: Vec<(i64, i64)> = Vec::new();
+    if let Some(s) = read.supported_shutters.as_ref() {
+        for &a in &s.shutter_angles {
+            if let Some(a100) = round_i64(a).filter(|v| *v > 0) {
+                let denom = convert_angle_or_denom(a100, fps100);
+                if !out.iter().any(|(d, _)| *d == denom) {
+                    out.push((denom, a100));
+                }
+            }
+        }
+    }
+    out.sort_unstable();
+    out
+}
+
+/// The shutter denominators the panel steps over: the camera's `shutterSpeeds`, else its
+/// `shutterAngles` converted at the project fps, else [`shutter_choices_for_fps`]. Ascending.
+fn shutter_choices(read: &RestRead, fps100: i64) -> Vec<i64> {
+    let mut speeds: Vec<i64> = read
+        .supported_shutters
+        .as_ref()
+        .map(|s| {
+            s.shutter_speeds
+                .iter()
+                .copied()
+                .filter(|v| *v > 0)
+                .collect()
+        })
+        .unwrap_or_default();
+    if speeds.is_empty() {
+        speeds = angle_choices(read, fps100)
+            .into_iter()
+            .map(|(d, _)| d)
+            .collect();
+    }
+    if speeds.is_empty() {
+        return shutter_choices_for_fps(fps100);
+    }
+    speeds.sort_unstable();
+    speeds.dedup();
+    speeds
+}
+
+/// Builds `(ShadingParams, CameraCaps)` from one read cycle's REST answers.
+///
+/// - aperture: `apertureAv = 2*log2(apertureStop)` (the true displayed f-number), `apertureNorm` =
+///   the nearest grid choice ([`read_fnumber_grid`]); the grid is `caps.fNumberChoices`.
+/// - `fps100` = the project frame rate (`system/format frameRate`); `sensorFps100` = the off-speed
+///   rate x100, a diagnostic; `caps.fpsChoices` = [`frame_rate_choices`] x100;
+///   `caps.fpsMin/fpsMax` = the off-speed range.
+/// - shutter: the speed denominator, or the angle converted at the project fps (at
+///   [`DEFAULT_FPS100`] when the format is unknown this cycle).
+/// - `focusNorm` = `lens/focus normalised` (read only); `focusDistance` (PTP d003) is not reported.
+pub fn params_and_caps(read: &RestRead) -> (ShadingParams, CameraCaps) {
+    let project = project_fps100(read);
+    let fps100 = project.unwrap_or(DEFAULT_FPS100);
+    let grid = read_fnumber_grid(read);
+    let stop = read
+        .iris
+        .as_ref()
+        .and_then(|i| i.aperture_stop)
+        .filter(|f| *f > 0.0 && f.is_finite());
+    let shutter = read.shutter.as_ref().and_then(|s| {
+        s.shutter_speed.filter(|v| *v > 0).or_else(|| {
+            s.shutter_angle
+                .and_then(round_i64)
+                .filter(|v| *v > 0)
+                .map(|a| convert_angle_or_denom(a, fps100))
+        })
+    });
+    let format = read.format.as_ref();
+    let params = ShadingParams {
+        aperture_av: stop.and_then(fnumber_to_av),
+        aperture_norm: stop.and_then(|f| nearest_choice_norm(f, &grid)),
+        iso: read.iso.as_ref().and_then(|v| v.iso),
+        kelvin: read.white_balance.as_ref().and_then(|v| v.white_balance),
+        tint: read.tint.as_ref().and_then(|v| v.white_balance_tint),
+        shutter,
+        fps100: project,
+        sensor_fps100: format
+            .and_then(|f| f.off_speed_frame_rate)
+            .and_then(|v| round_i64(v * 100.0))
+            .filter(|v| *v > 0),
+        focus_distance: None,
+        focus_norm: read
+            .focus
+            .as_ref()
+            .and_then(|f| f.normalised)
+            .filter(|v| v.is_finite()),
+    };
+    let mut iso_choices: Vec<i64> = read
+        .supported_isos
+        .as_ref()
+        .map(|s| s.supported_isos.clone())
+        .unwrap_or_default();
+    iso_choices.sort_unstable();
+    iso_choices.dedup();
+    let wb = read
+        .white_balance_description
+        .as_ref()
+        .and_then(|d| d.white_balance);
+    let caps = CameraCaps {
+        iso_choices,
+        fnumber_choices: grid,
+        shutter_choices: shutter_choices(read, fps100),
+        fps_choices: read_frame_rates(read)
+            .into_iter()
+            .map(|c| c.fps100)
+            .collect(),
+        fps_min: format
+            .and_then(|f| f.min_off_speed_frame_rate)
+            .and_then(round_i64)
+            .unwrap_or(FPS_MIN_FALLBACK),
+        fps_max: format
+            .and_then(|f| f.max_off_speed_frame_rate)
+            .and_then(round_i64)
+            .unwrap_or(FPS_MAX_FALLBACK),
+        kelvin_min: wb.and_then(|r| r.min).unwrap_or(KELVIN_MIN_FALLBACK),
+        kelvin_max: wb.and_then(|r| r.max).unwrap_or(KELVIN_MAX_FALLBACK),
+    };
     (params, caps)
 }
 
-/// Whether the camera exposes its PROJECT fps — the d006 MENU answered with a `Current:` or
-/// a choice list (issue 1402). Exposed is not "settable to any rate": a `fps` write is
-/// accepted only for a value in the d006 choices ([`fps_settable`]). The off-speed d007
-/// RANGE alone does not count — it is not the rate a `fps` write sets.
-pub fn fps_supported(raw: &RawConfigs) -> bool {
-    current_i64(&raw.project_fps).is_some() || !parse_fps100_choices(&raw.project_fps).is_empty()
+/// Whether the camera exposes its project frame rate: `system/format` named one, or it lists rates
+/// to switch to.
+pub fn fps_supported(read: &RestRead) -> bool {
+    project_fps100(read).is_some() || !read_frame_rates(read).is_empty()
 }
 
-/// A `fps` write the camera cannot take (issue 1402): `fps * 100` is not one of the camera's
-/// own d006 project-fps choices. [`plan_writes`] returns it BEFORE planning anything, so the
-/// whole request is refused and nothing reaches the camera. The rate is never rounded to a
-/// neighbour (60 is not written as 5994) and never redirected to the off-speed d007. The relay
-/// answers it as a client error (422) carrying this message.
+/// What a write is planned against, taken from the latest read (shading#6): the aperture grid and
+/// where the iris is, the project fps the shutter angle converts at, the frame rates an `fps`
+/// write may pick, and how the camera measures its shutter.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WriteBasis {
+    pub fnumber_choices: Vec<f64>,
+    /// The iris's f-number at the read (`apertureStop`), to tell whether a write moved it.
+    pub aperture_stop: Option<f64>,
+    pub fps100: i64,
+    pub frame_rates: Vec<FrameRateChoice>,
+    pub shutter_measure: ShutterMeasure,
+    /// `(denominator, angle x100)` of the camera's supported angles at `fps100`.
+    pub shutter_angles: Vec<(i64, i64)>,
+}
+
+impl WriteBasis {
+    pub fn from_read(read: &RestRead) -> Self {
+        let fps100 = project_fps100(read).unwrap_or(DEFAULT_FPS100);
+        WriteBasis {
+            fnumber_choices: read_fnumber_grid(read),
+            aperture_stop: read.iris.as_ref().and_then(|i| i.aperture_stop),
+            fps100,
+            frame_rates: read_frame_rates(read),
+            shutter_measure: shutter_measure(read),
+            shutter_angles: angle_choices(read, fps100),
+        }
+    }
+
+    /// The settable frame rates x100 (the `fps` write rule, [`fps_settable`]).
+    pub fn fps_choices(&self) -> Vec<i64> {
+        self.frame_rates.iter().map(|c| c.fps100).collect()
+    }
+}
+
+/// A `fps` write the camera cannot take (issue 1402, shading#6): `fps * 100` is not one of the
+/// frame rates the camera lists for its current codec and resolution. [`plan_writes`] returns it
+/// BEFORE planning anything, so the whole request is refused and nothing reaches the camera. The
+/// rate is never rounded to a neighbour (60 is not written as 59.94). The relay answers it as a
+/// client error (422) carrying this message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FpsNotSettable {
     /// The requested project fps, as sent (plain fps, e.g. `60`).
     pub fps: i64,
-    /// The camera's own d006 choices (x100), verbatim — empty when it exposes no d006.
+    /// The camera's own frame rates x100 — empty when it lists none.
     pub choices: Vec<i64>,
 }
 
@@ -264,8 +343,9 @@ impl std::fmt::Display for FpsNotSettable {
         let choices: Vec<String> = self.choices.iter().map(|c| c.to_string()).collect();
         write!(
             f,
-            "fps-not-settable: fps {} ({} x100) is not one of the camera's d006 project-fps \
-             choices [{}] (x100); refused, never rounded to a neighbour, never written to d007",
+            "fps-not-settable: fps {} ({} x100) is not one of the camera's project frame rates \
+             [{}] (x100) for its current codec and resolution; refused, never rounded to a \
+             neighbour",
             self.fps,
             wanted,
             choices.join(", ")
@@ -275,66 +355,113 @@ impl std::fmt::Display for FpsNotSettable {
 
 impl std::error::Error for FpsNotSettable {}
 
-/// Plans the gphoto2 `set-config` writes for a [`SetRequest`] as ordered
-/// `(config-key, value-string)` pairs — pure; the relay executes them. `auto_wb` has no
-/// PTP equivalent on the USB path and is silently dropped (matching the MVP box-side).
+/// One REST write. [`RestWrite::path`] is the endpoint; the relay builds the JSON body.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RestWrite {
+    /// `PUT system/format {"frameRate": <the camera's own string>}`.
+    FrameRate(String),
+    /// `PUT lens/iris {"apertureStop": f}` — the camera snaps it to the lens's step.
+    ApertureStop(f64),
+    /// `PUT video/iso {"iso": n}`.
+    Iso(i64),
+    /// `PUT video/shutter {"shutterSpeed": n}` (1/n s).
+    ShutterSpeed(i64),
+    /// `PUT video/shutter {"shutterAngle": n}` (degrees x100).
+    ShutterAngle(i64),
+    /// `PUT video/whiteBalance {"whiteBalance": k}`.
+    WhiteBalance(i64),
+    /// `PUT video/whiteBalanceTint {"whiteBalanceTint": t}`.
+    Tint(i64),
+    /// `PUT video/whiteBalance/doAuto` (no body).
+    AutoWhiteBalance,
+}
+
+impl RestWrite {
+    pub fn path(&self) -> &'static str {
+        match self {
+            RestWrite::FrameRate(_) => rest::FORMAT,
+            RestWrite::ApertureStop(_) => rest::IRIS,
+            RestWrite::Iso(_) => rest::ISO,
+            RestWrite::ShutterSpeed(_) | RestWrite::ShutterAngle(_) => rest::SHUTTER,
+            RestWrite::WhiteBalance(_) => rest::WHITE_BALANCE,
+            RestWrite::Tint(_) => rest::TINT,
+            RestWrite::AutoWhiteBalance => rest::WHITE_BALANCE_AUTO,
+        }
+    }
+}
+
+/// Plans the REST writes for a [`SetRequest`], in order — pure; the relay executes them.
 ///
-/// `fps` (issue 1402) is written to the PROJECT fps d006 as exactly `fps * 100`, and only
-/// when that value is one of `fps_choices` (the camera's d006 choices, [`fps_settable`]).
-/// Any other value refuses the WHOLE request with [`FpsNotSettable`] before anything is
-/// planned — a request is applied whole or not at all. The off-speed d007 is never written.
-/// The d006 write goes FIRST, so every other value lands at the rate the camera then runs.
-/// `d002` is the shutter ANGLE, so a `shutter` in the same request converts at that NEW
-/// project fps (it arrives after d006), otherwise at `fps100`, the camera's current project
-/// fps. Whether a body keeps the angle or the speed across a rate change does not matter then
-/// (review round 2: that is not verified).
-pub fn plan_writes(
-    req: &SetRequest,
-    fnumber_choices: &[String],
-    fps100: i64,
-    fps_choices: &[i64],
-) -> Result<Vec<(String, String)>, FpsNotSettable> {
-    // Decide the fps write FIRST, so a refused rate leaves the plan empty.
+/// - `fps` goes FIRST, and only as one of the camera's own frame rates ([`FpsNotSettable`] refuses
+///   the WHOLE request otherwise, before anything is planned). Everything after it lands while the
+///   camera runs the new rate, and a shutter ANGLE in the same request converts at that rate.
+/// - `apertureNorm` picks a grid choice ([`norm_to_choice_index`]) and writes its f-number as
+///   `apertureStop`.
+/// - `shutter` (a denominator) is written as a speed, or as an angle when the camera measures in
+///   angles (the camera's exact listed angle when the denominator is one of its own).
+/// - `autoWb: true` runs auto white balance, after any manual Kelvin/tint in the same request.
+pub fn plan_writes(req: &SetRequest, basis: &WriteBasis) -> Result<Vec<RestWrite>, FpsNotSettable> {
     let fps_write = match req.fps {
-        Some(fps) => match fps.checked_mul(100) {
-            Some(wanted) if fps_settable(fps_choices, wanted) => Some(wanted),
-            _ => {
-                return Err(FpsNotSettable {
-                    fps,
-                    choices: fps_choices.to_vec(),
-                })
+        Some(fps) => {
+            let choices = basis.fps_choices();
+            let found = fps
+                .checked_mul(100)
+                .filter(|wanted| fps_settable(&choices, *wanted))
+                .and_then(|wanted| basis.frame_rates.iter().find(|c| c.fps100 == wanted));
+            match found {
+                Some(choice) => Some(choice.clone()),
+                None => return Err(FpsNotSettable { fps, choices }),
             }
-        },
+        }
         None => None,
     };
-    let mut out: Vec<(String, String)> = Vec::new();
-    // The project frame rate first: everything below lands while the camera runs the new rate.
-    if let Some(fps100_value) = fps_write {
-        out.push(("d006".to_string(), fps100_value.to_string()));
+    let mut out: Vec<RestWrite> = Vec::new();
+    if let Some(choice) = &fps_write {
+        out.push(RestWrite::FrameRate(choice.label.clone()));
     }
     if let Some(norm) = req.aperture_norm {
-        let idx = norm_to_choice_index(norm, fnumber_choices.len() as i64);
-        if let Some(choice) = fnumber_choices.get(idx as usize) {
-            out.push(("f-number".to_string(), choice.clone()));
+        let idx = norm_to_choice_index(norm, basis.fnumber_choices.len() as i64);
+        if let Some(&f) = basis.fnumber_choices.get(idx as usize) {
+            out.push(RestWrite::ApertureStop(f));
         }
     }
     if let Some(iso) = req.iso {
-        out.push(("iso".to_string(), iso.to_string()));
+        out.push(RestWrite::Iso(iso));
     }
-    if let Some(shutter) = req.shutter {
-        // issue 1402: d002 is the shutter ANGLE and arrives after the d006 write above, so a
-        // shutter set together with a project-fps write converts at that NEW rate.
-        let conv_fps100 = fps_write.unwrap_or(fps100);
-        out.push((
-            "d002".to_string(),
-            shutter_denom_to_angle100(shutter, conv_fps100).to_string(),
-        ));
+    if let Some(denom) = req.shutter {
+        match basis.shutter_measure {
+            ShutterMeasure::Speed => out.push(RestWrite::ShutterSpeed(denom)),
+            ShutterMeasure::Angle => {
+                let angle = match &fps_write {
+                    Some(choice) => shutter_denom_to_angle100(denom, choice.fps100),
+                    None => basis
+                        .shutter_angles
+                        .iter()
+                        .find(|(d, _)| *d == denom)
+                        .map(|(_, a)| *a)
+                        .unwrap_or_else(|| shutter_denom_to_angle100(denom, basis.fps100)),
+                };
+                out.push(RestWrite::ShutterAngle(angle));
+            }
+        }
     }
     if let Some(kelvin) = req.kelvin {
-        out.push(("d004".to_string(), kelvin.to_string()));
+        out.push(RestWrite::WhiteBalance(kelvin));
     }
     if let Some(tint) = req.tint {
-        out.push(("d005".to_string(), tint.to_string()));
+        out.push(RestWrite::Tint(tint));
+    }
+    if req.auto_wb == Some(true) {
+        out.push(RestWrite::AutoWhiteBalance);
     }
     Ok(out)
+}
+
+/// Whether a write moved the iris: the f-number before and after differ by more than display
+/// rounding (0.05). `None` when either side is unknown.
+pub fn iris_moved(before: Option<f64>, after: Option<f64>) -> Option<bool> {
+    match (before, after) {
+        (Some(b), Some(a)) => Some((a - b).abs() > 0.05),
+        _ => None,
+    }
 }

@@ -1,10 +1,12 @@
 //! The pinned shading -> camera-box contract (docs/CONTRACT.md, shading#1). camera-box deploys the
-//! released relay and its E2E reads the camera through the relay's own key names, so a change here
-//! is a breaking change for camera-box: bump the version, update docs/CONTRACT.md, tell camera-box.
+//! released relay and its E2E reads the camera through the same REST endpoints the relay uses
+//! (shading#6), so a change here is a breaking change for camera-box: bump the version, update
+//! docs/CONTRACT.md, tell camera-box.
 
 use std::process::Command;
 
-use bkshading_relay::transport::{CORE_CONFIG_KEYS, FOCUS_DISTANCE_KEY};
+use bkshading_proto::rest;
+use bkshading_relay::transport::{CAMERA_HTTP_PORT, CAMERA_LINK_DRIVER};
 
 fn relay(args: &[&str]) -> String {
     let out = Command::new(env!("CARGO_BIN_EXE_bkshading-relay"))
@@ -20,14 +22,21 @@ fn relay(args: &[&str]) -> String {
 }
 
 #[test]
-fn the_gphoto2_keys_camera_box_reads_keep_their_names() {
-    // camera-box E2E: read+set iso, d002 (shutter angle x100), d004 (WB K), f-number, d005;
-    // read-only d006 (project fps x100); d007 (off-speed fps) is read by the relay, never by E2E.
-    assert_eq!(
-        CORE_CONFIG_KEYS,
-        ["iso", "f-number", "d002", "d004", "d005", "d006", "d007"]
-    );
-    assert_eq!(FOCUS_DISTANCE_KEY, "d003");
+fn the_rest_endpoints_camera_box_reads_keep_their_paths() {
+    // shading#6: the relay drives the camera at http://<camera>:80/control/api/v1/<endpoint>, and
+    // camera-box's E2E test-camera step uses the same endpoints while the relay is stopped.
+    assert_eq!(rest::API_PREFIX, "/control/api/v1");
+    assert_eq!(CAMERA_HTTP_PORT, 80);
+    assert_eq!(rest::ISO, "/video/iso");
+    assert_eq!(rest::SHUTTER, "/video/shutter");
+    assert_eq!(rest::WHITE_BALANCE, "/video/whiteBalance");
+    assert_eq!(rest::TINT, "/video/whiteBalanceTint");
+    assert_eq!(rest::IRIS, "/lens/iris");
+    assert_eq!(rest::FOCUS, "/lens/focus");
+    assert_eq!(rest::FORMAT, "/system/format");
+    assert_eq!(rest::PRODUCT, "/system/product");
+    // The networkd .network camera-box installs matches the camera link by this driver.
+    assert_eq!(CAMERA_LINK_DRIVER, "cdc_ncm");
 }
 
 #[test]
@@ -46,4 +55,7 @@ fn listens_on_8771_and_reads_its_registration_from_relay_env() {
     // camera-box writes these into the relay.env its unit loads.
     assert!(help.contains("[env: BKSHADING_REGISTER_URL="), "{help}");
     assert!(help.contains("[env: BKSHADING_RELAY_ID="), "{help}");
+    // shading#6: the optional fixed camera address; gphoto2 is gone.
+    assert!(help.contains("[env: BKSHADING_CAMERA="), "{help}");
+    assert!(!help.contains("gphoto2"), "{help}");
 }

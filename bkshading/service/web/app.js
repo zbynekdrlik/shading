@@ -87,6 +87,9 @@ async function setParam(id, patch) {
 // issue 1304: +/- step amounts. Aperture steps by ONE camera f-number choice (computed from
 // caps.fNumberChoices); the white balance and tint step by a fixed operator-sized amount.
 const KELVIN_STEP = 100; // K per tap
+// shading#6: an aperture step targets at least 1/6 stop (2^(1/12)) away from the lens's real
+// f-number — the proto `FNUMBER_GRID_MIN_RATIO` (`mapping::aperture_step`).
+const FNUMBER_STEP_MIN_RATIO = 1.0594630943592953;
 const TINT_STEP = 1; // tint units per tap
 
 // A block's enumerated choice list, stored on its dataset by updateBlock. Empty/absent -> the
@@ -193,17 +196,27 @@ function refreshStepDisabled(el) {
   }
 }
 
-// issue 1337: JS mirror of the proto `mapping::step_choice` — the target choice INDEX stepping the
-// aperture from the camera's REAL current f-number across the enumerated grid. "+" = the first
-// choice strictly ABOVE the current f-number, "-" = the last strictly BELOW; a lens open below the
-// first enumerated stop clamps to the min choice from either direction (so the FIRST step moves it
-// ONTO the grid, never the pre-fix nearest-snap-to-idx-0 +1 that owner reported as "clona sa
-// nezdvihne"). Ascending choices. Pinned against the Rust spec by test_app_js_step_choice_1337.
-function stepChoice(currentFnum, choices, dir) {
+// issue 1337: JS mirror of the proto `mapping::step_choice` — the target choice INDEX stepping from
+// the camera's REAL current value across the enumerated grid. "+" = the first choice strictly ABOVE
+// the current value, "-" = the last strictly BELOW; a value below the first choice clamps to the
+// min choice from either direction (so the FIRST step moves it ONTO the grid, never the pre-fix
+// nearest-snap-to-idx-0 +1 that owner reported as "clona sa nezdvihne"). Ascending choices.
+// shading#6: with `minRatio` > 1 it mirrors `mapping::aperture_step` instead — the target must be at
+// least that ratio away (the aperture passes FNUMBER_STEP_MIN_RATIO, 1/6 stop), because the lens
+// snaps a write to its own step and a nominal value just above it would land back where it started.
+function stepChoice(currentFnum, choices, dir, minRatio = 1) {
   const n = choices.length;
   if (n === 0) return null;
   if (n === 1) return 0;
   if (dir === 0) return 0; // parity with the Rust step_choice (dir 0 is never sent by the panel)
+  if (minRatio > 1) {
+    if (dir > 0) {
+      const i = choices.findIndex((c) => c >= currentFnum * minRatio);
+      return i === -1 ? n - 1 : i;
+    }
+    for (let i = n - 1; i >= 0; i--) if (choices[i] <= currentFnum / minRatio) return i;
+    return 0;
+  }
   if (dir > 0) {
     const i = choices.findIndex((c) => c > currentFnum);
     return i === -1 ? n - 1 : i;
@@ -232,7 +245,7 @@ function stepAperture(el, id, dir) {
   const s = el.querySelector('[data-role="aperture"]');
   const curFnum = currentFnum(el);
   const idx = Number.isFinite(curFnum)
-    ? stepChoice(curFnum, choices, dir)
+    ? stepChoice(curFnum, choices, dir, FNUMBER_STEP_MIN_RATIO)
     : Math.min(n - 1, Math.max(0, Math.round(Number(s.value) * (n - 1)) + dir));
   const norm = idx / (n - 1);
   s.value = norm;
@@ -295,7 +308,7 @@ function stepEnum(el, id, cfg, dir) {
 
 // issue 1304: step a linear slider (kelvin by KELVIN_STEP K, tint by TINT_STEP) by `amount`,
 // clamped to the slider's own min/max, sending the ABSOLUTE new value. One tap = one PUT, no
-// auto-repeat on hold (the issue-1229 USB-PTP bus doctrine: one write = one gphoto2 session).
+// auto-repeat on hold (the issue-1229 shared-bus doctrine: one tap = one camera write).
 function stepLinear(el, id, role, key, amount, dir) {
   const s = el.querySelector(`[data-role="${role}"]`);
   const min = Number(s.min);

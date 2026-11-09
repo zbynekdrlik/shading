@@ -17,9 +17,9 @@ paths:
 
 A multiplatform Rust **service** (`bkshading`, runs on the strih PC — Windows first, Linux later)
 that aggregates per-camera **relays** into ONE operator web panel; and a cambox/SBC **relay**
-(`bkshading-relay`) that drives a Blackmagic camera over USB-PTP via the `gphoto2` CLI. Shared
-crate `bkshading-proto` holds the wire types + the byte-verified PTP mapping (ported 1:1 from the
-dev2 MVP `pybridge/mapping.py`). Owner architecture: issue 808 comments 5355836067 / 5356048130 /
+(`bkshading-relay`) that drives a Blackmagic camera through the official Blackmagic REST API over
+the camera's USB-C CDC-NCM link (since v0.2.0, shading#6; before that over USB-PTP via the
+`gphoto2` CLI). Shared crate `bkshading-proto` holds the wire types + the REST mapping. Owner architecture: issue 808 comments 5355836067 / 5356048130 /
 5356062847 (2026-08-20).
 
 ## Non-negotiables (owner decisions)
@@ -61,12 +61,68 @@ dev2 MVP `pybridge/mapping.py`). Owner architecture: issue 808 comments 53558360
     use names for it.
   - **Preview workers run for every declared camera**, visiting ones included (they start from the static
     list at boot); an absent NDI source only backs off, as for any offline camera.
-- **`relay/src/transport.rs` is split** (issue 808): `transport/gphoto2.rs` (the CLI seam),
-  `transport/reads.rs` (read constants + pure helpers), re-exported from `transport`. New code goes
-  into a child module, never back into transport.rs (size budget).
-- Relay transport = shell out to the `gphoto2` CLI behind the `CameraTransport`-style trait (NOT a
-  `libgphoto2` FFI binding — the trait keeps FFI as a future 2nd impl). Rationale: no build-time C
-  dep → clean ARM cross-build for the zero-class arm64 SBC handheld relay.
+- **Relay transport = the Blackmagic REST API (shading#6, owner 9.11.2026: "preco chces ostavat
+  pri nejakom gphoto riadeni?!?").** gphoto2/PTP is gone; see the next section. `transport.rs` is
+  the session; `transport/rest.rs` (HTTP client), `transport/discover.rs` (finding the camera) and
+  `transport/reads.rs` (env parsers + clock) are its children. New code goes into a child module.
+- **Every gphoto2/PTP section below this file's REST section is HISTORY** (issues 1229, 1238,
+  1306, 1337, 1371, 1402, 1452): the reasoning about the shared xHCI bus, the read floor and the
+  FIFO gate still holds; the gphoto2 keys, the `--shell`, the paced reads and the 0x5007 settle no
+  longer exist in the code.
+
+## Relay transport = Blackmagic REST over the camera's USB-C link (shading#6, v0.2.0)
+- **The link.** Camera OS 9.x enumerates CDC-NCM next to PTP; the kernel names it `enx<mac>`
+  (driver `cdc_ncm`). It comes up DOWN. camera-box installs `05-bkshading-camera.network`
+  (`Driver=cdc_ncm`, DHCPv4, no routes/DNS, `RequiredForOnline=no`; the text is in
+  `docs/CONTRACT.md`). The camera is the DHCP server of a /30 (cam5: camera `.161`, box `.162`).
+- **Finding it** (`transport/discover.rs`): every interface whose `device/driver` symlink ends in
+  `cdc_ncm` AND whose `device/../idVendor` is Blackmagic's `1edb` (never by name: RTL8156 dongles
+  and phones use cdc_ncm too), its `ifindex`, then networkd's lease
+  `/run/systemd/netif/leases/<ifindex>` -> `SERVER_ADDRESS` (else `ROUTER`); without a lease, the
+  /30 peer of the box's own address (`ip -4 -o addr`). The lease file is networkd's internal
+  state, not an API. `GET system/product`
+  confirms. `--camera`/`BKSHADING_CAMERA` pins an address. The found link is kept until a read
+  fails. Tests point `DiscoverPaths` at a fake sysfs + lease tree.
+- **The client** (`transport/rest.rs`): hand-written HTTP/1.1 over std `TcpStream` (the register
+  path's no-client-crate rule, arm64 build stays light), `Connection: close`, one 1 s deadline per
+  request, Content-Length / chunked / read-to-close bodies, 1 MB cap. A transport failure ends a
+  read cycle (offline); a non-2xx or undecodable answer only leaves that endpoint `None`.
+- **Field facts** (Blackmagic's `RESTAPIforBlackmagicCameras.pdf` + live cam5):
+  - only `PUT lens/iris {"apertureStop": x}` moves the iris; `apertureNumber`/`normalised` writes
+    answer 204 and do nothing. The camera snaps to the lens step; read back after ~1 s
+    (`APERTURE_READBACK_DELAY_MS`);
+  - `video/shutter` answers `shutterSpeed` (1/N) OR `shutterAngle` (degrees x100, 18000 = 180),
+    per the camera's setup; write the same unit back (the exact listed angle for a listed denom);
+  - `system/format frameRate` is a STRING (`"23.98"`, `"24"`, `"59.94"`); a write sends the
+    camera's own string from `system/supportedFormats` for the current codec + resolution;
+  - `lens/focus` gives `normalised` only (wire `focusNorm`); `focusDistance` (PTP d003) stays `null`.
+- **Pure half** (`proto/src/rest.rs` types + paths, `proto/src/read.rs` assembly + `plan_writes`),
+  tested in `proto/tests/rest_read_6.rs`. **Relay half** tested in `relay/tests/rest_camera_6.rs`
+  against `relay/tests/support/` — an axum fake camera on its own runtime thread, the ONLY
+  replaced part.
+- **Aperture grid:** REST gives the lens's min/max, not its stops, so `fNumberChoices` = the
+  nominal 1/3-stop list between them plus the exact ends, dropping nominal values within 1/6 stop
+  of an end. The lens snaps each write to ITS step (cam5 shows 7.3, 4.9), so a plain "first
+  choice above" step got stuck (lens on 4.9 -> asks 5.0 -> lands 4.9). The +/- step is
+  `mapping::aperture_step` (JS `stepChoice(..., FNUMBER_STEP_MIN_RATIO)`): the target is at least
+  1/6 stop away. Pinned by `every_panel_aperture_tap_moves_the_lens_6`, which walks a fake lens.
+  Still unhandled: a lens whose steps are wider than 1/3 stop can stick at such a gap.
+- **Writes:** `submit` plans on the cached read's basis inside the floor (else one real read),
+  drains the FIFO, then does ONE full read-back that is the PUT answer and the new cache;
+  `notApplied` from it (a moved iris is never flagged). The gate stays shut through the read-back
+  (`SetQueue::pop_pending` while writing, `finish` after): a SET that arrives during it is written
+  in a second round, never inside the first round's read-back.
+  - A cached basis is used only while younger than `WRITE_BASIS_MAX_AGE_MS` (2 s), so a change
+    on the camera body just before a click is seen.
+  - A drain older than `DRAIN_SETTLE_BUDGET_MS` (4 s) reads back without the 1 s iris wait:
+    steady clicking adds rounds, and the first PUT must answer inside the service's 10 s
+    write-client timeout.
+  - A read-back that finds the camera offline drops (and logs) the late SETs instead of writing
+    them through the dropped link.
+  - Timing tests sync on the fake's recorded PUT (`wait_for_put`), never on a guessed sleep.
+    Every fake delay stays under `REST_TIMEOUT` (1 s), or the client times out.
+- **Decoding:** integer fields go through a lenient int (`400.0` reads as 400), and fields the
+  relay does not use are not declared, so one odd value cannot fail a whole endpoint.
 
 ## Workspace, version and release (shading#1)
 - Root `Cargo.toml` is a pure workspace: `members = ["bkshading/proto","bkshading/relay","bkshading/service"]`,
@@ -162,10 +218,20 @@ was reused.
   store's `updated_ms` stays wall clock (`store::wall_clock_ms`), the clock freshness is judged on.
 - **Never build a frame the decimator drops (shading#3).** v0.1.0 copied + RGB-converted every
   60 fps NDI frame, then kept 3 fps: ~20 % of a core per live camera, ~95 % total on strih-snv,
-  next to OBS. A source asks the worker's `keep` callback AT FRAME ARRIVAL (`next_frame(timeout,
-  keep)`); `capture_step` frees an unwanted NDI frame untouched. Asking before the blocking
-  capture drifts 3 fps to ~2.9 fps. NDI frame type 4 (error) returns at once: fail the source,
-  never retry in place. v0.1.1 live: preview threads ~2 % each, the rest is NDI's own decode.
+  next to OBS. The rules since v0.1.2:
+  - A source asks the worker's `keep` AT FRAME ARRIVAL (`next_frame(timeout, keep)`), and only
+    for a frame it can build (`frame_usable`). Asking before the blocking capture drifts the fps.
+  - `Decimator::is_due` at arrival; `mark_emitted` after the ENCODE ATTEMPT, success or not. A
+    slot spent on a frame never built starves; a slot not spent on a failed encode runs 60 fps.
+  - `run_source` calls `decim.reset()`: each connection has its own clock from 0. A stamp from
+    the old clock froze the preview for as long as the old connection ran (bug since issue 808).
+  - NDI glue lives in `capture_frame` behind the private `NdiRecv` trait; tests use a fake
+    receiver whose `free` poisons the buffer (catches free-before-copy).
+  - Lost link (frame type 4): wait 200 ms, rebuild after 3 s without video (`LostLink`); any
+    no-frame return can end the window.
+  - Logs: every recurring failure goes through the camera's `RepeatGate` (set of texts, kept
+    across reconnects, cleared by a stored frame): one warning per streak. Unusable frame shapes
+    warn once per source per process. Never log per frame.
 - `Closes #N` in a dev commit closes the ticket at merge, before camera-box deploys. Reopen it
   and close with the live read from camera-box.
 
