@@ -508,6 +508,11 @@ impl NetTree {
         std::fs::write(usb_dev.join("idVendor"), format!("{vendor}\n")).unwrap();
     }
 
+    fn usb_product(&self, name: &str, product: &str) {
+        let usb_dev = self.root.join("usb").join(name);
+        std::fs::write(usb_dev.join("product"), format!("{product}\n")).unwrap();
+    }
+
     fn lease(&self, ifindex: u32, text: &str) {
         std::fs::write(self.root.join("leases").join(ifindex.to_string()), text).unwrap();
     }
@@ -1049,5 +1054,83 @@ fn presses_queued_past_the_answer_budget_finish_in_the_background_in_order_6() {
                 std::thread::sleep(Duration::from_millis(50));
             }
         }
+    }
+}
+
+#[test]
+fn a_pocket_6k_at_fw_8_6_is_detected_read_set_and_stepped_6() {
+    // The coordinator's live endpoint subset of SNV cam3 (no system/product, no lists, no
+    // descriptions), found through discovery so the USB product string names it.
+    let cam = FakeCamera::start(support::pocket_6k_fw86());
+    let stops = cam.cam().lens_stops.clone();
+    let net = NetTree::new("6k86");
+    net.iface("enx7c2e0d6k0086", "cdc_ncm", 11);
+    net.usb_product("enx7c2e0d6k0086", "Pocket Cinema Camera 6K");
+    net.lease(11, "SERVER_ADDRESS=127.0.0.1\n");
+    let s = Arc::new(
+        CameraSession::new(
+            CameraLocator::Discover {
+                paths: net.paths(),
+                port: cam.addr.port(),
+            },
+            VERSION,
+        )
+        .with_aperture_readback_delay_ms(0)
+        .with_iris_probe_wait_ms(30),
+    );
+    // detect: confirmed by lens/iris, named by the USB product string.
+    assert_eq!(s.detect().as_deref(), Some("Pocket Cinema Camera 6K"));
+    // state: every value read, every missing list replaced by a sane default.
+    let st = s.read_state();
+    assert!(st.online);
+    assert_eq!(st.params.iso, Some(1000));
+    assert_eq!(st.params.shutter, Some(100));
+    assert_eq!(st.params.kelvin, Some(4850));
+    assert_eq!(st.params.fps100, Some(6000));
+    assert_eq!(fstop(&st), 9.5);
+    let caps = st.caps.clone().unwrap();
+    assert!(
+        caps.iso_choices.contains(&1000) && caps.iso_choices.len() > 10,
+        "{:?}",
+        caps.iso_choices
+    );
+    assert!(
+        caps.shutter_choices.contains(&100),
+        "{:?}",
+        caps.shutter_choices
+    );
+    assert_eq!((caps.kelvin_min, caps.kelvin_max), (2500, 10000));
+    assert!(caps.fnumber_choices.len() > 5, "the slider gets a range");
+    assert!(caps.fps_choices.contains(&6000));
+    // set: plain values land.
+    let (_, st) = applied(
+        s.submit(&SetRequest {
+            iso: Some(800),
+            kelvin: Some(5600),
+            shutter: Some(50),
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+    assert_eq!(
+        (st.params.iso, st.params.kelvin, st.params.shutter),
+        (Some(800), Some(5600), Some(50))
+    );
+    assert!(st.not_applied.is_empty(), "{:?}", st.not_applied);
+    // step: one press = the next native step, down to the end of the lens and back up, quietly
+    // stopping at both ends although the lens range is unknown.
+    let at = stops.iter().position(|f| *f == 9.5).unwrap();
+    for want in stops[..at].iter().rev() {
+        assert_eq!(fstop(&press(&s, -1)), *want);
+    }
+    let st = press(&s, -1);
+    assert_eq!(fstop(&st), 4.0, "the end of the lens");
+    assert!(
+        st.not_applied.is_empty(),
+        "the end of an unknown range is quiet: {:?}",
+        st.not_applied
+    );
+    for want in &stops[1..] {
+        assert_eq!(fstop(&press(&s, 1)), *want);
     }
 }

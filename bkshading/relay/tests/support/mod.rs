@@ -57,6 +57,8 @@ pub struct Cam {
     pub refuse: HashMap<String, (u16, String)>,
     /// Paths that answer 501 to a GET (not implemented on this body).
     pub not_implemented: Vec<String>,
+    /// Paths that answer 404 to a GET (not served by this firmware at all).
+    pub not_found: Vec<String>,
     /// A pause before answering a PUT on this path.
     pub put_delay: HashMap<String, Duration>,
     /// A pause before answering a GET on this path (a camera that stops answering).
@@ -97,6 +99,7 @@ impl Default for Cam {
                 .to_vec(),
             refuse: HashMap::new(),
             not_implemented: Vec::new(),
+            not_found: Vec::new(),
             put_delay: HashMap::new(),
             get_delay: HashMap::new(),
             auto_wb_kelvin: 4800,
@@ -194,6 +197,45 @@ pub fn zoom_third_stop_lens() -> Cam {
     }
 }
 
+/// SNV cam3, the original Pocket 6K at fw 8.6, read live 9.11.2026 (shading#6): REST is served
+/// (Web media manager on), but this firmware has no `system/product`, no capability lists and no
+/// descriptions. Its lens at 24 mm, walked live with 1/16-stop targets: 1/6-stop steps from 4.0
+/// (the end of the lens) up to 11.0, starting at 9.5.
+pub fn pocket_6k_fw86() -> Cam {
+    Cam {
+        product: json!(null),
+        iso: 1000,
+        shutter_speed: Some(100),
+        kelvin: 4850,
+        tint: 0,
+        aperture: 9.5,
+        lens_stops: vec![
+            4.0, 4.4, 4.6, 4.8, 5.0, 5.2, 5.4, 5.6, 5.9, 6.2, 6.45, 6.7, 7.0, 7.3, 7.65, 8.0, 8.35,
+            8.7, 9.1, 9.5, 10.0, 10.5, 11.0,
+        ],
+        focus: 0.0,
+        frame_rate: "60".into(),
+        not_found: [
+            "/system/product",
+            "/video/supportedISOs",
+            "/video/supportedShutters",
+            "/video/whiteBalance/description",
+            "/lens/iris/description",
+            "/video/shutter/description",
+        ]
+        .map(String::from)
+        .to_vec(),
+        not_implemented: [
+            "/video/ndFilter",
+            "/system/supportedCodecFormats",
+            "/system/supportedVideoFormats",
+        ]
+        .map(String::from)
+        .to_vec(),
+        ..Cam::default()
+    }
+}
+
 /// The PP Pocket 6K lens: 1/6-stop steps near open (2.8 2.9 3.1 3.2 3.3 3.5, read live), with some
 /// gaps under 0.1 stop (3.9 -> 4.0).
 pub fn sixth_stop_lens() -> Cam {
@@ -276,7 +318,11 @@ async fn handle(State(sh): State<Arc<Shared>>, method: Method, uri: Uri, body: B
     if cam.not_implemented.contains(&path) {
         return (StatusCode::NOT_IMPLEMENTED, "not implemented").into_response();
     }
+    if cam.not_found.contains(&path) {
+        return (StatusCode::NOT_FOUND, "Not Found").into_response();
+    }
     match path.as_str() {
+        "/system" => StatusCode::NO_CONTENT.into_response(),
         "/system/product" => ok(cam.product.clone()),
         "/video/iso" => ok(json!({ "iso": cam.iso })),
         "/video/supportedISOs" => ok(json!({ "supportedISOs": cam.isos })),
