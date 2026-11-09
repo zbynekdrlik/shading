@@ -41,6 +41,9 @@ function fNumberFromAv(av) {
 // the owner-reported down-then-back flicker. The wire key doubles as the issue-1343 notApplied key.
 const pending = new Map();
 const PENDING_HOLD_MS = 4000; // confirm-or-timeout window (covers the ~2 s pump + camera apply)
+// shading#6: an aperture +/- press walks the lens (~1-5 s, one 1.2 s wait per probe the iris does
+// not follow), so its hold outlives the plain one; the PUT answer's push usually ends it first.
+const STEP_HOLD_MS = 8000;
 function markPending(cameraId, key, target) {
   pending.set(`${cameraId}:${key}`, { target, ts: Date.now() });
 }
@@ -84,8 +87,9 @@ async function setParam(id, patch) {
   }
 }
 
-// issue 1304: +/- step amounts. Aperture steps by ONE camera f-number choice (computed from
-// caps.fNumberChoices); the white balance and tint step by a fixed operator-sized amount.
+// issue 1304: +/- step amounts. The white balance and tint step by a fixed operator-sized amount.
+// The aperture +/- move ONE of the lens's own steps (`apertureStep`, shading#6); caps.fNumberChoices
+// are only the absolute slider's positions and the ends that disable the buttons.
 const KELVIN_STEP = 100; // K per tap
 const TINT_STEP = 1; // tint units per tap
 
@@ -239,7 +243,7 @@ function reconcileStepHold(cameraId, valEl, pushedText, refused) {
   const pkey = `${cameraId}:apertureStep`;
   const pend = pending.get(pkey);
   if (!pend) return false;
-  if (refused || pushedText !== pend.target || Date.now() - pend.ts >= PENDING_HOLD_MS) {
+  if (refused || pushedText !== pend.target || Date.now() - pend.ts >= STEP_HOLD_MS) {
     pending.delete(pkey);
     return false;
   }
@@ -565,7 +569,8 @@ function updateBlock(el, cam) {
   const fn = fNumberFromAv(p.apertureAv);
   const fnumEl = q("fnum");
   const fnText = fn == null ? "f/—" : "f/" + fn.toFixed(1);
-  const apRefused = notApplied.includes("apertureNorm");
+  // shading#6: a +/- press the iris did not follow reports `apertureStep`; a slider write `apertureNorm`.
+  const apRefused = notApplied.includes("apertureNorm") || notApplied.includes("apertureStep");
   const apHeld =
     reconcileStepHold(cam.id, fnumEl, fnText, apRefused) ||
     reconcileLabel(cam.id, "apertureNorm", fnumEl, fnText, apRefused);
@@ -628,7 +633,7 @@ function updateBlock(el, cam) {
   // just reverts). Runs AFTER refreshStepDisabled so it doesn't fight the disabled-reason titles.
   const NA_TITLE = "Kamera tento zápis neprijala";
   const flagNotApplied = (valRole, key, stepperRoles) => {
-    const flagged = notApplied.includes(key);
+    const flagged = [].concat(key).some((k) => notApplied.includes(k)); // a key or a list of keys
     const valEl = q(valRole);
     if (valEl) {
       valEl.classList.toggle("not-applied", flagged);
@@ -644,7 +649,7 @@ function updateBlock(el, cam) {
       else if (!flagged && b.title === NA_TITLE) b.title = "";
     }
   };
-  flagNotApplied("fnum", "apertureNorm", ["aperture-dec", "aperture-inc"]);
+  flagNotApplied("fnum", ["apertureNorm", "apertureStep"], ["aperture-dec", "aperture-inc"]);
   flagNotApplied("iso-val", "iso", ["iso-dec", "iso-inc"]);
   flagNotApplied("kelvin-val", "kelvin", ["kelvin-dec", "kelvin-inc"]);
   flagNotApplied("tint-val", "tint", ["tint-dec", "tint-inc"]);

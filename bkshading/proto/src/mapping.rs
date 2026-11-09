@@ -232,8 +232,10 @@ pub fn step_choice(current_fnumber: f64, choices: &[f64], dir: i32) -> Option<us
 /// snaps a written `apertureStop` to the NEAREST native lens step, so a probe only lands past the
 /// next step when it crosses the midpoint between the next step and the one after it. An increment
 /// below half the sum of two adjacent native gaps can therefore never skip a step. The smallest
-/// gaps seen live are about 0.09 stop (the PP 6K's 3.1 -> 3.2 -> 3.3), so 1/16 stop (0.0625) is
-/// safe there. It is also below the coordinator's "about 1/12".
+/// gaps seen live are about 0.09 stop (the PP 6K's 3.1 -> 3.2 -> 3.3, as the camera reports them to
+/// 0.1, so the true gaps may be a little smaller), so 1/16 stop (0.0625) is safe there. It is also
+/// below the coordinator's "about 1/12". The argument assumes the iris shows a move within the
+/// relay's probe wait; an iris slower than that could see the next probe written mid-travel.
 pub const APERTURE_PROBE_STOPS: f64 = 1.0 / 16.0;
 
 /// The f-number of the `k`-th probe (1-based) of an `apertureStep` from `current` (the camera's
@@ -264,7 +266,8 @@ pub fn aperture_probe_target(
     } else {
         target < previous - 1e-9 && target < current
     };
-    progresses.then(|| (target * 100.0).round() / 100.0)
+    // Round to 0.01, then clamp again, so a range end like 16.666 is never overshot by the rounding.
+    progresses.then(|| ((target * 100.0).round() / 100.0).clamp(lo, hi))
 }
 
 // --- frame rate --------------------------------------------------------------

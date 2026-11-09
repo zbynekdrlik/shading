@@ -70,7 +70,8 @@ test("panel +/- step buttons PUT the expected absolute values, console clean", a
   const recorded = await (await page.request.get(`${STUB}/__recorded`)).json();
   // Aperture (shading#6, 0.2.1): "+" sends the direction; the relay walks the lens's own steps.
   expect(recorded.some((b) => b.apertureStep === 1), "aperture + -> apertureStep 1").toBeTruthy();
-  expect(recorded.some((b) => "apertureNorm" in b), "+/- never send a grid position").toBeFalsy();
+  // The service forwards the typed SetRequest, so absent fields arrive as null.
+  expect(recorded.some((b) => b.apertureNorm != null), "+/- never send a grid position").toBeFalsy();
   // Biely bod: 5600 + 100 K.
   expect(recorded.some((b) => b.kelvin === 5700), "kelvin + -> 5700").toBeTruthy();
   // Tint: 0 + 1.
@@ -341,12 +342,12 @@ test("a not-applied push after an optimistic tap surfaces the refusal (clears th
   await expect(fnum).toHaveText("f/5.2");
   await expect(fnum).toHaveClass(/pending/);
 
-  // The relay reports the camera REFUSED the aperture write (issue 1343 notApplied) while the pump
+  // The relay reports the iris did NOT follow the +/- press (shading#6: notApplied apertureStep) while the pump
   // snapshot still carries the OLD value. The pending hold must NOT swallow the refusal: it clears,
   // the reverted server value shows, and the .not-applied style + title surface immediately.
   await page.evaluate(
     (agg) => window.render(agg),
-    makeFixture({ apertureAv: 4.78, notApplied: ["apertureNorm"] })
+    makeFixture({ apertureAv: 4.78, notApplied: ["apertureStep"] })
   );
   await expect(fnum).toHaveText("f/5.2");
   await expect(fnum).not.toHaveClass(/pending/);

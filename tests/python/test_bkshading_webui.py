@@ -275,7 +275,9 @@ def test_app_js_aperture_step_sends_a_direction_not_a_grid_position_6():
     assert "stepChoice(" not in ap
     hold = _js_fn_body(js, "function reconcileStepHold(")
     assert "pushedText !== pend.target" in hold, "the hold ends on a different f-stop"
-    assert "PENDING_HOLD_MS" in hold and "refused" in hold
+    assert "STEP_HOLD_MS" in hold and "refused" in hold
+    ub0 = _js_fn_body(js, "function updateBlock(")
+    assert 'notApplied.includes("apertureStep")' in ub0, "a press the iris did not follow is shown"
     ub = _js_fn_body(js, "function updateBlock(")
     assert "reconcileStepHold(" in ub
     assert "FNUMBER_STEP_MIN_RATIO" not in js

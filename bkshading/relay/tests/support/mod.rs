@@ -44,6 +44,12 @@ pub struct Cam {
     pub iris_range: Option<(f64, f64)>,
     /// The iris ACKs a write and does not move.
     pub iris_ignores_writes: bool,
+    /// `lens/iris/description controllable`.
+    pub iris_controllable: bool,
+    /// How long after an `apertureStop` PUT the iris reports its new position (a moving iris).
+    pub iris_latency: Duration,
+    /// An accepted iris write still travelling: the landing and when it was written.
+    pub iris_travel: Option<(f64, std::time::Instant)>,
     pub focus: f64,
     pub frame_rate: String,
     pub frame_rates: Vec<String>,
@@ -81,6 +87,9 @@ impl Default for Cam {
             ],
             iris_range: None,
             iris_ignores_writes: false,
+            iris_controllable: true,
+            iris_latency: Duration::ZERO,
+            iris_travel: None,
             focus: 0.42,
             frame_rate: "25".into(),
             frame_rates: ["23.98", "24", "25", "29.97", "30", "50", "59.94", "60"]
@@ -253,6 +262,16 @@ async fn handle(State(sh): State<Arc<Shared>>, method: Method, uri: Uri, body: B
     if let Some(d) = delay {
         tokio::time::sleep(d).await;
     }
+    {
+        // A travelling iris arrives once its latency has passed.
+        let mut cam = sh.cam.lock().unwrap();
+        if let Some((to, at)) = cam.iris_travel {
+            if at.elapsed() >= cam.iris_latency {
+                cam.aperture = to;
+                cam.iris_travel = None;
+            }
+        }
+    }
     let cam = sh.cam.lock().unwrap().clone();
     if cam.not_implemented.contains(&path) {
         return (StatusCode::NOT_IMPLEMENTED, "not implemented").into_response();
@@ -293,7 +312,9 @@ async fn handle(State(sh): State<Arc<Shared>>, method: Method, uri: Uri, body: B
                 *cam.lens_stops.first().unwrap(),
                 *cam.lens_stops.last().unwrap(),
             ));
-            ok(json!({ "controllable": true, "apertureStop": { "min": min, "max": max } }))
+            ok(
+                json!({ "controllable": cam.iris_controllable, "apertureStop": { "min": min, "max": max } }),
+            )
         }
         "/lens/focus" => ok(json!({ "normalised": cam.focus })),
         "/system/format" => ok(json!({
@@ -352,7 +373,12 @@ fn put(sh: &Shared, path: &str, body: Option<Value>) -> Response {
             // Live cam5: only apertureStop moves the iris; the other two keys are ACKed and ignored.
             if let Some(f) = b.get("apertureStop").and_then(Value::as_f64) {
                 if !cam.iris_ignores_writes {
-                    cam.aperture = nearest(&cam.lens_stops, f);
+                    let to = nearest(&cam.lens_stops, f);
+                    if cam.iris_latency.is_zero() {
+                        cam.aperture = to;
+                    } else {
+                        cam.iris_travel = Some((to, std::time::Instant::now()));
+                    }
                 }
             }
         }

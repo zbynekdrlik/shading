@@ -126,14 +126,16 @@ fn no_camera_reads_offline_and_keeps_the_box_rate_6() {
         .local_addr()
         .unwrap()
         .port();
-    let s = CameraSession::new(
-        CameraLocator::Fixed(CameraAddr {
-            host: "127.0.0.1".into(),
-            port,
-        }),
-        VERSION,
-    )
-    .with_capture_fps(Some(60));
+    let s = Arc::new(
+        CameraSession::new(
+            CameraLocator::Fixed(CameraAddr {
+                host: "127.0.0.1".into(),
+                port,
+            }),
+            VERSION,
+        )
+        .with_capture_fps(Some(60)),
+    );
     let st = s.read_state();
     assert!(!st.online);
     assert_eq!(st.camera, None);
@@ -154,9 +156,11 @@ fn no_camera_reads_offline_and_keeps_the_box_rate_6() {
 fn the_read_floor_serves_the_cache_until_it_expires_1229() {
     let cam = FakeCamera::start(Cam::default());
     let clock = FakeClock::default();
-    let s = session(&cam)
-        .with_min_read_interval_ms(10_000)
-        .with_clock(Box::new(clock.clone()));
+    let s = Arc::new(
+        session(&cam)
+            .with_min_read_interval_ms(10_000)
+            .with_clock(Box::new(clock.clone())),
+    );
     s.read_state();
     s.read_state();
     clock.0.store(9_999, Ordering::SeqCst);
@@ -185,7 +189,7 @@ fn the_read_floor_serves_the_cache_until_it_expires_1229() {
 #[test]
 fn every_param_is_one_put_and_the_answer_is_the_read_back_6() {
     let cam = FakeCamera::start(Cam::default());
-    let s = session(&cam);
+    let s = Arc::new(session(&cam));
     let req = SetRequest {
         iso: Some(800),
         kelvin: Some(6500),
@@ -232,7 +236,7 @@ fn every_param_is_one_put_and_the_answer_is_the_read_back_6() {
 #[test]
 fn an_aperture_write_sends_aperture_stop_and_reports_where_the_lens_landed_6() {
     let cam = FakeCamera::start(Cam::default());
-    let s = session(&cam);
+    let s = Arc::new(session(&cam));
     let grid = s.read_state().caps.unwrap().fnumber_choices;
     let i8 = grid.iter().position(|f| *f == 8.0).unwrap();
     let norm = i8 as f64 / (grid.len() - 1) as f64;
@@ -279,7 +283,7 @@ fn an_iris_that_ignores_the_write_is_flagged_not_applied_1343() {
         iris_ignores_writes: true,
         ..Default::default()
     });
-    let s = session(&cam);
+    let s = Arc::new(session(&cam));
     let (_, st) = applied(
         s.submit(&SetRequest {
             aperture_norm: Some(1.0),
@@ -295,7 +299,7 @@ fn an_iris_that_ignores_the_write_is_flagged_not_applied_1343() {
 #[test]
 fn an_unlisted_fps_is_refused_422_and_writes_nothing_1402() {
     let cam = FakeCamera::start(Cam::default());
-    let s = session(&cam);
+    let s = Arc::new(session(&cam));
     let err = s
         .submit(&SetRequest {
             fps: Some(48),
@@ -330,7 +334,7 @@ fn a_refused_put_is_a_502_naming_the_camera_answer_and_drops_the_cache_6() {
     );
     let cam = FakeCamera::start(c);
     let clock = FakeClock::default();
-    let s = session(&cam).with_clock(Box::new(clock));
+    let s = Arc::new(session(&cam).with_clock(Box::new(clock)));
     s.read_state();
     let err = s
         .submit(&SetRequest {
@@ -360,7 +364,7 @@ fn a_refused_put_is_a_502_naming_the_camera_answer_and_drops_the_cache_6() {
 #[test]
 fn auto_white_balance_runs_the_cameras_do_auto_6() {
     let cam = FakeCamera::start(Cam::default());
-    let s = session(&cam);
+    let s = Arc::new(session(&cam));
     let (count, st) = applied(
         s.submit(&SetRequest {
             auto_wb: Some(true),
@@ -384,7 +388,7 @@ fn a_shutter_angle_camera_gets_its_exact_angle_back_6() {
         angles: vec![9000, 17280, 18000, 36000],
         ..Default::default()
     });
-    let s = session(&cam);
+    let s = Arc::new(session(&cam));
     let st = s.read_state();
     assert_eq!(st.params.shutter, Some(50), "180 deg at 25 fps");
     assert_eq!(st.caps.unwrap().shutter_choices, vec![25, 50, 52, 100]);
@@ -550,13 +554,13 @@ fn the_camera_is_the_dhcp_server_on_the_cdc_ncm_link_6() {
     assert_eq!(links[0].source, Some("lease"));
     assert_eq!(links[0].iface, "enx7c2e0d123456");
     assert_eq!(links[0].camera_ip, Some("127.0.0.1".parse().unwrap()));
-    let s = CameraSession::new(
+    let s = Arc::new(CameraSession::new(
         CameraLocator::Discover {
             paths: net.paths(),
             port: cam.addr.port(),
         },
         VERSION,
-    );
+    ));
     let st = s.read_state();
     assert!(
         st.online,
@@ -571,13 +575,13 @@ fn the_camera_is_the_dhcp_server_on_the_cdc_ncm_link_6() {
 #[test]
 fn no_link_or_no_lease_reads_offline_6() {
     let net = NetTree::new("none");
-    let s = CameraSession::new(
+    let s = Arc::new(CameraSession::new(
         CameraLocator::Discover {
             paths: net.paths(),
             port: CAMERA_HTTP_PORT,
         },
         VERSION,
-    );
+    ));
     assert!(!s.read_state().online, "no cdc_ncm interface at all");
     net.iface("enx7c2e0d123456", "cdc_ncm", 9);
     let links = camera_links(&net.paths());
@@ -585,13 +589,13 @@ fn no_link_or_no_lease_reads_offline_6() {
         links[0].camera_ip, None,
         "the link is there, DHCP has not run"
     );
-    let s = CameraSession::new(
+    let s = Arc::new(CameraSession::new(
         CameraLocator::Discover {
             paths: net.paths(),
             port: CAMERA_HTTP_PORT,
         },
         VERSION,
-    );
+    ));
     assert!(!s.read_state().online);
     // A missing sysfs dir reads as no links, never a panic.
     let gone = DiscoverPaths {
@@ -757,7 +761,7 @@ fn the_slash30_peer_is_the_fallback_address_6() {
 fn a_camera_that_stops_answering_goes_offline_within_the_deadline_6() {
     let cam = FakeCamera::start(Cam::default());
     let clock = FakeClock::default();
-    let s = session(&cam).with_clock(Box::new(clock.clone()));
+    let s = Arc::new(session(&cam).with_clock(Box::new(clock.clone())));
     assert!(s.read_state().online);
     cam.cam()
         .get_delay
@@ -863,9 +867,11 @@ fn a_late_set_is_never_written_through_a_camera_that_went_offline_6() {
 #[test]
 fn a_drain_over_its_settle_budget_skips_the_iris_wait_6() {
     let cam = FakeCamera::start(Cam::default());
-    let s = session(&cam)
-        .with_aperture_readback_delay_ms(3000)
-        .with_drain_settle_budget_ms(0);
+    let s = Arc::new(
+        session(&cam)
+            .with_aperture_readback_delay_ms(3000)
+            .with_drain_settle_budget_ms(0),
+    );
     let started = std::time::Instant::now();
     let (_, st) = applied(
         s.submit(&SetRequest {
@@ -887,7 +893,7 @@ fn a_drain_over_its_settle_budget_skips_the_iris_wait_6() {
 fn walk_the_lens(cam_model: Cam) {
     let stops = cam_model.lens_stops.clone();
     let cam = FakeCamera::start(cam_model);
-    let s = session(&cam).with_iris_probe_wait_ms(30);
+    let s = Arc::new(session(&cam).with_iris_probe_wait_ms(30));
     let fnum = |st: &bkshading_proto::wire::RelayState| {
         let f = 2f64.powf(st.params.aperture_av.unwrap() / 2.0);
         (f * 100.0).round() / 100.0
@@ -922,4 +928,123 @@ fn one_press_is_the_next_step_of_a_zoom_anchored_third_stop_lens_6() {
 #[test]
 fn one_press_is_the_next_step_of_a_sixth_stop_lens_6() {
     walk_the_lens(support::sixth_stop_lens());
+}
+
+fn press(s: &Arc<CameraSession>, dir: i64) -> bkshading_proto::wire::RelayState {
+    applied(
+        s.submit(&SetRequest {
+            aperture_step: Some(dir),
+            ..Default::default()
+        })
+        .unwrap(),
+    )
+    .1
+}
+
+fn fstop(st: &bkshading_proto::wire::RelayState) -> f64 {
+    let f = 2f64.powf(st.params.aperture_av.unwrap() / 2.0);
+    (f * 100.0).round() / 100.0
+}
+
+#[test]
+fn an_iris_that_follows_no_probe_gives_up_bounded_and_says_so_6() {
+    let cam = FakeCamera::start(Cam {
+        iris_ignores_writes: true,
+        ..support::zoom_third_stop_lens()
+    });
+    let s = Arc::new(session(&cam).with_iris_probe_wait_ms(30));
+    let st = press(&s, 1);
+    assert_eq!(fstop(&st), 4.4);
+    assert_eq!(st.not_applied, vec!["apertureStep".to_string()]);
+    assert_eq!(
+        cam.puts().len(),
+        6,
+        "MAX_DEAD_APERTURE_PROBES writes, never the 64 of a whole lens"
+    );
+}
+
+#[test]
+fn an_iris_the_lens_says_it_cannot_drive_is_not_probed_6() {
+    let cam = FakeCamera::start(Cam {
+        iris_controllable: false,
+        ..support::zoom_third_stop_lens()
+    });
+    let s = Arc::new(session(&cam).with_iris_probe_wait_ms(30));
+    let st = press(&s, 1);
+    assert!(cam.puts().is_empty());
+    assert_eq!(st.not_applied, vec!["apertureStep".to_string()]);
+}
+
+#[test]
+fn a_slow_iris_is_waited_for_and_still_lands_on_the_next_step_6() {
+    // The iris reports its new position 60 ms after the write; the probe waits up to 200 ms.
+    let cam = FakeCamera::start(Cam {
+        iris_latency: Duration::from_millis(60),
+        ..support::sixth_stop_lens()
+    });
+    let s = Arc::new(session(&cam).with_iris_probe_wait_ms(200));
+    for want in [2.9, 3.1, 3.2, 3.3, 3.5] {
+        assert_eq!(fstop(&press(&s, 1)), want);
+    }
+    assert_eq!(fstop(&press(&s, -1)), 3.3);
+}
+
+#[test]
+fn presses_queued_past_the_answer_budget_finish_in_the_background_in_order_6() {
+    let cam = FakeCamera::start(Cam {
+        iris_latency: Duration::from_millis(40),
+        ..support::zoom_third_stop_lens()
+    });
+    let s = Arc::new(
+        session(&cam)
+            .with_iris_probe_wait_ms(150)
+            .with_min_read_interval_ms(1)
+            .with_drain_answer_budget_ms(0),
+    );
+    let first = {
+        let s = s.clone();
+        std::thread::spawn(move || press(&s, 1))
+    };
+    wait_for_put(&cam, "/lens/iris");
+    for _ in 0..2 {
+        let q = s
+            .submit(&SetRequest {
+                aperture_step: Some(1),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(q, ApplyOutcome::Queued);
+    }
+    // The first caller is answered after its own press (budget 0), not after all three.
+    assert_eq!(fstop(&first.join().unwrap()), 4.8);
+    // The two queued presses still run, in order, one native step each: 5.2, then 5.6.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let st = s.read_state();
+        if st.online && fstop(&st) == 5.6 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the background drain never reached 5.6"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // And the gate is free again afterwards.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match s
+            .submit(&SetRequest {
+                iso: Some(800),
+                ..Default::default()
+            })
+            .unwrap()
+        {
+            ApplyOutcome::Applied { .. } => break,
+            ApplyOutcome::Queued => {
+                assert!(std::time::Instant::now() < deadline, "gate never freed");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
 }

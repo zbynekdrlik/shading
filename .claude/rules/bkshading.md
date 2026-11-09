@@ -116,8 +116,18 @@ the camera's USB-C CDC-NCM link (since v0.2.0, shading#6; before that over USB-P
     `support::zoom_third_stop_lens` / `sixth_stop_lens`);
   - `fNumberChoices` is ONLY the absolute slider's positions (nominal 1/3 marks between the
     description ends); never present it as the lens's steps;
-  - cost: one 1.2 s wait per probe the iris does not follow (~1-3 s per press). If live shows the
-    iris answering faster, shorten `IRIS_PROBE_WAIT_MS`, never the increment.
+  - cost: one 1.2 s wait per probe the iris does not follow (cam5 4.4 -> 4.8 ~3.5 s, its 4.4 end
+    against min 4.1 ~5 s). If live shows the iris answering faster, shorten `IRIS_PROBE_WAIT_MS`,
+    never the increment (a probe written while the iris is still travelling can skip);
+  - an iris that follows none of `MAX_DEAD_APERTURE_PROBES` (6) probes with range left, or
+    `controllable: false`, reports `notApplied: ["apertureStep"]`; reaching the range end is quiet;
+  - an absolute `apertureNorm` earlier in the same round is waited out before a step reads its start;
+  - `submit` takes `&Arc<Self>`: past `DRAIN_ANSWER_BUDGET_MS` (6 s) the caller is answered and the
+    rest of the FIFO continues on a background drain (gate stays shut), so queued presses never
+    push the service's 10 s write client over;
+  - the panel holds a press `STEP_HOLD_MS` (8 s) and flags `apertureStep` like `apertureNorm`;
+  - the fake camera's `iris_latency` models a travelling iris; the service forwards a typed
+    `SetRequest`, so absent fields reach the stub as `null` (assert `!= null`, not `in`).
 - **Writes:** `submit` plans on the cached read's basis inside the floor (else one real read),
   drains the FIFO, then does ONE full read-back that is the PUT answer and the new cache;
   `notApplied` from it (a moved iris is never flagged). The gate stays shut through the read-back

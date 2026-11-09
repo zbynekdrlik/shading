@@ -298,6 +298,8 @@ pub struct WriteBasis {
     /// The lens's f-number range (`lens/iris/description` `apertureStop.min/max`): where an
     /// `apertureStep` stops widening.
     pub aperture_range: Option<(f64, f64)>,
+    /// `lens/iris/description controllable` (`false` = the iris cannot be driven).
+    pub aperture_controllable: Option<bool>,
     pub fps100: i64,
     pub frame_rates: Vec<FrameRateChoice>,
     pub shutter_measure: ShutterMeasure,
@@ -316,6 +318,7 @@ impl WriteBasis {
                 .as_ref()
                 .and_then(|d| d.aperture_stop)
                 .and_then(|r| Some((r.min?, r.max?))),
+            aperture_controllable: read.iris_description.as_ref().and_then(|d| d.controllable),
             fps100,
             frame_rates: read_frame_rates(read),
             shutter_measure: shutter_measure(read),

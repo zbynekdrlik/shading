@@ -162,16 +162,25 @@ UseDomains=no
       `lens/iris/description` min or max.
     - The increment is smaller than half of two adjacent native gaps, so the first landing is
       always the next native step: none is skipped, on a 1/3- or 1/6-stop lens, at any zoom.
-    - At the end of the lens a press answers with the same f-stop. That is not an error, and it
-      is not `notApplied`.
-    - One press costs about 1-3 s (one 1.2 s wait per probe the iris does not follow).
+    - At the end of the lens (the target reached the description min/max) a press answers with
+      the same f-stop. That is not an error, and it is not `notApplied`.
+    - An iris that follows none of up to 6 probes with range left, or a lens whose description
+      says `controllable: false`, is reported as `notApplied: ["apertureStep"]`. A
+      `controllable: false` lens is not probed at all.
+    - **Cost:** each probe the iris does not follow waits 1.2 s; the landing itself about 1 s.
+      cam5's lens 4.4 -> 4.8 is about 3.5 s, and its zoom-shifted end (4.4 against a description
+      min of 4.1) about 5 s. The worst case is an iris that follows nothing: 6 waits, about 7 s.
+    - **Queued presses:** a write drain answers its caller once it has run 6 s. SETs still queued
+      then run IN ORDER on a background drain that keeps the gate shut, so the service's 10 s
+      write client never times out. Their results reach the panel through `/api/state`.
     - An older relay ignores the field.
   - `apertureNorm` stays the absolute slider write. It snaps to the lens, which is fine for a
     drag.
   - **The answer shape:**
     - `200 {"applied": <number of camera PUTs>, "state": <RelayState>}`. `state` is read back
       from the camera after the writes (after ~1 s when the iris was written with
-      `apertureNorm`), and its `notApplied` lists the keys the camera did not take.
+      `apertureNorm`), and its `notApplied` lists the keys the camera did not take (`apertureNorm`,
+      `apertureStep`, `iso`, `shutter`, `kelvin`, `tint`, `fps`).
     - `202 {"queued": true}` when the SET queued behind a write in flight. It is applied in order
       by that write; the next `/api/state` shows it.
     - `422 <text starting "fps-not-settable:">` for an `fps` the camera does not list. Nothing was
