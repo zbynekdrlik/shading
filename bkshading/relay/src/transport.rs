@@ -43,6 +43,10 @@ pub use rest::{
     parse_camera_addr, CameraAddr, RestClient, RestError, CAMERA_HTTP_PORT, REST_TIMEOUT,
 };
 
+/// The model the relay reports when the camera names itself nowhere (no `system/product`, no USB
+/// product string, e.g. a fixed `--camera` address on a 6K at fw 8.6).
+pub const FALLBACK_CAMERA_MODEL: &str = "Blackmagic camera";
+
 /// How long the relay waits after a write that moved the iris before reading it back: the iris
 /// motor takes about a second to land (live on cam5), and the read-back is what the panel shows.
 pub const APERTURE_READBACK_DELAY_MS: u64 = 1000;
@@ -91,18 +95,27 @@ impl CameraLocator {
         }
     }
 
-    /// The addresses to try this time, and one line describing how they were found.
-    fn candidates(&self) -> (Vec<CameraAddr>, String) {
+    /// The addresses to try this time (each with the USB product string of the camera behind it,
+    /// when discovery found one), and one line describing how they were found.
+    fn candidates(&self) -> (Vec<(CameraAddr, Option<String>)>, String) {
         match self {
-            CameraLocator::Fixed(addr) => (vec![addr.clone()], format!("fixed address {addr}")),
+            CameraLocator::Fixed(addr) => {
+                (vec![(addr.clone(), None)], format!("fixed address {addr}"))
+            }
             CameraLocator::Discover { paths, port } => {
                 let links = camera_links(paths);
                 let addrs = links
                     .iter()
-                    .filter_map(|l| l.camera_ip)
-                    .map(|ip| CameraAddr {
-                        host: ip.to_string(),
-                        port: *port,
+                    .filter_map(|l| {
+                        l.camera_ip.map(|ip| {
+                            (
+                                CameraAddr {
+                                    host: ip.to_string(),
+                                    port: *port,
+                                },
+                                l.usb_product.clone(),
+                            )
+                        })
                     })
                     .collect();
                 (addrs, discover::describe(&links))
@@ -222,6 +235,8 @@ pub struct CameraSession {
     link: Mutex<Option<Link>>,
     /// The last discovery description, logged only when it changes.
     last_discovery: Mutex<Option<String>>,
+    /// Endpoints already logged as not served by this camera (logged once each).
+    reported_missing: Mutex<std::collections::BTreeSet<String>>,
     /// Single-flight FIFO gate for writes (issue 1309/1337).
     set_queue: Mutex<SetQueue>,
 }
@@ -243,6 +258,7 @@ impl CameraSession {
             last_online: Mutex::new(None),
             link: Mutex::new(None),
             last_discovery: Mutex::new(None),
+            reported_missing: Mutex::new(std::collections::BTreeSet::new()),
             set_queue: Mutex::new(SetQueue::default()),
         }
     }
@@ -314,25 +330,19 @@ impl CameraSession {
         }
         let (addrs, how) = self.locator.candidates();
         let mut tried: Vec<String> = Vec::new();
-        for addr in addrs {
+        for (addr, usb_product) in addrs {
             let client = RestClient::new(addr.clone(), self.timeout);
-            match client.product() {
-                Ok(p) => match p.model() {
-                    Some(model) => {
-                        tracing::info!(
-                            camera = %addr, model = %model,
-                            device = p.device_name.as_deref().unwrap_or(""),
-                            software = p.software_version.as_deref().unwrap_or(""),
-                            found_by = %how,
-                            "camera found (REST API answers)"
-                        );
-                        *lock(&self.last_discovery) = None;
-                        let link = Link { client, model };
-                        *cached = Some(link.clone());
-                        return Some(link);
-                    }
-                    None => tried.push(format!("{addr}: system/product names no product")),
-                },
+            match self.probe_camera(&client, usb_product) {
+                Ok((model, confirmed_by)) => {
+                    tracing::info!(
+                        camera = %addr, model = %model, confirmed_by, found_by = %how,
+                        "camera found (REST API answers)"
+                    );
+                    *lock(&self.last_discovery) = None;
+                    let link = Link { client, model };
+                    *cached = Some(link.clone());
+                    return Some(link);
+                }
                 Err(e) => tried.push(format!("{addr}: {e}")),
             }
         }
@@ -347,6 +357,57 @@ impl CameraSession {
             *last = Some(summary);
         }
         None
+    }
+
+    /// Tells a camera from anything else at `client`'s address, and names it (shading#6, 0.2.2).
+    /// `system/product` names it when the firmware serves it. A firmware without it (the 6K at
+    /// fw 8.6 answers 404) is confirmed by `GET lens/iris` 200, else `GET /system` 2xx, and named by
+    /// the USB product string of the device behind the link, else "Blackmagic camera". A transport
+    /// failure on the first probe ends it: nothing answers there.
+    fn probe_camera(
+        &self,
+        client: &RestClient,
+        usb_product: Option<String>,
+    ) -> std::result::Result<(String, &'static str), String> {
+        let fallback = || {
+            usb_product
+                .clone()
+                .unwrap_or_else(|| FALLBACK_CAMERA_MODEL.to_string())
+        };
+        match client.product() {
+            Ok(p) => {
+                if let Some(model) = p.model() {
+                    return Ok((model, "system/product"));
+                }
+            }
+            Err(RestError::Transport(e)) => return Err(e),
+            Err(e) => self.note_missing(bkshading_proto::rest::PRODUCT, &e.to_string()),
+        }
+        match client.get_json::<bkshading_proto::rest::Iris>(bkshading_proto::rest::IRIS) {
+            Ok(_) => return Ok((fallback(), "lens/iris")),
+            Err(RestError::Transport(e)) => return Err(e),
+            Err(e) => self.note_missing(bkshading_proto::rest::IRIS, &e.to_string()),
+        }
+        match client.request("GET", "/system", None) {
+            Ok(r) if (200..300).contains(&r.status) => Ok((fallback(), "/system")),
+            Ok(r) => Err(format!(
+                "not a Blackmagic REST camera: system/product, lens/iris and /system all refused (/system: status {})",
+                r.status
+            )),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Logs an endpoint the camera does not serve, ONCE per relay run, at INFO: it is a firmware
+    /// fact (the 6K at fw 8.6 has no lists or descriptions), not an error, and repeats every read.
+    fn note_missing(&self, path: &str, reason: &str) {
+        if lock(&self.reported_missing).insert(path.to_string()) {
+            tracing::info!(
+                endpoint = path,
+                reason,
+                "camera does not serve this REST endpoint; using a default"
+            );
+        }
     }
 
     fn forget_link(&self, why: &str) {
@@ -370,7 +431,10 @@ impl CameraSession {
             };
         };
         match link.client.read_all() {
-            Ok(read) => {
+            Ok((read, missing)) => {
+                for (path, reason) in &missing {
+                    self.note_missing(path, reason);
+                }
                 let (params, caps) = params_and_caps(&read);
                 Reading {
                     state: RelayState {
@@ -716,6 +780,13 @@ impl CameraSession {
             };
             let w = RestWrite::ApertureStop(target);
             if let Err(e) = link.client.write(&w) {
+                // 400 = "out of range" (the manual): the target is past the end of the lens, which
+                // a firmware without `lens/iris/description` only finds out this way. The end of
+                // the lens, not an error.
+                if matches!(e, RestError::Status { status: 400, .. }) {
+                    tracing::info!(dir, from = start, target, probes, "aperture step: the camera refuses the target as out of range; the end of the lens");
+                    return Ok(None);
+                }
                 if matches!(e, RestError::Transport(_)) {
                     self.forget_link("an aperture probe got no answer");
                 }
@@ -748,6 +819,15 @@ impl CameraSession {
                 probe = k,
                 "aperture probe: the iris did not move; widening"
             );
+        }
+        if range.is_none() {
+            // No `lens/iris/description` (the 6K at fw 8.6): the lens's ends are unknown, so an
+            // iris that follows none of the probes is at its end. Quiet, like a known end.
+            tracing::info!(
+                dir, from = start, probes,
+                "aperture step: no move after the probe limit and no lens range; the end of the lens"
+            );
+            return Ok(None);
         }
         log.not_applied.push("apertureStep".into());
         tracing::warn!(

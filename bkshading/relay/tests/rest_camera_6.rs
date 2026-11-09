@@ -1138,3 +1138,45 @@ fn a_pocket_6k_at_fw_8_6_is_detected_read_set_and_stepped_6() {
         assert_eq!(fstop(&press(&s, 1)), *want);
     }
 }
+
+#[test]
+fn a_fixed_address_camera_without_system_product_is_a_blackmagic_camera_6() {
+    let cam = FakeCamera::start(support::pocket_6k_fw86());
+    let s = Arc::new(session(&cam));
+    assert_eq!(s.detect().as_deref(), Some("Blackmagic camera"));
+    assert!(s.read_state().online);
+    assert_eq!(
+        cam.gets_of("/system/product"),
+        1,
+        "probed once, then the link is kept"
+    );
+}
+
+#[test]
+fn a_probe_the_camera_refuses_as_out_of_range_is_the_end_of_the_lens_6() {
+    let mut c = support::pocket_6k_fw86();
+    c.refuse
+        .insert("/lens/iris".into(), (400, "Bad Request".into()));
+    let cam = FakeCamera::start(c);
+    let s = Arc::new(session(&cam).with_iris_probe_wait_ms(30));
+    let st = press(&s, 1);
+    assert_eq!(fstop(&st), 9.5);
+    assert!(st.not_applied.is_empty(), "{:?}", st.not_applied);
+    assert_eq!(
+        cam.puts().len(),
+        1,
+        "no widening after an out-of-range answer"
+    );
+}
+
+#[test]
+fn something_that_is_not_a_camera_is_not_taken_for_one_6() {
+    let cam = FakeCamera::start(Cam {
+        not_found: ["/system/product", "/lens/iris"].map(String::from).to_vec(),
+        not_implemented: vec!["/system".into()],
+        ..Cam::default()
+    });
+    let s = Arc::new(session(&cam));
+    assert_eq!(s.detect(), None);
+    assert!(!s.read_state().online);
+}

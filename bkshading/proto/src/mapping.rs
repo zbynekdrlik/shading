@@ -45,6 +45,18 @@ pub const THIRD_STOP_FNUMBERS: [f64; 28] = [
     9.0, 10.0, 11.0, 13.0, 14.0, 16.0, 18.0, 20.0, 22.0,
 ];
 
+/// The standard Pocket Cinema Camera ISO list (100 .. 25600 in 1/3 steps): `caps.isoChoices` when the
+/// firmware does not serve `video/supportedISOs` (the 6K at fw 8.6, shading#6).
+pub const POCKET_ISO_CHOICES: [i64; 25] = [
+    100, 125, 160, 200, 250, 320, 400, 500, 640, 800, 1000, 1250, 1600, 2000, 2500, 3200, 4000,
+    5000, 6400, 8000, 10000, 12800, 16000, 20000, 25600,
+];
+
+/// The aperture slider's range when the firmware does not serve `lens/iris/description` (the 6K at
+/// fw 8.6): f/2.8 .. f/22, widened to include the f-stop the lens reports. The camera snaps a
+/// slider write to its own nearest step, so a range wider than the lens is harmless.
+pub const DEFAULT_APERTURE_RANGE: (f64, f64) = (2.8, 22.0);
+
 /// Two f-numbers closer than this ratio (1/6 stop, `2^(1/12)`) are one stop of the grid: a nominal
 /// value this close to the lens's own min or max is left out, so a step from the end of the lens
 /// moves at least 1/6 stop instead of snapping back onto the end.

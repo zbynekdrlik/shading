@@ -378,24 +378,26 @@ impl RestClient {
 
     /// One read cycle: every [`rest::READ_ENDPOINTS`] in order. A transport failure ends the cycle
     /// (`Err`: the camera is gone, the caller goes offline); an endpoint that answers an error
-    /// status or an undecodable body is just missing this cycle (logged), never a failed read.
-    pub fn read_all(&self) -> Result<RestRead, String> {
+    /// status or an undecodable body is just missing this cycle, never a failed read. Every
+    /// capability endpoint is optional (the 6K at fw 8.6 serves no lists or descriptions); the
+    /// missing ones come back as `(path, reason)` so the session logs each ONCE.
+    pub fn read_all(&self) -> Result<(RestRead, Vec<(String, String)>), String> {
         fn one<T: DeserializeOwned>(
             c: &RestClient,
             path: &str,
-            missing: &mut Vec<String>,
+            missing: &mut Vec<(String, String)>,
         ) -> Result<Option<T>, String> {
             match c.get_json::<T>(path) {
                 Ok(v) => Ok(Some(v)),
                 Err(RestError::Transport(e)) => Err(format!("GET {path}: {e}")),
                 Err(e) => {
-                    missing.push(format!("{path} ({e})"));
+                    missing.push((path.to_string(), e.to_string()));
                     Ok(None)
                 }
             }
         }
         let started = Instant::now();
-        let mut missing: Vec<String> = Vec::new();
+        let mut missing: Vec<(String, String)> = Vec::new();
         let m = &mut missing;
         let read = RestRead {
             iso: one(self, rest::ISO, m)?,
@@ -418,10 +420,7 @@ impl RestClient {
             duration_ms = started.elapsed().as_millis() as u64,
             "camera REST read cycle"
         );
-        if !missing.is_empty() {
-            tracing::debug!(camera = %self.addr, missing = ?missing, "camera REST endpoints without a value this cycle");
-        }
-        Ok(read)
+        Ok((read, missing))
     }
 
     /// One planned write as a `PUT`, logged at info with its body, status and duration.

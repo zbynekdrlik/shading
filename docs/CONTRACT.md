@@ -62,7 +62,14 @@ floor camera-box's own CI builds had. A box with an older glibc cannot run them.
     server address from systemd-networkd's lease `/run/systemd/netif/leases/<ifindex>`
     (`SERVER_ADDRESS`, else `ROUTER`). Without a lease file it falls back to the other host of the
     link's own /30 (`ip -4 -o addr show dev <iface>`). The camera is that DHCP server: it hands the box one address of a /30 (cam5:
-    camera `172.25.77.161`, box `.162`). The relay confirms the address with `GET system/product`.
+    camera `172.25.77.161`, box `.162`).
+  - **Confirming and naming it (v0.2.2).** `GET system/product` names the camera when the firmware
+    serves it. Otherwise (the Pocket 6K at fw 8.6 answers 404) the camera is confirmed by `GET
+    lens/iris` 200, else `GET /system` 2xx. It is then named by the USB product string of the
+    vendor-1edb device behind the link (`Pocket Cinema Camera 6K`), else "Blackmagic camera".
+  - **Camera-side prerequisite:** the camera serves REST only with **Blackmagic Camera Setup →
+    Network access → "Web media manager" enabled** (live on the 6K at fw 8.6). Without it the link
+    comes up and DHCP works, but nothing answers HTTP, and the relay reads the camera offline.
   - **Override.** `BKSHADING_CAMERA=<host[:port]>` (or `--camera`) skips discovery and uses that
     address.
 - **The camera link — camera-box installs this `.network` file** on every box that runs the relay
@@ -142,9 +149,36 @@ UseDomains=no
   - `params.sensorFps100` is the off-speed rate (`offSpeedFrameRate` × 100).
   - `camera` is the product name (`Blackmagic Pocket Cinema Camera 4K`). It was the gphoto2
     `--auto-detect` model.
-- **Verified live vs. from the manual.** Only `system/product`, `lens/iris` GET and PUT
-  `{apertureStop}`, `lens/zoom` and `lens/focus` were read on a camera (SNV cam5, Pocket 4K,
-  fw 9.8). The following come from Blackmagic's manual and are UNVERIFIED on a camera until the
+- **Not every firmware serves every endpoint.** Every capability endpoint is optional. A missing
+  one (404/501) is logged once at INFO, and the relay falls back to:
+  - ISO: the standard Pocket list 100 .. 25600 in 1/3 steps;
+  - shutter: the standard denominators no faster than the frame rate;
+  - white balance: 2500 .. 10000 K;
+  - lens range: unknown. The absolute slider uses f/2.8 .. f/22, widened to any f-stop the lens
+    reports. For `apertureStep`, a press the iris does not follow then means the end of the lens
+    (quiet), and a probe the camera refuses with 400 is the end of the lens too.
+
+  What two bodies serve, read live:
+
+| Endpoint | Pocket 4K fw 9.8 (SNV cam5) | Pocket 6K fw 8.6 (SNV cam3) |
+|---|---|---|
+| `system/product` | 200 | **404** |
+| `system` | — | 204 |
+| `lens/iris`, `lens/focus`, `lens/zoom` | 200 | 200 |
+| `lens/iris/description` | 200 | **404** |
+| `video/iso`, `video/shutter`, `video/whiteBalance`, `video/whiteBalanceTint`, `video/gain` | 200 | 200 |
+| `video/supportedISOs`, `video/supportedShutters` | manual | **404** |
+| `video/whiteBalance/description`, `video/shutter/description` | manual | **404** |
+| `system/format`, `system/supportedFormats` | manual | 200 |
+| `video/ndFilter`, `system/supportedCodecFormats`, `system/supportedVideoFormats` | manual | **501** |
+
+  "manual" = documented, not read live on that body. The 6K's own `/control/documentation.html`
+  lists only the paths it serves.
+
+- **Verified live vs. from the manual.** `system/product`, `lens/iris` GET and PUT
+  `{apertureStop}`, `lens/zoom` and `lens/focus` were read on cam5 (Pocket 4K, fw 9.8). The 6K at
+  fw 8.6 (cam3) answered every endpoint in the table above, and the iris walk landed on each of
+  its 1/6-stop steps. The following come from Blackmagic's manual and are UNVERIFIED on a camera until the
   first live run:
   - the `PUT system/format` body with `frameRate` alone;
   - `doAuto` (its read-back may still show the Kelvin from before auto WB finished);

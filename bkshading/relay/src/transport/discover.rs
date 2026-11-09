@@ -52,6 +52,9 @@ pub struct CameraLink {
     pub camera_ip: Option<Ipv4Addr>,
     /// Where `camera_ip` came from: `"lease"` or `"/30 peer"`.
     pub source: Option<&'static str>,
+    /// The USB product string of the camera behind the link (`Pocket Cinema Camera 6K`): the model
+    /// name when the firmware has no `system/product` (the 6K at fw 8.6).
+    pub usb_product: Option<String>,
 }
 
 /// The camera address in a networkd lease file: `SERVER_ADDRESS=`, else the first `ROUTER=`.
@@ -78,6 +81,14 @@ fn usb_vendor_of(iface_dir: &Path) -> Option<String> {
     std::fs::read_to_string(iface_dir.join("device/../idVendor"))
         .ok()
         .map(|v| v.trim().to_ascii_lowercase())
+}
+
+/// The USB product string of the device behind an interface (`device/../product`).
+fn usb_product_of(iface_dir: &Path) -> Option<String> {
+    std::fs::read_to_string(iface_dir.join("device/../product"))
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
 }
 
 /// The first `inet a.b.c.d/N` in `ip -4 -o addr show dev <iface>` output.
@@ -152,6 +163,7 @@ pub fn camera_links(paths: &DiscoverPaths) -> Vec<CameraLink> {
                 },
             };
             Some(CameraLink {
+                usb_product: usb_product_of(&dir),
                 iface,
                 ifindex,
                 camera_ip,
