@@ -100,13 +100,24 @@ the camera's USB-C CDC-NCM link (since v0.2.0, shading#6; before that over USB-P
   tested in `proto/tests/rest_read_6.rs`. **Relay half** tested in `relay/tests/rest_camera_6.rs`
   against `relay/tests/support/` — an axum fake camera on its own runtime thread, the ONLY
   replaced part.
-- **Aperture grid:** REST gives the lens's min/max, not its stops, so `fNumberChoices` = the
-  nominal 1/3-stop list between them plus the exact ends, dropping nominal values within 1/6 stop
-  of an end. The lens snaps each write to ITS step (cam5 shows 7.3, 4.9), so a plain "first
-  choice above" step got stuck (lens on 4.9 -> asks 5.0 -> lands 4.9). The +/- step is
-  `mapping::aperture_step` (JS `stepChoice(..., FNUMBER_STEP_MIN_RATIO)`): the target is at least
-  1/6 stop away. Pinned by `every_panel_aperture_tap_moves_the_lens_6`, which walks a fake lens.
-  Still unhandled: a lens whose steps are wider than 1/3 stop can stick at such a gap.
+- **Aperture +/- = `apertureStep`, the relay walks the LENS (shading#6 v0.2.1, live cam5).** Lens
+  steps depend on lens AND zoom: cam5 at 108 mm lands on 4.4 4.8 5.2 5.6 6.2 6.7 7.3 8.0 while
+  `lens/iris/description` says min 4.1; the PP 6K has 1/6 steps (2.8 2.9 3.1 3.2 3.3 3.5). A
+  nominal grid (v0.2.0) skipped 4.8 and 6.7 (camera-box#1452 again). So:
+  - the panel's +/- send `{apertureStep: ±1}` and hold the shown f-stop as pending until a push
+    differs (`reconcileStepHold`); the display is always the true `apertureStop`;
+  - `CameraSession::step_iris`: GET the TRUE f-stop, PUT a target `APERTURE_PROBE_STOPS` (1/16
+    stop) away (`mapping::aperture_probe_target`), wait `IRIS_PROBE_WAIT_MS` (1.2 s) for the iris,
+    widen by 1/16 until it lands elsewhere or the target hits the description range;
+  - never-skip rule: the camera snaps to the NEAREST step, so an increment below half of two
+    adjacent native gaps can never pass the next step. Smallest live gap ~0.09 stop -> 1/16 (0.0625)
+    is safe, 1/12 would be borderline. Pinned by `a_probe_increment_never_crosses_past_the_next_
+    native_step_6` (proto) and the fake-lens walks `one_press_is_the_next_step_of_*` (relay,
+    `support::zoom_third_stop_lens` / `sixth_stop_lens`);
+  - `fNumberChoices` is ONLY the absolute slider's positions (nominal 1/3 marks between the
+    description ends); never present it as the lens's steps;
+  - cost: one 1.2 s wait per probe the iris does not follow (~1-3 s per press). If live shows the
+    iris answering faster, shorten `IRIS_PROBE_WAIT_MS`, never the increment.
 - **Writes:** `submit` plans on the cached read's basis inside the floor (else one real read),
   drains the FIFO, then does ONE full read-back that is the PUT answer and the new cache;
   `notApplied` from it (a moved iris is never flagged). The gate stays shut through the read-back

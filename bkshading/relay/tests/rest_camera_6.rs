@@ -818,51 +818,6 @@ fn a_set_that_arrives_during_the_read_back_waits_for_it_6() {
 }
 
 #[test]
-fn every_panel_aperture_tap_moves_the_lens_6() {
-    // The panel steps with `aperture_step` from the real f-number and sends the grid position; the
-    // fake lens snaps to its own 1/3-stop steps (4.4 4.9 5.6 6.3 7.3 8 ... 22), none of which is
-    // the nominal 5.0 or 7.1. Every tap must move the iris, all the way up and all the way down.
-    use bkshading_proto::mapping::aperture_step;
-    let cam = FakeCamera::start(Cam::default());
-    let s = session(&cam);
-    let grid = s.read_state().caps.unwrap().fnumber_choices;
-    let n = grid.len() as f64 - 1.0;
-    let mut cur = 7.3;
-    let mut seen = vec![cur];
-    for dir in [1, -1] {
-        loop {
-            let at_end = if dir > 0 { cur >= 22.0 } else { cur <= 4.4 };
-            if at_end {
-                break;
-            }
-            let idx = aperture_step(cur, &grid, dir).unwrap();
-            let (_, st) = applied(
-                s.submit(&SetRequest {
-                    aperture_norm: Some(idx as f64 / n),
-                    ..Default::default()
-                })
-                .unwrap(),
-            );
-            let landed = 2f64.powf(st.params.aperture_av.unwrap() / 2.0);
-            let moved = if dir > 0 {
-                landed > cur + 0.01
-            } else {
-                landed < cur - 0.01
-            };
-            assert!(
-                moved,
-                "tap {dir:+} from {cur} asked {} and landed {landed}",
-                grid[idx]
-            );
-            assert!(st.not_applied.is_empty(), "{:?}", st.not_applied);
-            cur = landed;
-            seen.push(cur);
-        }
-    }
-    assert!(seen.len() > 12, "walked the lens: {seen:?}");
-}
-
-#[test]
 fn a_late_set_is_never_written_through_a_camera_that_went_offline_6() {
     let cam = FakeCamera::start(Cam::default());
     let s = Arc::new(session(&cam).with_aperture_readback_delay_ms(1500));

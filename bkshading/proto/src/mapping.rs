@@ -228,31 +228,6 @@ pub fn step_choice(current_fnumber: f64, choices: &[f64], dir: i32) -> Option<us
     }
 }
 
-/// The aperture +/- step over the nominal grid (shading#6): like [`step_choice`], but the target must
-/// be at least 1/6 stop ([`FNUMBER_GRID_MIN_RATIO`]) away from the current f-number. The lens
-/// snaps every write to its OWN step, which is rarely the nominal value: a lens on 4.9 asked for
-/// the "next" nominal 5.0 lands back on 4.9, and the button would never move. Requiring 1/6 stop
-/// (half a grid step) sends 5.6 instead, which lands on the lens's next step. "+" = the first choice
-/// at or above `current * ratio`, "-" = the last at or below `current / ratio`; past either end of
-/// the grid the end itself (the panel disables the button there). `None` for an empty grid. The
-/// panel's JS `stepChoice(cur, choices, dir, FNUMBER_STEP_MIN_RATIO)` mirrors it.
-pub fn aperture_step(current_fnumber: f64, choices: &[f64], dir: i32) -> Option<usize> {
-    let n = choices.len();
-    if n == 0 {
-        return None;
-    }
-    if n == 1 || dir == 0 {
-        return Some(0);
-    }
-    if dir > 0 {
-        let at_least = current_fnumber * FNUMBER_GRID_MIN_RATIO;
-        Some(choices.iter().position(|&c| c >= at_least).unwrap_or(n - 1))
-    } else {
-        let at_most = current_fnumber / FNUMBER_GRID_MIN_RATIO;
-        Some(choices.iter().rposition(|&c| c <= at_most).unwrap_or(0))
-    }
-}
-
 /// How far each `apertureStep` probe moves the target, in stops (shading#6, 0.2.1). The camera
 /// snaps a written `apertureStop` to the NEAREST native lens step, so a probe only lands past the
 /// next step when it crosses the midpoint between the next step and the one after it. An increment
