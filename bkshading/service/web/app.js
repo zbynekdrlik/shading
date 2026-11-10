@@ -41,8 +41,9 @@ function fNumberFromAv(av) {
 // the owner-reported down-then-back flicker. The wire key doubles as the issue-1343 notApplied key.
 const pending = new Map();
 const PENDING_HOLD_MS = 4000; // confirm-or-timeout window (covers the ~2 s pump + camera apply)
-// shading#6: an aperture +/- press walks the lens (~1-5 s, one 1.2 s wait per probe the iris does
-// not follow), so its hold outlives the plain one; the PUT answer's push usually ends it first.
+// shading#6: an aperture +/- press walks the lens (relay 0.2.5: ~0.4-3 s, one 0.5 s wait per probe
+// the iris does not follow; an older relay ~1-5 s), so its hold outlives the plain one; the PUT
+// answer's push usually ends it first.
 const STEP_HOLD_MS = 8000;
 function markPending(cameraId, key, target) {
   pending.set(`${cameraId}:${key}`, { target, ts: Date.now() });

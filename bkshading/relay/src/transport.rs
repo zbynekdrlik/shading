@@ -28,6 +28,7 @@ use bkshading_proto::wire::{
 };
 
 pub mod discover;
+mod lens_memory;
 mod reads;
 pub mod rest;
 
@@ -35,6 +36,7 @@ pub use discover::{
     camera_links, parse_inet, parse_lease, peer_of, CameraLink, DiscoverPaths,
     BLACKMAGIC_USB_VENDOR, CAMERA_LINK_DRIVER,
 };
+pub use lens_memory::{FocalKey, LensMemory};
 pub use reads::{
     parse_capture_fps_env, parse_min_read_interval_env, read_is_fresh, InstantClock, MonoClock,
     DEFAULT_MIN_READ_INTERVAL_MS, MAX_MIN_READ_INTERVAL_MS,
@@ -53,12 +55,16 @@ pub const APERTURE_READBACK_DELAY_MS: u64 = 1000;
 
 /// A write drain that has run this long answers its caller and hands any still-queued SETs to a
 /// background drain (shading#6): the service's write client gives up at 10 s, and a run of aperture
-/// steps costs ~1-5 s per press.
+/// steps costs ~0.4-3 s per press (0.2.5).
 pub const DRAIN_ANSWER_BUDGET_MS: u64 = 6000;
 
 /// How long an `apertureStep` probe waits for the iris to leave its current f-stop before it widens
-/// the target (shading#6, 0.2.1). The iris lands in about a second (live on cam5).
-pub const IRIS_PROBE_WAIT_MS: u64 = 1200;
+/// the target (shading#6). 0.2.1 waited 1.2 s; live 10.11.2026 a `GET lens/iris` after a
+/// `PUT lens/iris` reads the moved `apertureStop` within <= 340 ms on cam5 (Pocket 4K fw 9.8) and
+/// ~220 ms on cam3 (6K fw 8.6), so 0.5 s covers it with margin (0.2.5). Only the wait shrinks,
+/// never the 1/16-stop increment: a probe that lands is waited out until two reads agree, so the
+/// next probe is never written while the iris travels.
+pub const IRIS_PROBE_WAIT_MS: u64 = 500;
 
 /// The most probes one `apertureStep` writes that the iris does not follow before the press gives
 /// up (1/16 stop each, so 3/8 stop of travel). The first probe that crosses the midpoint to the
@@ -240,6 +246,9 @@ pub struct CameraSession {
     /// The lowest and highest f-stop this link has reported, for the slider grid of a lens with
     /// no `lens/iris/description`. Reset with the link.
     seen_stops: Mutex<Option<(f64, f64)>>,
+    /// The lens's steps and ends learned per focal length (shading#6, 0.2.5). Reset with the link.
+    /// A leaf lock: never held across camera IO.
+    lens: Mutex<LensMemory>,
     /// Single-flight FIFO gate for writes (issue 1309/1337).
     set_queue: Mutex<SetQueue>,
 }
@@ -263,6 +272,7 @@ impl CameraSession {
             last_discovery: Mutex::new(None),
             reported_missing: Mutex::new(std::collections::BTreeSet::new()),
             seen_stops: Mutex::new(None),
+            lens: Mutex::new(LensMemory::default()),
             set_queue: Mutex::new(SetQueue::default()),
         }
     }
@@ -439,6 +449,7 @@ impl CameraSession {
 
     fn forget_link(&self, why: &str) {
         *lock(&self.seen_stops) = None;
+        lock(&self.lens).clear();
         lock(&self.reported_missing).clear();
         if let Some(l) = lock(&self.link).take() {
             tracing::warn!(camera = %l.client.addr, model = %l.model, why, "camera link dropped; it is looked up again on the next read");
@@ -471,6 +482,7 @@ impl CameraSession {
                 let (mut params, mut caps) = params_and_caps(&read);
                 let mut basis = WriteBasis::from_read(&read);
                 self.widen_slider_grid(&read, &mut params, &mut caps, &mut basis);
+                self.apply_lens_memory(&link, &read, &mut params);
                 Reading {
                     state: RelayState {
                         online: true,
@@ -492,6 +504,54 @@ impl CameraSession {
                     state: self.offline(Some(link.model)),
                     basis: None,
                 }
+            }
+        }
+    }
+
+    /// The lens memory's part of a read (shading#6, 0.2.5): remember the read f-stop under the
+    /// current focal length, and report `irisRangePos` 0 / 1 while the iris sits on a learned end
+    /// (the Pocket 4K's `normalised` never reaches 0 at a zoom's wide end). A focal length that
+    /// cannot be read this cycle leaves the camera's value and learns nothing.
+    fn apply_lens_memory(
+        &self,
+        link: &Link,
+        read: &bkshading_proto::rest::RestRead,
+        params: &mut bkshading_proto::wire::ShadingParams,
+    ) {
+        let Some(stop) = read
+            .iris
+            .as_ref()
+            .and_then(|i| i.aperture_stop)
+            .filter(|f| f.is_finite() && *f > 0.0)
+        else {
+            return;
+        };
+        let Some(focal) = self.read_focal(link) else {
+            return;
+        };
+        let mut lens = lock(&self.lens);
+        lens.note_stop(focal, stop);
+        if let Some(end) = lens.end_position(focal, stop) {
+            params.iris_range_pos = Some(end);
+        }
+    }
+
+    /// The focal length the lens memory is keyed by (`GET lens/zoom focalLength`): `Some(None)` =
+    /// the firmware does not serve it (or gives no focal length), `None` = unknown this time (a
+    /// failure: nothing is learned or used from the memory then).
+    fn read_focal(&self, link: &Link) -> Option<FocalKey> {
+        match link
+            .client
+            .get_json::<bkshading_proto::rest::Zoom>(bkshading_proto::rest::ZOOM)
+        {
+            Ok(z) => Some(z.focal_mm()),
+            Err(e) if not_served(&e) => {
+                self.note_missing(bkshading_proto::rest::ZOOM, &e);
+                Some(None)
+            }
+            Err(e) => {
+                self.note_endpoint_failure(bkshading_proto::rest::ZOOM, &e);
+                None
             }
         }
     }
@@ -628,7 +688,7 @@ impl CameraSession {
     /// Runs the in-flight drain from `current` (the gate is already shut for it). `own` = this
     /// thread answers a caller whose SET is `current` (its refusal is that caller's answer). Once
     /// the drain has run [`DRAIN_ANSWER_BUDGET_MS`] with SETs still queued (a run of aperture steps
-    /// is ~1-5 s each), the caller is answered and the rest is drained IN ORDER on a handoff
+    /// is ~0.4-3 s each), the caller is answered and the rest is drained IN ORDER on a handoff
     /// thread that keeps the gate shut, so the service's 10 s write client never times out.
     fn drain(self: &Arc<Self>, mut current: SetRequest, own: bool) -> Result<ApplyOutcome> {
         let mut guard = FlightGuard {
@@ -669,7 +729,7 @@ impl CameraSession {
                 }
                 own_set = false;
                 // The caller is answered after its OWN aperture press (a press can take up to
-                // ~8.5 s) or once the drain passes the budget; what is still queued then goes to
+                // ~4.5 s) or once the drain passes the budget; what is still queued then goes to
                 // the background handoff below, so the service's 10 s write client never waits on
                 // a later press.
                 if own && (current.aperture_step.is_some() || over_answer_budget()) {
@@ -824,6 +884,14 @@ impl CameraSession {
     /// increment is below half of two adjacent native gaps, so the first landing is always the
     /// NEXT native step (1/3- or 1/6-stop lens, any zoom). Returns where the iris landed, `None`
     /// when the lens has no further step that way.
+    ///
+    /// 0.2.5 (live cam5, 108 mm): what a walk finds is remembered per focal length
+    /// ([`LensMemory`]). A press whose next stop a walk already proved adjacent writes it directly
+    /// (one PUT; a write the iris does not take falls back to the walk), and a press toward an end
+    /// a walk already found is refused with no PUT. A press that finds the end reports
+    /// `notApplied: apertureStep` (it was quiet before).
+    ///
+    /// [`APERTURE_PROBE_STOPS`]: bkshading_proto::mapping::APERTURE_PROBE_STOPS
     fn step_iris(
         &self,
         link: &Link,
@@ -849,6 +917,11 @@ impl CameraSession {
         log.stepped = true;
         let started = std::time::Instant::now();
         let (start, range_pos) = self.read_iris_position(link)?;
+        // `None` = the focal length could not be read: the memory is neither used nor taught.
+        let focal = self.read_focal(link);
+        if let Some(f) = focal {
+            lock(&self.lens).note_stop(f, start);
+        }
         // shading#6 (0.2.3): the camera says the iris is already at the end this press heads for
         // (`lens/iris normalised` 0 = wide open, 1 = closed). No probe: there is no further step,
         // and on a firmware without a lens range six dead probes would cost ~7 s.
@@ -862,6 +935,25 @@ impl CameraSession {
             log.not_applied.push("apertureStep".into());
             return Ok(None);
         }
+        if let Some(f) = focal {
+            // 0.2.5: an end a walk already found at this focal length.
+            if lock(&self.lens).is_end(f, start, dir) {
+                tracing::info!(
+                    dir,
+                    from = start,
+                    focal_mm = ?f,
+                    "aperture step refused: a learned end of the lens at this focal length"
+                );
+                log.not_applied.push("apertureStep".into());
+                return Ok(None);
+            }
+            let known = lock(&self.lens).neighbour(f, start, dir);
+            if let Some(next) = known {
+                if let Some(landed) = self.step_to_known(link, f, start, next, dir, log, started)? {
+                    return Ok(Some(landed));
+                }
+            }
+        }
         let mut probes = 0u32;
         for k in 1..=MAX_DEAD_APERTURE_PROBES {
             let Some(target) = aperture_probe_target(start, dir, k, range) else {
@@ -873,6 +965,7 @@ impl CameraSession {
                     duration_ms = started.elapsed().as_millis() as u64,
                     "aperture step: the lens has no further step this way"
                 );
+                self.reached_end(focal, start, dir, log);
                 return Ok(None);
             };
             let w = RestWrite::ApertureStop(target);
@@ -882,6 +975,7 @@ impl CameraSession {
                 // the lens, not an error.
                 if range.is_none() && matches!(e, RestError::Status { status: 400, .. }) {
                     tracing::info!(dir, from = start, target, probes, "aperture step: the camera refuses the target as out of range; the end of the lens");
+                    self.reached_end(focal, start, dir, log);
                     return Ok(None);
                 }
                 if matches!(e, RestError::Transport(_)) {
@@ -904,9 +998,14 @@ impl CameraSession {
                     to = landed,
                     last_target = target,
                     probes,
+                    focal_mm = ?focal.flatten(),
                     duration_ms = started.elapsed().as_millis() as u64,
                     "aperture step landed on the next lens step"
                 );
+                // A walk never skips a step: where it landed is the next one after `start`.
+                if let Some(f) = focal {
+                    lock(&self.lens).note_adjacent(f, start, landed);
+                }
                 return Ok(Some(landed));
             }
             tracing::debug!(
@@ -919,13 +1018,16 @@ impl CameraSession {
         }
         if range.is_none() {
             // No `lens/iris/description` (the 6K at fw 8.6): the lens's ends are unknown, so an
-            // iris that follows none of the probes is at its end. Quiet, like a known end.
+            // iris that follows none of the probes is at its end.
             tracing::info!(
                 dir, from = start, probes,
                 "aperture step: no move after the probe limit and no lens range; the end of the lens (or an iris that ignores writes)"
             );
+            self.reached_end(focal, start, dir, log);
             return Ok(None);
         }
+        // With range left this is an iris that does not follow (auto exposure, a manual lens),
+        // not an end: reported, never learned.
         log.not_applied.push("apertureStep".into());
         tracing::warn!(
             dir,
@@ -934,6 +1036,95 @@ impl CameraSession {
             "aperture step: no move after the probe limit"
         );
         Ok(None)
+    }
+
+    /// A press found no further step from `start` toward `dir`: report it (`notApplied:
+    /// apertureStep`, 0.2.5) and remember the end for this focal length.
+    fn reached_end(&self, focal: Option<FocalKey>, start: f64, dir: i64, log: &mut DrainLog) {
+        if let Some(f) = focal {
+            lock(&self.lens).note_end(f, start, dir);
+            tracing::info!(dir, at = start, focal_mm = ?f, "aperture step: learned this end of the lens at this focal length");
+        }
+        log.not_applied.push("apertureStep".into());
+    }
+
+    /// Writes a neighbour a walk proved adjacent (0.2.5): ONE PUT, then the usual wait for the
+    /// iris. `Some(landed)` when the iris moved; `None` when it did not, and the caller walks the
+    /// lens as usual (the pair is forgotten). A landing elsewhere than `next` means the remembered
+    /// ladder no longer fits this focal length: it is forgotten and the landing reported.
+    #[allow(clippy::too_many_arguments)]
+    fn step_to_known(
+        &self,
+        link: &Link,
+        focal: FocalKey,
+        start: f64,
+        next: f64,
+        dir: i64,
+        log: &mut DrainLog,
+        started: std::time::Instant,
+    ) -> Result<Option<f64>> {
+        let w = RestWrite::ApertureStop(next);
+        if let Err(e) = link.client.write(&w) {
+            if matches!(e, RestError::Status { status: 400, .. }) {
+                tracing::info!(
+                    dir,
+                    from = start,
+                    to = next,
+                    "aperture step: the camera refuses the known neighbour; walking the lens"
+                );
+                lock(&self.lens).forget_adjacent(focal, start, next);
+                return Ok(None);
+            }
+            if matches!(e, RestError::Transport(_)) {
+                self.forget_link("an aperture write got no answer");
+            }
+            anyhow::bail!(
+                "camera {} refused the aperture step PUT {}{} {}: {e}",
+                link.client.addr,
+                bkshading_proto::rest::API_PREFIX,
+                w.path(),
+                rest::write_body(&w).unwrap_or_default()
+            );
+        }
+        log.count += 1;
+        match self.wait_iris_move(link, start)? {
+            Some(landed) if (landed - next).abs() <= 0.005 => {
+                tracing::info!(
+                    dir,
+                    from = start,
+                    to = landed,
+                    focal_mm = ?focal,
+                    duration_ms = started.elapsed().as_millis() as u64,
+                    "aperture step landed on the known next lens step (one write)"
+                );
+                lock(&self.lens).note_adjacent(focal, start, landed);
+                Ok(Some(landed))
+            }
+            Some(landed) => {
+                tracing::warn!(
+                    dir,
+                    from = start,
+                    expected = next,
+                    to = landed,
+                    focal_mm = ?focal,
+                    "aperture step: the known next step did not hold; the learned ladder for this focal length is forgotten"
+                );
+                let mut lens = lock(&self.lens);
+                lens.forget_focal(focal);
+                lens.note_stop(focal, landed);
+                Ok(Some(landed))
+            }
+            None => {
+                tracing::info!(
+                    dir,
+                    from = start,
+                    to = next,
+                    "aperture step: the iris did not take the known next step; walking the lens"
+                );
+                lock(&self.lens).forget_adjacent(focal, start, next);
+                Ok(None)
+            }
+        }
     }
 
     /// The iris's true f-stop now (`GET lens/iris`), never a cached value.

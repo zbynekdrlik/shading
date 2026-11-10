@@ -53,6 +53,8 @@ pub struct Cam {
     pub iris_latency: Duration,
     /// An accepted iris write still travelling: the landing and when it was written.
     pub iris_travel: Option<(f64, std::time::Instant)>,
+    /// `lens/zoom focalLength` in mm (shading#6, 0.2.5); `None` = the endpoint answers 404.
+    pub focal_length: Option<f64>,
     pub focus: f64,
     pub frame_rate: String,
     pub frame_rates: Vec<String>,
@@ -98,6 +100,7 @@ impl Default for Cam {
             iris_position: IrisPosition::Fixed(0.3158),
             iris_latency: Duration::ZERO,
             iris_travel: None,
+            focal_length: None,
             focus: 0.42,
             frame_rate: "25".into(),
             frame_rates: ["23.98", "24", "25", "29.97", "30", "50", "59.94", "60"]
@@ -122,6 +125,10 @@ pub enum IrisPosition {
     /// The iris's place between the ends of `lens_stops`, in stops: 0.0 at the first (widest),
     /// 1.0 at the last (closed), fractional between (cam3 at 24 mm read 0.0 wide open at f/4.0).
     FromLens,
+    /// The iris's place between the ends of `iris_range` (`lens/iris/description`), in stops: the
+    /// Pocket 4K at fw 9.8 measures against the description, so at 108 mm its widest stop 4.4 reads
+    /// above 0 against a description min of 4.1 (live 10.11.2026), and 0 is never reached there.
+    FromRange,
     /// No `normalised` key at all.
     Absent,
 }
@@ -218,6 +225,27 @@ pub fn zoom_third_stop_lens() -> Cam {
             17.4, 19.0, 20.7, 22.0,
         ],
         iris_range: Some((4.1, 22.0)),
+        ..Cam::default()
+    }
+}
+
+/// SNV cam5 read live 10.11.2026 (shading#6, 0.2.5): Pocket 4K fw 9.8, zoom lens at 108 mm.
+/// The native ladder there is 4.4 5.2 5.6 6.2 6.7 7.3 8.0 (no 4.8: writes of 4.6/4.8 stay at 4.4,
+/// 5.0 lands 5.2), continued here in 1/3 stops to 22 (the description's max). The description says
+/// 4.1 .. 22 and `normalised` is measured against it (0.0387 live at 4.4, never 0 at tele).
+/// `lens/zoom` answers `focalLength` 108. The iris reports a move ~300 ms after a PUT (measured
+/// <= 340 ms).
+pub fn pocket_4k_zoom_108mm() -> Cam {
+    Cam {
+        aperture: 6.7,
+        lens_stops: vec![
+            4.4, 5.2, 5.6, 6.2, 6.7, 7.3, 8.0, 8.7, 9.5, 10.4, 11.3, 12.3, 13.5, 14.6, 16.0, 17.4,
+            19.0, 20.7, 22.0,
+        ],
+        iris_range: Some((4.1, 22.0)),
+        iris_position: IrisPosition::FromRange,
+        iris_latency: Duration::from_millis(300),
+        focal_length: Some(108.0),
         ..Cam::default()
     }
 }
@@ -386,6 +414,10 @@ async fn handle(State(sh): State<Arc<Shared>>, method: Method, uri: Uri, body: B
             let norm = match cam.iris_position {
                 IrisPosition::Fixed(n) => Some(n),
                 IrisPosition::FromLens => Some(lens_position(&cam.lens_stops, cam.aperture)),
+                IrisPosition::FromRange => {
+                    let (lo, hi) = cam.iris_range.expect("FromRange needs iris_range");
+                    Some(lens_position(&[lo, hi], cam.aperture))
+                }
                 IrisPosition::Absent => None,
             };
             if let Some(n) = norm {
@@ -403,6 +435,10 @@ async fn handle(State(sh): State<Arc<Shared>>, method: Method, uri: Uri, body: B
             )
         }
         "/lens/focus" => ok(json!({ "normalised": cam.focus })),
+        "/lens/zoom" => match cam.focal_length {
+            Some(f) => ok(json!({ "focalLength": f, "normalised": 0.0 })),
+            None => (StatusCode::NOT_FOUND, "Not Found").into_response(),
+        },
         "/system/format" => ok(json!({
             "codec": "BRaw:Q0",
             "frameRate": cam.frame_rate,

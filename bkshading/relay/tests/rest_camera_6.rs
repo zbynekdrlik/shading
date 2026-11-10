@@ -925,8 +925,17 @@ fn walk_the_lens(cam_model: Cam) {
     for want in stops[..stops.len() - 1].iter().rev() {
         assert_eq!(press(-1), *want, "- from the previous step");
     }
-    // At the ends a press stays put (the lens has no further step), never an error.
-    assert_eq!(press(-1), stops[0]);
+    // At the end a press stays put (the lens has no further step), never an error, and since
+    // 0.2.5 says so: `notApplied: apertureStep` (the panel learns the press did nothing).
+    let (_, st) = applied(
+        s.submit(&SetRequest {
+            aperture_step: Some(-1),
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+    assert_eq!(fnum(&st), stops[0]);
+    assert_eq!(st.not_applied, vec!["apertureStep".to_string()]);
 }
 
 #[test]
@@ -1162,7 +1171,8 @@ fn a_probe_the_camera_refuses_as_out_of_range_is_the_end_of_the_lens_6() {
     let s = Arc::new(session(&cam).with_iris_probe_wait_ms(30));
     let st = press(&s, 1);
     assert_eq!(fstop(&st), 9.5);
-    assert!(st.not_applied.is_empty(), "{:?}", st.not_applied);
+    // 0.2.5: the end of the lens is reported, no longer quiet.
+    assert_eq!(st.not_applied, vec!["apertureStep".to_string()]);
     assert_eq!(
         cam.puts().len(),
         1,
@@ -1367,5 +1377,6 @@ fn without_normalised_a_minus_at_the_wide_end_falls_back_to_probing_6() {
         iris_puts(&cam) > 0,
         "no position known: the probe finds the end"
     );
-    assert!(st.not_applied.is_empty(), "{:?}", st.not_applied);
+    // 0.2.5: the end found by probing is reported, no longer quiet.
+    assert_eq!(st.not_applied, vec!["apertureStep".to_string()]);
 }

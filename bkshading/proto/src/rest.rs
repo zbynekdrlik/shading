@@ -76,6 +76,11 @@ pub const IRIS: &str = "/lens/iris";
 pub const IRIS_DESCRIPTION: &str = "/lens/iris/description";
 /// `GET` `{normalised}` — read only here (a focus write during a take is unsafe, issue 1238).
 pub const FOCUS: &str = "/lens/focus";
+/// `GET` `{focalLength, normalised}` — read only (shading#6, 0.2.5): the relay keys what it learns
+/// about the lens's aperture steps by `focalLength` (mm), because a zoom's steps and wide end move
+/// with it (cam5 at 108 mm: `{"focalLength":108,"normalised":0.0}`; the 6K at fw 8.6 serves it too).
+/// Not part of [`READ_ENDPOINTS`]: the relay GETs it on its own, and a body without it is fine.
+pub const ZOOM: &str = "/lens/zoom";
 /// `GET` `{codec, frameRate, offSpeedEnabled, offSpeedFrameRate, minOffSpeedFrameRate,
 /// maxOffSpeedFrameRate, recordResolution, sensorResolution}`; `PUT` `{frameRate}`.
 pub const FORMAT: &str = "/system/format";
@@ -204,6 +209,23 @@ pub struct Iris {
 pub struct IrisDescription {
     pub controllable: Option<bool>,
     pub aperture_stop: Option<NumberRange>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Zoom {
+    /// The current focal length in mm (`108`).
+    pub focal_length: Option<f64>,
+}
+
+impl Zoom {
+    /// The focal length as the key of the relay's lens memory: whole mm, `None` when absent or not
+    /// a positive finite number.
+    pub fn focal_mm(&self) -> Option<i64> {
+        self.focal_length
+            .filter(|f| f.is_finite() && *f > 0.0 && *f < 1e6)
+            .map(|f| f.round() as i64)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]

@@ -128,6 +128,7 @@ UseDomains=no
 | `lens/iris` | `{apertureStop, normalised, apertureNumber, continuousApertureAutoExposure}` | read + set, **set `apertureStop` only** (the other two answer 204 and do not move the iris, live on cam5); `normalised` is read as `params.irisRangePos` (v0.2.3) | `f-number` / `0x5007` |
 | `lens/iris/description` | `{controllable, apertureStop: {min, max}}` | read (the aperture grid's ends) | `f-number` choices |
 | `lens/focus` | `{normalised}` | read only | `d003` |
+| `lens/zoom` | `{focalLength, normalised}` | read only (v0.2.5): `focalLength` keys what the relay learns about the lens's aperture steps; a body without it is fine | — |
 | `system/format` | `{codec, frameRate, offSpeedFrameRate, min/maxOffSpeedFrameRate, recordResolution, …}` | read; set `{frameRate}` | `d006` / `d007` |
 | `system/supportedFormats` | `{supportedFormats: [{codecs, frameRates, recordResolution}]}` | read (the settable frame rates) | `d006` choices |
 
@@ -148,6 +149,12 @@ UseDomains=no
       variable-aperture zoom moves its wide end with the focal length, and `normalised` follows it.
     - The relay never writes it: a `normalised` write answers 204 and does not move the iris.
     - An older relay does not send it. A reader that does not know it ignores it.
+    - **v0.2.5 (additive meaning, same field):** it also reads `0` / `1` while the iris sits on an
+      end the relay LEARNED at the current focal length (below, `apertureStep`), even when the
+      camera's `normalised` says otherwise. The Pocket 4K measures `normalised` against the
+      `lens/iris/description` range, so at a zoom's wide end it never reaches 0 (cam5 at 108 mm:
+      0.0387 at its widest 4.4, description min 4.1). Away from a learned end it is the camera's
+      value as before. A reader that treats 0 / 1 as "at that end" needs no change.
     - The panel disables `-` at `0` and `+` at `1`, and a slider release past a reached end sends
       nothing.
   - `caps.fNumberChoices` is NOT the lens's steps. It is only the positions the absolute aperture
@@ -178,8 +185,9 @@ UseDomains=no
     - For `apertureStep`, the iris's `irisRangePos` (`lens/iris normalised`) gives the ends first:
       a press toward the end the iris is at is `notApplied` at once, with no probe (v0.2.3). A
       camera without `normalised` still probes: a press the iris does not follow means the end of
-      the lens (quiet), and a probe the camera refuses with 400 is the end of the lens too. With a KNOWN range, a 400 is
-      a refused write (502), as before.
+      the lens, and a probe the camera refuses with 400 is the end of the lens too; since v0.2.5
+      both report `notApplied: apertureStep`. With a KNOWN range, a 400 is a refused write (502),
+      as before.
 
   What two bodies serve, read live:
 
@@ -215,7 +223,8 @@ UseDomains=no
     f-number, `-1` = smaller); the size is ignored. It moves the aperture by exactly ONE of the
     lens's own steps.
     - The relay reads the TRUE current f-stop and writes a target 1/16 stop away.
-    - It waits up to 1.2 s for the iris. If the iris has not moved, it widens the target by
+    - It waits up to 0.5 s for the iris (1.2 s before v0.2.5; live, the iris reads back moved
+      within 340 ms on the 4K and ~220 ms on the 6K). If the iris has not moved, it widens the target by
       another 1/16 stop, until the iris lands on a different f-stop or the target reaches the
       `lens/iris/description` min or max.
     - The increment is smaller than half of two adjacent native gaps, so the first landing is
@@ -223,16 +232,28 @@ UseDomains=no
     - **At a reported end (v0.2.3):** when `lens/iris normalised` says the iris is already at the
       end the press heads for (`-1` at `0`, `+1` at `1`, within 0.001), the relay writes NOTHING
       and answers at once with `notApplied: ["apertureStep"]` and the same f-stop.
-    - At the end of the lens found by probing (the target reached the description min/max, on a
-      camera that gives no `normalised`) a press answers with the same f-stop. That is not an
-      error, and it is not `notApplied`.
+    - At the end of the lens found by probing (the target reached the description min/max, six
+      dead probes or a 400 without a description) a press answers with the same f-stop. That is
+      not an error. **Since v0.2.5 it is `notApplied: ["apertureStep"]`** (before, it was quiet,
+      and the panel got no feedback).
+    - **Learned per focal length (v0.2.5, additive).** The relay reads `lens/zoom focalLength` with
+      each press's start and remembers, per focal length, every f-stop it saw, the pairs of stops
+      a walk proved adjacent, and the ends it found. A press whose next stop is such a proven
+      neighbour (no other known stop between them) writes that stop directly: ONE PUT, about
+      0.4 s. If the iris does not take it, the relay walks the lens as above. A press toward a
+      learned end is refused at once with `notApplied: ["apertureStep"]` and no PUT, and
+      `irisRangePos` reads 0 / 1 there. Another focal length has its own memory; a camera without
+      `lens/zoom` shares one (a zoom change it cannot see is then caught only by a stop read
+      between two remembered neighbours, or a direct write that lands elsewhere). The memory is
+      cleared whenever the camera link drops.
     - An iris that follows none of up to 6 probes with range left, or a lens whose description
       says `controllable: false`, is reported as `notApplied: ["apertureStep"]`. A
       `controllable: false` lens is not probed at all.
-    - **Cost:** each probe the iris does not follow waits 1.2 s; the landing itself about 1 s.
-      cam5's lens 4.4 -> 4.8 is about 3.5 s, and its zoom-shifted end (4.4 against a description
-      min of 4.1) about 5 s. The worst case is an iris that follows nothing: 6 waits, about 7 s.
-    - **Queued presses:** a caller is answered right after its OWN press (worst about 8.5 s: an
+    - **Cost (v0.2.5):** each probe the iris does not follow waits 0.5 s; the landing about
+      0.4 s. cam5 at 108 mm 5.2 -> 5.6 is about 1 s, 4.4 -> 5.2 about 2 s, a known neighbour about
+      0.4 s; its zoom-shifted end (4.4 against a description min of 4.1) about 2 s the first time
+      and at once after. The worst case is an iris that follows nothing: 6 waits, about 3 s.
+    - **Queued presses:** a caller is answered right after its OWN press (worst about 4.5 s: an
       earlier absolute iris write waited out, then 6 dead probes), or once its drain has run 6 s.
       SETs still queued then run IN ORDER on a background drain that keeps the gate shut. So the
       service's 10 s write client never waits on a later press. Their results, `notApplied`
