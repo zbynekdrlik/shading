@@ -848,7 +848,20 @@ impl CameraSession {
         log.iris_travelling = false;
         log.stepped = true;
         let started = std::time::Instant::now();
-        let start = self.read_iris(link)?;
+        let (start, range_pos) = self.read_iris_position(link)?;
+        // shading#6 (0.2.3): the camera says the iris is already at the end this press heads for
+        // (`lens/iris normalised` 0 = wide open, 1 = closed). No probe: there is no further step,
+        // and on a firmware without a lens range six dead probes would cost ~7 s.
+        if bkshading_proto::mapping::iris_at_end(range_pos, dir) {
+            tracing::info!(
+                dir,
+                from = start,
+                iris_range_pos = ?range_pos,
+                "aperture step refused: the iris is at that end of the lens (lens/iris normalised)"
+            );
+            log.not_applied.push("apertureStep".into());
+            return Ok(None);
+        }
         let mut probes = 0u32;
         for k in 1..=MAX_DEAD_APERTURE_PROBES {
             let Some(target) = aperture_probe_target(start, dir, k, range) else {
@@ -925,6 +938,12 @@ impl CameraSession {
 
     /// The iris's true f-stop now (`GET lens/iris`), never a cached value.
     fn read_iris(&self, link: &Link) -> Result<f64> {
+        self.read_iris_position(link).map(|(f, _)| f)
+    }
+
+    /// The iris's true f-stop now and its place in the lens range (`normalised` as
+    /// `irisRangePos`, `None` when the camera does not give it), from one `GET lens/iris`.
+    fn read_iris_position(&self, link: &Link) -> Result<(f64, Option<f64>)> {
         let iris: bkshading_proto::rest::Iris = link
             .client
             .get_json(bkshading_proto::rest::IRIS)
@@ -934,9 +953,16 @@ impl CameraSession {
             }
             anyhow::anyhow!("camera {} iris read failed: {e}", link.client.addr)
         })?;
-        iris.aperture_stop
+        let stop = iris
+            .aperture_stop
             .filter(|f| f.is_finite() && *f > 0.0)
-            .ok_or_else(|| anyhow::anyhow!("camera {} reports no apertureStop", link.client.addr))
+            .ok_or_else(|| {
+                anyhow::anyhow!("camera {} reports no apertureStop", link.client.addr)
+            })?;
+        Ok((
+            stop,
+            bkshading_proto::mapping::iris_range_pos(iris.normalised),
+        ))
     }
 
     /// Waits up to `iris_probe_wait_ms` for the iris to leave `from`; once it has, until two reads in

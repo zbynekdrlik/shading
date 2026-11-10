@@ -167,6 +167,21 @@ the camera's USB-C CDC-NCM link (since v0.2.0, shading#6; before that over USB-P
     position and write basis stay one grid); a slider write 400 = `notApplied: apertureNorm`.
   - Test profile `support::pocket_6k_fw86()` carries the exact 404/501 set and the lens's live
     1/6-stop steps (4.0 .. 11.0 at 24 mm); `NetTree::usb_product` writes the USB product string.
+- **The lens's ends come from `lens/iris normalised` (v0.2.3, live cam3 6K fw 8.6 at 24 mm:
+  `{"apertureStop":4.0,"normalised":0.0}` wide open).** It is the iris's place in the lens range
+  (0 wide open, 1 closed; follows a zoom's moving wide end), wire `params.irisRangePos`
+  (`mapping::iris_range_pos`, clamped, `null` when absent). Read only: a `normalised` WRITE is
+  ignored by the camera.
+  - `step_iris` reads it with the start f-stop (`read_iris_position`); `mapping::iris_at_end`
+    (`IRIS_END_EPS` 1e-3) toward that end -> `notApplied: apertureStep` at once, ZERO probes. This
+    replaced the fw-8.6 "6 dead probes = the end, quiet" (~7.7 s, then the panel snapped back).
+    Without `normalised` the old probing path stays.
+  - Panel (`app.js`): `irisRangePos`/`apertureNorm` on the block dataset; `-` disabled at 0, `+` at
+    1 (titled); a slider release whose target f-number lies past a reached end sends nothing and
+    the slider goes back to the camera's `apertureNorm`. Fake: `support::IrisPosition::FromLens`
+    (log-stop position between `lens_stops` ends, on `pocket_6k_fw86`); default cams keep the fixed
+    live cam5 value 0.3158 (never an end).
+  - The closed-end `normalised` = 1.0 is from the camera YAML, not yet read live (shading#6).
 - **Decoding:** integer fields go through a lenient int (`400.0` reads as 400), and fields the
   relay does not use are not declared, so one odd value cannot fail a whole endpoint.
 

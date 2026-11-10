@@ -61,6 +61,13 @@ pub struct ShadingParams {
     /// `#[serde(default)]` so an older relay still deserializes.
     #[serde(default)]
     pub focus_norm: Option<f64>,
+    /// The iris's place in the lens's own range, `[0,1]`: 0 = wide open, 1 = closed —
+    /// `lens/iris normalised` (shading#6, 0.2.3). READ-ONLY. It is how the panel and the relay know
+    /// the lens's ends when the firmware serves no `lens/iris/description` (6K at fw 8.6), and it
+    /// follows a zoom lens's moving wide end. `None` when the camera does not give it.
+    /// `#[serde(default)]` so an older relay still deserializes.
+    #[serde(default)]
+    pub iris_range_pos: Option<f64>,
 }
 
 /// The camera's own fine-grained value lists/ranges — the web UI rebuilds its ISO and

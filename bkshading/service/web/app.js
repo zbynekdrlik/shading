@@ -159,10 +159,17 @@ function refreshStepDisabled(el) {
     const onGridIdx = Number.isFinite(cur)
       ? choices.findIndex((c) => Math.abs(c - cur) < 1e-6)
       : -1;
-    apDec.disabled = onGridIdx === 0;
-    apInc.disabled = onGridIdx === n - 1;
-    apDec.title = "";
-    apInc.title = "";
+    // shading#6 (0.2.3): the camera's own word on the lens's ends (`irisRangePos`, 0 = wide open,
+    // 1 = closed). The slider grid is not the lens range on a firmware without
+    // `lens/iris/description` (6K fw 8.6: grid from f/2.8, lens from f/4.0 at 24 mm), and a zoom
+    // moves the wide end, so this is what stops "-" at the lens's widest stop.
+    const pos = irisRangePos(el);
+    const atWide = irisAtEnd(pos, -1);
+    const atClosed = irisAtEnd(pos, 1);
+    apDec.disabled = onGridIdx === 0 || atWide;
+    apInc.disabled = onGridIdx === n - 1 || atClosed;
+    apDec.title = atWide ? "Objektív je na najotvorenejšej clone" : "";
+    apInc.title = atClosed ? "Objektív je na najzatvorenejšej clone" : "";
   }
   for (const [role, dec, inc] of [
     ["kelvin", "kelvin-dec", "kelvin-inc"],
@@ -214,6 +221,24 @@ function stepChoice(currentFnum, choices, dir) {
   }
   for (let i = n - 1; i >= 0; i--) if (choices[i] < currentFnum) return i;
   return 0;
+}
+
+// shading#6 (0.2.3): mirror of the proto `mapping::IRIS_END_EPS` / `iris_at_end`.
+const IRIS_END_EPS = 1e-3;
+
+// The block's `irisRangePos` (the iris's place in the lens range), or NaN when the camera gives none.
+function irisRangePos(el) {
+  const raw = el.dataset.irisRangePos;
+  return raw === "" || raw == null ? NaN : Number(raw);
+}
+
+// Whether the iris is already at the lens end a move in direction `dir` heads for: -1 (wider) at
+// 0, +1 (more closed) at 1. An unknown position is never an end.
+function irisAtEnd(pos, dir) {
+  if (!Number.isFinite(pos)) return false;
+  if (dir < 0) return pos <= IRIS_END_EPS;
+  if (dir > 0) return pos >= 1 - IRIS_END_EPS;
+  return false;
 }
 
 // issue 1337: the block's REAL current f-number, or NaN when aperture is unknown. Guards the
@@ -331,6 +356,24 @@ function wire(el, id) {
   q("aperture").addEventListener("change", (e) => {
     const norm = Number(e.target.value);
     const choices = readFnumChoices(el);
+    // shading#6 (0.2.3): never write past a lens end the iris has reached. A release on the far
+    // side of the reached end sends nothing and puts the slider back on the camera's position.
+    const pos = irisRangePos(el);
+    const cur = currentFnum(el);
+    const lastNorm = el.dataset.apertureNorm === "" || el.dataset.apertureNorm == null
+      ? NaN
+      : Number(el.dataset.apertureNorm);
+    let dir = 0;
+    if (choices.length >= 2 && Number.isFinite(cur)) {
+      const idx = Math.min(choices.length - 1, Math.max(0, Math.round(norm * (choices.length - 1))));
+      dir = Math.sign(choices[idx] - cur);
+    } else if (Number.isFinite(lastNorm)) {
+      dir = Math.sign(norm - lastNorm);
+    }
+    if (dir !== 0 && irisAtEnd(pos, dir)) {
+      if (Number.isFinite(lastNorm)) e.target.value = lastNorm;
+      return;
+    }
     if (choices.length >= 2) {
       const idx = Math.min(choices.length - 1, Math.max(0, Math.round(norm * (choices.length - 1))));
       q("fnum").textContent = "f/" + choices[idx].toFixed(1);
@@ -579,6 +622,10 @@ function updateBlock(el, cam) {
   if (!apHeld) el.dataset.apertureFnum = fn == null ? "" : String(fn);
   const apEl = q("aperture");
   if (document.activeElement !== apEl && !apHeld && p.apertureNorm != null) apEl.value = p.apertureNorm;
+  // shading#6 (0.2.3): the lens-range position and the camera's slider position, for the step
+  // buttons' end rules and the slider's end guard.
+  el.dataset.irisRangePos = p.irisRangePos == null ? "" : String(p.irisRangePos);
+  el.dataset.apertureNorm = p.apertureNorm == null ? "" : String(p.apertureNorm);
 
   // ISO. issue 1337: the aperture-style stepper — store the choices + REAL value on the dataset
   // (stepEnum/refreshStepDisabled step from them), position the index slider (guarded while the
