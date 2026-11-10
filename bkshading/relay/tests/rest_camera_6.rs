@@ -19,10 +19,10 @@ use bkshading_relay::transport::rest::{
 use bkshading_relay::transport::{
     camera_links, parse_camera_addr, parse_capture_fps_env, parse_inet, parse_lease,
     parse_min_read_interval_env, peer_of, read_is_fresh, ApplyOutcome, CameraAddr, CameraLocator,
-    CameraSession, DiscoverPaths, MonoClock, CAMERA_HTTP_PORT,
+    CameraSession, DiscoverPaths, MonoClock, CAMERA_HTTP_PORT, IRIS_PROBE_WAIT_MS,
 };
 use serde_json::json;
-use support::{Cam, FakeCamera};
+use support::{Cam, FakeCamera, IrisPosition};
 
 const VERSION: &str = "0.2.0-test";
 
@@ -1250,4 +1250,121 @@ fn a_slider_position_past_an_unknown_lens_end_is_not_applied_not_an_error_6() {
     );
     assert_eq!(st.not_applied, vec!["apertureNorm".to_string()]);
     assert_eq!(st.params.iso, Some(800), "the rest of the SET still landed");
+}
+
+// --- shading#6 (0.2.3): the relay knows the lens's ends from `lens/iris normalised` -------------
+// Live on cam3 (Pocket 6K, fw 8.6, 24 mm, 10.11.2026): `lens/iris/description` is 404, a "-" at the
+// widest stop 4.0 was probed ~7.7 s ("no move after the probe limit and no lens range") and the
+// panel snapped back. `GET lens/iris` answers `normalised` 0.0 there: the iris's place in the lens's
+// range. The relay passes it on as `params.irisRangePos`, and a step toward an end the iris is
+// already at is refused at once, with no probe.
+
+/// `params.irisRangePos` on the wire (what the service and the panel read).
+fn iris_range_pos(st: &bkshading_proto::wire::RelayState) -> serde_json::Value {
+    serde_json::to_value(&st.params).unwrap()["irisRangePos"].clone()
+}
+
+fn iris_puts(cam: &FakeCamera) -> usize {
+    cam.puts().iter().filter(|(p, _)| p == "/lens/iris").count()
+}
+
+#[test]
+fn the_iris_range_position_is_a_read_param_6() {
+    let cam = FakeCamera::start(support::pocket_6k_fw86());
+    let s = Arc::new(session(&cam));
+    let st = s.read_state();
+    let want = support::lens_position(&cam.cam().lens_stops, 9.5);
+    let got = iris_range_pos(&st)
+        .as_f64()
+        .expect("irisRangePos is a number");
+    assert!((got - want).abs() < 1e-9, "{got} != {want}");
+    assert!(got > 0.0 && got < 1.0, "9.5 lies between the ends: {got}");
+    // A SET's read-back is a fresh camera read (a plain read may answer from the read floor's cache).
+    let reread = |s: &Arc<CameraSession>| {
+        applied(
+            s.submit(&SetRequest {
+                iso: Some(800),
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .1
+    };
+    cam.cam().aperture = 4.0;
+    assert_eq!(iris_range_pos(&reread(&s)), json!(0.0), "wide open");
+    cam.cam().aperture = 11.0;
+    let st = reread(&s);
+    assert_eq!(iris_range_pos(&st), json!(1.0), "closed");
+}
+
+#[test]
+fn a_camera_without_normalised_reports_no_iris_range_position_6() {
+    let mut c = support::pocket_6k_fw86();
+    c.iris_position = IrisPosition::Absent;
+    let cam = FakeCamera::start(c);
+    let s = Arc::new(session(&cam));
+    let st = s.read_state();
+    assert!(st.online);
+    assert_eq!(iris_range_pos(&st), serde_json::Value::Null);
+}
+
+/// A step toward the end the iris is at: refused at once (`notApplied: apertureStep`), no PUT to
+/// `lens/iris`, and fast (the old way was 6 dead probes of 1.2 s each).
+fn assert_end_refused_at_once(aperture: f64, dir: i64) {
+    let mut c = support::pocket_6k_fw86();
+    c.aperture = aperture;
+    let cam = FakeCamera::start(c);
+    // The production probe wait: a probe would cost >= 1.2 s, so the timing below catches one.
+    let s = Arc::new(session(&cam).with_iris_probe_wait_ms(IRIS_PROBE_WAIT_MS));
+    let _ = s.read_state();
+    cam.clear_seen();
+    let started = std::time::Instant::now();
+    let st = press(&s, dir);
+    let took = started.elapsed();
+    assert_eq!(iris_puts(&cam), 0, "no probe written: {:?}", cam.puts());
+    assert_eq!(st.not_applied, vec!["apertureStep".to_string()]);
+    assert_eq!(fstop(&st), aperture, "the iris stays at the end");
+    assert!(
+        took < Duration::from_millis(IRIS_PROBE_WAIT_MS),
+        "answered at once, not after a probe: {took:?}"
+    );
+}
+
+#[test]
+fn a_minus_press_at_the_wide_end_is_refused_at_once_without_a_probe_6() {
+    assert_end_refused_at_once(4.0, -1);
+}
+
+#[test]
+fn a_plus_press_at_the_closed_end_is_refused_at_once_without_a_probe_6() {
+    assert_end_refused_at_once(11.0, 1);
+}
+
+#[test]
+fn a_press_away_from_the_end_still_walks_the_lens_6() {
+    let mut c = support::pocket_6k_fw86();
+    c.aperture = 4.0;
+    let cam = FakeCamera::start(c);
+    let s = Arc::new(session(&cam).with_iris_probe_wait_ms(30));
+    let st = press(&s, 1);
+    assert_eq!(fstop(&st), 4.4, "+ from the wide end is the next step");
+    assert!(st.not_applied.is_empty(), "{:?}", st.not_applied);
+    let p = iris_range_pos(&st).as_f64().unwrap();
+    assert!(p > 0.0 && p < 1.0, "{p}");
+}
+
+#[test]
+fn without_normalised_a_minus_at_the_wide_end_falls_back_to_probing_6() {
+    let mut c = support::pocket_6k_fw86();
+    c.aperture = 4.0;
+    c.iris_position = IrisPosition::Absent;
+    let cam = FakeCamera::start(c);
+    let s = Arc::new(session(&cam).with_iris_probe_wait_ms(30));
+    let st = press(&s, -1);
+    assert_eq!(fstop(&st), 4.0);
+    assert!(
+        iris_puts(&cam) > 0,
+        "no position known: the probe finds the end"
+    );
+    assert!(st.not_applied.is_empty(), "{:?}", st.not_applied);
 }
