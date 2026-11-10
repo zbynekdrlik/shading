@@ -27,9 +27,10 @@ grab_fps = 60
 [[camera]]
 id = "cam3"
 label = "Cam 3"
-# a handheld SBC relay controls this cambox's camera (owner ruling 5977504457)
-transport = "sbc-relay"
-address = "register:cam4-shading"
+# cam3 has no handheld SBC, never had one (owner 2026-11-10): SBC relays exist only for cam1/2/4
+transport = "cambox-relay"
+address = "register:cam3"
+fallback_address = "cam3.lan:8771"
 ndi_preview = "CAM3 (usb)"
 grab_fps = 60
 

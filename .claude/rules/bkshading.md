@@ -213,7 +213,12 @@ the camera's USB-C CDC-NCM link (since v0.2.0, shading#6; before that over USB-P
   camera-box's old CI had the same floor. A runner image change can raise it: re-read it per release.
 - The strih seed test (`service/tests/service.rs` `both_strih_seeds_load_in_the_service_1431`) reads
   `service/tests/fixtures/strih-*-seed.toml`, a snapshot of camera-box's
-  `strih_bkshading_config_text` at camera-box 390ae50. camera-box checks its live seed with
+  `strih_bkshading_config_text` at camera-box 390ae50, with cam3 corrected by hand on 10.11.2026.
+  **Handheld SBC relays exist only for cam1, cam2 and cam4** (owner 10.11.2026: cam3 never had
+  one). The SNV seed had cam3 on `sbc-relay@register:cam4-shading`, so the live panel showed
+  cam3 offline while its cambox relay ran and announced itself as `cam3`. A camera shown offline
+  with a running relay: compare `/api/cameras` `registration` against the relay's
+  `BKSHADING_RELAY_ID`. camera-box checks its live seed with
   `bkshading --check-config` from the pinned release.
 
 ## Verifying a NEW crate
