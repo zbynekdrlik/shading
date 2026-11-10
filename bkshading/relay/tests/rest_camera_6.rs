@@ -1121,18 +1121,19 @@ fn a_pocket_6k_at_fw_8_6_is_detected_read_set_and_stepped_6() {
         (Some(800), Some(5600), Some(50))
     );
     assert!(st.not_applied.is_empty(), "{:?}", st.not_applied);
-    // step: one press = the next native step, down to the end of the lens and back up, quietly
-    // stopping at both ends although the lens range is unknown.
+    // step: one press = the next native step, down to the end of the lens and back up. The lens
+    // range is unknown (no description), but `lens/iris normalised` 0.0 says the iris is at the wide
+    // end, so a further "-" is refused at once (0.2.3).
     let at = stops.iter().position(|f| *f == 9.5).unwrap();
     for want in stops[..at].iter().rev() {
         assert_eq!(fstop(&press(&s, -1)), *want);
     }
     let st = press(&s, -1);
     assert_eq!(fstop(&st), 4.0, "the end of the lens");
-    assert!(
-        st.not_applied.is_empty(),
-        "the end of an unknown range is quiet: {:?}",
-        st.not_applied
+    assert_eq!(
+        st.not_applied,
+        vec!["apertureStep".to_string()],
+        "the wide end the camera reports refuses a further -"
     );
     for want in &stops[1..] {
         assert_eq!(fstop(&press(&s, 1)), *want);
