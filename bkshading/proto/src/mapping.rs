@@ -251,6 +251,29 @@ pub fn step_choice(current_fnumber: f64, choices: &[f64], dir: i32) -> Option<us
 /// relay's probe wait; an iris slower than that could see the next probe written mid-travel.
 pub const APERTURE_PROBE_STOPS: f64 = 1.0 / 16.0;
 
+/// How close to 0.0 / 1.0 `lens/iris normalised` counts as AT that end of the lens (shading#6,
+/// 0.2.3). cam3 reads exactly 0.0 wide open; the tolerance only absorbs float noise, it is far below
+/// one 1/6-stop lens step (about 0.03 of a 4.0 .. 11.0 range).
+pub const IRIS_END_EPS: f64 = 1e-3;
+
+/// `lens/iris normalised` as the wire's `irisRangePos`: finite values clamped into `[0,1]`, else
+/// `None`.
+pub fn iris_range_pos(normalised: Option<f64>) -> Option<f64> {
+    normalised
+        .filter(|v| v.is_finite())
+        .map(|v| v.clamp(0.0, 1.0))
+}
+
+/// Whether the iris is already at the lens end an `apertureStep` in direction `dir` heads for:
+/// `-1` (wider) at `irisRangePos` 0, `+1` (closed) at 1. Unknown position or `dir` 0 = no.
+pub fn iris_at_end(iris_range_pos: Option<f64>, dir: i64) -> bool {
+    match iris_range_pos {
+        Some(p) if dir < 0 => p <= IRIS_END_EPS,
+        Some(p) if dir > 0 => p >= 1.0 - IRIS_END_EPS,
+        _ => false,
+    }
+}
+
 /// The f-number of the `k`-th probe (1-based) of an `apertureStep` from `current` (the camera's
 /// TRUE f-stop) in direction `dir` (sign only): `current * 2^(k * APERTURE_PROBE_STOPS / 2)` (one
 /// stop is a factor sqrt 2 in f-number), clamped to the lens `range` from `lens/iris/description`,

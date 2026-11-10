@@ -440,3 +440,29 @@ fn a_probe_increment_never_crosses_past_the_next_native_step_6() {
         }
     }
 }
+
+/// shading#6 (0.2.3): `lens/iris normalised` (the iris's place in the lens's range, 0 = wide open,
+/// 1 = closed) is the read param `irisRangePos`; absent when the camera does not give it.
+#[test]
+fn the_iris_range_position_maps_onto_the_wire_6() {
+    let pos = |read: &RestRead| {
+        let (p, _) = params_and_caps(read);
+        serde_json::to_value(&p).unwrap()["irisRangePos"].clone()
+    };
+    assert_eq!(pos(&cam5()), serde_json::json!(0.3158));
+    let mut wide = cam5();
+    wide.iris = Some(de(
+        r#"{"apertureNumber":320,"apertureStop":4.0,"continuousApertureAutoExposure":false,"normalised":0.0}"#,
+    ));
+    assert_eq!(
+        pos(&wide),
+        serde_json::json!(0.0),
+        "cam3 at 24 mm, wide open"
+    );
+    let mut none = cam5();
+    none.iris = Some(de(r#"{"apertureStop":4.0}"#));
+    assert_eq!(pos(&none), serde_json::Value::Null);
+    let mut over = cam5();
+    over.iris = Some(de(r#"{"apertureStop":22.0,"normalised":1.0000001}"#));
+    assert_eq!(pos(&over), serde_json::json!(1.0), "clamped into 0..1");
+}

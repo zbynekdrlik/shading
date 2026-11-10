@@ -193,6 +193,10 @@ pub struct Tint {
 pub struct Iris {
     /// The f-number the camera displays (`7.3`).
     pub aperture_stop: Option<f64>,
+    /// The iris's place in the lens's range: 0.0 = wide open, 1.0 = closed (LensControl.yaml
+    /// min 0.0 max 1.0; cam3 at 24 mm read 0.0 at its widest f/4.0). READ only: a `normalised`
+    /// write answers 204 and does not move the iris (shading#6, 0.2.3).
+    pub normalised: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]

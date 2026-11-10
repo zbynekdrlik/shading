@@ -46,6 +46,9 @@ pub struct Cam {
     pub iris_ignores_writes: bool,
     /// `lens/iris/description controllable`.
     pub iris_controllable: bool,
+    /// What `lens/iris` answers as `normalised` (shading#6, 0.2.3: the iris's position inside the
+    /// lens's range, 0 = wide open, 1 = closed).
+    pub iris_position: IrisPosition,
     /// How long after an `apertureStop` PUT the iris reports its new position (a moving iris).
     pub iris_latency: Duration,
     /// An accepted iris write still travelling: the landing and when it was written.
@@ -92,6 +95,7 @@ impl Default for Cam {
             iris_range: None,
             iris_ignores_writes: false,
             iris_controllable: true,
+            iris_position: IrisPosition::Fixed(0.3158),
             iris_latency: Duration::ZERO,
             iris_travel: None,
             focus: 0.42,
@@ -108,6 +112,24 @@ impl Default for Cam {
             auto_wb_kelvin: 4800,
         }
     }
+}
+
+/// How the fake reports `lens/iris normalised`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum IrisPosition {
+    /// A fixed value whatever the iris does (the live cam5 read, 0.3158).
+    Fixed(f64),
+    /// The iris's place between the ends of `lens_stops`, in stops: 0.0 at the first (widest),
+    /// 1.0 at the last (closed), fractional between (cam3 at 24 mm read 0.0 wide open at f/4.0).
+    FromLens,
+    /// No `normalised` key at all.
+    Absent,
+}
+
+/// `normalised` for an iris at `f` on a lens whose ends are `stops[0]` and `stops[last]`.
+pub fn lens_position(stops: &[f64], f: f64) -> f64 {
+    let (lo, hi) = (*stops.first().unwrap(), *stops.last().unwrap());
+    ((f.log2() - lo.log2()) / (hi.log2() - lo.log2())).clamp(0.0, 1.0)
 }
 
 /// One request the fake received.
@@ -203,7 +225,8 @@ pub fn zoom_third_stop_lens() -> Cam {
 /// SNV cam3, the original Pocket 6K at fw 8.6, read live 9.11.2026 (shading#6): REST is served
 /// (Web media manager on), but this firmware has no `system/product`, no capability lists and no
 /// descriptions. Its lens at 24 mm, walked live with 1/16-stop targets: 1/6-stop steps from 4.0
-/// (the end of the lens) up to 11.0, starting at 9.5.
+/// (the end of the lens) up to 11.0, starting at 9.5. `lens/iris normalised` is the iris's place in
+/// the lens's range: 0.0 wide open at 4.0 (read live 10.11.2026), 1.0 closed.
 pub fn pocket_6k_fw86() -> Cam {
     Cam {
         product: json!(null),
@@ -216,6 +239,7 @@ pub fn pocket_6k_fw86() -> Cam {
             4.0, 4.4, 4.6, 4.8, 5.0, 5.2, 5.4, 5.6, 5.9, 6.2, 6.45, 6.7, 7.0, 7.3, 7.65, 8.0, 8.35,
             8.7, 9.1, 9.5, 10.0, 10.5, 11.0,
         ],
+        iris_position: IrisPosition::FromLens,
         focus: 0.0,
         frame_rate: "60".into(),
         not_found: [
@@ -353,12 +377,22 @@ async fn handle(State(sh): State<Arc<Shared>>, method: Method, uri: Uri, body: B
             ok(json!({ "whiteBalance": { "min": 2500, "max": 10000 } }))
         }
         "/video/whiteBalanceTint" => ok(json!({ "whiteBalanceTint": cam.tint })),
-        "/lens/iris" => ok(json!({
-            "apertureNumber": 432,
-            "apertureStop": cam.aperture,
-            "continuousApertureAutoExposure": false,
-            "normalised": 0.3158
-        })),
+        "/lens/iris" => {
+            let mut v = json!({
+                "apertureNumber": 432,
+                "apertureStop": cam.aperture,
+                "continuousApertureAutoExposure": false,
+            });
+            let norm = match cam.iris_position {
+                IrisPosition::Fixed(n) => Some(n),
+                IrisPosition::FromLens => Some(lens_position(&cam.lens_stops, cam.aperture)),
+                IrisPosition::Absent => None,
+            };
+            if let Some(n) = norm {
+                v["normalised"] = json!(n);
+            }
+            ok(v)
+        }
         "/lens/iris/description" => {
             let (min, max) = cam.iris_range.unwrap_or((
                 *cam.lens_stops.first().unwrap(),

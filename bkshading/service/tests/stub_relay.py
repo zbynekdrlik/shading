@@ -34,6 +34,7 @@ STATE = {
         "fps100": 6000,
         "sensorFps100": 6000,
         "focusDistance": None,
+        "irisRangePos": 0.5,
     },
     "caps": {
         "isoChoices": [100, 200, 400, 800],

@@ -233,7 +233,7 @@ function makeFixture(opts = {}) {
           camera: "Blackmagic Design Pocket Cinema Camera 4K",
           params: {
             apertureAv: g(opts.apertureAv, 4.78), // f/5.2
-            apertureNorm: 2.0 / 3.0,
+            apertureNorm: g(opts.apertureNorm, 2.0 / 3.0),
             iso: g(opts.iso, 400),
             kelvin: g(opts.kelvin, 5600),
             tint: g(opts.tint, 0),
@@ -241,6 +241,8 @@ function makeFixture(opts = {}) {
             fps100: 6000,
             sensorFps100: 6000,
             focusDistance: null,
+            // shading#6 (0.2.3): the iris's place in the lens's range (0 wide open, 1 closed).
+            irisRangePos: opts.irisRangePos != null ? opts.irisRangePos : null,
           },
           caps: {
             isoChoices: [100, 200, 400, 800],
@@ -353,6 +355,103 @@ test("a not-applied push after an optimistic tap surfaces the refusal (clears th
   await expect(fnum).not.toHaveClass(/pending/);
   await expect(fnum).toHaveClass(/not-applied/);
   await expect(fnum).toHaveAttribute("title", "Kamera tento zápis neprijala");
+
+  expect(problems, `console problems: ${problems.join(" | ")}`).toEqual([]);
+});
+
+// shading#6 (0.2.3): the panel knows the lens's ends. Live on cam3 (Pocket 6K fw 8.6, 24 mm): the
+// lens's widest stop was f/4.0 while the slider grid (no `lens/iris/description` on that firmware)
+// ran down to f/2.8, so "-" and the slider went past the lens and the value snapped back. The relay
+// now sends `params.irisRangePos` (0 = wide open, 1 = closed): "-" is disabled at 0 and "+" at 1,
+// and a slider release past a reached end sends nothing and puts the slider back.
+test("the aperture stepper and slider stop at the lens's ends (irisRangePos), console clean", async ({
+  page,
+}) => {
+  const problems = [];
+  page.on("console", (msg) => {
+    const t = msg.type();
+    if (t === "error" || t === "warning") problems.push(`${t}: ${msg.text()}`);
+  });
+  page.on("pageerror", (err) => problems.push(`pageerror: ${err.message}`));
+
+  // Only window.render drives the panel; every PUT the panel sends is recorded.
+  const puts = [];
+  await page.addInitScript(DISABLE_WS);
+  await page.route("**/api/**", (route) => {
+    const req = route.request();
+    if (req.method() === "PUT") {
+      puts.push(JSON.parse(req.postData() || "{}"));
+      return route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
+    }
+    return route.fulfill({ status: 200, contentType: "text/plain", body: "offline-fixture" });
+  });
+  await page.goto("/");
+  await page.waitForFunction(() => typeof window.render === "function");
+
+  const dec = page.locator('[data-role="aperture-dec"]');
+  const inc = page.locator('[data-role="aperture-inc"]');
+  const slider = page.locator('[data-role="aperture"]');
+  const fnum = page.locator('[data-role="fnum"]');
+
+  // Wide open at f/4.0 (AV 4.0), which is NOT the first slider grid entry (2.8): only
+  // irisRangePos 0 tells the panel the lens has no wider stop.
+  const wideNorm = 1.0 / 3.0;
+  await page.evaluate(
+    (agg) => window.render(agg),
+    makeFixture({ apertureAv: 4.0, apertureNorm: wideNorm, irisRangePos: 0.0 })
+  );
+  await expect(fnum).toHaveText("f/4.0");
+  await expect(dec).toBeDisabled();
+  await expect(inc).toBeEnabled();
+
+  // The slider released below the lens's widest stop: nothing is sent, the slider goes back.
+  await slider.fill("0");
+  await expect.poll(async () => Number(await slider.inputValue())).toBeCloseTo(wideNorm, 2);
+  await expect(fnum).toHaveText("f/4.0");
+  await expect(fnum).not.toHaveClass(/pending/);
+  expect(puts, "no write past the wide end").toEqual([]);
+
+  // Away from the reached end (toward closed) the slider still writes.
+  await slider.fill("1");
+  await expect.poll(() => puts.length).toBe(1);
+  expect(puts[0].apertureNorm).toBeCloseTo(1, 6);
+
+  // The camera confirms that write (f/8.0), which ends its pending hold (issue 1350: a held write
+  // keeps the stepper base on its target until a push confirms it).
+  await page.evaluate(
+    (agg) => window.render(agg),
+    makeFixture({ apertureAv: 6.0, apertureNorm: 1.0, irisRangePos: 0.6 })
+  );
+  await expect(fnum).toHaveText("f/8.0");
+  await expect(fnum).not.toHaveClass(/pending/);
+
+  // Mid-range: both directions enabled.
+  await page.evaluate(
+    (agg) => window.render(agg),
+    makeFixture({ apertureAv: 4.78, apertureNorm: 2.0 / 3.0, irisRangePos: 0.4 })
+  );
+  await expect(dec).toBeEnabled();
+  await expect(inc).toBeEnabled();
+
+  // Closed at f/5.2 (AV 4.78), below the grid's last entry (8.0), with irisRangePos 1: "+" disabled,
+  // a slider release further closed sends nothing; a release toward open still writes.
+  puts.length = 0;
+  const closedNorm = 2.0 / 3.0;
+  await page.evaluate(
+    (agg) => window.render(agg),
+    makeFixture({ apertureAv: 4.78, apertureNorm: closedNorm, irisRangePos: 1.0 })
+  );
+  await expect(fnum).toHaveText("f/5.2");
+  await expect(inc).toBeDisabled();
+  await expect(dec).toBeEnabled();
+  await slider.fill("1");
+  await expect.poll(async () => Number(await slider.inputValue())).toBeCloseTo(closedNorm, 2);
+  await expect(fnum).toHaveText("f/5.2");
+  await expect(fnum).not.toHaveClass(/pending/);
+  expect(puts, "no write past the closed end").toEqual([]);
+  await slider.fill("0");
+  await expect.poll(() => puts.length).toBe(1);
+  expect(puts[0].apertureNorm).toBeCloseTo(0, 6);
 
   expect(problems, `console problems: ${problems.join(" | ")}`).toEqual([]);
 });

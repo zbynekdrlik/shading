@@ -128,6 +128,7 @@ fn shading_params_wire_is_camel_case() {
         sensor_fps100: Some(2500),
         focus_distance: None,
         focus_norm: Some(0.25),
+        iris_range_pos: Some(0.5),
     };
     let json = serde_json::to_string(&p).unwrap();
     assert!(json.contains("\"apertureAv\""));
@@ -135,6 +136,8 @@ fn shading_params_wire_is_camel_case() {
     assert!(json.contains("\"sensorFps100\""));
     // shading#6: the REST focus position serialises camelCase; an older reader ignores it.
     assert!(json.contains("\"focusNorm\""));
+    // shading#6 (0.2.3): the iris's place in the lens range.
+    assert!(json.contains("\"irisRangePos\""));
     // round-trips
     let back: bkshading_proto::wire::ShadingParams = serde_json::from_str(&json).unwrap();
     assert_eq!(back, p);
@@ -218,4 +221,32 @@ fn step_choice_from_off_grid_and_on_grid_1337() {
         Some(0),
         "single choice -> idx 0"
     );
+}
+
+/// shading#6 (0.2.3): a step toward the end `lens/iris normalised` says the iris is at.
+#[test]
+fn the_iris_is_at_the_end_a_step_heads_for_6() {
+    use bkshading_proto::mapping::{iris_at_end, iris_range_pos, IRIS_END_EPS};
+    assert!(iris_at_end(Some(0.0), -1), "wide open, -");
+    assert!(!iris_at_end(Some(0.0), 1), "wide open, +");
+    assert!(iris_at_end(Some(1.0), 1), "closed, +");
+    assert!(!iris_at_end(Some(1.0), -1), "closed, -");
+    assert!(
+        iris_at_end(Some(IRIS_END_EPS / 2.0), -1),
+        "float noise at the end"
+    );
+    assert!(iris_at_end(Some(1.0 - IRIS_END_EPS / 2.0), 1));
+    assert!(
+        !iris_at_end(Some(0.03), -1),
+        "one 1/6 stop in: a step is left"
+    );
+    assert!(!iris_at_end(Some(0.97), 1));
+    assert!(!iris_at_end(None, -1), "unknown: probe");
+    assert!(!iris_at_end(None, 1));
+    assert!(!iris_at_end(Some(0.0), 0));
+    assert_eq!(iris_range_pos(Some(-0.2)), Some(0.0));
+    assert_eq!(iris_range_pos(Some(1.5)), Some(1.0));
+    assert_eq!(iris_range_pos(Some(0.4)), Some(0.4));
+    assert_eq!(iris_range_pos(Some(f64::NAN)), None);
+    assert_eq!(iris_range_pos(None), None);
 }

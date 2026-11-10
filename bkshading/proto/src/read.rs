@@ -225,6 +225,7 @@ fn shutter_choices(read: &RestRead, fps100: i64) -> Vec<i64> {
 /// - shutter: the speed denominator, or the angle converted at the project fps (at
 ///   [`DEFAULT_FPS100`] when the format is unknown this cycle).
 /// - `focusNorm` = `lens/focus normalised` (read only); `focusDistance` (PTP d003) is not reported.
+/// - `irisRangePos` = `lens/iris normalised`, clamped into `[0,1]` (read only).
 pub fn params_and_caps(read: &RestRead) -> (ShadingParams, CameraCaps) {
     let project = project_fps100(read);
     let fps100 = project.unwrap_or(DEFAULT_FPS100);
@@ -261,6 +262,9 @@ pub fn params_and_caps(read: &RestRead) -> (ShadingParams, CameraCaps) {
             .as_ref()
             .and_then(|f| f.normalised)
             .filter(|v| v.is_finite()),
+        iris_range_pos: crate::mapping::iris_range_pos(
+            read.iris.as_ref().and_then(|i| i.normalised),
+        ),
     };
     // A firmware without `video/supportedISOs` (the 6K at fw 8.6) gets the standard Pocket list.
     let mut iso_choices: Vec<i64> = read

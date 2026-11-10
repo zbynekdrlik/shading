@@ -125,7 +125,7 @@ UseDomains=no
 | `video/whiteBalance/description` | `{whiteBalance: {min, max}}` | read (the Kelvin range) | `d004` range |
 | `video/whiteBalance/doAuto` | no body | set (`autoWb: true`) | — |
 | `video/whiteBalanceTint` | `{whiteBalanceTint}` | read + set | `d005` |
-| `lens/iris` | `{apertureStop, normalised, apertureNumber, continuousApertureAutoExposure}` | read + set, **set `apertureStop` only** (the other two answer 204 and do not move the iris, live on cam5) | `f-number` / `0x5007` |
+| `lens/iris` | `{apertureStop, normalised, apertureNumber, continuousApertureAutoExposure}` | read + set, **set `apertureStop` only** (the other two answer 204 and do not move the iris, live on cam5); `normalised` is read as `params.irisRangePos` (v0.2.3) | `f-number` / `0x5007` |
 | `lens/iris/description` | `{controllable, apertureStop: {min, max}}` | read (the aperture grid's ends) | `f-number` choices |
 | `lens/focus` | `{normalised}` | read only | `d003` |
 | `system/format` | `{codec, frameRate, offSpeedFrameRate, min/maxOffSpeedFrameRate, recordResolution, …}` | read; set `{frameRate}` | `d006` / `d007` |
@@ -138,6 +138,18 @@ UseDomains=no
       present, so it prints nothing until it reads `focusNorm` instead.
   - `params.apertureAv` is always the camera's TRUE f-stop (`lens/iris apertureStop`). The
     display shows it as it is.
+  - **New field `params.irisRangePos` (v0.2.3, additive, read only).** It is `lens/iris
+    normalised`: the iris's place in the lens's own range, a number from 0 to 1.
+    - `0` = the iris is wide open (the lens's smallest f-number at the current zoom). `1` = the
+      iris is fully closed. Values between are fractional. A camera value outside 0..1 is clamped.
+    - `null` when the camera does not give `normalised`.
+    - It is the lens's ends even when the firmware has no `lens/iris/description` (Pocket 6K at
+      fw 8.6). Live on cam3 at 24 mm, wide open: `{"apertureStop":4.0,"normalised":0.0}`. A
+      variable-aperture zoom moves its wide end with the focal length, and `normalised` follows it.
+    - The relay never writes it: a `normalised` write answers 204 and does not move the iris.
+    - An older relay does not send it. A reader that does not know it ignores it.
+    - The panel disables `-` at `0` and `+` at `1`, and a slider release past a reached end sends
+      nothing.
   - `caps.fNumberChoices` is NOT the lens's steps. It is only the positions the absolute aperture
     slider writes: the nominal 1/3-stop marks between the ends of `lens/iris/description` (the
     first and last entries are those ends). The camera snaps such a write to its nearest own step.
@@ -163,8 +175,10 @@ UseDomains=no
       this link.
     - A slider position past the real end of the lens may be refused with 400. The relay reports
       that as `notApplied: apertureNorm`, not as an error.
-    - For `apertureStep`, a press the iris does not follow means the end of the lens (quiet), and
-      a probe the camera refuses with 400 is the end of the lens too. With a KNOWN range, a 400 is
+    - For `apertureStep`, the iris's `irisRangePos` (`lens/iris normalised`) gives the ends first:
+      a press toward the end the iris is at is `notApplied` at once, with no probe (v0.2.3). A
+      camera without `normalised` still probes: a press the iris does not follow means the end of
+      the lens (quiet), and a probe the camera refuses with 400 is the end of the lens too. With a KNOWN range, a 400 is
       a refused write (502), as before.
 
   What two bodies serve, read live:
@@ -206,8 +220,12 @@ UseDomains=no
       `lens/iris/description` min or max.
     - The increment is smaller than half of two adjacent native gaps, so the first landing is
       always the next native step: none is skipped, on a 1/3- or 1/6-stop lens, at any zoom.
-    - At the end of the lens (the target reached the description min/max) a press answers with
-      the same f-stop. That is not an error, and it is not `notApplied`.
+    - **At a reported end (v0.2.3):** when `lens/iris normalised` says the iris is already at the
+      end the press heads for (`-1` at `0`, `+1` at `1`, within 0.001), the relay writes NOTHING
+      and answers at once with `notApplied: ["apertureStep"]` and the same f-stop.
+    - At the end of the lens found by probing (the target reached the description min/max, on a
+      camera that gives no `normalised`) a press answers with the same f-stop. That is not an
+      error, and it is not `notApplied`.
     - An iris that follows none of up to 6 probes with range left, or a lens whose description
       says `controllable: false`, is reported as `notApplied: ["apertureStep"]`. A
       `controllable: false` lens is not probed at all.
