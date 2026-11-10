@@ -101,13 +101,14 @@ the camera's USB-C CDC-NCM link (since v0.2.0, shading#6; before that over USB-P
   against `relay/tests/support/` — an axum fake camera on its own runtime thread, the ONLY
   replaced part.
 - **Aperture +/- = `apertureStep`, the relay walks the LENS (shading#6 v0.2.1, live cam5).** Lens
-  steps depend on lens AND zoom: cam5 at 108 mm lands on 4.4 4.8 5.2 5.6 6.2 6.7 7.3 8.0 while
+  steps depend on lens AND zoom: cam5 at 108 mm lands on 4.4 5.2 5.6 6.2 6.7 7.3 8.0 (re-read
+  10.11.2026: no 4.8 at 108 mm, writes of 4.6/4.8 stay 4.4; the earlier 4.8 was another zoom) while
   `lens/iris/description` says min 4.1; the PP 6K has 1/6 steps (2.8 2.9 3.1 3.2 3.3 3.5). A
   nominal grid (v0.2.0) skipped 4.8 and 6.7 (camera-box#1452 again). So:
   - the panel's +/- send `{apertureStep: ±1}` and hold the shown f-stop as pending until a push
     differs (`reconcileStepHold`); the display is always the true `apertureStop`;
   - `CameraSession::step_iris`: GET the TRUE f-stop, PUT a target `APERTURE_PROBE_STOPS` (1/16
-    stop) away (`mapping::aperture_probe_target`), wait `IRIS_PROBE_WAIT_MS` (1.2 s) for the iris,
+    stop) away (`mapping::aperture_probe_target`), wait `IRIS_PROBE_WAIT_MS` (0.5 s since 0.2.5) for the iris,
     widen by 1/16 until it lands elsewhere or the target hits the description range;
   - never-skip rule: the camera snaps to the NEAREST step, so an increment below half of two
     adjacent native gaps can never pass the next step. Smallest live gap ~0.09 stop -> 1/16 (0.0625)
@@ -116,13 +117,32 @@ the camera's USB-C CDC-NCM link (since v0.2.0, shading#6; before that over USB-P
     `support::zoom_third_stop_lens` / `sixth_stop_lens`);
   - `fNumberChoices` is ONLY the absolute slider's positions (nominal 1/3 marks between the
     description ends); never present it as the lens's steps;
-  - cost: one 1.2 s wait per probe the iris does not follow (cam5 4.4 -> 4.8 ~3.5 s, its 4.4 end
-    against min 4.1 ~5 s). If live shows the iris answering faster, shorten `IRIS_PROBE_WAIT_MS`,
-    never the increment (a probe written while the iris is still travelling can skip);
+  - cost: one `IRIS_PROBE_WAIT_MS` wait per probe the iris does not follow. 0.2.1-0.2.4 waited
+    1.2 s (cam5 at 108 mm 4.2-5.9 s per press, live 10.11.2026). Measured then: a GET after a
+    PUT lens/iris reads the moved `apertureStop` within <= 340 ms (4K) / ~220 ms (6K), so 0.2.5
+    waits 500 ms. Shorten the wait, never the increment (a probe written while the iris is still
+    travelling can skip; a probe that lands is waited out until two reads agree);
   - an iris that follows none of `MAX_DEAD_APERTURE_PROBES` (6) probes with range left, or
-    `controllable: false`, reports `notApplied: ["apertureStep"]`; reaching the range end is quiet;
+    `controllable: false`, reports `notApplied: ["apertureStep"]`. Reaching the end (the range end,
+    6 dead probes or a 400 without a range) reports it too since 0.2.5 (it was quiet);
+  - **learned ladder + ends per focal length (0.2.5, `transport/lens_memory.rs`).** Each press
+    also GETs `lens/zoom` (`rest::ZOOM`, `focalLength` rounded to mm = the `FocalKey`; 404 = key
+    `None`, any other failure = memory unused that press). A probe walk's landing proves
+    (start, landing) ADJACENT (never-skip); a later press whose next stop is a proven neighbour
+    with NO known stop between them writes it directly (`step_to_known`: one PUT; no move = forget
+    the pair and walk; a landing elsewhere = forget that focal length). A press that reaches the
+    end records it (`note_end`); a press toward a learned end is refused with zero PUTs, and
+    `read_now` (`apply_lens_memory`) reports `irisRangePos` 0 / 1 on a learned end, because the 4K
+    measures `normalised` against the description (cam5 108 mm: 0.0387 at its widest 4.4, never
+    0). A stop read past a learned end drops it; a stop read inside a proven pair breaks the pair.
+    Cleared in `forget_link`. Known limit: a camera without `lens/zoom` shares one key, so a zoom
+    change it cannot see is caught only by a read inside a pair or a direct write landing
+    elsewhere. Tests: `relay/tests/lens_memory_6.rs` (`support::pocket_4k_zoom_108mm`:
+    ladder 4.4 5.2 5.6 6.2 6.7 7.3 8.0 .., `IrisPosition::FromRange`, `focal_length`, 300 ms
+    latency) + the unit tests in `lens_memory.rs`;
   - an absolute `apertureNorm` earlier in the same round is waited out before a step reads its start;
-  - `submit` takes `&Arc<Self>`: a caller is answered after its OWN press, or past
+  - `submit` takes `&Arc<Self>`: a caller is answered after its OWN press (worst ~4.5 s since
+    0.2.5), or past
     `DRAIN_ANSWER_BUDGET_MS` (6 s); the rest of the FIFO continues on a background drain
     (`std::thread::Builder`, the gate stays shut; a spawn failure aborts the queue, never wedges it),
     so queued presses never push the service's 10 s write client over. Step refusals go into the
