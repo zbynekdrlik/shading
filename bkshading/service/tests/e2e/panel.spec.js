@@ -416,6 +416,15 @@ test("the aperture stepper and slider stop at the lens's ends (irisRangePos), co
   await expect.poll(() => puts.length).toBe(1);
   expect(puts[0].apertureNorm).toBeCloseTo(1, 6);
 
+  // The camera confirms that write (f/8.0), which ends its pending hold (issue 1350: a held write
+  // keeps the stepper base on its target until a push confirms it).
+  await page.evaluate(
+    (agg) => window.render(agg),
+    makeFixture({ apertureAv: 6.0, apertureNorm: 1.0, irisRangePos: 0.6 })
+  );
+  await expect(fnum).toHaveText("f/8.0");
+  await expect(fnum).not.toHaveClass(/pending/);
+
   // Mid-range: both directions enabled.
   await page.evaluate(
     (agg) => window.render(agg),
