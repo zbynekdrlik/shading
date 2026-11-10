@@ -177,8 +177,6 @@ test("a not-applied write flags the aperture value + stepper, console clean", as
             fps100: 6000,
             sensorFps100: 6000,
             focusDistance: null,
-            // shading#6 (0.2.3): the iris's place in the lens's range (0 wide open, 1 closed).
-            irisRangePos: opts.irisRangePos != null ? opts.irisRangePos : null,
           },
           caps: {
             isoChoices: [100, 200, 400, 800],
@@ -243,6 +241,8 @@ function makeFixture(opts = {}) {
             fps100: 6000,
             sensorFps100: 6000,
             focusDistance: null,
+            // shading#6 (0.2.3): the iris's place in the lens's range (0 wide open, 1 closed).
+            irisRangePos: opts.irisRangePos != null ? opts.irisRangePos : null,
           },
           caps: {
             isoChoices: [100, 200, 400, 800],
