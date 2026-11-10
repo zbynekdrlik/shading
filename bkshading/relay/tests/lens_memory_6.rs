@@ -135,7 +135,10 @@ fn a_walk_learns_the_whole_ladder_and_never_skips_the_108mm_steps_6() {
     // seen next to 6.7 before, so that last press probes.
     let puts = iris_puts(&cam);
     assert_eq!(&puts[..at], &stops[1..=at], "{puts:?}");
-    assert!(puts.len() > at + 1, "the unknown 6.7 -> 7.3 probed: {puts:?}");
+    assert!(
+        puts.len() > at + 1,
+        "the unknown 6.7 -> 7.3 probed: {puts:?}"
+    );
 }
 
 #[test]
@@ -218,7 +221,11 @@ fn another_focal_length_does_not_reuse_the_ladder_or_the_end_6() {
     // Each press reads its start (f-stop, position, focal length) from the camera.
     cam.clear_seen();
     let st = press(&s, 1);
-    assert_eq!(fstop(&st), 4.8, "no direct write of the 108 mm neighbour 5.2");
+    assert_eq!(
+        fstop(&st),
+        4.8,
+        "no direct write of the 108 mm neighbour 5.2"
+    );
     assert!(st.not_applied.is_empty(), "{:?}", st.not_applied);
     assert_ne!(iris_puts(&cam), vec![5.2]);
     assert_eq!(fstop(&press(&s, -1)), 4.4);
