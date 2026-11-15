@@ -708,7 +708,12 @@ test("a live preview frame is shown, a stopped feed drops to the placeholder and
 // Owner 4.10.2026: "v shadingu maju byt online camery na zaciatku podla cisiel, a potom ofline".
 // Cameras with a live camera come first in config (= number) order, then every other block, and the
 // order follows a camera going online/offline on a later push.
-test("online cameras come first in number order, then the offline ones, console clean", async ({ page }) => {
+// shading#13 (owner ruling 15.11.2026, "1234567"): the blocks stand in camera NUMBER order, cam1
+// left, whatever the config order (strih-pp lists the visiting cams 2, 3, 5 last), and a block
+// never moves when its camera goes offline or comes back.
+test("cameras stand in number order whatever the config order, and never move on online/offline, console clean (shading#13)", async ({
+  page,
+}) => {
   const problems = [];
   page.on("console", (msg) => {
     const t = msg.type();
@@ -723,43 +728,56 @@ test("online cameras come first in number order, then the offline ones, console 
   const cam = (id, reachable, online) => ({
     id,
     label: id,
-    transport: id.startsWith("handheld") ? "sbc-relay" : "cambox-relay",
+    transport: "cambox-relay",
     hasPreview: false,
     reachable,
     grabFps: null,
     grabFpsDesync: false,
     fpsSync: "unknown",
+    control: !reachable ? "relay-unreachable" : online ? "ok" : "rest-off",
     state: reachable
       ? {
           online,
-          camera: online ? "USB PTP Class Camera" : null,
+          camera: online ? "Blackmagic Pocket Cinema Camera 4K" : null,
           params: { apertureAv: null, apertureNorm: null, iso: null, kelvin: null, tint: null,
             shutter: null, fps100: null, sensorFps100: null, focusDistance: null },
           caps: null,
           fpsSupported: false,
           captureFps: null,
-          version: "1.7.0-dev.e2e",
+          version: "0.2.6",
           notApplied: [],
+          offlineReason: online ? null : "rest-off",
         }
       : null,
   });
   const order = () => page.locator("#camera-grid > [data-id]").evaluateAll((els) => els.map((e) => e.dataset.id));
+  const show = (cams) => page.evaluate((agg) => window.render(agg), { version: "0.2.6-e2e", cameras: cams });
 
-  // cam1 + cam2 + handheld-1 live, cam3 relay up without a camera, cam4 relay down
-  await page.evaluate((agg) => window.render(agg), {
-    version: "1.7.0-dev.e2e",
-    cameras: [cam("cam1", true, true), cam("cam2", true, true), cam("cam3", true, false),
-      cam("cam4", false, false), cam("handheld-1", true, true)],
-  });
-  expect(await order()).toEqual(["cam1", "cam2", "handheld-1", "cam3", "cam4"]);
+  // strih-pp's config order: its own cams 1, 4, 6, 7, then the visiting cam2 (and cam3 relay down).
+  await show([cam("cam1", true, true), cam("cam4", true, true), cam("cam6", true, true),
+    cam("cam7", true, true), cam("cam2", true, true)]);
+  expect(await order()).toEqual(["cam1", "cam2", "cam4", "cam6", "cam7"]);
 
-  // cam1 drops its camera, cam4 comes online: the blocks follow on the next push
-  await page.evaluate((agg) => window.render(agg), {
-    version: "1.7.0-dev.e2e",
-    cameras: [cam("cam1", true, false), cam("cam2", true, true), cam("cam3", true, false),
-      cam("cam4", true, true), cam("handheld-1", true, true)],
-  });
-  expect(await order()).toEqual(["cam2", "cam4", "handheld-1", "cam1", "cam3"]);
+  // cam1 goes offline (REST off), cam6's relay drops: no block moves; the offline ones grey out
+  // in place with their warning.
+  await show([cam("cam1", true, false), cam("cam4", true, true), cam("cam6", false, false),
+    cam("cam7", true, true), cam("cam2", true, true)]);
+  expect(await order()).toEqual(["cam1", "cam2", "cam4", "cam6", "cam7"]);
+  const block = (id) => page.locator(`#camera-grid > [data-id="${id}"]`);
+  await expect(block("cam1")).toHaveClass(/disabled/);
+  await expect(block("cam1").locator('[data-role="control-warn"]')).toBeVisible();
+  await expect(block("cam6").locator('[data-role="control-warn"]')).toContainText("Relay nedostupný");
+
+  // Both come back: still the same order.
+  await show([cam("cam1", true, true), cam("cam4", true, true), cam("cam6", true, true),
+    cam("cam7", true, true), cam("cam2", true, true)]);
+  expect(await order()).toEqual(["cam1", "cam2", "cam4", "cam6", "cam7"]);
+  await expect(block("cam1")).not.toHaveClass(/disabled/);
+
+  // cam10 sorts after cam7 (a number, not text); an id without a number goes last.
+  await show([cam("cam10", true, true), cam("spare", true, true), cam("cam7", true, true),
+    cam("cam1", true, true)]);
+  expect(await order()).toEqual(["cam1", "cam7", "cam10", "spare"]);
 
   expect(problems, `console problems: ${problems.join(" | ")}`).toEqual([]);
 });
