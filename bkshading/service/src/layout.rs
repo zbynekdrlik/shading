@@ -48,7 +48,14 @@ pub fn atomic_write(path: &Path, data: &str) -> std::io::Result<()> {
     file.write_all(data.as_bytes())?;
     file.sync_all()?;
     drop(file);
-    std::fs::rename(&tmp, path)
+    std::fs::rename(&tmp, path)?;
+    // The rename itself is made durable by syncing the directory (Unix; Windows has no directory
+    // handle to sync, NTFS journals the rename).
+    #[cfg(unix)]
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::File::open(dir)?.sync_all()?;
+    }
+    Ok(())
 }
 
 /// What [`load`] found.
@@ -66,8 +73,8 @@ pub enum Loaded {
 /// writes a fresh file. A file that cannot be read at all is [`Loaded::Unreadable`]: the operator's
 /// layout may still be in it, so it is never overwritten.
 pub fn load(path: &Path) -> Loaded {
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             tracing::info!(file = %path.display(), "layout: no file yet, number order (rev 0)");
             return Loaded::Doc(LayoutDoc::default());
@@ -82,7 +89,8 @@ pub fn load(path: &Path) -> Loaded {
             return Loaded::Unreadable;
         }
     };
-    match serde_json::from_str::<LayoutDoc>(&text) {
+    // Bytes that are not UTF-8 are a broken document like any other (moved aside below).
+    match serde_json::from_slice::<LayoutDoc>(&bytes) {
         Ok(doc) => {
             tracing::info!(
                 file = %path.display(),

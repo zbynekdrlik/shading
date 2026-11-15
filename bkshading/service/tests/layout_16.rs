@@ -152,6 +152,20 @@ fn a_failed_write_keeps_the_stored_layout() {
 }
 
 #[test]
+fn a_file_that_is_not_utf8_is_moved_aside_too() {
+    let dir = scratch_dir("binary");
+    let file = dir.join("layout.json");
+    std::fs::write(&file, [0xff, 0xfe, 0x00]).unwrap();
+    assert_eq!(load(&file), Loaded::Doc(LayoutDoc::default()));
+    assert!(dir.join("layout.json.bad").exists());
+    // The next save writes a fresh file.
+    let store = LayoutStore::open(Some(file.clone()));
+    assert_eq!(store.path(), Some(file.as_path()));
+    store.save(&put(0, &["cam1"], &[]), "a").unwrap();
+    assert!(matches!(load(&file), Loaded::Doc(d) if d.rev == 1));
+}
+
+#[test]
 fn an_unreadable_file_is_never_overwritten() {
     let dir = scratch_dir("unreadable");
     // A directory where the file should be: it exists, but it cannot be read as a file.

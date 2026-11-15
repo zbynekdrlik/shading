@@ -333,12 +333,22 @@ fn linear_range(row: Row, caps: Option<&CameraCaps>) -> (i64, i64) {
 #[derive(Debug, Clone, Default)]
 pub struct Steppers {
     holds: Holds,
+    /// The camera's view last drawn, and how many different views this block has seen: a tap's
+    /// hold is confirmed or refused only by a view of THIS camera newer than the tap (a push about
+    /// another camera, or the clock, changes nothing here).
+    last: Option<CameraView>,
+    seq: u64,
 }
 
 impl Steppers {
-    /// The six steppers for `cam` of push number `seq` at `now`, reconciling the held taps with it
-    /// (only a push newer than a tap confirms or refuses it; the clock only times it out).
-    pub fn view(&mut self, cam: &CameraView, seq: u64, now: f64) -> Vec<RowView> {
+    /// The six steppers for `cam` at `now`, reconciling the held taps with it (only a view of the
+    /// camera that changed since a tap confirms or refuses it; the clock only times it out).
+    pub fn view(&mut self, cam: &CameraView, now: f64) -> Vec<RowView> {
+        if self.last.as_ref() != Some(cam) {
+            self.seq += 1;
+            self.last = Some(cam.clone());
+        }
+        let seq = self.seq;
         let live = Live::of(cam);
         Row::ALL
             .iter()
@@ -388,21 +398,12 @@ impl Steppers {
         }
     }
 
-    /// A tap on `row`'s − (`dir` −1) or + (`dir` 1) of camera `cam` (push number `seq`): the
-    /// write, or none when the button would be disabled. The tap is held (shown at once, pending)
-    /// until a newer push confirms or refuses it.
-    pub fn press(
-        &mut self,
-        row: Row,
-        dir: i32,
-        cam: &CameraView,
-        seq: u64,
-        now: f64,
-    ) -> Option<Press> {
-        let current = self
-            .view(cam, seq, now)
-            .into_iter()
-            .find(|v| v.row == row)?;
+    /// A tap on `row`'s − (`dir` −1) or + (`dir` 1) of camera `cam`: the write, or none when the
+    /// button would be disabled. The tap is held (shown at once, pending) until a newer view of
+    /// the camera confirms or refuses it.
+    pub fn press(&mut self, row: Row, dir: i32, cam: &CameraView, now: f64) -> Option<Press> {
+        let current = self.view(cam, now).into_iter().find(|v| v.row == row)?;
+        let seq = self.seq;
         let gate = if dir < 0 { &current.dec } else { &current.inc };
         if !gate.enabled {
             return None;

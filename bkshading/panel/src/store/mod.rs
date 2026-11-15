@@ -20,9 +20,6 @@ pub struct Store {
     pub cameras: RwSignal<Vec<CameraView>>,
     /// Whether any aggregate arrived yet (the empty-config note waits for one).
     pub heard: RwSignal<bool>,
-    /// The number of the last state push (every push counts, a repeat too): a tap's hold is
-    /// confirmed or refused only by a push newer than the tap.
-    pub push_seq: RwSignal<u64>,
     /// The venue's stored layout (rev 0 = number order until the service says otherwise).
     pub layout: RwSignal<LayoutDoc>,
     /// Whether the service's layout arrived yet: ARRANGE starts only on it (a mode started on the
@@ -47,7 +44,6 @@ impl Store {
         Store {
             cameras: RwSignal::new(Vec::new()),
             heard: RwSignal::new(false),
-            push_seq: RwSignal::new(0),
             layout: RwSignal::new(LayoutDoc::default()),
             layout_heard: RwSignal::new(false),
             ws_open: RwSignal::new(false),
@@ -118,7 +114,6 @@ impl Store {
         if self.cameras.with_untracked(|c| *c != agg.cameras) {
             self.cameras.set(agg.cameras);
         }
-        self.push_seq.update(|n| *n += 1);
         if !self.heard.get_untracked() {
             self.heard.set(true);
         }

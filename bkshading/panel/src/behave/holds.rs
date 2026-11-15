@@ -8,9 +8,10 @@
 //!   unknown until it answers, so the target is the f-stop shown at the tap and the hold ends when
 //!   a push shows a DIFFERENT one.
 //!
-//! Only a push NEWER than the tap can confirm or refuse it (`seq`, the push counter): the push the
-//! tap was made against may still carry an older refusal of the same key, and the clock that
-//! redraws the block between pushes may only time a hold out (the JS panel reconciled on pushes).
+//! Only a view of the camera NEWER than the tap can confirm or refuse it (`seq`, the block's count
+//! of the camera's different views): the view the tap was made against may still carry an older
+//! refusal of the same key, and a push about another camera or the clock that redraws the block
+//! may only time a hold out (the JS panel reconciled on pushes).
 
 use std::collections::HashMap;
 

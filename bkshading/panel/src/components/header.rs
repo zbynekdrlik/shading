@@ -113,6 +113,7 @@ pub fn Header() -> impl IntoView {
                 type="button"
                 class="arrange-key"
                 class:selected=arranging
+                disabled=move || !store.layout_heard.get()
                 data-role="arrange-key"
                 aria-pressed=move || arranging().to_string()
                 title="Usporiadať kamery"
