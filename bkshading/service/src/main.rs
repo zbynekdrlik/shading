@@ -48,10 +48,16 @@ struct Args {
     #[arg(long)]
     bind: Option<String>,
 
+    /// The panel layout file (shading#16: block order + hidden blocks, saved from the panel's
+    /// ARRANGE mode). Default: `bkshading-layout.json` next to `--config`; without either the
+    /// layout lives in memory only.
+    #[arg(long, value_name = "FILE")]
+    layout_file: Option<PathBuf>,
+
     /// Load this config file, print `ok: <N> cameras` and exit 0, or exit non-zero naming the
     /// file and the reason. Starts nothing and binds no port: camera-box runs it from the pinned
     /// release on its generated strih seed (shading#1, docs/CONTRACT.md).
-    #[arg(long, value_name = "FILE", conflicts_with_all = ["config", "bind"])]
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["config", "bind", "layout_file"])]
     check_config: Option<PathBuf>,
 }
 
@@ -172,6 +178,11 @@ async fn main() -> Result<()> {
         });
     }
 
+    // shading#16: the venue's panel layout, next to the config unless --layout-file says otherwise.
+    let layout_path =
+        bkshading::layout::layout_path(args.layout_file.as_deref(), args.config.as_deref());
+    let layout = bkshading::layout::LayoutStore::open(layout_path);
+
     let state = AppState {
         agg,
         config,
@@ -179,6 +190,7 @@ async fn main() -> Result<()> {
         live: live_rx,
         live_tx,
         registry,
+        layout,
     };
 
     tracing::info!(
@@ -186,6 +198,11 @@ async fn main() -> Result<()> {
         %addr,
         cameras = state.config.cameras.len(),
         preview_workers,
+        layout_file = %state
+            .layout
+            .path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(memory)".into()),
         "bkshading service starting"
     );
     let listener = tokio::net::TcpListener::bind(addr).await?;

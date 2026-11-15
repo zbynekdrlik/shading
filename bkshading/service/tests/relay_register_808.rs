@@ -81,6 +81,7 @@ async fn service(
         live: live_rx,
         live_tx: Arc::new(live_tx),
         registry,
+        layout: bkshading::layout::LayoutStore::with_doc(None, Default::default()),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
