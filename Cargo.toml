@@ -1,13 +1,14 @@
-# shading workspace: the bkshading shading-control service, the camera relay and their
-# shared protocol. Imported from camera-box (shading#1); camera-box now pins a release.
+# shading workspace: the bkshading shading-control service, the camera relay, their shared
+# protocol and the operator panel (Leptos CSR, built to WASM by Trunk, shading#16). Imported
+# from camera-box (shading#1); camera-box now pins a release.
 [workspace]
-members = ["bkshading/proto", "bkshading/relay", "bkshading/service"]
+members = ["bkshading/proto", "bkshading/relay", "bkshading/service", "bkshading/panel"]
 resolver = "2"
 
-# Single source of truth for the version of all three crates (CARGO_PKG_VERSION).
+# Single source of truth for the version of all four crates (CARGO_PKG_VERSION).
 # `bkshading-relay --version` prints it as its last word: a pinned contract (docs/CONTRACT.md).
 [workspace.package]
-version = "0.2.6"
+version = "0.2.7"
 
 [profile.release]
 lto = true

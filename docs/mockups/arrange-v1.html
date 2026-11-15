@@ -1,0 +1,654 @@
+<!doctype html>
+<!-- shading #16: mockup v1 of the rebuilt panel's ARRANGE mode, for the owner's approval; not part
+     of the app. The look follows fohmixer's approved mockups and crates/fohmixer-ui (its tokens,
+     the calm 30 px ⇄ key with the yellow underline when lit, the edit cover with the ⠿ grip,
+     the dashed place of an empty/hidden cell). What it shows:
+     (a) the normal panel, camera blocks in number order (#13, the default of ARRANGE);
+     (b) ARRANGE: a tap on ⇄ puts every block under a cover with a ⠿ handle; drag a block onto
+         another one to SWAP them, or onto a block's left/right edge to MOVE it there; the eye
+         hides or shows a block; every control is inert; a second tap on ⇄ saves ONE layout for
+         the whole venue (every device gets it at once);
+     (c) a hidden camera: gone from the normal panel (the grid closes up), a chip in the header
+         says how many are hidden; in ARRANGE it keeps its place as a dashed block with a crossed
+         eye, a tap on the eye brings it back;
+     (d) the #14 warning badge on a camera that cannot be controlled, with its Slovak popup.
+     Plain JS, pointer events (mouse and touch). Invented values, no site data. -->
+<html lang="sk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Shading ARRANGE v1</title>
+<link rel="icon" href="data:,">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@600;700&family=Barlow+Condensed:wght@700&family=JetBrains+Mono:wght@500;600&display=swap">
+<style>
+/* --- fohmixer's tokens (crates/fohmixer-ui/style.css) --- */
+:root {
+    color-scheme: dark;
+    --bg: #07070c;
+    --page: #0b0b12;
+    --bar: #11111b;
+    --section: #151522;
+    --panel: #1a1a28;
+    --panel-hi: #20203a;
+    --track: #0a0a14;
+    --line: #2a2a44;
+    --line-soft: rgba(255, 255, 255, 0.06);
+    --accent: #4ecdc4;
+    --accent-dim: rgba(78, 205, 196, 0.28);
+    --solo: #f4d35e;
+    --text: #eaeaf0;
+    --muted: #9a9ab4;
+    --faint: #5c5c78;
+    --ok: #36d67a;
+    --bad: #ff4757;
+    --warn: #f5a623;
+    --display: "Barlow Condensed", "Arial Narrow", sans-serif;
+    --ui: "Barlow", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --mono: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--ui); }
+button { font: inherit; color: inherit; }
+
+/* --- the mockup's own chrome (not part of the app) --- */
+.mock {
+    padding: 12px 16px;
+    border-bottom: 1px dashed var(--line);
+    background: #05050a;
+    font-size: 13px;
+    color: var(--muted);
+}
+.mock h1 { margin: 0 0 6px; font: 700 18px/1.2 var(--display); letter-spacing: 0.04em; color: var(--text); }
+.mock p { margin: 4px 0; max-width: 980px; line-height: 1.45; }
+.mock .scen { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.mock .scen button {
+    padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px;
+    background: var(--section); font: 600 12px/1 var(--ui); cursor: pointer;
+}
+.mock .scen button:hover { border-color: var(--accent); }
+.mock .scen button[aria-pressed="true"] { border-color: var(--solo); color: var(--solo); }
+.mock b { color: var(--text); }
+
+/* --- the app --- */
+.app { background: var(--page); min-height: 100vh; }
+.head {
+    position: sticky; top: 0; z-index: 20;
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 16px; background: var(--bar); border-bottom: 1px solid var(--line);
+}
+.title { font: 700 20px/1 var(--display); letter-spacing: 0.06em; }
+.ver { font: 500 12px/1 var(--mono); color: var(--muted); }
+.conn { font: 600 12px/1 var(--ui); color: var(--ok); }
+.conn.bad { color: var(--bad); }
+.spacer { flex: 1; }
+.hidden-chip {
+    display: none; padding: 5px 9px; border-radius: 999px; border: 1px dashed var(--faint);
+    background: transparent; color: var(--muted); font: 600 12px/1 var(--ui); cursor: pointer;
+}
+.hidden-chip.on { display: inline-block; }
+.note { font: 600 11px/1.2 var(--ui); color: var(--muted); letter-spacing: 0.03em; min-width: 0; text-align: right; }
+.note.saved { color: var(--ok); }
+/* The ⇄ key (fohmixer #212: a small calm outlined key, lit with the yellow underline). */
+.arrange-key {
+    display: grid; place-items: center; flex: 0 0 34px; width: 34px; height: 30px; padding: 0;
+    border: 1px solid var(--line); border-radius: 8px; background: transparent;
+    color: var(--muted); font: 600 16px/1 var(--ui); cursor: pointer;
+}
+.arrange-key.selected { border-color: transparent; background: var(--panel-hi); color: var(--text); box-shadow: inset 0 -2px 0 var(--solo); }
+.reset-num {
+    display: none; padding: 5px 9px; border: 1px solid var(--line); border-radius: 8px;
+    background: transparent; color: var(--muted); font: 600 12px/1 var(--ui); cursor: pointer;
+}
+.app[data-arrange="true"] .reset-num { display: inline-block; }
+.app[data-arrange="true"] .hidden-chip { display: none; }
+
+.banner {
+    display: none; padding: 12px 16px; background: var(--bad); color: #fff;
+    font: 700 15px/1.3 var(--ui); text-align: center;
+}
+.banner.on { display: block; }
+
+.grid {
+    position: relative;
+    display: grid; gap: 10px; padding: 12px 16px 24px;
+    grid-template-columns: repeat(auto-fill, minmax(236px, 1fr));
+}
+
+/* A camera block. */
+.cam {
+    position: relative; display: flex; flex-direction: column;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden;
+    touch-action: auto;
+}
+.prev { position: relative; aspect-ratio: 16 / 9; background: #000; border-bottom: 1px solid var(--line); }
+.prev .pic { position: absolute; inset: 0; }
+.prev .tag {
+    position: absolute; left: 6px; bottom: 5px; padding: 2px 5px; border-radius: 4px;
+    background: rgba(0,0,0,0.55); font: 500 10px/1 var(--mono); color: var(--muted);
+}
+.prev .none { position: absolute; inset: 0; display: grid; place-items: center; color: var(--faint); font: 600 12px/1 var(--ui); }
+.body { padding: 8px 10px 10px; display: flex; flex-direction: column; gap: 6px; }
+.bhead { display: flex; align-items: baseline; gap: 8px; }
+.num { font: 700 26px/0.9 var(--display); color: var(--text); }
+.lbl { font: 700 13px/1 var(--ui); color: var(--muted); letter-spacing: 0.04em; }
+.on-dot { margin-left: auto; font: 600 11px/1 var(--ui); color: var(--ok); }
+.on-dot.off { color: var(--bad); }
+
+/* #14: the warning badge, outside the dimmed controls, bright and tappable. */
+.warn {
+    display: block; width: 100%; padding: 7px 9px; border: 1px solid var(--bad); border-radius: 8px;
+    background: rgba(255, 71, 87, 0.14); color: var(--text); font: 700 12.5px/1.25 var(--ui);
+    text-align: left; cursor: pointer;
+}
+.cam[data-control="off"] .ctrls { opacity: 0.4; pointer-events: none; }
+
+.ctrls { display: flex; flex-direction: column; gap: 5px; }
+.row {
+    display: grid; grid-template-columns: 58px 36px 1fr 36px; align-items: center; gap: 5px;
+    padding: 4px 5px; border-radius: 8px; background: var(--section);
+}
+.row .k { font: 600 11px/1.1 var(--ui); color: var(--muted); letter-spacing: 0.03em; }
+.step {
+    height: 34px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel);
+    font: 700 18px/1 var(--ui); cursor: pointer; touch-action: manipulation;
+}
+.step:hover:not(:disabled) { border-color: var(--accent); }
+.step:disabled { opacity: 0.3; cursor: not-allowed; }
+.val { display: flex; flex-direction: column; gap: 4px; align-items: center; min-width: 0; }
+.val .v { font: 600 15px/1 var(--mono); }
+.val .v.pending { color: var(--accent); font-style: italic; }
+.val .bar { position: relative; width: 100%; height: 4px; border-radius: 2px; background: var(--track); }
+.val .bar i { position: absolute; top: -2px; width: 8px; height: 8px; margin-left: -4px; border-radius: 50%; background: var(--accent); }
+.val .end { white-space: nowrap; font: 600 9px/1 var(--ui); color: var(--warn); letter-spacing: 0.04em; }
+.autowb {
+    justify-self: end; padding: 6px 9px; border: 1px solid var(--line); border-radius: 7px;
+    background: var(--panel); font: 600 11px/1 var(--ui); cursor: pointer;
+}
+
+/* --- ARRANGE (fohmixer sectors.css: the cover owns every touch, nothing under it takes one) --- */
+.cover {
+    position: absolute; inset: 0; z-index: 5; display: none;
+    border-radius: 10px; box-shadow: inset 0 0 0 1.5px rgba(154, 154, 180, 0.55);
+    cursor: grab; touch-action: none; -webkit-user-select: none; user-select: none;
+}
+.app[data-arrange="true"] { -webkit-user-select: none; user-select: none; }
+.app[data-arrange="true"] .cover { display: block; }
+.app[data-arrange="true"] .cam > :not(.cover) { opacity: 0.45; }
+.app[data-arrange="true"] .cam > :not(.cover),
+.app[data-arrange="true"] .cam > :not(.cover) * { pointer-events: none !important; }
+.grip {
+    position: absolute; top: 50%; left: 50%; width: 52px; height: 62px; margin: -31px 0 0 -26px;
+    display: grid; place-items: center; align-content: center;
+    border-radius: 10px; background: #1d1d2c; box-shadow: inset 0 0 0 1px var(--line);
+    color: var(--muted); font: 700 24px/26px var(--ui);
+}
+.grip small { display: block; margin-top: -2px; font: 700 8px/10px var(--ui); letter-spacing: 0.1em; }
+.cover .cnum {
+    position: absolute; left: 10px; top: 8px; font: 700 34px/1 var(--display); color: var(--text);
+    text-shadow: 0 1px 6px #000;
+}
+.eye {
+    position: absolute; top: 7px; right: 7px; width: 40px; height: 36px; padding: 0;
+    display: grid; place-items: center; border-radius: 9px;
+    border: 1px solid var(--line); background: #1d1d2c; cursor: pointer; touch-action: manipulation;
+}
+.eye svg { width: 22px; height: 22px; stroke: var(--text); fill: none; stroke-width: 1.8; stroke-linecap: round; }
+.eye .slash { display: none; }
+.cam.ghost .eye { border-color: var(--warn); }
+.cam.ghost .eye svg { stroke: var(--warn); }
+.cam.ghost .eye .slash { display: inline; }
+/* A hidden camera's place in ARRANGE: a dashed outline, faded further, its name kept. */
+.cam.ghost { border-style: dashed; border-color: var(--faint); background: transparent; }
+.app[data-arrange="true"] .cam.ghost > :not(.cover) { opacity: 0.14; }
+.cam.ghost .cover { box-shadow: none; }
+.cam.ghost .hid-tag {
+    display: block; position: absolute; left: 50%; top: calc(50% + 40px); transform: translateX(-50%);
+    padding: 3px 7px; border-radius: 5px; background: rgba(245,166,35,0.14); color: var(--warn);
+    font: 700 10px/1 var(--ui); letter-spacing: 0.08em; white-space: nowrap;
+}
+.hid-tag { display: none; }
+/* A block carried under the finger, and where it lands. */
+.cam.carried { z-index: 15; box-shadow: 0 0 0 2px var(--solo), 0 12px 30px rgba(0,0,0,0.6); cursor: grabbing; }
+.cam.swap-target { box-shadow: 0 0 0 2px var(--solo); }
+.cam.swap-target .cover::after {
+    content: "VYMENIŤ"; position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%);
+    font: 700 10px/1 var(--ui); letter-spacing: 0.1em; color: var(--solo);
+}
+.drop-line {
+    position: absolute; z-index: 14; width: 4px; margin-left: -2px; border-radius: 2px;
+    background: var(--solo); display: none; pointer-events: none;
+}
+.drop-line.on { display: block; }
+
+/* Another device at the venue (mockup only): it follows the SAVED layout, never the edit. */
+.other {
+    margin: 0 16px 24px; padding: 10px 12px; border: 1px dashed var(--line); border-radius: 10px;
+    font-size: 12px; color: var(--muted);
+}
+.other .chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+.other .chips span {
+    padding: 4px 7px; border-radius: 6px; background: var(--panel); border: 1px solid var(--line);
+    font: 700 12px/1 var(--display); color: var(--text); letter-spacing: 0.04em;
+}
+.other .flash { animation: flash 0.9s ease-out; }
+@keyframes flash { from { background: rgba(54, 214, 122, 0.25); } to { background: transparent; } }
+
+/* #14's popup. */
+dialog.info {
+    max-width: min(30rem, calc(100vw - 32px)); padding: 16px 18px; border: 1px solid var(--line);
+    border-radius: 12px; background: var(--panel); color: var(--text);
+}
+dialog.info::backdrop { background: rgba(0,0,0,0.6); }
+dialog.info h2 { margin: 0 0 6px; font: 700 18px/1.2 var(--ui); color: var(--bad); }
+dialog.info .cam-n { margin: 0 0 10px; color: var(--muted); font-size: 13px; }
+dialog.info .step-t { font-weight: 700; }
+dialog.info form { text-align: right; margin: 0; }
+dialog.info button { padding: 8px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--section); cursor: pointer; }
+
+@media (max-width: 520px) {
+    .grid { grid-template-columns: 1fr; }
+    .note { display: none; }
+}
+</style>
+</head>
+<body>
+
+<section class="mock" aria-label="Mockup">
+    <h1>Shading panel · ARRANGE · návrh v1 (#16)</h1>
+    <p><b>Toto je klikateľný návrh, nie aplikácia.</b> Hodnoty sú vymyslené. Skús: ťukni na <b>⇄</b> hore vpravo,
+        potiahni kameru za <b>⠿</b> na inú kameru (vymenia sa) alebo na jej ľavý/pravý okraj (presunie sa tam),
+        ťukni na <b>oko</b> (skryje/ukáže kameru), a znova <b>⇄</b> = uložiť pre celé miesto.</p>
+    <p>(a) normálny panel v poradí podľa čísel kamier · (b) ARRANGE · (c) skrytá kamera a ako ju vrátiť ·
+        (d) varovanie #14 na kamere 5 (ťukni na červený pruh).</p>
+    <div class="scen">
+        <button type="button" data-scen="normal">(a) Normálny panel</button>
+        <button type="button" data-scen="arrange">(b) ARRANGE</button>
+        <button type="button" data-scen="hidden">(c) Príklad: kamera 2 skrytá</button>
+        <button type="button" data-scen="newcam">Nová kamera cam8 v konfigurácii</button>
+        <button type="button" data-scen="offline" aria-pressed="false">Výpadok spojenia</button>
+        <button type="button" data-scen="reset">Začať odznova</button>
+    </div>
+</section>
+
+<div class="app" id="app" data-arrange="false">
+    <header class="head">
+        <span class="title">SHADING</span>
+        <span class="ver" data-testid="version">v0.2.7</span>
+        <span class="conn" id="conn">● spojené</span>
+        <span class="spacer"></span>
+        <button type="button" class="hidden-chip" id="hiddenChip" title="Skryté kamery vrátiš cez ⇄"></button>
+        <span class="note" id="note"></span>
+        <button type="button" class="reset-num" id="resetNum" title="Vráti poradie podľa čísel kamier a ukáže všetky">↺ podľa čísel</button>
+        <button type="button" class="arrange-key" id="arrangeKey" aria-pressed="false" title="Usporiadať kamery">⇄</button>
+    </header>
+    <div class="banner" id="banner" role="alert"></div>
+    <main class="grid" id="grid"><div class="drop-line" id="dropLine"></div></main>
+    <div class="other">Iné zariadenie na tomto mieste (tablet pri réžii) vidí uložené poradie:
+        <div class="chips" id="otherChips"></div>
+    </div>
+</div>
+
+<dialog class="info" id="info">
+    <h2 id="infoTitle"></h2>
+    <p class="cam-n" id="infoCam"></p>
+    <p id="infoCause"></p>
+    <p class="step-t" id="infoStep"></p>
+    <form method="dialog"><button type="submit">Zavrieť</button></form>
+</dialog>
+
+<script>
+"use strict";
+// Shown values and their choices (invented).
+const F_CHOICES = [1.8, 2, 2.2, 2.5, 2.8, 3.2, 3.5, 4, 4.5, 5, 5.6, 6.3, 7.1, 8, 9, 10, 11, 13, 14, 16, 18, 20, 22];
+const ISO_CHOICES = [100, 125, 160, 200, 250, 320, 400, 500, 640, 800, 1000, 1250, 1600, 2000, 2500, 3200];
+const SHUT_CHOICES = ["1/25", "1/30", "1/48", "1/50", "1/60", "1/96", "1/100", "1/120", "1/200", "1/250"];
+const FPS_CHOICES = [24, 25, 30, 50, 60];
+const WMM = {
+    badge: "⚠ Zapni Web media manager na kamere",
+    title: "Na kamere je vypnutý Web media manager",
+    cause: "Kamera je pripojená a odpovedá, ale ovládanie cez sieť (Web media manager) má vypnuté.",
+    step: "Na kamere otvor Menu → Setup → Web media manager a zapni ho.",
+};
+
+function freshCams() {
+    const hue = [200, 28, 140, 265, 330, 90, 180, 10];
+    const mk = (n, o) => Object.assign({
+        id: "cam" + n, n, label: "Cam " + n, hue: hue[n - 1], online: true, control: "ok", ndi: true,
+        f: 6, iso: 7, kelvin: 5600, tint: 0, shut: 3, fps: 3,
+        // lens ends (the indexes into F_CHOICES the lens can reach)
+        fMin: 0, fMax: F_CHOICES.length - 1,
+    }, o);
+    return [
+        mk(1, { f: 4 }),
+        mk(2, { iso: 9 }),
+        mk(3, { f: 1, fMin: 1, fMax: 18 }),            // at its widest end: − disabled
+        mk(4, { ndi: false }),                           // a camera with no NDI preview
+        mk(5, { control: "off" }),                       // #14 warning
+        mk(6, { f: 22, kelvin: 4300 }),                  // at f/22: + disabled
+        mk(7, { tint: 3 }),
+    ];
+}
+
+let cams, saved, edit, carry = null, noteTimer = 0;
+const app = document.getElementById("app");
+const grid = document.getElementById("grid");
+const dropLine = document.getElementById("dropLine");
+const note = document.getElementById("note");
+const key = document.getElementById("arrangeKey");
+
+function reset() {
+    cams = freshCams();
+    saved = { order: cams.map(c => c.id), hidden: [] };  // #13: number order is the default
+    edit = null;
+    setOffline(false);
+    render();
+    renderOther(false);
+}
+
+const byId = id => cams.find(c => c.id === id);
+const layout = () => edit || saved;
+const same = (a, b) => JSON.stringify(a.order) === JSON.stringify(b.order)
+    && JSON.stringify([...a.hidden].sort()) === JSON.stringify([...b.hidden].sort());
+
+// A camera new to the config lands at its number slot: after the nearest lower-numbered camera in
+// the stored order (first, when there is none). The stored order of everyone else is kept.
+function withNewCameras(order) {
+    const out = order.filter(id => byId(id));
+    for (const c of [...cams].sort((a, b) => a.n - b.n)) {
+        if (out.includes(c.id)) continue;
+        let at = 0;
+        out.forEach((id, i) => { if (byId(id).n < c.n) at = Math.max(at, i + 1); });
+        out.splice(at, 0, c.id);
+    }
+    return out;
+}
+
+function svgEye() {
+    return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12z"/><circle cx="12" cy="12" r="3"/><path class="slash" d="M4 20L20 4"/></svg>';
+}
+
+function row(k, val, sub, decOk, incOk, dec, inc, endNote, pend) {
+    const r = document.createElement("div");
+    r.className = "row";
+    r.innerHTML = `<span class="k">${k}</span>
+        <button type="button" class="step" ${decOk ? "" : "disabled"} title="${decOk ? "o krok nižšie" : endNote || "koniec rozsahu"}">−</button>
+        <span class="val"><span class="v${pend ? " pending" : ""}">${val}</span><span class="bar"><i style="left:${sub * 100}%"></i></span>${endNote && (!decOk || !incOk) ? `<span class="end">${endNote}</span>` : ""}</span>
+        <button type="button" class="step" ${incOk ? "" : "disabled"} title="${incOk ? "o krok vyššie" : endNote || "koniec rozsahu"}">+</button>`;
+    const [d, i] = r.querySelectorAll(".step");
+    d.addEventListener("click", dec);
+    i.addEventListener("click", inc);
+    return r;
+}
+
+function block(c, ghost) {
+    const el = document.createElement("section");
+    el.className = "cam" + (ghost ? " ghost" : "");
+    el.dataset.id = c.id;
+    el.dataset.control = c.control;
+    const pic = c.ndi
+        ? `<div class="pic" style="background:
+              radial-gradient(ellipse at 30% 35%, hsla(${c.hue},70%,62%,0.9), transparent 55%),
+              radial-gradient(ellipse at 75% 70%, hsla(${(c.hue + 60) % 360},60%,40%,0.9), transparent 60%),
+              linear-gradient(160deg, hsl(${c.hue},25%,18%), #050508)"></div><span class="tag">NDI · CAM${c.n}</span>`
+        : `<div class="none">bez NDI náhľadu</div>`;
+    el.innerHTML = `<div class="prev">${pic}</div><div class="body">
+        <div class="bhead"><span class="num">${c.n}</span><span class="lbl">${c.label.toUpperCase()}</span>
+        <span class="on-dot${c.online ? "" : " off"}">${c.online ? "● online" : "● offline"}</span></div></div>`;
+    const body = el.querySelector(".body");
+    if (c.control !== "ok") {
+        const w = document.createElement("button");
+        w.type = "button"; w.className = "warn"; w.textContent = WMM.badge;
+        w.addEventListener("click", () => openInfo(c));
+        body.append(w);
+    }
+    const ctrls = document.createElement("div");
+    ctrls.className = "ctrls";
+    const set = (k, v) => { c[k] = v; c.pend = k; render(); setTimeout(() => { c.pend = null; render(); }, 450); };
+    ctrls.append(
+        row("CLONA", "f/" + F_CHOICES[c.f], (c.f - c.fMin) / (c.fMax - c.fMin || 1), c.f > c.fMin, c.f < c.fMax,
+            () => set("f", c.f - 1), () => set("f", c.f + 1),
+            (c.f <= c.fMin || c.f >= c.fMax) ? "KONIEC" : "", c.pend === "f"),
+        row("ISO", ISO_CHOICES[c.iso], c.iso / (ISO_CHOICES.length - 1), c.iso > 0, c.iso < ISO_CHOICES.length - 1,
+            () => set("iso", c.iso - 1), () => set("iso", c.iso + 1), "", c.pend === "iso"),
+        row("BIELY BOD", c.kelvin + " K", (c.kelvin - 2500) / 7500, c.kelvin > 2500, c.kelvin < 10000,
+            () => set("kelvin", c.kelvin - 100), () => set("kelvin", c.kelvin + 100), "", c.pend === "kelvin"),
+        row("TINT", (c.tint > 0 ? "+" : "") + c.tint, (c.tint + 50) / 100, c.tint > -50, c.tint < 50,
+            () => set("tint", c.tint - 1), () => set("tint", c.tint + 1), "", c.pend === "tint"),
+        row("UZÁVIERKA", SHUT_CHOICES[c.shut], c.shut / (SHUT_CHOICES.length - 1), c.shut > 0, c.shut < SHUT_CHOICES.length - 1,
+            () => set("shut", c.shut - 1), () => set("shut", c.shut + 1), "", c.pend === "shut"),
+        row("FPS", FPS_CHOICES[c.fps], c.fps / (FPS_CHOICES.length - 1), c.fps > 0, c.fps < FPS_CHOICES.length - 1,
+            () => set("fps", c.fps - 1), () => set("fps", c.fps + 1), "", c.pend === "fps"),
+    );
+    const awb = document.createElement("button");
+    awb.type = "button"; awb.className = "autowb"; awb.textContent = "Auto WB";
+    awb.addEventListener("click", () => set("kelvin", 5600));
+    ctrls.append(awb);
+    body.append(ctrls);
+
+    const cover = document.createElement("div");
+    cover.className = "cover";
+    cover.innerHTML = `<span class="cnum">${c.n}</span><div class="grip">⠿<small>ŤAHAJ</small></div>
+        <button type="button" class="eye" title="${ghost ? "Ukázať kameru" : "Skryť kameru"}" aria-label="${ghost ? "Ukázať" : "Skryť"} ${c.label}" aria-pressed="${ghost}">${svgEye()}</button>
+        <span class="hid-tag">SKRYTÁ · ťukni na oko</span>`;
+    cover.querySelector(".eye").addEventListener("pointerdown", e => e.stopPropagation());
+    cover.querySelector(".eye").addEventListener("click", () => toggleHidden(c.id));
+    cover.addEventListener("pointerdown", e => startCarry(e, el, c.id));
+    el.append(cover);
+    return el;
+}
+
+function render() {
+    if (carry) return;   // a push during a drag waits: the carried block is never rebuilt under the finger
+    const lay = layout();
+    const arranging = !!edit;
+    app.dataset.arrange = String(arranging);
+    key.classList.toggle("selected", arranging);
+    key.setAttribute("aria-pressed", String(arranging));
+    for (const el of grid.querySelectorAll(".cam")) el.remove();
+    for (const id of lay.order) {
+        const c = byId(id);
+        const hidden = lay.hidden.includes(id);
+        if (hidden && !arranging) continue;      // outside ARRANGE the grid closes up
+        grid.append(block(c, hidden));
+    }
+    const chip = document.getElementById("hiddenChip");
+    const n = saved.hidden.length;
+    chip.classList.toggle("on", n > 0);
+    chip.textContent = n === 1 ? "1 skrytá kamera · vrátiš ju cez ⇄" : `${n} skryté kamery · vrátiš ich cez ⇄`;
+    if (arranging && !note.dataset.hold) note.textContent = "ťahaj ⠿ · oko skryje/ukáže · ⇄ = uložiť";
+    if (!arranging && !note.dataset.hold) note.textContent = "";
+}
+
+function renderOther(flash) {
+    const box = document.getElementById("otherChips");
+    box.innerHTML = "";
+    for (const id of saved.order) {
+        if (saved.hidden.includes(id)) continue;
+        const s = document.createElement("span");
+        s.textContent = byId(id).n;
+        box.append(s);
+    }
+    if (flash) { box.classList.remove("flash"); void box.offsetWidth; box.classList.add("flash"); }
+}
+
+function showNote(text, ok) {
+    note.textContent = text;
+    note.classList.toggle("saved", !!ok);
+    note.dataset.hold = "1";
+    const mine = ++noteTimer;
+    setTimeout(() => { if (mine === noteTimer) { delete note.dataset.hold; note.classList.remove("saved"); render(); } }, 3500);
+}
+
+// The ⇄ key: the first tap starts the mode, the second saves one layout for the venue.
+key.addEventListener("click", () => {
+    if (!edit) {
+        edit = { order: withNewCameras(saved.order), hidden: [...saved.hidden] };
+        delete note.dataset.hold;
+        render();
+        return;
+    }
+    if (same(edit, saved)) {
+        edit = null;
+        showNote("Bez zmeny", false);
+        render();
+        return;
+    }
+    note.dataset.hold = "1";
+    note.textContent = "Ukladám…";
+    const sending = edit;
+    setTimeout(() => {   // the service answers, then pushes the new layout to every device
+        saved = sending;
+        edit = null;
+        showNote("Uložené pre všetky zariadenia", true);
+        render();
+        renderOther(true);
+    }, 400);
+});
+
+document.getElementById("resetNum").addEventListener("click", () => {
+    if (!edit) return;
+    edit = { order: [...cams].sort((a, b) => a.n - b.n).map(c => c.id), hidden: [] };
+    render();
+});
+document.getElementById("hiddenChip").addEventListener("click", () => key.click());
+
+function toggleHidden(id) {
+    if (!edit) return;
+    const h = edit.hidden;
+    edit = { order: edit.order, hidden: h.includes(id) ? h.filter(x => x !== id) : [...h, id] };
+    render();
+}
+
+// The drag (fohmixer behave::arrange_drag): carried once the finger moved past 6 px; on a block's
+// middle it SWAPS with it, on a block's left/right edge it MOVES there (before/after it).
+function startCarry(e, el, id) {
+    if (!edit || (e.button !== undefined && e.button > 0)) return;
+    e.preventDefault();
+    el.setPointerCapture(e.pointerId);
+    const gr = grid.getBoundingClientRect();
+    const spots = [...grid.querySelectorAll(".cam")].filter(x => x !== el)
+        .map(x => ({ id: x.dataset.id, el: x, r: x.getBoundingClientRect() }));
+    carry = { id, el, x0: e.clientX, y0: e.clientY, carried: false, spots, gr, target: null };
+    el.addEventListener("pointermove", moveCarry);
+    el.addEventListener("pointerup", endCarry);
+    el.addEventListener("pointercancel", endCarry);
+}
+
+function targetAt(x, y) {
+    let best = null, bd = Infinity;
+    for (const s of carry.spots) {
+        const cx = s.r.left + s.r.width / 2, cy = s.r.top + s.r.height / 2;
+        const d = Math.hypot(x - cx, y - cy);
+        if (d < bd) { bd = d; best = s; }
+    }
+    if (!best) return null;
+    const rel = (x - best.r.left) / best.r.width;
+    const kind = rel < 0.22 ? "before" : rel > 0.78 ? "after" : "swap";
+    return { ...best, kind };
+}
+
+function moveCarry(e) {
+    if (!carry) return;
+    const dx = e.clientX - carry.x0, dy = e.clientY - carry.y0;
+    if (!carry.carried && Math.hypot(dx, dy) <= 6) return;
+    carry.carried = true;
+    carry.el.classList.add("carried");
+    carry.el.style.transform = `translate(${dx}px, ${dy}px)`;
+    for (const s of carry.spots) s.el.classList.remove("swap-target");
+    const t = targetAt(e.clientX, e.clientY);
+    carry.target = t;
+    if (!t) { dropLine.classList.remove("on"); return; }
+    if (t.kind === "swap") {
+        t.el.classList.add("swap-target");
+        dropLine.classList.remove("on");
+    } else {
+        const gx = (t.kind === "before" ? t.r.left - 5 : t.r.right + 5) - carry.gr.left;
+        dropLine.style.left = gx + "px";
+        dropLine.style.top = (t.r.top - carry.gr.top) + "px";
+        dropLine.style.height = t.r.height + "px";
+        dropLine.classList.add("on");
+    }
+}
+
+function endCarry() {
+    if (!carry) return;
+    const { id, el, target, carried } = carry;
+    el.removeEventListener("pointermove", moveCarry);
+    el.removeEventListener("pointerup", endCarry);
+    el.removeEventListener("pointercancel", endCarry);
+    dropLine.classList.remove("on");
+    carry = null;
+    if (!carried || !target || !edit) { render(); return; }
+    const order = [...edit.order];
+    const from = order.indexOf(id);
+    if (target.kind === "swap") {
+        const to = order.indexOf(target.id);
+        [order[from], order[to]] = [order[to], order[from]];
+    } else {
+        order.splice(from, 1);
+        let to = order.indexOf(target.id);
+        if (target.kind === "after") to += 1;
+        order.splice(to, 0, id);
+    }
+    edit = { order, hidden: edit.hidden };
+    render();
+}
+
+// #14's popup.
+function openInfo(c) {
+    document.getElementById("infoTitle").textContent = WMM.title;
+    document.getElementById("infoCam").textContent = c.label + " · relay odpovedá, kamera nie je ovládateľná";
+    document.getElementById("infoCause").textContent = WMM.cause;
+    document.getElementById("infoStep").textContent = WMM.step;
+    document.getElementById("info").showModal();
+}
+
+// The connection banner (issue 1343), kept as is.
+let offline = false, lost = 0, tick = 0;
+function setOffline(on) {
+    offline = on;
+    const b = document.getElementById("banner");
+    const conn = document.getElementById("conn");
+    document.querySelector('[data-scen="offline"]').setAttribute("aria-pressed", String(on));
+    clearInterval(tick);
+    if (on) {
+        lost = 6;
+        const draw = () => { b.textContent = `⚠ Bez spojenia so službou · posledný kontakt pred ${lost} s · zobrazené hodnoty môžu byť staré`; lost += 1; };
+        draw(); tick = setInterval(draw, 1000);
+        b.classList.add("on");
+        conn.textContent = "● odpojené"; conn.classList.add("bad");
+    } else {
+        b.classList.remove("on");
+        conn.textContent = "● spojené"; conn.classList.remove("bad");
+    }
+}
+
+// The mockup's scenario buttons.
+document.querySelector(".mock .scen").addEventListener("click", e => {
+    const s = e.target.closest("button")?.dataset.scen;
+    if (!s) return;
+    if (s === "reset") { reset(); return; }
+    if (s === "offline") { setOffline(!offline); return; }
+    if (s === "normal") { edit = null; delete note.dataset.hold; render(); }
+    if (s === "arrange") { if (!edit) key.click(); }
+    if (s === "hidden") {
+        edit = null;
+        saved = { order: saved.order, hidden: saved.hidden.includes("cam2") ? saved.hidden : [...saved.hidden, "cam2"] };
+        delete note.dataset.hold;
+        render(); renderOther(true);
+    }
+    if (s === "newcam") {
+        if (!byId("cam8")) {
+            cams.push(Object.assign(freshCams()[0], { id: "cam8", n: 8, label: "Cam 8", hue: 10, f: 8 }));
+            saved = { order: withNewCameras(saved.order), hidden: saved.hidden };
+            render(); renderOther(true);
+            showNote("cam8 pribudla na svojom mieste podľa čísla", true);
+        }
+    }
+});
+
+reset();
+</script>
+</body>
+</html>

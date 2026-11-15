@@ -1,0 +1,47 @@
+# The bkshading panel's Trunk build (shading#16, fohmixer-ui's Trunk.toml patterns).
+[build]
+target = "index.html"
+dist = "dist"
+# Phase 1 of the migration: the new panel is served at /next/ (the old JS panel stays at /).
+public_url = "/next/"
+# fohmixer's guarded loader (copied from fohmixer-ui @ b65cf52, which took it from iemmixer), in
+# place of Trunk's default (`await init(...)` at module top level, which turns a failed download
+# into an uncaught error and leaves the shell spinning). Getting the code — the bindings, and the
+# WASM module, compiled while it streams in — is caught: when it fails (the WiFi dropped, the page
+# was left before the module arrived) the shell says so and offers a reload (`shadingLoadFailed`
+# in index.html). Starting the app is not caught: a panic in `main` stays a loud error. Trunk fills
+# in {base}, {js} and {wasm} by plain replacement, so no other brace pair may spell one of them.
+# CI checks the built index.html for this loader (panel job).
+pattern_script = '''
+<script type="module">
+let app;
+let wasmModule;
+try {
+    app = await import("{base}{js}");
+    const response = fetch("{base}{wasm}");
+    wasmModule = typeof WebAssembly.compileStreaming === "function"
+        ? await WebAssembly.compileStreaming(response)
+        : await WebAssembly.compile(await (await response).arrayBuffer());
+} catch (error) {
+    window.shadingLoadFailed(error);
+}
+if (wasmModule) {
+    const wasm = await app.default({ module_or_path: wasmModule });
+    window.wasmBindings = app;
+    dispatchEvent(new CustomEvent("TrunkApplicationStarted", { detail: { wasm: wasm } }));
+}
+</script>
+'''
+# The bindings only: Trunk's default also preloads the WASM module (`as="fetch"`); WebKit (an iPad)
+# never matches that preload to the loader's fetch and warns that it was preloaded for nothing.
+# CI checks the built index.html has no WASM preload (panel job).
+pattern_preload = '<link rel="modulepreload" href="{base}{js}" crossorigin="anonymous">'
+
+[watch]
+watch = ["src", "index.html", "style.css", "arrange.css", "sw.js", "manifest.webmanifest"]
+ignore = ["./target", "./dist"]
+
+[serve]
+address = "127.0.0.1"
+port = 8090
+open = false

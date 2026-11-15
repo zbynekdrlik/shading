@@ -17,11 +17,14 @@ use axum::{
     routing::{get, post, put},
     Router,
 };
+use bkshading_proto::layout::{LayoutDoc, LayoutPut};
 use bkshading_proto::wire::{Aggregate, RelayState, ServerMsg, SetRequest};
+use rust_embed::RustEmbed;
 use tokio::sync::watch;
 
 use crate::aggregator::{aggregate_with_camera_update, Aggregator};
 use crate::config::{CameraConfig, ServiceConfig};
+use crate::layout::{LayoutStore, SaveError};
 use crate::preview::store::{wall_clock_ms, PreviewStore};
 use crate::registry::{announced_address, valid_relay_id, Registration, RelayRegistry};
 
@@ -83,7 +86,20 @@ pub struct AppState {
     pub live_tx: Arc<watch::Sender<Arc<Aggregate>>>,
     /// Self-registered relays (issue 808): a handheld SBC announces itself here.
     pub registry: RelayRegistry,
+    /// The venue's panel layout (shading#16): `GET`/`PUT /api/layout`, pushed over `/ws`.
+    pub layout: LayoutStore,
 }
+
+/// The rebuilt Leptos panel (shading#16): Trunk's `bkshading/panel/dist/`, embedded at build time
+/// so the service stays one self-contained binary. Served at `/next/` while the old JS panel stays
+/// at `/` (phase 1 of the migration). CI builds the real bundle before every service build that
+/// ships; native-only jobs create a placeholder `dist/index.html` first (the folder must exist).
+#[derive(RustEmbed)]
+#[folder = "../panel/dist/"]
+pub struct PanelAssets;
+
+/// Where the new panel is served (Trunk `public_url`).
+pub const PANEL_PREFIX: &str = "/next/";
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -101,7 +117,15 @@ pub fn router(state: AppState) -> Router {
         .route("/api/cameras/:id/params", put(set_params))
         .route("/api/cameras/:id/preview.jpg", get(preview_jpg))
         .route("/api/relays/register", post(register_relay))
+        .route("/api/layout", get(get_layout).put(put_layout))
         .route("/ws", get(ws_upgrade))
+        // shading#16: the rebuilt panel. `/next` -> `/next/` so its relative asset paths resolve.
+        .route(
+            "/next",
+            get(|| async { axum::response::Redirect::permanent(PANEL_PREFIX) }),
+        )
+        .route("/next/", get(|| async { panel_file("index.html") }))
+        .route("/next/*path", get(panel_path))
         .with_state(state)
 }
 
@@ -132,33 +156,161 @@ async fn register_relay(
 /// writes stay on `PUT /api/cameras/:id/params`; this is the single-source-of-truth channel
 /// the owner asked for (server pushes, every panel sees the same state).
 async fn ws_upgrade(State(state): State<AppState>, ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(move |socket| ws_push(socket, state.live.clone()))
+    ws.on_upgrade(move |socket| ws_push(socket, state.live.clone(), state.layout.subscribe()))
 }
 
-/// Pushes the latest aggregate to one connected panel: send the current state immediately,
-/// then block on `changed()` and send each new state. A client that goes away is detected on
-/// the next `send`; a dropped pump (`changed()` = `Err`) ends the loop. Inbound frames are not
-/// read (push-only) — a browser panel sends nothing.
-async fn ws_push(mut socket: WebSocket, mut rx: watch::Receiver<Arc<Aggregate>>) {
-    loop {
-        // `borrow_and_update` marks the current value seen, so the FIRST `changed()` below
-        // only fires on the NEXT pump update (no duplicate initial send).
-        let snapshot = rx.borrow_and_update().clone();
-        match serde_json::to_string(&ServerMsg::State((*snapshot).clone())) {
-            Ok(text) => {
-                if socket.send(Message::Text(text)).await.is_err() {
-                    break; // client gone
-                }
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "ws: serialize aggregate failed");
-                break;
-            }
-        }
-        if rx.changed().await.is_err() {
-            break; // pump/sender dropped (service shutting down)
+/// Sends one push message; false when the client is gone or the message did not serialize.
+async fn ws_send(socket: &mut WebSocket, msg: &ServerMsg) -> bool {
+    match serde_json::to_string(msg) {
+        Ok(text) => socket.send(Message::Text(text)).await.is_ok(),
+        Err(e) => {
+            tracing::warn!(error = %e, "ws: serialize push failed");
+            false
         }
     }
+}
+
+/// Pushes to one connected panel: the venue layout first (shading#16), then the current
+/// aggregate, then whichever changes next — a new aggregate from the pump, or a new layout after a
+/// save. A client that goes away is detected on the next `send`; a dropped sender (`changed()` =
+/// `Err`) ends the loop. Inbound frames are not read (push-only) — a browser panel sends nothing.
+async fn ws_push(
+    mut socket: WebSocket,
+    mut rx: watch::Receiver<Arc<Aggregate>>,
+    mut layout_rx: watch::Receiver<Arc<LayoutDoc>>,
+) {
+    // `borrow_and_update` marks the current values seen, so `changed()` below only fires on the
+    // NEXT update (no duplicate initial send).
+    let layout = layout_rx.borrow_and_update().clone();
+    if !ws_send(&mut socket, &ServerMsg::Layout((*layout).clone())).await {
+        return;
+    }
+    let snapshot = rx.borrow_and_update().clone();
+    if !ws_send(&mut socket, &ServerMsg::State((*snapshot).clone())).await {
+        return;
+    }
+    loop {
+        let msg = tokio::select! {
+            // Push-only: an inbound frame is never acted on, but a Close (or the end of the
+            // stream) ends this loop at once instead of at the next send.
+            inbound = socket.recv() => match inbound {
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                Some(Ok(_)) => continue,
+            },
+            changed = rx.changed() => {
+                if changed.is_err() {
+                    break; // pump dropped (service shutting down)
+                }
+                ServerMsg::State((*rx.borrow_and_update().clone()).clone())
+            }
+            changed = layout_rx.changed() => {
+                if changed.is_err() {
+                    break; // layout store dropped
+                }
+                ServerMsg::Layout((*layout_rx.borrow_and_update().clone()).clone())
+            }
+        };
+        if !ws_send(&mut socket, &msg).await {
+            break; // client gone
+        }
+    }
+}
+
+/// `GET /api/layout` (shading#16): the venue's panel layout.
+async fn get_layout(State(state): State<AppState>) -> Json<LayoutDoc> {
+    Json(state.layout.current())
+}
+
+/// `PUT /api/layout {rev, order, hidden}` (shading#16): saves the panel's ARRANGE edit. 200
+/// `{rev}`; 409 `{"error":"stale"}` when `rev` is not the current revision (another device saved
+/// first); 422 `{"error":"invalid"}` for a repeated id or a hidden id outside the order; 500
+/// `{"error":"write"}` when the file write failed (nothing changed). On 200 every `/ws` client
+/// gets the new layout.
+async fn put_layout(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+    Json(put): Json<LayoutPut>,
+) -> Response {
+    // The save writes and flushes a file: off the async workers.
+    let store = state.layout.clone();
+    match tokio::task::spawn_blocking(move || layout_put_response(&store, &put, &peer.to_string()))
+        .await
+    {
+        Ok(resp) => resp,
+        Err(e) => {
+            tracing::error!(error = %e, "layout: the save task failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "write" })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// The pure decision of `PUT /api/layout`, split out so its status contract is tested without an
+/// HTTP server.
+pub fn layout_put_response(store: &LayoutStore, put: &LayoutPut, peer: &str) -> Response {
+    match store.save(put, peer) {
+        Ok(doc) => Json(serde_json::json!({ "rev": doc.rev })).into_response(),
+        Err(SaveError::Refused(refusal)) => {
+            let status = match refusal {
+                bkshading_proto::LayoutRefusal::Stale => StatusCode::CONFLICT,
+                bkshading_proto::LayoutRefusal::Invalid => StatusCode::UNPROCESSABLE_ENTITY,
+            };
+            (status, Json(serde_json::json!({ "error": refusal.text() }))).into_response()
+        }
+        Err(SaveError::Write(_)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "write" })),
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /next/<path>`: an embedded panel file, or the panel page for a path without a dot (a
+/// reload on a client-side address).
+async fn panel_path(Path(path): Path<String>) -> Response {
+    if path.contains('.') {
+        panel_file(&path)
+    } else {
+        panel_file("index.html")
+    }
+}
+
+/// Whether a file name carries a content hash (12 or more hex characters in a row, as Trunk names
+/// the panel's JS and WASM): such a file never changes and may be cached for good.
+pub fn has_content_hash(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    name.as_bytes()
+        .windows(12)
+        .any(|w| w.iter().all(u8::is_ascii_hexdigit))
+}
+
+/// One embedded panel file with its type and cache rule, or 404. The page, the service worker and
+/// the manifest are `no-cache` (always revalidated: a new release shows at the next load);
+/// content-hashed files are immutable.
+pub fn panel_file(path: &str) -> Response {
+    let Some(file) = <PanelAssets as RustEmbed>::get(path) else {
+        tracing::debug!(path, "panel: no such file");
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    };
+    let mime = mime_guess::from_path(path)
+        .first_or_octet_stream()
+        .to_string();
+    let cache = if has_content_hash(path) {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
+    };
+    (
+        [
+            (header::CONTENT_TYPE, mime),
+            (header::CACHE_CONTROL, cache.to_string()),
+        ],
+        file.data.into_owned(),
+    )
+        .into_response()
 }
 
 /// Injects the compiled service version into the served HTML so the panel header shows it

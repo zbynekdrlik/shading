@@ -458,6 +458,10 @@ pub struct Aggregate {
 pub enum ServerMsg {
     /// The full aggregate, pushed on connect and again whenever it changes.
     State(Aggregate),
+    /// The venue's panel layout (shading#16): pushed on connect before the first state, and again
+    /// after every save, so every panel at the venue shows the same order. `{"type":"layout",
+    /// "rev", "order", "hidden"}`. A reader that knows only `state` ignores it.
+    Layout(crate::layout::LayoutDoc),
 }
 
 // --- issue 1309 / 1337: shading-write single-flight FIFO queue + a shared SET summary -----------

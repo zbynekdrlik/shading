@@ -1,0 +1,4 @@
+# Autopilot log
+
+- shading#14 (panel warning + Slovak popup when a camera cannot be controlled): pull request 15, merged aca3009, release v0.2.6. Bump e00534f; red 893f6c4 -> green 89580da (relay `offlineReason`, `CameraView.control`, panel strip + dialog); review red df3f11a -> green 4fc0b4a (`/system` 5xx = not answering, held camera losing REST = rest-off, popup follows push); test race fix 0c790d0. Tests: `relay/tests/offline_reason_14.rs`, `proto/tests/control_14.rs`, `service/tests/control_14.rs`, Playwright "... Slovak popup per cause (shading#14)" + "the real service turns a relay's offline reason ...". Contract additive; camera-box told by peer. Open: camera-box deploy + live check.
+- shading#13 (fixed panel order by camera number, owner ruling 15.11.2026): same pull request / v0.2.6. Red af4ec2c (failed on live-first) -> green 762f4e9. Playwright "cameras stand in number order ... (shading#13)". Open: camera-box deploy.

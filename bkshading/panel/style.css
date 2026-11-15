@@ -1,0 +1,222 @@
+/* The bkshading panel (shading#16): fohmixer-ui's tokens and fonts (crates/fohmixer-ui/style.css,
+   the house app stack), the look of the owner's approved mockup docs/mockups/arrange-v1.html.
+   Cascade: style.css (fonts, tokens, page, header, banner, grid, camera block, steppers, popup),
+   then arrange.css (the ⇄ key's mode: covers, grips, eyes, the carried block). The fonts ship
+   with the panel (the venue LAN has no internet): Barlow, Barlow Condensed, JetBrains Mono (OFL). */
+@font-face {
+    font-family: "Barlow Condensed";
+    font-weight: 700;
+    font-display: block;
+    src: url("fonts/barlow-condensed-latin-700-normal.woff2") format("woff2");
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+2000-206F, U+2212, U+221E;
+}
+@font-face {
+    font-family: "Barlow Condensed";
+    font-weight: 700;
+    font-display: block;
+    src: url("fonts/barlow-condensed-latin-ext-700-normal.woff2") format("woff2");
+    unicode-range: U+0100-02AF, U+0304, U+0308, U+0329, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+    font-family: "Barlow";
+    font-weight: 600;
+    font-display: block;
+    src: url("fonts/barlow-latin-600-normal.woff2") format("woff2");
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+2000-206F, U+2212, U+221E;
+}
+@font-face {
+    font-family: "Barlow";
+    font-weight: 600;
+    font-display: block;
+    src: url("fonts/barlow-latin-ext-600-normal.woff2") format("woff2");
+    unicode-range: U+0100-02AF, U+0304, U+0308, U+0329, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+    font-family: "Barlow";
+    font-weight: 700;
+    font-display: block;
+    src: url("fonts/barlow-latin-700-normal.woff2") format("woff2");
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+2000-206F, U+2212, U+221E;
+}
+@font-face {
+    font-family: "Barlow";
+    font-weight: 700;
+    font-display: block;
+    src: url("fonts/barlow-latin-ext-700-normal.woff2") format("woff2");
+    unicode-range: U+0100-02AF, U+0304, U+0308, U+0329, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+    font-family: "JetBrains Mono";
+    font-weight: 500;
+    font-display: block;
+    src: url("fonts/jetbrains-mono-latin-500-normal.woff2") format("woff2");
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+2000-206F, U+2212, U+221E;
+}
+@font-face {
+    font-family: "JetBrains Mono";
+    font-weight: 500;
+    font-display: block;
+    src: url("fonts/jetbrains-mono-latin-ext-500-normal.woff2") format("woff2");
+    unicode-range: U+0100-02AF, U+0304, U+0308, U+0329, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+    font-family: "JetBrains Mono";
+    font-weight: 600;
+    font-display: block;
+    src: url("fonts/jetbrains-mono-latin-600-normal.woff2") format("woff2");
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+2000-206F, U+2212, U+221E;
+}
+@font-face {
+    font-family: "JetBrains Mono";
+    font-weight: 600;
+    font-display: block;
+    src: url("fonts/jetbrains-mono-latin-ext-600-normal.woff2") format("woff2");
+    unicode-range: U+0100-02AF, U+0304, U+0308, U+0329, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+:root {
+    color-scheme: dark;
+    --bg: #07070c;
+    --page: #0b0b12;
+    --bar: #11111b;
+    --section: #151522;
+    --panel: #1a1a28;
+    --panel-hi: #20203a;
+    --track: #0a0a14;
+    --line: #2a2a44;
+    --accent: #4ecdc4;
+    --solo: #f4d35e;
+    --text: #eaeaf0;
+    --muted: #9a9ab4;
+    --faint: #5c5c78;
+    --ok: #36d67a;
+    --bad: #ff4757;
+    --warn: #f5a623;
+    --display: "Barlow Condensed", "Arial Narrow", sans-serif;
+    --ui: "Barlow", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --mono: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--ui); }
+button { font: inherit; color: inherit; }
+[hidden] { display: none !important; }
+
+.app { background: var(--page); min-height: 100vh; }
+
+/* The header. */
+.head {
+    position: sticky; top: 0; z-index: 20;
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 16px; background: var(--bar); border-bottom: 1px solid var(--line);
+}
+.title { font: 700 20px/1 var(--display); letter-spacing: 0.06em; }
+.ver { font: 500 12px/1 var(--mono); color: var(--muted); }
+.conn { font: 600 12px/1 var(--ui); color: var(--ok); }
+.conn::before { content: "● "; }
+.conn.bad { color: var(--bad); }
+.spacer { flex: 1; }
+.hidden-chip {
+    padding: 5px 9px; border-radius: 999px; border: 1px dashed var(--faint);
+    background: transparent; color: var(--muted); font: 600 12px/1 var(--ui); cursor: pointer;
+}
+.note { font: 600 11px/1.2 var(--ui); color: var(--muted); letter-spacing: 0.03em; min-width: 0; text-align: right; }
+.note.saved { color: var(--ok); }
+.note.refused { color: var(--warn); }
+
+/* The connection banner (issue 1343). */
+.banner {
+    padding: 12px 16px; background: var(--bad); color: #fff;
+    font: 700 15px/1.3 var(--ui); text-align: center;
+}
+
+/* The camera grid: it reflows with the screen width. */
+.grid {
+    position: relative;
+    display: grid; gap: 10px; padding: 12px 16px 24px;
+    grid-template-columns: repeat(auto-fill, minmax(236px, 1fr));
+}
+.empty-note { padding: 24px 16px; color: var(--muted); text-align: center; }
+
+/* A camera block. */
+.cam {
+    position: relative; display: flex; flex-direction: column;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden;
+}
+.prev { position: relative; aspect-ratio: 16 / 9; background: #000; border-bottom: 1px solid var(--line); }
+.prev .preview-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; visibility: hidden; }
+.prev .preview-img.ready { visibility: visible; }
+.prev .tag {
+    position: absolute; left: 6px; bottom: 5px; padding: 2px 5px; border-radius: 4px;
+    background: rgba(0, 0, 0, 0.55); font: 500 10px/1 var(--mono); color: var(--muted);
+}
+.prev .none {
+    position: absolute; inset: 0; display: grid; place-items: center; padding: 0 12px;
+    color: var(--faint); font: 600 12px/1.3 var(--ui); text-align: center;
+}
+.body { padding: 8px 10px 10px; display: flex; flex-direction: column; gap: 6px; }
+.bhead { display: flex; align-items: baseline; gap: 8px; }
+.num { font: 700 26px/0.9 var(--display); color: var(--text); }
+.lbl { font: 700 13px/1 var(--ui); color: var(--muted); letter-spacing: 0.04em; text-transform: uppercase; }
+.on-dot { margin-left: auto; font: 600 11px/1 var(--ui); color: var(--ok); white-space: nowrap; }
+.on-dot::before { content: "● "; }
+.on-dot.bad { color: var(--bad); }
+.reg { font: 500 10.5px/1.3 var(--mono); color: var(--muted); overflow-wrap: anywhere; }
+.reg.stale { color: var(--warn); }
+
+/* shading#14: the warning badge, outside the dimmed controls, bright and tappable. */
+.warn {
+    display: block; width: 100%; padding: 7px 9px; border: 1px solid var(--bad); border-radius: 8px;
+    background: rgba(255, 71, 87, 0.14); color: var(--text); font: 700 12.5px/1.25 var(--ui);
+    text-align: left; cursor: pointer;
+}
+.cam.disabled .ctrls { opacity: 0.4; pointer-events: none; }
+
+/* The six steppers. */
+.ctrls { display: flex; flex-direction: column; gap: 5px; }
+.row {
+    display: grid; grid-template-columns: 58px 36px 1fr 36px; align-items: center; gap: 5px;
+    padding: 4px 5px; border-radius: 8px; background: var(--section);
+}
+.row .k { font: 600 11px/1.1 var(--ui); color: var(--muted); letter-spacing: 0.03em; }
+.step {
+    height: 34px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel);
+    font: 700 18px/1 var(--ui); cursor: pointer; touch-action: manipulation;
+}
+.step:hover:not(:disabled) { border-color: var(--accent); }
+.step:disabled { opacity: 0.3; cursor: not-allowed; }
+.step.not-applied { border-color: var(--bad); }
+.val { display: flex; flex-direction: column; gap: 4px; align-items: center; min-width: 0; }
+.val .v { font: 600 15px/1 var(--mono); }
+.val .v.pending { color: var(--accent); font-style: italic; }
+.val .v.not-applied { color: var(--bad); text-decoration: underline dotted; }
+.val .bar { position: relative; width: 100%; height: 4px; border-radius: 2px; background: var(--track); }
+.val .bar i { position: absolute; top: -2px; width: 8px; height: 8px; margin-left: -4px; border-radius: 50%; background: var(--accent); }
+.val .end { white-space: nowrap; font: 600 9px/1 var(--ui); color: var(--warn); letter-spacing: 0.04em; }
+.extras { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.autowb {
+    margin-left: auto; padding: 6px 9px; border: 1px solid var(--line); border-radius: 7px;
+    background: var(--panel); font: 600 11px/1 var(--ui); cursor: pointer;
+}
+.fps-sync { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font: 600 11px/1.2 var(--ui); color: var(--muted); }
+.fps-warn, .fps-desync { color: var(--warn); }
+.fps-set-grab {
+    padding: 5px 8px; border: 1px solid var(--warn); border-radius: 7px; background: transparent;
+    color: var(--warn); font: 700 11px/1 var(--ui); cursor: pointer;
+}
+
+/* shading#14's popup. */
+dialog.info {
+    max-width: min(30rem, calc(100vw - 32px)); padding: 16px 18px; border: 1px solid var(--line);
+    border-radius: 12px; background: var(--panel); color: var(--text);
+}
+dialog.info::backdrop { background: rgba(0, 0, 0, 0.6); }
+dialog.info h2 { margin: 0 0 6px; font: 700 18px/1.2 var(--ui); color: var(--bad); }
+dialog.info .cam-n { margin: 0 0 10px; color: var(--muted); font-size: 13px; }
+dialog.info .step-t { font-weight: 700; }
+dialog.info form { text-align: right; margin: 0; }
+dialog.info button { padding: 8px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--section); cursor: pointer; }
+
+@media (max-width: 520px) {
+    .grid { grid-template-columns: 1fr; }
+    .note { display: none; }
+}

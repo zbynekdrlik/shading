@@ -5,6 +5,7 @@
 pub mod aggregator;
 pub mod config;
 pub mod http;
+pub mod layout;
 pub mod monitor;
 pub mod preview;
 pub mod registry;

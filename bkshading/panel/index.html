@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="sk">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>bkshading — riadenie shadingu kamier</title>
+    <link data-trunk rel="css" href="style.css" />
+    <link data-trunk rel="css" href="arrange.css" />
+    <!-- fohmixer-ui: no wasm-opt (its bundled binaryen refuses current rustc output: "error validating input"; the release profile is already lto + codegen-units 1), no SRI (same-origin assets). -->
+    <link data-trunk rel="rust" href="Cargo.toml" data-wasm-opt="0" data-integrity="none" />
+    <link data-trunk rel="copy-file" href="manifest.webmanifest" />
+    <link data-trunk rel="copy-file" href="sw.js" />
+    <link data-trunk rel="copy-dir" href="icons" />
+    <link data-trunk rel="copy-dir" href="fonts" />
+    <!-- Installable web app (issue 1305): relative, so it follows the panel's address (/next/). -->
+    <link rel="manifest" href="manifest.webmanifest" />
+    <meta name="theme-color" content="#07070c" />
+    <link rel="icon" href="icons/favicon.svg" type="image/svg+xml" />
+    <link rel="icon" href="icons/icon-192.png" sizes="192x192" type="image/png" />
+    <link rel="apple-touch-icon" href="icons/icon-192.png" />
+</head>
+<body>
+    <noscript>Panel potrebuje JavaScript a WebAssembly.</noscript>
+    <div id="app-shell">
+        <style>
+            #app-shell {
+                position: fixed; inset: 0; z-index: 9999;
+                display: flex; flex-direction: column; align-items: center; justify-content: center;
+                background: #07070c; color: #eaeaf0;
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            }
+            #app-shell h1 { margin-bottom: 2rem; font-size: 1.2rem; letter-spacing: 0.15em; text-transform: uppercase; }
+            .shell-spinner {
+                width: 40px; height: 40px; border-radius: 50%;
+                border: 3px solid rgba(255, 255, 255, 0.15); border-top-color: #4ecdc4;
+                animation: shell-spin 0.8s linear infinite;
+            }
+            .shell-error { max-width: 20rem; padding: 0 1rem; text-align: center; line-height: 1.5; }
+            .shell-error button {
+                margin-top: 1rem; padding: 0.6rem 1.6rem; border: 0; border-radius: 6px;
+                background: #4ecdc4; color: #000; font: inherit; font-weight: 600; cursor: pointer;
+            }
+            @keyframes shell-spin { to { transform: rotate(360deg); } }
+        </style>
+        <h1>Shading</h1>
+        <div class="shell-spinner"></div>
+        <div class="shell-error" id="shell-error" data-testid="load-error" hidden>
+            <p>Panel sa nenačítal.<br />Skontroluj, či je toto zariadenie v sieti strižne.</p>
+            <button type="button" id="shell-retry">Skúsiť znova</button>
+        </div>
+    </div>
+    <script>
+    // The installable web app (issue 1305): a network-only service worker (sw.js). Registered only
+    // where the browser offers the API (a secure context: https, or localhost); on a plain-http LAN
+    // page it is absent and nothing happens. data-sw on <html> says what happened (E2E, support);
+    // a failed registration is a log line, never a console error.
+    (function () {
+        var root = document.documentElement;
+        if (!("serviceWorker" in navigator)) {
+            root.dataset.sw = "unsupported";
+            return;
+        }
+        navigator.serviceWorker.register("sw.js").then(function () {
+            root.dataset.sw = "registered";
+        }, function (error) {
+            root.dataset.sw = "failed";
+            console.log("[pwa] service worker not registered: " + error);
+        });
+    })();
+    // The panel's code did not arrive (the loader in Trunk.toml calls this): say so and offer a
+    // reload instead of spinning forever. A log line, not an error: the page shows the failure.
+    window.shadingLoadFailed = function (error) {
+        console.log("[load] the panel did not load: " + error);
+        document.querySelector("#app-shell .shell-spinner").hidden = true;
+        document.getElementById("shell-error").hidden = false;
+    };
+    document.getElementById("shell-retry").addEventListener("click", function () {
+        location.reload();
+    });
+    </script>
+</body>
+</html>
