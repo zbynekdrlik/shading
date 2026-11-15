@@ -236,8 +236,53 @@ knowing a part:
   (the stub relay's `POST /__state` / `POST /__reset`; always reset in `finally`, the stub is shared).
 - Not done: a per-key reason for `notApplied` (followup).
 
+## The rebuilt panel: Leptos CSR at /next/, ARRANGE, the venue layout (shading#16, v0.2.7)
+Owner decision A (15.11.2026): the panel is rebuilt on fohmixer-ui's stack (Leptos 0.7.8 CSR, Trunk,
+the house app stack airuleset#1333); mockup `docs/mockups/arrange-v1.html` approved as is.
+- **Phase 1 (this release): the new panel at `/next/`, the old JS panel (`service/web/*`) still at `/`.**
+  The switch PR moves it to `/`, deletes `service/web/{app.js,index.html,style.css}` and
+  `panel.spec.js`, after a live check at both venues. Trunk `public_url = "/next/"`; manifest and
+  `sw.js` use RELATIVE paths, so they follow the panel's address.
+- **Crate `bkshading/panel`:** `behave/` = pure rules, natively tested (`cargo test -p bkshading-panel`):
+  `steppers.rs` + `holds.rs` (six steppers, ends, optimistic hold: value hold 4 s ends on a push showing
+  the target; aperture STEP hold 8 s ends on a push showing a DIFFERENT f-stop), `arrange_drag.rs` +
+  `arrange_edit.rs`, `control_info.rs` (the #14 Slovak texts live only here), `preview.rs`, `block.rs`;
+  `store/` = signals + `conn.rs` rules + `net.rs` browser IO; `components/` render. New logic goes into
+  `behave/` with a test, never straight into a component.
+- **The service embeds `bkshading/panel/dist/` with rust-embed** (`http::PanelAssets`, `panel_file`:
+  hashed files immutable, the rest `no-cache`). The folder must exist to compile: build it
+  (`cd bkshading/panel && trunk build --release`) or `mkdir -p bkshading/panel/dist && echo placeholder
+  > bkshading/panel/dist/index.html`. A debug build reads the files from disk at runtime, a release
+  build embeds them. CI: the `panel` job builds + checks the dist and uploads `panel-dist`;
+  `bkshading` and `bkshading-windows` download it first; `coverage` uses a placeholder and
+  `--exclude bkshading-panel` (fohmixer's pattern).
+- **No wasm-opt** (`data-wasm-opt="0"`): Trunk's binaryen (v131) refuses current rustc output with
+  "Fatal: error validating input". fohmixer runs without it too. CI pins `trunk@0.21.14`.
+- **The venue layout** (`proto/src/layout.rs`, `service/src/layout.rs`): `LayoutDoc {rev, order,
+  hidden}` in `bkshading-layout.json` next to `--config` (`--layout-file` overrides; no config =
+  memory only, WARN), atomic tmp+rename, a broken file is moved to `<file>.bad` and number order is
+  used. `GET`/`PUT /api/layout` (200 `{rev}`, 409 `stale`, 422 `invalid`, 500 `write`); `/ws` sends
+  `{"type":"layout",...}` on connect BEFORE the first state and after every save. Ids the config does
+  not list are kept in the document (a visiting camera keeps its place). A camera new to the config
+  lands after the last placed id with a lower number (`effective_order`). Hiding is panel-only: the
+  service still polls a hidden camera. Service<->panel only: `docs/CONTRACT.md` is untouched.
+- **ARRANGE (`Arrange` Off / On{rev, base, edit} / Saving):** "Bez zmeny" compares the edit with the
+  edit the mode STARTED from (which already holds new cameras), never with the stored doc. While
+  Saving a `/ws` layout push is ignored: the PUT answer ends the mode (the push of the save can come
+  first). On a 200 the panel applies the saved doc at once.
+- **E2E** (`service/tests/e2e`): `panel-next.spec.js` = every `panel.spec.js` scenario on `/next/`;
+  `arrange.spec.js` against a 3-camera instance (`e2e-arrange-config.toml`, :8784); a second
+  registration instance (:8785) so the two specs never share a registration. Every instance gets a
+  fresh `--layout-file` in the temp dir. Fixtures go in through `window.shadingPush(msg)` (the panel's
+  own entry for a `/ws` message; wait for it with `waitForFunction`). Local run without a release
+  build: `BKSHADING_BIN=target/debug/bkshading npx playwright test` (debug rust-embed reads `dist/`).
+- **E2E gotchas:** a synthetic `visibilitychange` must be dispatched with `{bubbles: true}` (the real
+  one bubbles; the app listens on `window`). A refused `PUT /api/layout` (409) is logged by Chromium as
+  "Failed to load resource"; the stale test allows exactly that line. A click on a control under the
+  ARRANGE cover must go through `page.mouse.click(x, y)` (a locator click fails actionability).
+
 ## Workspace, version and release (shading#1)
-- Root `Cargo.toml` is a pure workspace: `members = ["bkshading/proto","bkshading/relay","bkshading/service"]`,
+- Root `Cargo.toml` is a pure workspace: `members = ["bkshading/proto","bkshading/relay","bkshading/service","bkshading/panel"]`,
   `resolver = "2"`, camera-box's release profile (lto, codegen-units 1, strip). No root package.
 - **ONE version:** `[workspace.package].version`; every crate has `version.workspace = true`, so
   `CARGO_PKG_VERSION` (panel DOM, `/api/version`, `RelayState.version`, `--version`) moves with one
