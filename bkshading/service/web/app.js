@@ -881,12 +881,22 @@ function render(agg) {
   orderBlocks(agg.cameras);
 }
 
-// Owner 4.10.2026: cameras with a live camera first, in config (= number) order, then every other
-// block in config order. The DOM is only touched when that order changes (a camera going online or
-// offline), so a push never moves a block under the operator's finger for nothing.
+// shading#13 (owner ruling 15.11.2026, "1234567"): the blocks stand in camera NUMBER order, cam1
+// on the left, so the operators' muscle memory holds. The number is the trailing digits of the
+// camera id (`cam7` -> 7), never the config order (strih-pp lists the visiting cams 2, 3, 5 last).
+// Online/offline plays no part: a camera that drops stays in its place, greyed, with its shading#14
+// warning. Ties and ids without a number keep config order (numberless ones last). orderBlocks only
+// touches the DOM when this order changes (a camera added or removed).
+function cameraNumber(id) {
+  const m = /(\d+)$/.exec(String(id));
+  return m ? Number(m[1]) : Infinity;
+}
+
 function panelOrder(cameras) {
-  const live = (c) => Boolean(c.reachable && c.state && c.state.online);
-  return [...cameras.filter(live), ...cameras.filter((c) => !live(c))].map((c) => c.id);
+  return cameras
+    .map((c, i) => ({ id: c.id, n: cameraNumber(c.id), i }))
+    .sort((a, b) => (a.n === b.n ? a.i - b.i : a.n - b.n))
+    .map((c) => c.id);
 }
 
 function orderBlocks(cameras) {
