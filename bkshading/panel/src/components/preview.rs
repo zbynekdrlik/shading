@@ -31,26 +31,33 @@ struct Frame {
     abort: StoredValue<Option<web_sys::AbortController>, LocalStorage>,
 }
 
+// Every access below is a `try_` one: a fetch can finish after its block was removed (an ARRANGE
+// hide, a push without the camera), when the block's signals are already disposed; a plain access
+// would panic the whole app there. A disposed frame just does nothing.
 impl Frame {
     /// Back to the placeholder: abort a fetch in flight, drop and release the frame.
     fn placeholder(self) {
         if let Some(ctrl) = self.abort.try_update_value(Option::take).flatten() {
             ctrl.abort();
         }
-        if self.ready.get_untracked() {
-            self.ready.set(false);
+        if self.ready.try_get_untracked() == Some(true) {
+            self.ready.try_set(false);
         }
-        if let Some(old) = self.url.get_untracked() {
-            self.url.set(None);
+        if let Some(old) = self.url.try_get_untracked().flatten() {
+            self.url.try_set(None);
             let _ = web_sys::Url::revoke_object_url(&old);
         }
-        self.shown_at.set_value(None);
+        self.shown_at.try_set_value(None);
     }
 
-    /// A new frame's object URL replaces the shown one (released at once).
+    /// A new frame's object URL replaces the shown one (released at once); a disposed frame
+    /// releases the new one instead.
     fn show(self, url: String) {
-        let old = self.url.get_untracked();
-        self.url.set(Some(url));
+        let Some(old) = self.url.try_get_untracked() else {
+            let _ = web_sys::Url::revoke_object_url(&url);
+            return;
+        };
+        self.url.try_set(Some(url));
         if let Some(old) = old {
             let _ = web_sys::Url::revoke_object_url(&old);
         }
@@ -63,8 +70,8 @@ async fn load(id: String, frame: Frame, live: Signal<bool>, busy: RwSignal<bool>
         return;
     };
     let signal = ctrl.signal();
-    frame.abort.set_value(Some(ctrl.clone()));
-    busy.set(true);
+    frame.abort.try_set_value(Some(ctrl.clone()));
+    busy.try_set(true);
     let timed_out = Rc::new(Cell::new(false));
     let timer = {
         let timed_out = timed_out.clone();
@@ -93,10 +100,10 @@ async fn load(id: String, frame: Frame, live: Signal<bool>, busy: RwSignal<bool>
         Ok(blob.dyn_into::<web_sys::Blob>().ok())
     }
     .await;
+    // After the await the block may be gone (see `impl Frame`): from here on only `try_` reads.
+    let live_now = live.try_get_untracked().unwrap_or(false);
     match outcome {
-        Ok(Some(blob))
-            if !signal.aborted() && live.get_untracked() && store.connected_untracked() =>
-        {
+        Ok(Some(blob)) if !signal.aborted() && live_now && store.connected_untracked() => {
             if let Ok(obj) = web_sys::Url::create_object_url_with_blob(&blob) {
                 frame.show(obj);
             }
@@ -105,9 +112,9 @@ async fn load(id: String, frame: Frame, live: Signal<bool>, busy: RwSignal<bool>
         Err(_) => {
             let keep = keeps_frame(
                 timed_out.get(),
-                frame.shown_at.get_value(),
+                frame.shown_at.try_get_value().flatten(),
                 net::perf_now(),
-                live.get_untracked(),
+                live_now,
                 store.connected_untracked(),
             );
             if !keep {
@@ -124,9 +131,9 @@ async fn load(id: String, frame: Frame, live: Signal<bool>, busy: RwSignal<bool>
         .try_with_value(|a| a.as_ref().is_some_and(|c| c == &ctrl))
         .unwrap_or(false);
     if mine {
-        frame.abort.set_value(None);
+        frame.abort.try_set_value(None);
     }
-    busy.set(false);
+    busy.try_set(false);
 }
 
 /// A block's preview area.
