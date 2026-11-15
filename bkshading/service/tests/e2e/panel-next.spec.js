@@ -348,6 +348,43 @@ test("a live preview frame is shown, a stopped feed drops to the placeholder and
   gate.assertClean();
 });
 
+test("a block removed while its preview fetch is in flight leaves a clean console (shading#16 review)", async ({ page }) => {
+  const gate = consoleGate(page);
+  let held = 0;
+  let hidden = false;
+  await page.addInitScript(DISABLE_WS);
+  await page.route("**/api/cameras", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(makeFixture({ hasPreview: true, previewLive: true })) })
+  );
+  await page.route("**/api/layout", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(hidden ? { rev: 1, order: ["cam1"], hidden: ["cam1"] } : { rev: 0, order: [], hidden: [] }),
+    })
+  );
+  await page.route(PREVIEW_URL_RE, async (route) => {
+    held += 1;
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    try {
+      await route.fulfill({ status: 200, contentType: "image/jpeg", body: PREVIEW_JPEG });
+    } catch (e) {
+      // aborted by the page
+    }
+  });
+  await page.goto(`${PREVIEW_SVC}${NEXT}`);
+  await waitForApp(page);
+  await expect.poll(() => held, { timeout: 8000, intervals: [100] }).toBeGreaterThanOrEqual(1);
+  // The venue hides the camera (another device's save) while its frame is still on its way.
+  hidden = true;
+  await page.evaluate(() => window.shadingPush({ type: "layout", rev: 1, order: ["cam1"], hidden: ["cam1"] }));
+  await expect(page.locator('[data-role="camera-block"]')).toHaveCount(0);
+  // The held fetch answers or is aborted after the block is gone.
+  await page.waitForTimeout(2500);
+  await expect(page.locator('[data-role="camera-block"]')).toHaveCount(0);
+  gate.assertClean();
+});
+
 // shading#13 (owner ruling 15.11.2026, "1234567"): number order whatever the config order, and a
 // block never moves when its camera goes offline or comes back. It is the default of ARRANGE.
 test("cameras stand in number order whatever the config order, and never move on online/offline, console clean (shading#13)", async ({ page }) => {
