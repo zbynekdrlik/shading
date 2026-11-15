@@ -163,6 +163,10 @@ the camera's USB-C CDC-NCM link (since v0.2.0, shading#6; before that over USB-P
   - A read-back that finds the camera offline drops (and logs) the late SETs instead of writing
     them through the dropped link.
   - Timing tests sync on the fake's recorded PUT (`wait_for_put`), never on a guessed sleep.
+    A SET meant to arrive DURING the read-back must wait for the read-back's first GET
+    (`gets_of` grows): the drain pops pending SETs after each write, before the read-back, so a
+    SET sent right after `wait_for_put` can join the first round on a loaded runner (shading#14,
+    PR run 43714798063).
     Every fake delay stays under `REST_TIMEOUT` (1 s), or the client times out.
 - **Not every firmware serves every endpoint (v0.2.2, live 6K fw 8.6 = SNV cam3).** That body
   answers 404 to `system/product`, `video/supportedISOs`, `video/supportedShutters`,
