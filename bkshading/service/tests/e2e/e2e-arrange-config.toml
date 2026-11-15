@@ -1,0 +1,23 @@
+# bkshading service config for the shading#16 ARRANGE E2E (a fifth service instance, so the other
+# panel tests keep their one camera). THREE cameras, all on the stdlib stub_relay.py, listed out of
+# number order (3, 1, 2) as a venue config can be: the panel must still start in number order.
+# playwright.config.js gives it a fresh --layout-file per run.
+bind = "127.0.0.1:8784"
+
+[[camera]]
+id = "cam3"
+label = "Cam 3"
+transport = "cambox-relay"
+address = "127.0.0.1:8781"
+
+[[camera]]
+id = "cam1"
+label = "Cam 1"
+transport = "cambox-relay"
+address = "127.0.0.1:8781"
+
+[[camera]]
+id = "cam2"
+label = "Cam 2"
+transport = "cambox-relay"
+address = "127.0.0.1:8781"

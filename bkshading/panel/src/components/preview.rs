@@ -1,0 +1,192 @@
+//! A block's live NDI preview (issue 808, ported from the JS panel's loader; the decisions are in
+//! `behave::preview`). Each tick ([`PREVIEW_FPS`] a second) a block whose feed the service reports
+//! live, while the panel has contact, fetches ONE frame: `fetch(no-store)` -> blob -> object URL,
+//! one request in flight, aborted after [`FETCH_TIMEOUT_MS`] or when the block drops to its
+//! placeholder. A 204 (no fresh frame), a failed fetch, or a push that turns the feed off shows the
+//! placeholder with the `<img>` source REMOVED (no load/error event, no frozen frame) and the
+//! object URL revoked.
+
+use std::cell::Cell;
+use std::rc::Rc;
+use std::time::Duration;
+
+use leptos::prelude::*;
+use leptos::task::spawn_local;
+use wasm_bindgen::JsCast;
+use wasm_bindgen_futures::JsFuture;
+
+use crate::behave::preview::{
+    keeps_frame, placeholder_text, should_fetch, FETCH_TIMEOUT_MS, PREVIEW_FPS,
+};
+use crate::store::{net, Store};
+
+/// The preview's state.
+#[derive(Clone, Copy)]
+struct Frame {
+    url: RwSignal<Option<String>>,
+    ready: RwSignal<bool>,
+    seen: RwSignal<bool>,
+    /// When the frame on screen was painted (`performance.now()`), none without one.
+    shown_at: StoredValue<Option<f64>>,
+    abort: StoredValue<Option<web_sys::AbortController>, LocalStorage>,
+}
+
+impl Frame {
+    /// Back to the placeholder: abort a fetch in flight, drop and release the frame.
+    fn placeholder(self) {
+        if let Some(ctrl) = self.abort.try_update_value(Option::take).flatten() {
+            ctrl.abort();
+        }
+        if self.ready.get_untracked() {
+            self.ready.set(false);
+        }
+        if let Some(old) = self.url.get_untracked() {
+            self.url.set(None);
+            let _ = web_sys::Url::revoke_object_url(&old);
+        }
+        self.shown_at.set_value(None);
+    }
+
+    /// A new frame's object URL replaces the shown one (released at once).
+    fn show(self, url: String) {
+        let old = self.url.get_untracked();
+        self.url.set(Some(url));
+        if let Some(old) = old {
+            let _ = web_sys::Url::revoke_object_url(&old);
+        }
+    }
+}
+
+/// Fetches one frame of camera `id`.
+async fn load(id: String, frame: Frame, live: Signal<bool>, busy: RwSignal<bool>, store: Store) {
+    let Ok(ctrl) = web_sys::AbortController::new() else {
+        return;
+    };
+    let signal = ctrl.signal();
+    frame.abort.set_value(Some(ctrl.clone()));
+    busy.set(true);
+    let timed_out = Rc::new(Cell::new(false));
+    let timer = {
+        let timed_out = timed_out.clone();
+        let ctrl = ctrl.clone();
+        set_timeout_with_handle(
+            move || {
+                timed_out.set(true);
+                ctrl.abort();
+            },
+            Duration::from_millis(FETCH_TIMEOUT_MS as u64),
+        )
+        .ok()
+    };
+    let url = format!(
+        "/api/cameras/{}/preview.jpg",
+        js_sys::encode_uri_component(&id)
+    );
+    let outcome: Result<Option<web_sys::Blob>, String> = async {
+        let resp = net::fetch("GET", &url, None, Some(&signal)).await?;
+        if resp.status() != 200 {
+            return Ok(None); // 204: no fresh frame
+        }
+        let blob = JsFuture::from(resp.blob().map_err(|e| format!("{e:?}"))?)
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+        Ok(blob.dyn_into::<web_sys::Blob>().ok())
+    }
+    .await;
+    match outcome {
+        Ok(Some(blob))
+            if !signal.aborted() && live.get_untracked() && store.connected_untracked() =>
+        {
+            if let Ok(obj) = web_sys::Url::create_object_url_with_blob(&blob) {
+                frame.show(obj);
+            }
+        }
+        Ok(_) => frame.placeholder(),
+        Err(_) => {
+            let keep = keeps_frame(
+                timed_out.get(),
+                frame.shown_at.get_value(),
+                net::perf_now(),
+                live.get_untracked(),
+                store.connected_untracked(),
+            );
+            if !keep {
+                frame.placeholder();
+            }
+        }
+    }
+    if let Some(t) = timer {
+        t.clear();
+    }
+    // This fetch is over: free the slot (unless a newer one took it meanwhile).
+    let mine = frame
+        .abort
+        .try_with_value(|a| a.as_ref().is_some_and(|c| c == &ctrl))
+        .unwrap_or(false);
+    if mine {
+        frame.abort.set_value(None);
+    }
+    busy.set(false);
+}
+
+/// A block's preview area.
+#[component]
+pub fn Preview(id: String, live: Signal<bool>, busy: RwSignal<bool>) -> impl IntoView {
+    let store = expect_context::<Store>();
+    let frame = Frame {
+        url: RwSignal::new(None),
+        ready: RwSignal::new(false),
+        seen: RwSignal::new(false),
+        shown_at: StoredValue::new(None),
+        abort: StoredValue::new_local(None),
+    };
+
+    // A push that turns the feed off drops the frame at once.
+    Effect::new(move |_| {
+        if !live.get() {
+            frame.placeholder();
+        }
+    });
+
+    let tick_id = id.clone();
+    let tick = move || {
+        if !live.get_untracked() || !store.connected_untracked() {
+            frame.placeholder();
+            return;
+        }
+        if should_fetch(true, true, busy.get_untracked()) {
+            spawn_local(load(tick_id.clone(), frame, live, busy, store));
+        }
+    };
+    if let Ok(handle) =
+        set_interval_with_handle(tick, Duration::from_millis(u64::from(1000 / PREVIEW_FPS)))
+    {
+        on_cleanup(move || {
+            handle.clear();
+            frame.placeholder();
+        });
+    }
+
+    let tag = format!("NDI · {}", id.to_uppercase());
+    view! {
+        <div class="prev" data-role="preview">
+            <img
+                class="preview-img"
+                class:ready=move || frame.ready.get()
+                data-role="preview-img"
+                alt="Živý NDI preview kamery"
+                src=move || frame.url.get()
+                on:load=move |_| {
+                    frame.ready.set(true);
+                    frame.seen.set(true);
+                    frame.shown_at.set_value(Some(net::perf_now()));
+                }
+                on:error=move |_| frame.placeholder()
+            />
+            <div class="none" data-role="preview-placeholder" hidden=move || frame.ready.get()>
+                {move || placeholder_text(frame.seen.get())}
+            </div>
+            <span class="tag" hidden=move || !frame.ready.get()>{tag}</span>
+        </div>
+    }
+}

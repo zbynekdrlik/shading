@@ -1,0 +1,10 @@
+# bkshading service config for the rebuilt panel's self-registration E2E (shading#16): the same
+# shape as e2e-register-config.toml, its own instance and relay id, so panel-next.spec.js can start
+# from "not announced yet" whatever panel.spec.js did to the other instance.
+bind = "127.0.0.1:8785"
+
+[[camera]]
+id = "cam4"
+label = "Cam 4"
+transport = "sbc-relay"
+address = "register:handheld-next"

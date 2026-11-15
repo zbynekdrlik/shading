@@ -1,0 +1,58 @@
+[package]
+name = "bkshading-panel"
+version.workspace = true
+edition = "2021"
+authors = ["zbynekdrlik"]
+description = "The bkshading operator panel: Leptos CSR (Rust/WASM) PWA built by Trunk, served by the service (shading#16)"
+license = "MIT"
+repository = "https://github.com/zbynekdrlik/shading"
+
+# fohmixer-ui's manifest (crates/fohmixer-ui, the house app stack): a cdylib for Trunk's WASM
+# build, an rlib so the pure modules run as native unit tests (`cargo test -p bkshading-panel`).
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# The wire types the service speaks (serde only, WASM-safe): one set of types, no JS mirror.
+bkshading-proto = { path = "../proto" }
+
+leptos = { version = "0.7.8", features = ["csr"] }
+
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+console_error_panic_hook = "0.1"
+serde_json = "1"
+
+# Web APIs: the /ws push and the HTTP fallback (WebSocket, fetch), the preview frames (Blob, object
+# URLs, AbortController), the #14 popup (<dialog>), ARRANGE's drag (pointer events, rects, styles)
+# and the page lifecycle (visibility).
+web-sys = { version = "0.3", features = [
+    "AbortController",
+    "AbortSignal",
+    "Blob",
+    "CloseEvent",
+    "CssStyleDeclaration",
+    "Document",
+    "DomRect",
+    "DomTokenList",
+    "Element",
+    "Event",
+    "EventTarget",
+    "Headers",
+    "HtmlDialogElement",
+    "HtmlElement",
+    "HtmlImageElement",
+    "Location",
+    "MessageEvent",
+    "NodeList",
+    "Performance",
+    "PointerEvent",
+    "Request",
+    "RequestInit",
+    "Response",
+    "Url",
+    "VisibilityState",
+    "WebSocket",
+    "Window",
+] }
