@@ -23,6 +23,13 @@ fn control_word(cam: &CameraView) -> String {
         .unwrap_or_default()
 }
 
+/// Sets the rows only when one changed (the clock ticks twice a second).
+fn set_rows(rows: RwSignal<Vec<RowView>>, v: Vec<RowView>) {
+    if rows.try_with_untracked(|r| *r != v).unwrap_or(false) {
+        rows.set(v);
+    }
+}
+
 /// Sends one write and drops its hold when it never reached the service.
 fn send(
     store: Store,
@@ -36,9 +43,9 @@ fn send(
         if net::put_param(&id, key, value).await.is_err() {
             steppers.update_value(|s| s.write_failed(key));
             if let Some(cam) = store.camera(&id) {
-                let now = net::now_ms();
-                if let Some(v) = steppers.try_update_value(|s| s.view(&cam, now)) {
-                    rows.set(v);
+                let (seq, now) = (store.push_seq.get_untracked(), net::now_ms());
+                if let Some(v) = steppers.try_update_value(|s| s.view(&cam, seq, now)) {
+                    set_rows(rows, v);
                 }
             }
         }
@@ -57,11 +64,14 @@ pub fn CameraBlock(id: String) -> impl IntoView {
     let preview_busy = RwSignal::new(false);
 
     // Each push (and the clock, so a hold that timed out shows the truth) redraws the steppers.
+    // Each push and the clock tick (a hold that timed out shows the truth) redraw the steppers;
+    // `rows` changes only when a row does.
     Effect::new(move |_| {
         let now = store.now.get();
+        let seq = store.push_seq.get();
         if let Some(c) = cam.get() {
-            if let Some(v) = steppers.try_update_value(|s| s.view(&c, now)) {
-                rows.set(v);
+            if let Some(v) = steppers.try_update_value(|s| s.view(&c, seq, now)) {
+                set_rows(rows, v);
             }
         }
     });
@@ -72,23 +82,20 @@ pub fn CameraBlock(id: String) -> impl IntoView {
         };
         let now = net::now_ms();
         let Some(p) = steppers
-            .try_update_value(|s| s.press(row, dir, &c, now))
+            .try_update_value(|s| s.press(row, dir, &c, store.push_seq.get_untracked(), now))
             .flatten()
         else {
             return;
         };
-        if let Some(v) = steppers.try_update_value(|s| s.view(&c, now)) {
-            rows.set(v);
+        let seq = store.push_seq.get_untracked();
+        if let Some(v) = steppers.try_update_value(|s| s.view(&c, seq, now)) {
+            set_rows(rows, v);
         }
         send(store, steppers, rows, c.id.clone(), p.key, p.value);
     };
 
-    let ghost = move || {
-        store
-            .blocks()
-            .iter()
-            .any(|(b, g)| *g && *b == id.get_value())
-    };
+    // Whether this block is a hidden camera's dashed place in ARRANGE: only while the mode is on.
+    let ghost = Memo::new(move |_| store.arrange.with(|a| a.hidden_in_edit(&id.get_value())));
     let online = move || cam.with(|c| c.as_ref().is_some_and(is_online));
     let control = move || cam.with(|c| c.as_ref().map(control_word).unwrap_or_default());
     let label = move || cam.with(|c| c.as_ref().map(|c| c.label.clone()).unwrap_or_default());
@@ -117,7 +124,7 @@ pub fn CameraBlock(id: String) -> impl IntoView {
         <section
             node_ref=root
             class="cam"
-            class:ghost=ghost
+            class:ghost=move || ghost.get()
             class:disabled=move || !online()
             data-role="camera-block"
             data-id=move || id.get_value()
@@ -198,7 +205,7 @@ pub fn CameraBlock(id: String) -> impl IntoView {
                     </div>
                 </div>
             </div>
-            <Cover id=id.get_value() block=root ghost=Signal::derive(ghost) />
+            <Cover id=id.get_value() block=root ghost=Signal::from(ghost) />
         </section>
     }
 }

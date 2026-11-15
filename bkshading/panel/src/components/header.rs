@@ -21,6 +21,10 @@ pub fn tap_arrange(store: Store) {
     let cams = store
         .cameras
         .with_untracked(|c| c.iter().map(|c| c.id.clone()).collect::<Vec<String>>());
+    if !store.layout_heard.get_untracked() {
+        leptos::logging::log!("[arrange] tap before the service's layout arrived: ignored");
+        return;
+    }
     let doc = store.layout.get_untracked();
     let tap = store.arrange.try_update(|a| a.tap(&doc, &cams)).flatten();
     leptos::logging::log!("[arrange] tap at rev {}: {tap:?}", doc.rev);

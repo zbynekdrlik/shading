@@ -37,30 +37,49 @@ pub enum SaveError {
     Write(String),
 }
 
-/// Writes `data` to `path` atomically: a temporary file in the same directory, then a rename, so a
-/// crash never leaves half a document.
+/// Writes `data` to `path` atomically: a temporary file in the same directory, flushed to disk,
+/// then a rename, so a crash or a power cut never leaves half a document.
 pub fn atomic_write(path: &Path, data: &str) -> std::io::Result<()> {
+    use std::io::Write;
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);
-    std::fs::write(&tmp, data)?;
+    let mut file = std::fs::File::create(&tmp)?;
+    file.write_all(data.as_bytes())?;
+    file.sync_all()?;
+    drop(file);
     std::fs::rename(&tmp, path)
 }
 
+/// What [`load`] found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Loaded {
+    /// The stored document, or the default (no file yet, or a broken one moved aside).
+    Doc(LayoutDoc),
+    /// The file is there but cannot be read (permissions, a lock): it must not be overwritten.
+    Unreadable,
+}
+
 /// Reads the document at `path`. No file = the default (rev 0: number order, nothing hidden). A
-/// file that cannot be read or parsed is moved aside to `<file>.bad` (logged as an error) and the
+/// file that is not a layout document is moved aside to `<file>.bad` (logged as an error) and the
 /// default is used, so a broken layout never keeps the shading panel from starting; the next save
-/// writes a fresh file.
-pub fn load(path: &Path) -> LayoutDoc {
+/// writes a fresh file. A file that cannot be read at all is [`Loaded::Unreadable`]: the operator's
+/// layout may still be in it, so it is never overwritten.
+pub fn load(path: &Path) -> Loaded {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             tracing::info!(file = %path.display(), "layout: no file yet, number order (rev 0)");
-            return LayoutDoc::default();
+            return Loaded::Doc(LayoutDoc::default());
         }
         Err(e) => {
-            tracing::error!(file = %path.display(), error = %e, "layout: file not readable, using number order");
-            return LayoutDoc::default();
+            tracing::error!(
+                file = %path.display(),
+                error = %e,
+                "layout: file not readable; number order, saves kept in memory only so the file \
+                 is never overwritten (fix its permissions and restart)"
+            );
+            return Loaded::Unreadable;
         }
     };
     match serde_json::from_str::<LayoutDoc>(&text) {
@@ -72,7 +91,7 @@ pub fn load(path: &Path) -> LayoutDoc {
                 hidden = ?doc.hidden,
                 "layout: loaded"
             );
-            doc
+            Loaded::Doc(doc)
         }
         Err(e) => {
             let mut bad = path.as_os_str().to_owned();
@@ -85,7 +104,7 @@ pub fn load(path: &Path) -> LayoutDoc {
                 moved_ok = moved.is_ok(),
                 "layout: file is not a layout document, moved aside; using number order"
             );
-            LayoutDoc::default()
+            Loaded::Doc(LayoutDoc::default())
         }
     }
 }
@@ -109,14 +128,17 @@ struct Inner {
 impl LayoutStore {
     /// A store over `path` (loaded now), or in memory only when `path` is `None`.
     pub fn open(path: Option<PathBuf>) -> Self {
-        let doc = match &path {
-            Some(p) => load(p),
+        let (path, doc) = match path {
+            Some(p) => match load(&p) {
+                Loaded::Doc(doc) => (Some(p), doc),
+                Loaded::Unreadable => (None, LayoutDoc::default()),
+            },
             None => {
                 tracing::warn!(
                     "layout: no --config and no --layout-file, the panel layout lives in memory \
                      only and is lost at restart"
                 );
-                LayoutDoc::default()
+                (None, LayoutDoc::default())
             }
         };
         Self::with_doc(path, doc)

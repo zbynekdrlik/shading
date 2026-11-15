@@ -66,7 +66,7 @@ fn row(views: &[RowView], r: Row) -> RowView {
 
 #[test]
 fn every_row_shows_the_cameras_value() {
-    let v = Steppers::default().view(&cam(), 0.0);
+    let v = Steppers::default().view(&cam(), 2, 0.0);
     let texts: Vec<String> = v.iter().map(|r| r.text.clone()).collect();
     assert_eq!(texts, ["f/5.2", "400", "5600 K", "0", "1/60", "60.00"]);
     assert!(v.iter().all(|r| !r.pending && !r.not_applied));
@@ -76,7 +76,7 @@ fn every_row_shows_the_cameras_value() {
 fn an_offline_camera_shows_dashes_and_no_step() {
     let mut c = cam();
     c.state.as_mut().unwrap().online = false;
-    let v = Steppers::default().view(&c, 0.0);
+    let v = Steppers::default().view(&c, 2, 0.0);
     assert!(v.iter().all(|r| r.text.ends_with('—')), "{v:?}");
     assert!(v.iter().all(|r| !r.dec.enabled && !r.inc.enabled));
 }
@@ -106,7 +106,7 @@ fn step_choice_mirrors_the_proto_rule() {
 fn iso_plus_writes_the_next_listed_value_and_holds_it() {
     let mut s = Steppers::default();
     let c = cam();
-    let p = s.press(Row::Iso, 1, &c, 0.0).unwrap();
+    let p = s.press(Row::Iso, 1, &c, 1, 0.0).unwrap();
     assert_eq!(
         p,
         Press {
@@ -115,11 +115,11 @@ fn iso_plus_writes_the_next_listed_value_and_holds_it() {
         }
     );
     // The same (stale) push still shows 400: the panel holds 800, pending.
-    let r = row(&s.view(&c, 100.0), Row::Iso);
+    let r = row(&s.view(&c, 2, 100.0), Row::Iso);
     assert_eq!((r.text.as_str(), r.pending), ("800", true));
     assert!(!r.inc.enabled, "800 is the last choice");
     // The confirmation ends the hold.
-    let r = row(&s.view(&with(|p| p.iso = Some(800)), 200.0), Row::Iso);
+    let r = row(&s.view(&with(|p| p.iso = Some(800)), 3, 200.0), Row::Iso);
     assert_eq!((r.text.as_str(), r.pending), ("800", false));
 }
 
@@ -128,18 +128,18 @@ fn a_second_tap_builds_on_the_held_target() {
     let mut s = Steppers::default();
     let c = cam();
     assert_eq!(
-        s.press(Row::Kelvin, 1, &c, 0.0).unwrap().value,
+        s.press(Row::Kelvin, 1, &c, 1, 0.0).unwrap().value,
         serde_json::json!(5700)
     );
     assert_eq!(
-        s.press(Row::Kelvin, 1, &c, 10.0).unwrap().value,
+        s.press(Row::Kelvin, 1, &c, 1, 10.0).unwrap().value,
         serde_json::json!(5800)
     );
     assert_eq!(
-        s.press(Row::Tint, -1, &c, 10.0).unwrap().value,
+        s.press(Row::Tint, -1, &c, 1, 10.0).unwrap().value,
         serde_json::json!(-1)
     );
-    assert_eq!(row(&s.view(&c, 20.0), Row::Tint).text, "-1");
+    assert_eq!(row(&s.view(&c, 2, 20.0), Row::Tint).text, "-1");
 }
 
 #[test]
@@ -149,19 +149,19 @@ fn linear_steps_clamp_and_disable_at_the_ends() {
         p.kelvin = Some(10000);
         p.tint = Some(-50);
     });
-    let v = s.view(&c, 0.0);
+    let v = s.view(&c, 2, 0.0);
     assert!(!row(&v, Row::Kelvin).inc.enabled);
     assert!(row(&v, Row::Kelvin).dec.enabled);
     assert!(!row(&v, Row::Tint).dec.enabled);
     assert_eq!(
-        s.press(Row::Kelvin, 1, &c, 0.0),
+        s.press(Row::Kelvin, 1, &c, 1, 0.0),
         None,
         "a disabled + writes nothing"
     );
     let c = with(|p| p.kelvin = Some(9950));
     assert_eq!(
         Steppers::default()
-            .press(Row::Kelvin, 1, &c, 0.0)
+            .press(Row::Kelvin, 1, &c, 1, 0.0)
             .unwrap()
             .value,
         serde_json::json!(10000)
@@ -172,10 +172,10 @@ fn linear_steps_clamp_and_disable_at_the_ends() {
 fn shutter_off_the_grid_steps_onto_it() {
     let c = with(|p| p.shutter = Some(50));
     let mut s = Steppers::default();
-    let v = row(&s.view(&c, 0.0), Row::Shutter);
+    let v = row(&s.view(&c, 2, 0.0), Row::Shutter);
     assert!(v.dec.enabled && v.inc.enabled, "off-grid: both directions");
     assert_eq!(
-        s.press(Row::Shutter, 1, &c, 0.0).unwrap().value,
+        s.press(Row::Shutter, 1, &c, 1, 0.0).unwrap().value,
         serde_json::json!(60)
     );
 }
@@ -185,17 +185,17 @@ fn the_aperture_step_sends_the_direction_and_holds_the_shown_f_stop() {
     let mut s = Steppers::default();
     let c = cam();
     assert_eq!(
-        s.press(Row::Aperture, 1, &c, 0.0).unwrap(),
+        s.press(Row::Aperture, 1, &c, 1, 0.0).unwrap(),
         Press {
             key: "apertureStep",
             value: serde_json::json!(1)
         }
     );
-    let r = row(&s.view(&c, 100.0), Row::Aperture);
+    let r = row(&s.view(&c, 2, 100.0), Row::Aperture);
     assert_eq!((r.text.as_str(), r.pending), ("f/5.2", true));
     // The lens moved: the hold ends and the true f-stop shows.
     let r = row(
-        &s.view(&with(|p| p.aperture_av = Some(6.0)), 200.0),
+        &s.view(&with(|p| p.aperture_av = Some(6.0)), 3, 200.0),
         Row::Aperture,
     );
     assert_eq!((r.text.as_str(), r.pending), ("f/8.0", false));
@@ -208,15 +208,15 @@ fn the_aperture_stops_at_the_lens_ends() {
         p.aperture_av = Some(4.0);
         p.iris_range_pos = Some(0.0);
     });
-    let r = row(&Steppers::default().view(&wide, 0.0), Row::Aperture);
+    let r = row(&Steppers::default().view(&wide, 2, 0.0), Row::Aperture);
     assert_eq!(r.text, "f/4.0");
     assert!(!r.dec.enabled && r.inc.enabled && r.at_end);
     assert_eq!(r.dec.title, "Objektív je na najotvorenejšej clone");
     let closed = with(|p| p.iris_range_pos = Some(1.0));
-    let r = row(&Steppers::default().view(&closed, 0.0), Row::Aperture);
+    let r = row(&Steppers::default().view(&closed, 2, 0.0), Row::Aperture);
     assert!(r.dec.enabled && !r.inc.enabled && r.at_end);
     let mid = with(|p| p.iris_range_pos = Some(0.4));
-    let r = row(&Steppers::default().view(&mid, 0.0), Row::Aperture);
+    let r = row(&Steppers::default().view(&mid, 2, 0.0), Row::Aperture);
     assert!(r.dec.enabled && r.inc.enabled && !r.at_end);
     assert_eq!(r.pos, Some(0.4));
 }
@@ -240,7 +240,7 @@ fn no_choices_disable_with_a_reason() {
         .unwrap()
         .iso_choices
         .clear();
-    let v = Steppers::default().view(&c, 0.0);
+    let v = Steppers::default().view(&c, 2, 0.0);
     let ap = row(&v, Row::Aperture);
     assert!(!ap.dec.enabled && !ap.inc.enabled);
     assert!(ap.dec.title.contains("Kroky clony"));
@@ -250,10 +250,10 @@ fn no_choices_disable_with_a_reason() {
 #[test]
 fn a_not_applied_key_flags_its_row_and_ends_its_hold() {
     let mut s = Steppers::default();
-    s.press(Row::Aperture, 1, &cam(), 0.0).unwrap();
+    s.press(Row::Aperture, 1, &cam(), 1, 0.0).unwrap();
     let mut c = cam();
     c.state.as_mut().unwrap().not_applied = vec!["apertureStep".into()];
-    let v = s.view(&c, 50.0);
+    let v = s.view(&c, 2, 50.0);
     let ap = row(&v, Row::Aperture);
     assert!(ap.not_applied && !ap.pending);
     assert_eq!(ap.inc.title, NOT_APPLIED_TITLE);
@@ -270,13 +270,13 @@ fn fps_steps_only_over_whole_listed_rates() {
     );
     let mut s = Steppers::default();
     assert_eq!(
-        s.press(Row::Fps, -1, &c, 0.0).unwrap(),
+        s.press(Row::Fps, -1, &c, 1, 0.0).unwrap(),
         Press {
             key: "fps",
             value: serde_json::json!(50)
         }
     );
-    assert_eq!(row(&s.view(&c, 1.0), Row::Fps).text, "50.00");
+    assert_eq!(row(&s.view(&c, 2, 1.0), Row::Fps).text, "50.00");
     let mut none = cam();
     none.state
         .as_mut()
@@ -286,7 +286,7 @@ fn fps_steps_only_over_whole_listed_rates() {
         .unwrap()
         .fps_choices
         .clear();
-    let r = row(&Steppers::default().view(&none, 0.0), Row::Fps);
+    let r = row(&Steppers::default().view(&none, 2, 0.0), Row::Fps);
     assert!(!r.dec.enabled && !r.inc.enabled);
 }
 
@@ -294,14 +294,14 @@ fn fps_steps_only_over_whole_listed_rates() {
 fn a_failed_write_drops_the_hold() {
     let mut s = Steppers::default();
     let c = cam();
-    s.press(Row::Kelvin, 1, &c, 0.0).unwrap();
+    s.press(Row::Kelvin, 1, &c, 1, 0.0).unwrap();
     s.write_failed("kelvin");
-    assert_eq!(row(&s.view(&c, 1.0), Row::Kelvin).text, "5600 K");
+    assert_eq!(row(&s.view(&c, 2, 1.0), Row::Kelvin).text, "5600 K");
 }
 
 #[test]
 fn the_bar_sits_at_the_value() {
-    let v = Steppers::default().view(&cam(), 0.0);
+    let v = Steppers::default().view(&cam(), 2, 0.0);
     assert_eq!(row(&v, Row::Iso).pos, Some(2.0 / 3.0));
     assert_eq!(row(&v, Row::Tint).pos, Some(0.5));
     assert_eq!(row(&v, Row::Shutter).pos, Some(0.0));
@@ -317,4 +317,23 @@ fn tint_and_f_numbers_read_like_the_mockup() {
     assert!(iris_at_end(Some(0.0005), -1));
     assert!(!iris_at_end(None, -1));
     assert!(!iris_at_end(Some(0.5), 0));
+}
+
+#[test]
+fn a_retap_against_a_push_that_still_carries_a_refusal_stays_pending() {
+    let mut c = cam();
+    c.state.as_mut().unwrap().not_applied = vec!["kelvin".into()];
+    let mut s = Steppers::default();
+    s.press(Row::Kelvin, 1, &c, 7, 0.0).unwrap();
+    let r = row(&s.view(&c, 7, 10.0), Row::Kelvin);
+    assert_eq!(
+        (r.text.as_str(), r.pending),
+        ("5700 K", true),
+        "the same push cannot refuse the new tap"
+    );
+    let r = row(&s.view(&c, 8, 20.0), Row::Kelvin);
+    assert!(
+        !r.pending && r.not_applied,
+        "a newer push still refusing it ends the hold"
+    );
 }

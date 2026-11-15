@@ -11,7 +11,7 @@
 
 use bkshading_proto::wire::{CameraCaps, CameraView, ShadingParams};
 
-use super::holds::{HoldKind, Holds};
+use super::holds::{HoldKind, Holds, Seen};
 
 /// Kelvin per tap.
 pub const KELVIN_STEP: i64 = 100;
@@ -336,21 +336,30 @@ pub struct Steppers {
 }
 
 impl Steppers {
-    /// The six steppers for push `cam` at `now`, reconciling the held taps with it.
-    pub fn view(&mut self, cam: &CameraView, now: f64) -> Vec<RowView> {
+    /// The six steppers for `cam` of push number `seq` at `now`, reconciling the held taps with it
+    /// (only a push newer than a tap confirms or refuses it; the clock only times it out).
+    pub fn view(&mut self, cam: &CameraView, seq: u64, now: f64) -> Vec<RowView> {
         let live = Live::of(cam);
         Row::ALL
             .iter()
-            .map(|&row| self.row_view(row, &live, now))
+            .map(|&row| self.row_view(row, &live, seq, now))
             .collect()
     }
 
-    fn row_view(&mut self, row: Row, live: &Live, now: f64) -> RowView {
+    fn row_view(&mut self, row: Row, live: &Live, seq: u64, now: f64) -> RowView {
         let (pushed_text, pushed_value) = pushed(row, live);
         let refused = live.refused(row);
         let held = self
             .holds
-            .reconcile(row.key(), &pushed_text, refused, now)
+            .reconcile(
+                row.key(),
+                Seen {
+                    pushed: &pushed_text,
+                    refused,
+                    seq,
+                    now,
+                },
+            )
             .cloned();
         let (text, base) = match &held {
             Some(h) => (h.text.clone(), h.value.or(pushed_value)),
@@ -379,10 +388,21 @@ impl Steppers {
         }
     }
 
-    /// A tap on `row`'s − (`dir` −1) or + (`dir` 1) of camera `cam`: the write, or none when the
-    /// button would be disabled. The tap is held (shown at once, pending) until confirmed.
-    pub fn press(&mut self, row: Row, dir: i32, cam: &CameraView, now: f64) -> Option<Press> {
-        let current = self.view(cam, now).into_iter().find(|v| v.row == row)?;
+    /// A tap on `row`'s − (`dir` −1) or + (`dir` 1) of camera `cam` (push number `seq`): the
+    /// write, or none when the button would be disabled. The tap is held (shown at once, pending)
+    /// until a newer push confirms or refuses it.
+    pub fn press(
+        &mut self,
+        row: Row,
+        dir: i32,
+        cam: &CameraView,
+        seq: u64,
+        now: f64,
+    ) -> Option<Press> {
+        let current = self
+            .view(cam, seq, now)
+            .into_iter()
+            .find(|v| v.row == row)?;
         let gate = if dir < 0 { &current.dec } else { &current.inc };
         if !gate.enabled {
             return None;
@@ -398,7 +418,7 @@ impl Steppers {
         match row {
             Row::Aperture => {
                 self.holds
-                    .hold(key, HoldKind::Step, current.text.clone(), None, now);
+                    .hold(key, HoldKind::Step, current.text.clone(), None, seq, now);
                 Some(Press {
                     key,
                     value: serde_json::json!(dir.signum()),
@@ -414,7 +434,7 @@ impl Steppers {
                     _ => fps_text(value),
                 };
                 self.holds
-                    .hold(key, HoldKind::Value, text, Some(value), now);
+                    .hold(key, HoldKind::Value, text, Some(value), seq, now);
                 Some(Press {
                     key,
                     value: serde_json::json!(value as i64),
@@ -434,7 +454,7 @@ impl Steppers {
                     tint_text(next)
                 };
                 self.holds
-                    .hold(key, HoldKind::Value, text, Some(next as f64), now);
+                    .hold(key, HoldKind::Value, text, Some(next as f64), seq, now);
                 Some(Press {
                     key,
                     value: serde_json::json!(next),

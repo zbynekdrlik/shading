@@ -10,7 +10,7 @@ use axum::http::StatusCode;
 use bkshading::aggregator::Aggregator;
 use bkshading::config::ServiceConfig;
 use bkshading::http::{has_content_hash, layout_put_response, panel_file, router, AppState};
-use bkshading::layout::{layout_path, load, LayoutStore, SaveError, DEFAULT_LAYOUT_FILE};
+use bkshading::layout::{layout_path, load, LayoutStore, Loaded, SaveError, DEFAULT_LAYOUT_FILE};
 use bkshading::preview::store::PreviewStore;
 use bkshading::registry::RelayRegistry;
 use bkshading_proto::layout::{LayoutDoc, LayoutPut, LayoutRefusal};
@@ -65,7 +65,10 @@ fn the_layout_file_defaults_next_to_the_config() {
 #[test]
 fn no_file_is_number_order_at_rev_0() {
     let dir = scratch_dir("missing");
-    assert_eq!(load(&dir.join("none.json")), LayoutDoc::default());
+    assert_eq!(
+        load(&dir.join("none.json")),
+        Loaded::Doc(LayoutDoc::default())
+    );
 }
 
 #[test]
@@ -73,7 +76,7 @@ fn a_broken_file_is_moved_aside_and_number_order_is_used() {
     let dir = scratch_dir("broken");
     let file = dir.join("layout.json");
     std::fs::write(&file, "{ not json").unwrap();
-    assert_eq!(load(&file), LayoutDoc::default());
+    assert_eq!(load(&file), Loaded::Doc(LayoutDoc::default()));
     assert!(!file.exists(), "the broken file is moved aside");
     assert_eq!(
         std::fs::read_to_string(dir.join("layout.json.bad")).unwrap(),
@@ -124,7 +127,10 @@ fn a_stale_or_invalid_save_changes_nothing() {
     assert_eq!(store.current().rev, 1);
     assert_eq!(store.current().order, ids(&["cam1", "cam2"]));
     assert!(!rx.has_changed().unwrap(), "nothing pushed");
-    assert_eq!(load(&file).order, ids(&["cam1", "cam2"]));
+    let Loaded::Doc(stored) = load(&file) else {
+        panic!("the file reads back");
+    };
+    assert_eq!(stored.order, ids(&["cam1", "cam2"]));
 }
 
 #[test]
@@ -143,6 +149,19 @@ fn a_failed_write_keeps_the_stored_layout() {
     ));
     assert_eq!(store.current(), LayoutDoc::default());
     assert!(!rx.has_changed().unwrap());
+}
+
+#[test]
+fn an_unreadable_file_is_never_overwritten() {
+    let dir = scratch_dir("unreadable");
+    // A directory where the file should be: it exists, but it cannot be read as a file.
+    let file = dir.join("layout.json");
+    std::fs::create_dir(&file).unwrap();
+    assert_eq!(load(&file), Loaded::Unreadable);
+    let store = LayoutStore::open(Some(file.clone()));
+    assert_eq!(store.path(), None, "saves stay in memory");
+    assert_eq!(store.save(&put(0, &["cam1"], &[]), "a").unwrap().rev, 1);
+    assert!(file.is_dir(), "untouched");
 }
 
 #[test]

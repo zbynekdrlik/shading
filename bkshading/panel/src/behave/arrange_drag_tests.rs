@@ -153,6 +153,7 @@ fn blocks_close_up_outside_the_mode_and_show_ghosts_in_it() {
         vec![("cam3".to_string(), false), ("cam2".to_string(), false)]
     );
     a.tap(&d, &cams());
+    assert!(a.hidden_in_edit("cam1") && !a.hidden_in_edit("cam3"));
     assert_eq!(
         a.blocks(&d, &cams()),
         vec![

@@ -113,15 +113,27 @@ pub async fn put_param(id: &str, key: &str, value: serde_json::Value) -> Result<
     }
 }
 
-/// ARRANGE's save: `PUT /api/layout`. The new revision, or why not.
+/// How long ARRANGE's save may take before it counts as not having reached the service (a hung
+/// request would otherwise keep the mode saving, its covers up, until a reload).
+pub const SAVE_TIMEOUT_MS: u64 = 10_000;
+
+/// ARRANGE's save: `PUT /api/layout`, aborted after [`SAVE_TIMEOUT_MS`]. The new revision, or why
+/// not.
 pub async fn put_layout(put: &LayoutPut) -> Result<u64, SaveFail> {
     let body = serde_json::to_string(put).map_err(|_| SaveFail::Other)?;
-    let answer = fetch_text("PUT", "/api/layout", Some(body), None)
-        .await
-        .map_err(|e| {
-            leptos::logging::log!("[layout] save did not reach the service: {e}");
-            SaveFail::Offline
-        })?;
+    let ctrl = web_sys::AbortController::new().map_err(|_| SaveFail::Other)?;
+    let timer = {
+        let ctrl = ctrl.clone();
+        set_timeout_with_handle(move || ctrl.abort(), Duration::from_millis(SAVE_TIMEOUT_MS)).ok()
+    };
+    let sent = fetch_text("PUT", "/api/layout", Some(body), Some(&ctrl.signal())).await;
+    if let Some(t) = timer {
+        t.clear();
+    }
+    let answer = sent.map_err(|e| {
+        leptos::logging::log!("[layout] save did not reach the service: {e}");
+        SaveFail::Offline
+    })?;
     let json: serde_json::Value = serde_json::from_str(&answer.text).unwrap_or_default();
     leptos::logging::log!(
         "[layout] save rev {} -> {} {}",
@@ -230,7 +242,8 @@ fn schedule_reconnect(store: Store) {
     );
 }
 
-/// The fallback poll (only while the socket is down): the aggregate and the layout over HTTP.
+/// The fallback poll (only while the socket is down): the aggregate and the layout over HTTP. An
+/// answer that arrives once the socket is open again is dropped: the socket's pushes are newer.
 async fn poll(store: Store) {
     let cams = fetch_text("GET", "/api/cameras", None, None).await;
     let agg = cams
@@ -240,10 +253,15 @@ async fn poll(store: Store) {
     let Some(agg) = agg else {
         return; // no contact: the banner shows once the last contact is stale
     };
+    if store.ws_open.get_untracked() {
+        return;
+    }
     store.apply(ServerMsg::State(agg), now_ms());
     if let Ok(a) = fetch_text("GET", "/api/layout", None, None).await {
         if let Ok(doc) = serde_json::from_str::<LayoutDoc>(&a.text) {
-            store.apply_layout(doc);
+            if !store.ws_open.get_untracked() {
+                store.apply_layout(doc);
+            }
         }
     }
 }

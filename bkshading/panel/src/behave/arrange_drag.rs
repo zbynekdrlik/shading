@@ -133,6 +133,16 @@ impl Arrange {
         matches!(self, Arrange::On { .. })
     }
 
+    /// Whether `id` is a hidden camera's place in the mode's edit (never outside the mode).
+    pub fn hidden_in_edit(&self, id: &str) -> bool {
+        match self {
+            Arrange::Off => false,
+            Arrange::On { edit, .. } | Arrange::Saving { edit, .. } => {
+                edit.hidden.iter().any(|h| h == id)
+            }
+        }
+    }
+
     /// Whether the mode is on (saving included): the blocks are under their covers.
     pub fn is_on(&self) -> bool {
         !matches!(self, Arrange::Off)

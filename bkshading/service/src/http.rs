@@ -191,6 +191,12 @@ async fn ws_push(
     }
     loop {
         let msg = tokio::select! {
+            // Push-only: an inbound frame is never acted on, but a Close (or the end of the
+            // stream) ends this loop at once instead of at the next send.
+            inbound = socket.recv() => match inbound {
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                Some(Ok(_)) => continue,
+            },
             changed = rx.changed() => {
                 if changed.is_err() {
                     break; // pump dropped (service shutting down)
@@ -225,7 +231,21 @@ async fn put_layout(
     ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
     Json(put): Json<LayoutPut>,
 ) -> Response {
-    layout_put_response(&state.layout, &put, &peer.to_string())
+    // The save writes and flushes a file: off the async workers.
+    let store = state.layout.clone();
+    match tokio::task::spawn_blocking(move || layout_put_response(&store, &put, &peer.to_string()))
+        .await
+    {
+        Ok(resp) => resp,
+        Err(e) => {
+            tracing::error!(error = %e, "layout: the save task failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "write" })),
+            )
+                .into_response()
+        }
+    }
 }
 
 /// The pure decision of `PUT /api/layout`, split out so its status contract is tested without an
