@@ -205,3 +205,89 @@ fn a_link_whose_camera_redirects_is_rest_off_14() {
     assert!(!st.online);
     assert_eq!(st.offline_reason, Some(OfflineReason::RestOff));
 }
+
+/// A 6K at fw 8.6 serves neither `system/product` nor `lens/iris/description`; while it boots,
+/// `/system` answers 503. That camera is not ready yet, never "REST off".
+#[test]
+fn a_booting_camera_without_product_is_not_answering_14() {
+    let mut c = Cam {
+        not_found: vec!["/system/product".into(), "/lens/iris".into()],
+        ..Cam::default()
+    };
+    c.get_override
+        .insert("/system".into(), (503, "booting".into()));
+    let cam = FakeCamera::start(c);
+    let st = session(fixed_port(cam.addr.port())).read_state();
+    assert!(!st.online);
+    assert_eq!(st.offline_reason, Some(OfflineReason::CameraNotAnswering));
+}
+
+/// A camera found before stops answering in the middle of a read (a GET times out): the relay
+/// keeps its name and says it is not answering.
+#[test]
+fn a_held_camera_that_stops_answering_is_not_answering_14() {
+    let cam = FakeCamera::start(Cam::default());
+    let s = session(fixed_port(cam.addr.port()));
+    assert!(s.read_state().online);
+    cam.cam().get_delay.insert(
+        "/video/iso".into(),
+        bkshading_relay::transport::REST_TIMEOUT + std::time::Duration::from_millis(500),
+    );
+    let st = s.read_state();
+    assert!(!st.online);
+    assert_eq!(st.offline_reason, Some(OfflineReason::CameraNotAnswering));
+    assert_eq!(
+        st.camera.as_deref(),
+        Some("Blackmagic Pocket Cinema Camera 4K")
+    );
+}
+
+/// Web media manager switched OFF while the relay holds the camera: every GET answers 307. The
+/// camera must not stay "online" with no values; the relay reports REST off at once.
+#[test]
+fn web_media_manager_switched_off_on_a_held_camera_is_rest_off_14() {
+    let cam = FakeCamera::start(Cam::default());
+    let s = session(fixed_port(cam.addr.port()));
+    assert!(s.read_state().online);
+    {
+        let mut c = cam.cam();
+        for p in bkshading_proto::rest::READ_ENDPOINTS
+            .iter()
+            .chain([&bkshading_proto::rest::PRODUCT, &"/system"])
+        {
+            c.get_override.insert(p.to_string(), (307, String::new()));
+        }
+    }
+    let st = s.read_state();
+    assert!(!st.online, "no endpoint answered: not controllable");
+    assert_eq!(st.offline_reason, Some(OfflineReason::RestOff));
+    // The next read looks the camera up again and still finds REST off.
+    let st = s.read_state();
+    assert!(!st.online);
+    assert_eq!(st.offline_reason, Some(OfflineReason::RestOff));
+    // Switched back on: online again.
+    cam.cam().get_override.clear();
+    assert!(s.read_state().online);
+}
+
+/// Two camera links: one address refuses, the other redirects. The redirect says more (a camera is
+/// there, its REST is off), whatever order the links are tried in.
+#[test]
+fn of_two_links_the_redirect_wins_14() {
+    let mut c = Cam::default();
+    c.get_override
+        .insert("/system/product".into(), (307, String::new()));
+    let cam = FakeCamera::start(c);
+    let net = NetTree::new("two");
+    net.camera_iface("enxa00000000001", 7);
+    std::fs::write(net.root.join("leases/7"), "SERVER_ADDRESS=127.0.0.5\n").unwrap();
+    net.camera_iface("enxb00000000002", 8);
+    std::fs::write(net.root.join("leases/8"), "SERVER_ADDRESS=127.0.0.1\n").unwrap();
+    let st = session(CameraLocator::Discover {
+        paths: net.paths(),
+        port: cam.addr.port(),
+    })
+    .read_state();
+    assert!(!st.online);
+    assert_eq!(st.offline_reason, Some(OfflineReason::RestOff));
+}
