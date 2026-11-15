@@ -276,6 +276,10 @@ the house app stack airuleset#1333); mockup `docs/mockups/arrange-v1.html` appro
   fresh `--layout-file` in the temp dir. Fixtures go in through `window.shadingPush(msg)` (the panel's
   own entry for a `/ws` message; wait for it with `waitForFunction`). Local run without a release
   build: `BKSHADING_BIN=target/debug/bkshading npx playwright test` (debug rust-embed reads `dist/`).
+- **Release check:** the service tarball's `web/` folder is still the OLD panel; the new panel is
+  only inside the binary (`grep -c shadingLoadFailed bkshading` > 0 proves the real dist, not the
+  placeholder, was embedded). v0.2.7 verified that way, then run against the stub relay: `/next/`
+  shows v0.2.7, ARRANGE covers render, console clean.
 - **E2E gotchas:** a synthetic `visibilitychange` must be dispatched with `{bubbles: true}` (the real
   one bubbles; the app listens on `window`). A refused `PUT /api/layout` (409) is logged by Chromium as
   "Failed to load resource"; the stale test allows exactly that line. A click on a control under the
