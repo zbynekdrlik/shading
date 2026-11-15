@@ -37,6 +37,8 @@ MEMBER_MANIFESTS = {
     "bkshading-proto": os.path.join(REPO, "bkshading", "proto", "Cargo.toml"),
     "bkshading-relay": os.path.join(REPO, "bkshading", "relay", "Cargo.toml"),
     "bkshading": os.path.join(REPO, "bkshading", "service", "Cargo.toml"),
+    # shading#16: the operator panel (Leptos CSR) shows this version in its header.
+    "bkshading-panel": os.path.join(REPO, "bkshading", "panel", "Cargo.toml"),
 }
 
 # A dev version like "1.7.0-dev.521" (or a plain "1.7.0" release).
@@ -124,7 +126,7 @@ def test_cargo_metadata_resolves_a_uniform_version():
     )
     meta = json.loads(out.stdout)
     resolved = {pkg["name"]: pkg["version"] for pkg in meta["packages"]}
-    # Every crate in this workspace (the 3 bkshading members) is present, and nothing else.
+    # Every crate in this workspace (the bkshading members) is present, and nothing else.
     assert set(resolved) == set(MEMBER_MANIFESTS), f"unexpected workspace packages: {resolved}"
     for name in MEMBER_MANIFESTS:
         assert name in resolved, f"{name} missing from cargo metadata packages"

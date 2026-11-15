@@ -34,13 +34,92 @@ jobs:
       - name: Compare workspace version with main
         run: python3 scripts/release.py version-check origin/main
 
-  bkshading:
-    name: bkshading service + relay
-    # Ported whole from camera-box's `bkshading` job (shading#1): clippy + tests in both feature
-    # configs, release builds, the panel Playwright E2E, then the deployable binaries.
+  # shading#16: the rebuilt operator panel (bkshading/panel, Leptos CSR) built to WASM by Trunk, as
+  # fohmixer's `wasm` job: clippy for wasm32, the release build, and the checks on the built page
+  # (the guarded loader, no leftover Trunk placeholder, no WASM preload, the network-only service
+  # worker). The `panel-dist` artifact is what every service build that ships embeds (rust-embed),
+  # so the release binaries carry the real panel.
+  panel:
+    name: Panel (Leptos CSR, Trunk)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: panel
+
+      - name: Install Trunk
+        uses: taiki-e/install-action@v2
+        with:
+          tool: trunk@0.21.14
+
+      - name: Clippy (panel + proto for wasm32)
+        run: cargo clippy --locked -p bkshading-panel -p bkshading-proto --target wasm32-unknown-unknown -- -D warnings
+
+      - name: Build the panel (release)
+        working-directory: bkshading/panel
+        run: trunk build --release --locked
+
+      - name: Check the built panel
+        run: |
+          set -euo pipefail
+          d=bkshading/panel/dist
+          test -f "$d/index.html"
+          ls "$d"/*.wasm
+          test -f "$d/manifest.webmanifest"
+          test -f "$d/icons/icon-192.png"
+          test -f "$d/icons/icon-512.png"
+          test -f "$d/fonts/barlow-latin-600-normal.woff2"
+          # fohmixer's guarded loader, not Trunk's default `await init(...)`.
+          grep -q 'WebAssembly.compileStreaming' "$d/index.html"
+          grep -q 'shadingLoadFailed' "$d/index.html"
+          if grep -qE '\{(base|js|wasm)\}' "$d/index.html"; then
+            echo "::error::dist/index.html has an unfilled loader placeholder"; exit 1
+          fi
+          if grep -q 'const wasm = await init(' "$d/index.html"; then
+            echo "::error::dist/index.html has Trunk's default loader"; exit 1
+          fi
+          if grep -oE '<link[^>]*>' "$d/index.html" | grep 'rel="preload"' | grep -q '\.wasm'; then
+            echo "::error::dist/index.html preloads the WASM module"; exit 1
+          fi
+          grep -q 'rel="modulepreload"' "$d/index.html"
+          # Served at /next/ (phase 1 of the migration).
+          grep -q '/next/' "$d/index.html"
+          test -f "$d/sw.js"
+          if grep -qE 'caches\.|cache\.put' "$d/sw.js"; then
+            echo "::error::dist/sw.js uses the Cache Storage (the service worker is network-only)"; exit 1
+          fi
+
+      - name: Upload panel dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: panel-dist
+          if-no-files-found: error
+          path: bkshading/panel/dist/
+
+  bkshading:
+    name: bkshading service + relay
+    # Ported whole from camera-box's `bkshading` job (shading#1): clippy + tests in both feature
+    # configs, release builds, the panel Playwright E2E, then the deployable binaries. It embeds the
+    # real rebuilt panel (shading#16) from the `panel` job.
+    needs: panel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download panel dist (embedded by the service)
+        uses: actions/download-artifact@v4
+        with:
+          name: panel-dist
+          path: bkshading/panel/dist
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -60,14 +139,16 @@ jobs:
       # path (src/preview/ndi_source.rs) with -D warnings. libloading is a RUNTIME dynamic load, so
       # it compiles here without libndi installed.
       - name: Clippy (bkshading members)
-        run: cargo clippy -p bkshading-proto -p bkshading-relay -p bkshading --all-targets -- -D warnings
+        run: cargo clippy -p bkshading-proto -p bkshading-relay -p bkshading -p bkshading-panel --all-targets -- -D warnings
 
       # Keep the `--no-default-features` stub (libndi-free) path clippy-clean so it cannot bit-rot.
       - name: Clippy (bkshading service, --no-default-features — stub path)
         run: cargo clippy -p bkshading --no-default-features --all-targets -- -D warnings
 
-      - name: Test (bkshading members)
-        run: cargo test --locked -p bkshading-proto -p bkshading-relay -p bkshading
+      # The panel's pure modules (steppers, holds, ARRANGE, popup texts, preview and connection
+      # rules) run natively, as fohmixer-ui's.
+      - name: Test (bkshading members, the panel's pure modules included)
+        run: cargo test --locked -p bkshading-proto -p bkshading-relay -p bkshading -p bkshading-panel
 
       - name: Test (bkshading service, --no-default-features — stub path)
         run: cargo test --locked -p bkshading --no-default-features
@@ -127,9 +208,16 @@ jobs:
     name: bkshading Windows build
     # A Linux compile is not proof the Windows target builds. ndi is the default, so this compiles
     # the real NDI path; libloading resolves Processing.NDI.Lib.x64.dll at runtime.
+    needs: panel
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Download panel dist (embedded by the service)
+        uses: actions/download-artifact@v4
+        with:
+          name: panel-dist
+          path: bkshading/panel/dist
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -173,8 +261,13 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov,cargo-nextest
+      # rust-embed needs the panel's dist folder; this job only measures, so a placeholder page will
+      # do (fohmixer's pattern). The panel crate itself is left out, as fohmixer-ui is: its pure
+      # modules run in the bkshading job, its browser glue in the Playwright E2E.
+      - name: Placeholder panel dist (rust-embed needs the folder)
+        run: mkdir -p bkshading/panel/dist && echo placeholder > bkshading/panel/dist/index.html
       - name: Coverage
-        run: cargo llvm-cov nextest --locked --workspace --fail-under-lines ${{ vars.COVERAGE_THRESHOLD || '71' }}
+        run: cargo llvm-cov nextest --locked --workspace --exclude bkshading-panel --fail-under-lines ${{ vars.COVERAGE_THRESHOLD || '71' }}
 
   python-tests:
     name: Python tests
@@ -198,7 +291,7 @@ jobs:
     name: Release v<version>
     # Only a push to main publishes. It needs every gate above, so a red gate never tags.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [bkshading, bkshading-windows, coverage, python-tests]
+    needs: [panel, bkshading, bkshading-windows, coverage, python-tests]
     runs-on: ubuntu-latest
     permissions:
       contents: write
