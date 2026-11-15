@@ -205,6 +205,29 @@ the camera's USB-C CDC-NCM link (since v0.2.0, shading#6; before that over USB-P
 - **Decoding:** integer fields go through a lenient int (`400.0` reads as 400), and fields the
   relay does not use are not declared, so one odd value cannot fail a whole endpoint.
 
+## Why a camera cannot be controlled — relay `offlineReason`, service `control`, panel popup (shading#14, v0.2.6)
+PP 15.11.2026: cam4 showed a live preview but no control, and nothing said why. Three layers, each
+knowing a part:
+- **Relay** (`transport/offline.rs`, pure): `RelayState.offlineReason` (additive, `null` online).
+  `CameraSession::link()` returns `Err(OfflineReason)`: no Blackmagic `cdc_ncm` link =
+  `no-camera-link`; a link without DHCP address, a transport failure or a 5xx (booting) =
+  `camera-not-answering`; any other non-2xx (307 on PP cam7 with Web media manager OFF, 404 on all
+  three probes) or a non-JSON 2xx = `rest-off`. Several addresses: `stronger()` (rest-off wins). A
+  read failing after a link was found = `camera-not-answering`. `OfflineReason` has
+  `#[serde(other)] Unknown`, so a newer relay value never breaks an older service's parse.
+- **Service** (`proto/src/control.rs`, pure): `CameraView.control` = `control_status(state)`:
+  no answer = `relay-unreachable`; online = `ok` (even an old relay); offline + version below
+  `MIN_REST_RELAY_VERSION` 0.2.0 = `relay-too-old` (pp-cam4 0.1.2); else the relay's reason, or
+  `camera-offline` when it gives none (0.2.0-0.2.5).
+- **Panel** (`app.js` `CONTROL_INFO`, one `<dialog id="control-info">`): the warning strip
+  `data-role="control-warn"` sits OUTSIDE `.block-params`, because a disabled block's params get
+  `pointer-events: none`. The Slovak texts live only in the panel (the wire carries enums).
+- Tests: `relay/tests/offline_reason_14.rs`, `proto/tests/control_14.rs`,
+  `service/tests/control_14.rs`, the contract pin in `relay/tests/contract.rs`, Playwright
+  "... Slovak popup per cause" (fixtures) and "the real service turns a relay's offline reason ..."
+  (the stub relay's `POST /__state` / `POST /__reset`; always reset in `finally`, the stub is shared).
+- Not done: a per-key reason for `notApplied` (followup).
+
 ## Workspace, version and release (shading#1)
 - Root `Cargo.toml` is a pure workspace: `members = ["bkshading/proto","bkshading/relay","bkshading/service"]`,
   `resolver = "2"`, camera-box's release profile (lto, codegen-units 1, strip). No root package.

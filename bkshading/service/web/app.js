@@ -29,6 +29,93 @@ const PREVIEW_FETCH_TIMEOUT_MS = 2000;
 // bound as the service's freshness floor (PREVIEW_MAX_AGE_FLOOR_MS).
 const PREVIEW_KEEP_ON_TIMEOUT_MS = 3000;
 
+// shading#14: why a camera cannot be controlled (CameraView.control, filled by the service from the
+// relay's offlineReason, its version and whether it answered at all), and what the operator should
+// switch on. Plain Slovak; `badge` is the warning strip on the block, the rest is the popup.
+const WMM_STEP =
+  "Zapni na kamere Web media manager: v menu kamery Setup, alebo v programe Blackmagic Camera Setup v časti Network access. Panel potom kameru nájde sám do pár sekúnd.";
+const CONTROL_INFO = {
+  "relay-unreachable": {
+    badge: "⚠ Relay nedostupný — kamera sa nedá ovládať",
+    title: "Panel sa nespojí s relay pri kamere",
+    cause:
+      "Relay (malý box alebo počítač pri kamere, cez ktorý panel ovláda kameru) neodpovedá. Box je vypnutý, odpojený zo siete, alebo na ňom nebeží relay.",
+    step: "Skontroluj, či je box pri kamere zapnutý a pripojený do siete (kábel alebo WiFi). Ak je zapnutý, reštartuj ho.",
+  },
+  "relay-too-old": {
+    badge: "⚠ Starý relay — kamera sa nedá ovládať",
+    title: "Relay pri kamere je príliš starý",
+    cause:
+      "Relay na tomto boxe má verziu {version}. Táto verzia ešte nevie ovládať kameru cez jej rozhranie (REST); treba verziu 0.2.0 alebo novšiu.",
+    step: "Na tento box treba nasadiť nový relay. Povedz to technikovi (nasadzuje ho camera-box).",
+  },
+  "no-camera-link": {
+    badge: "⚠ Kamera nie je pripojená cez USB",
+    title: "Relay nevidí kameru na USB",
+    cause: "Relay beží, ale kamera nie je pripojená USB-C káblom k boxu, alebo je vypnutá.",
+    step: "Zapni kameru a skontroluj USB-C kábel medzi kamerou a boxom (zapoj ho znova).",
+  },
+  "camera-not-answering": {
+    badge: "⚠ Kamera neodpovedá",
+    title: "Kamera je pripojená, ale neodpovedá",
+    cause:
+      "Relay vidí kameru na USB-C, ale kamera neodpovedá na ovládanie. Kamera sa ešte zapína, alebo má vypnutý Web media manager.",
+    step: "Počkaj chvíľu, kým sa kamera zapne. Ak to trvá dlhšie ako minútu: " + WMM_STEP,
+  },
+  "rest-off": {
+    badge: "⚠ Zapni Web media manager na kamere",
+    title: "Na kamere je vypnutý Web media manager",
+    cause: "Kamera je pripojená a odpovedá, ale ovládanie cez sieť (Web media manager) má vypnuté.",
+    step: WMM_STEP,
+  },
+  "camera-offline": {
+    badge: "⚠ Kamera offline — nedá sa ovládať",
+    title: "Kamera sa nedá ovládať",
+    cause: "Relay beží, ale kameru nevidí. Tento relay presnú príčinu nehlási.",
+    step: "Skontroluj, či je kamera zapnutá, či je zapojený USB-C kábel ku boxu a či má kamera zapnutý Web media manager.",
+  },
+};
+
+// The popup text for a status. An unknown status (a newer service) reads as "camera-offline".
+function controlInfo(status) {
+  return CONTROL_INFO[status] || CONTROL_INFO["camera-offline"];
+}
+
+// shading#14: the block's warning strip — hidden while the camera can be controlled.
+function updateControlWarn(el, cam) {
+  const warn = el.querySelector('[data-role="control-warn"]');
+  if (!warn) return;
+  const status = cam.control || "ok";
+  el.dataset.control = status;
+  el.dataset.label = cam.label;
+  el.dataset.relayVersion = (cam.state && cam.state.version) || "";
+  if (status === "ok") {
+    warn.hidden = true;
+    warn.textContent = "";
+    return;
+  }
+  warn.textContent = controlInfo(status).badge;
+  warn.title = "Čo treba spraviť?";
+  warn.hidden = false;
+}
+
+// shading#14: fill and open the popup for the block whose warning was tapped.
+function openControlInfo(el) {
+  const dlg = document.getElementById("control-info");
+  if (!dlg) return;
+  const status = el.dataset.control || "ok";
+  if (status === "ok") return;
+  const info = controlInfo(status);
+  const set = (role, text) => {
+    dlg.querySelector(`[data-role="${role}"]`).textContent = text;
+  };
+  set("control-info-title", info.title);
+  set("control-info-camera", el.dataset.label || "");
+  set("control-info-cause", info.cause.replace("{version}", el.dataset.relayVersion || "?"));
+  set("control-info-step", info.step);
+  if (!dlg.open) dlg.showModal();
+}
+
 // Present f-number from the AV the relay reported: fNumber = sqrt(2^AV).
 function fNumberFromAv(av) {
   return av == null ? null : Math.sqrt(Math.pow(2, av));
@@ -350,6 +437,9 @@ function stepLinear(el, id, role, key, amount, dir) {
 // Wire a freshly cloned block's controls to their PUT handlers (attached once per block).
 function wire(el, id) {
   const q = (role) => el.querySelector(`[data-role="${role}"]`);
+  // shading#14: the warning strip opens the popup with the cause and the step to take.
+  const warn = q("control-warn");
+  if (warn) warn.addEventListener("click", () => openControlInfo(el));
   // issue 1337: each slider change echoes an OPTIMISTIC pending value immediately (reconciled by
   // the next server push) so the number moves the instant the operator releases the slider. A slider
   // being dragged is protected from a mid-drag overwrite by the `document.activeElement` check in
@@ -592,6 +682,7 @@ function updateBlock(el, cam) {
   q("online").textContent = !cam.reachable ? "relay offline" : online ? "online" : "kamera offline";
   q("online").className = "cam-online " + (online ? "ok" : "bad");
   el.classList.toggle("disabled", !online);
+  updateControlWarn(el, cam);
   const regEl = q("registration");
   if (regEl) {
     const reg = cam.registration || null;

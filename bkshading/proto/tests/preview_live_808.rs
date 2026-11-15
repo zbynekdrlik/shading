@@ -20,6 +20,7 @@ fn view(preview_live: bool) -> CameraView {
         fps_align_settable: false,
         state: None,
         registration: None,
+        control: Default::default(),
     }
 }
 

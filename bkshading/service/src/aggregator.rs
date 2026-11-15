@@ -7,6 +7,7 @@
 
 use std::time::{Duration, Instant};
 
+use bkshading_proto::control::control_status;
 use bkshading_proto::mapping::fps_settable;
 use bkshading_proto::wire::{
     resolve_grab, summarize_set_request, Aggregate, CameraView, FpsSync, RegistrationView,
@@ -57,6 +58,8 @@ pub fn camera_view(
     // feed has none -> params-only block); it is preview-LIVE only while that is true AND the
     // store holds a fresh frame (issue 808).
     let has_preview = cam.ndi_preview.is_some();
+    // shading#14: whether the panel can control this camera, and why not.
+    let control = control_status(state.as_ref());
     CameraView {
         id: cam.id.clone(),
         label: cam.label.clone(),
@@ -70,6 +73,7 @@ pub fn camera_view(
         fps_align_settable,
         state,
         registration: None,
+        control,
     }
 }
 

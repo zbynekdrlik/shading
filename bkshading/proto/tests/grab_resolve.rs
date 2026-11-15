@@ -135,6 +135,7 @@ fn relay_state_capture_fps_is_camel_case_and_defaults_none() {
         capture_fps: Some(60),
         version: "1.7.0-dev.530".into(),
         not_applied: Vec::new(),
+        offline_reason: None,
     };
     let json = serde_json::to_string(&st).unwrap();
     assert!(
@@ -162,6 +163,7 @@ fn camera_view_carries_grab_fps_desync_camel_case() {
         fps_align_settable: false,
         state: None,
         registration: None,
+        control: Default::default(),
     };
     let json = serde_json::to_string(&view).unwrap();
     assert!(
