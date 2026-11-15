@@ -6,17 +6,20 @@
 //! of truth (the owner explicitly flagged the MVP's Python-vs-Kotlin duplicate-truth
 //! drift). Nothing here does process IO or networking:
 //!   - [`control`] — whether the panel can control a camera, and why not (shading#14).
+//!   - [`layout`] — the venue's panel layout: block order and hidden blocks (shading#16).
 //!   - [`mapping`] — pure camera-value conversions (aperture grid, shutter angle, frame rate).
 //!   - [`rest`] — the Blackmagic camera REST API paths and JSON shapes (shading#6).
 //!   - [`read`] — pure assembly of live state from the REST answers + pure write planning.
 //!   - [`wire`] — the serde JSON types exchanged between web panel, service, and relay.
 
 pub mod control;
+pub mod layout;
 pub mod mapping;
 pub mod read;
 pub mod rest;
 pub mod wire;
 
+pub use layout::{LayoutDoc, LayoutPut, LayoutRefusal};
 pub use read::{
     not_applied_keys, params_and_caps, plan_writes, FpsNotSettable, RestWrite, WriteBasis,
 };
