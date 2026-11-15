@@ -212,8 +212,11 @@ knowing a part:
   `CameraSession::link()` returns `Err(OfflineReason)`: no Blackmagic `cdc_ncm` link =
   `no-camera-link`; a link without DHCP address, a transport failure or a 5xx (booting) =
   `camera-not-answering`; any other non-2xx (307 on PP cam7 with Web media manager OFF, 404 on all
-  three probes) or a non-JSON 2xx = `rest-off`. Several addresses: `stronger()` (rest-off wins). A
-  read failing after a link was found = `camera-not-answering`. `OfflineReason` has
+  three probes) or a non-JSON 2xx = `rest-off`; a 5xx on the final `/system` probe stays
+  `camera-not-answering` (a 6K booting). Several addresses: `lookup_reason()` (rest-off wins). A
+  read failing after a link was found = `camera-not-answering`; a read on a held link where NOT ONE
+  endpoint answered (`lost_rest_reason`, Web media manager switched off mid-session) drops the link
+  and reports `rest-off` — before 0.2.6 such a camera stayed "online" with every value empty. `OfflineReason` has
   `#[serde(other)] Unknown`, so a newer relay value never breaks an older service's parse.
 - **Service** (`proto/src/control.rs`, pure): `CameraView.control` = `control_status(state)`:
   no answer = `relay-unreachable`; online = `ok` (even an old relay); offline + version below
@@ -221,7 +224,8 @@ knowing a part:
   `camera-offline` when it gives none (0.2.0-0.2.5).
 - **Panel** (`app.js` `CONTROL_INFO`, one `<dialog id="control-info">`): the warning strip
   `data-role="control-warn"` sits OUTSIDE `.block-params`, because a disabled block's params get
-  `pointer-events: none`. The Slovak texts live only in the panel (the wire carries enums).
+  `pointer-events: none`. The Slovak texts live only in the panel (the wire carries enums). An open
+  popup follows the push for its block (`dlg.dataset.cameraId`): refilled, closed when `ok`.
 - Tests: `relay/tests/offline_reason_14.rs`, `proto/tests/control_14.rs`,
   `service/tests/control_14.rs`, the contract pin in `relay/tests/contract.rs`, Playwright
   "... Slovak popup per cause" (fixtures) and "the real service turns a relay's offline reason ..."

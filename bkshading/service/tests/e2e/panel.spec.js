@@ -1036,9 +1036,17 @@ test("a camera that cannot be controlled shows a warning and a Slovak popup per 
     await expect(dlg).toBeHidden();
   }
 
-  // A camera that can be controlled has no warning.
+  // An open popup follows the next push: refilled with the new cause, closed once the camera is back.
+  await page.evaluate((agg) => window.render(agg), view(CONTROL_CASES[4]));
+  await warn.click();
+  await expect(dlg.locator('[data-role="control-info-title"]')).toHaveText(CONTROL_CASES[4].title);
+  await page.evaluate((agg) => window.render(agg), view(CONTROL_CASES[2]));
+  await expect(dlg.locator('[data-role="control-info-title"]')).toHaveText(CONTROL_CASES[2].title);
+
+  // A camera that can be controlled has no warning, and its open popup closes.
   await page.evaluate((agg) => window.render(agg), view({ control: "ok", reachable: true }));
   await expect(warn).toBeHidden();
+  await expect(dlg).toBeHidden();
 
   expect(problems, `console problems: ${problems.join(" | ")}`).toEqual([]);
 });

@@ -349,8 +349,7 @@ impl CameraSession {
         }
         let (addrs, how, links_found) = self.locator.candidates();
         let mut tried: Vec<String> = Vec::new();
-        let mut reason = offline::no_address_reason(links_found);
-        let mut first = true;
+        let mut failures: Vec<OfflineReason> = Vec::new();
         for (addr, usb_product) in addrs {
             let client = RestClient::new(addr.clone(), self.timeout);
             match self.probe_camera(&client, usb_product) {
@@ -365,16 +364,12 @@ impl CameraSession {
                     return Ok(link);
                 }
                 Err((e, why)) => {
-                    reason = if first {
-                        why
-                    } else {
-                        offline::stronger(reason, why)
-                    };
-                    first = false;
+                    failures.push(why);
                     tried.push(format!("{addr}: {e}"));
                 }
             }
         }
+        let reason = offline::lookup_reason(links_found, failures);
         let summary = if tried.is_empty() {
             how
         } else {
@@ -437,6 +432,11 @@ impl CameraSession {
             {
                 Ok((fallback(), "/system"))
             }
+            // A camera still booting answers 5xx: not answering yet, never "REST off".
+            Ok(r) if r.status >= 500 => Err((
+                format!("/system: status {} (camera not ready)", r.status),
+                OfflineReason::CameraNotAnswering,
+            )),
             // Something answers HTTP, but none of the three is a camera answer: REST is off.
             Ok(r) => Err((
                 format!(
@@ -496,6 +496,17 @@ impl CameraSession {
         };
         match link.client.read_all() {
             Ok((read, missing)) => {
+                // shading#14: not one endpoint answered (Web media manager switched off while the
+                // link was held: every GET 307/404). Not controllable; look the camera up again.
+                let total = bkshading_proto::rest::READ_ENDPOINTS.len();
+                if let Some(reason) = offline::lost_rest_reason(&missing, total) {
+                    tracing::warn!(camera = %link.client.addr, reason = ?reason, "no camera REST endpoint answered");
+                    self.forget_link("no REST endpoint answered");
+                    return Reading {
+                        state: self.offline(Some(link.model), reason),
+                        basis: None,
+                    };
+                }
                 for (path, e) in &missing {
                     if not_served(e) {
                         self.note_missing(path, e);

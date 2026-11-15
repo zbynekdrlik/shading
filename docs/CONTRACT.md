@@ -160,16 +160,17 @@ UseDomains=no
   - **New field `offlineReason` (v0.2.6, shading#14, additive).** Why the relay cannot reach its
     camera this cycle, so the panel can tell the operator what to switch on. Every other key keeps
     its name and meaning.
-    - `null` while `online` is true. A relay older than 0.2.6 does not send it (a reader that does
-      not know it ignores it).
+    - `null` while `online` is true, or when the relay cannot tell. A relay older than 0.2.6 does
+      not send it (a reader that does not know it ignores it).
     - `"no-camera-link"`: the box has no Blackmagic `cdc_ncm` link (no `enx` interface of vendor
       `1edb`): the camera is off, not on USB, or the cable is out.
     - `"camera-not-answering"`: a link (or the `BKSHADING_CAMERA` address) is there, but no camera
-      answers HTTP: no DHCP address yet, connection refused or timed out, or a 500/503 while the
-      camera boots; also a camera that stopped answering mid-read.
+      answers HTTP: no DHCP address yet, connection refused or timed out, or a 5xx (500/503) on a
+      probe while the camera boots; also a camera that stopped answering mid-read.
     - `"rest-off"`: something answers HTTP at the camera's address, but not the REST API: a
-      redirect (307), 404 on `system/product`, `lens/iris` and `/system`, or a web page. This is
-      **Web media manager OFF** (live on PP cam7: 307, then 404).
+      redirect (307), 404 on `system/product`, `lens/iris` and `/system`, or a web page; also a camera
+      found before whose every read endpoint now answers that way. This is **Web media manager
+      OFF** (live on PP cam7: 307, then 404).
     - Values may be added later; a reader must treat an unknown value as "offline, reason
       unknown".
   - `caps.fNumberChoices` is NOT the lens's steps. It is only the positions the absolute aperture

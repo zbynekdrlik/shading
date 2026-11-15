@@ -49,6 +49,30 @@ pub fn stronger(a: OfflineReason, b: OfflineReason) -> OfflineReason {
     }
 }
 
+/// The reason a camera lookup reports after it tried every candidate address: none tried =
+/// [`no_address_reason`]; otherwise the [`stronger`] of every address's failure.
+pub fn lookup_reason(
+    links_found: bool,
+    failures: impl IntoIterator<Item = OfflineReason>,
+) -> OfflineReason {
+    failures
+        .into_iter()
+        .fold(no_address_reason(links_found), stronger)
+}
+
+/// A read cycle on a camera found before in which NOT ONE endpoint answered (`missing` failures
+/// out of `total` GETs) has lost the camera's REST API, e.g. Web media manager switched off while
+/// the relay held the link: every endpoint answers 307/404. `None` while any endpoint answered.
+pub fn lost_rest_reason(missing: &[(String, RestError)], total: usize) -> Option<OfflineReason> {
+    if total == 0 || missing.len() < total {
+        return None;
+    }
+    missing
+        .iter()
+        .map(|(_, e)| probe_error_reason(e))
+        .reduce(stronger)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,5 +126,42 @@ mod tests {
             stronger(CameraNotAnswering, NoCameraLink),
             CameraNotAnswering
         );
+    }
+
+    #[test]
+    fn the_lookup_folds_every_address_14() {
+        use OfflineReason::*;
+        assert_eq!(lookup_reason(false, []), NoCameraLink);
+        assert_eq!(lookup_reason(true, []), CameraNotAnswering);
+        assert_eq!(lookup_reason(true, [CameraNotAnswering, RestOff]), RestOff);
+        assert_eq!(lookup_reason(true, [RestOff, CameraNotAnswering]), RestOff);
+        assert_eq!(
+            lookup_reason(true, [CameraNotAnswering]),
+            CameraNotAnswering
+        );
+    }
+
+    #[test]
+    fn a_read_with_no_endpoint_answering_has_lost_rest_14() {
+        let m = |s: u16| ("/x".to_string(), status(s));
+        assert_eq!(lost_rest_reason(&[], 2), None);
+        assert_eq!(
+            lost_rest_reason(&[m(404)], 2),
+            None,
+            "one endpoint answered"
+        );
+        assert_eq!(
+            lost_rest_reason(&[m(307), m(404)], 2),
+            Some(OfflineReason::RestOff)
+        );
+        assert_eq!(
+            lost_rest_reason(&[m(503), m(503)], 2),
+            Some(OfflineReason::CameraNotAnswering)
+        );
+        assert_eq!(
+            lost_rest_reason(&[m(503), m(404)], 2),
+            Some(OfflineReason::RestOff)
+        );
+        assert_eq!(lost_rest_reason(&[], 0), None);
     }
 }

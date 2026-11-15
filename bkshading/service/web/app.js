@@ -89,30 +89,40 @@ function updateControlWarn(el, cam) {
   el.dataset.control = status;
   el.dataset.label = cam.label;
   el.dataset.relayVersion = (cam.state && cam.state.version) || "";
+  // An open popup for THIS block follows the push: refilled, or closed once the camera is back.
+  const dlg = document.getElementById("control-info");
+  const shownHere = dlg && dlg.open && dlg.dataset.cameraId === el.dataset.id;
   if (status === "ok") {
     warn.hidden = true;
     warn.textContent = "";
+    if (shownHere) dlg.close();
     return;
   }
   warn.textContent = controlInfo(status).badge;
   warn.title = "Čo treba spraviť?";
   warn.hidden = false;
+  if (shownHere) fillControlInfo(dlg, el);
+}
+
+// shading#14: the popup's text for the block `el` (textContent only, never HTML).
+function fillControlInfo(dlg, el) {
+  const info = controlInfo(el.dataset.control);
+  const set = (role, text) => {
+    dlg.querySelector(`[data-role="${role}"]`).textContent = text;
+  };
+  dlg.dataset.cameraId = el.dataset.id || "";
+  set("control-info-title", info.title);
+  set("control-info-camera", el.dataset.label || "");
+  set("control-info-cause", info.cause.replace("{version}", el.dataset.relayVersion || "?"));
+  set("control-info-step", info.step);
 }
 
 // shading#14: fill and open the popup for the block whose warning was tapped.
 function openControlInfo(el) {
   const dlg = document.getElementById("control-info");
   if (!dlg) return;
-  const status = el.dataset.control || "ok";
-  if (status === "ok") return;
-  const info = controlInfo(status);
-  const set = (role, text) => {
-    dlg.querySelector(`[data-role="${role}"]`).textContent = text;
-  };
-  set("control-info-title", info.title);
-  set("control-info-camera", el.dataset.label || "");
-  set("control-info-cause", info.cause.replace("{version}", el.dataset.relayVersion || "?"));
-  set("control-info-step", info.step);
+  if ((el.dataset.control || "ok") === "ok") return;
+  fillControlInfo(dlg, el);
   if (!dlg.open) dlg.showModal();
 }
 
