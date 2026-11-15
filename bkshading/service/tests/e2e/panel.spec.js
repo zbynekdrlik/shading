@@ -874,6 +874,16 @@ test("a handheld that registers itself becomes reachable in the panel and takes 
   // No announcement yet: the service has no address for register:handheld-e2e, never a guess.
   await expect(online).toHaveText("relay offline", { timeout: 15000 });
   await expect(page.locator('[data-role="registration"]')).toBeHidden();
+  // shading#14: the service has no answer from the relay, so the block says so and what to check.
+  const warn = page.locator('[data-role="control-warn"]');
+  await expect(warn).toContainText("Relay nedostupný");
+  await warn.click();
+  const dlg = page.locator('[data-role="control-info"]');
+  await expect(dlg.locator('[data-role="control-info-title"]')).toHaveText(
+    "Panel sa nespojí s relay pri kamere"
+  );
+  await dlg.locator('[data-role="control-info-close"]').click();
+  await expect(dlg).toBeHidden();
 
   // The stub relay (127.0.0.1:8781) announces itself; the service keeps the peer address + port.
   const reg = await page.request.post(`${REGISTER_SVC}/api/relays/register`, {
@@ -884,6 +894,7 @@ test("a handheld that registers itself becomes reachable in the panel and takes 
 
   // The next pump snapshot reaches the stub through the registration.
   await expect(online).toHaveText("online", { timeout: 15000 });
+  await expect(warn).toBeHidden();
   // issue 808: the block names the handheld, where it announced from and how fresh that is.
   const regLine = page.locator('[data-role="registration"]');
   await expect(regLine).toBeVisible();
@@ -903,5 +914,175 @@ test("a handheld that registers itself becomes reachable in the panel and takes 
   const recorded = await (await page.request.get(`${STUB}/__recorded`)).json();
   expect(recorded.slice(before).some((b) => b.kelvin === 5700), "kelvin + -> 5700 via the registration").toBeTruthy();
 
+  expect(problems, `console problems: ${problems.join(" | ")}`).toEqual([]);
+});
+
+// shading#14: a block the panel cannot control shows a warning strip; a tap opens a Slovak popup
+// with the concrete cause and the step to take. One case per CameraView.control status, rendered
+// from fixtures (the /api routes are blocked so the real service never overwrites them).
+const CONTROL_CASES = [
+  {
+    control: "relay-unreachable",
+    reachable: false,
+    state: null,
+    badge: "Relay nedostupný",
+    title: "Panel sa nespojí s relay pri kamere",
+    step: "Skontroluj, či je box pri kamere zapnutý a pripojený do siete",
+  },
+  {
+    control: "relay-too-old",
+    reachable: true,
+    version: "0.1.2",
+    badge: "Starý relay",
+    title: "Relay pri kamere je príliš starý",
+    cause: "verziu 0.1.2",
+    step: "treba nasadiť nový relay",
+  },
+  {
+    control: "no-camera-link",
+    reachable: true,
+    reason: "no-camera-link",
+    badge: "Kamera nie je pripojená cez USB",
+    title: "Relay nevidí kameru na USB",
+    step: "skontroluj USB-C kábel",
+  },
+  {
+    control: "camera-not-answering",
+    reachable: true,
+    reason: "camera-not-answering",
+    badge: "Kamera neodpovedá",
+    title: "Kamera je pripojená, ale neodpovedá",
+    step: "Zapni na kamere Web media manager",
+  },
+  {
+    control: "rest-off",
+    reachable: true,
+    reason: "rest-off",
+    badge: "Zapni Web media manager na kamere",
+    title: "Na kamere je vypnutý Web media manager",
+    step: "Zapni na kamere Web media manager",
+  },
+  {
+    control: "camera-offline",
+    reachable: true,
+    version: "0.2.5",
+    badge: "Kamera offline",
+    title: "Kamera sa nedá ovládať",
+    step: "Web media manager",
+  },
+];
+
+test("a camera that cannot be controlled shows a warning and a Slovak popup per cause, console clean (shading#14)", async ({
+  page,
+}) => {
+  const problems = [];
+  page.on("console", (msg) => {
+    const t = msg.type();
+    if (t === "error" || t === "warning") problems.push(`${t}: ${msg.text()}`);
+  });
+  page.on("pageerror", (err) => problems.push(`pageerror: ${err.message}`));
+  await page.addInitScript(DISABLE_WS);
+  await page.route("**/api/**", (route) =>
+    route.fulfill({ status: 200, contentType: "text/plain", body: "offline-fixture" })
+  );
+  await page.goto("/");
+  await page.waitForFunction(() => typeof window.render === "function");
+
+  const view = (c) => ({
+    version: "0.2.6-e2e",
+    cameras: [
+      {
+        id: "cam7",
+        label: "Cam 7",
+        transport: "cambox-relay",
+        hasPreview: false,
+        reachable: c.reachable,
+        grabFps: null,
+        grabFpsDesync: false,
+        fpsSync: "unknown",
+        control: c.control,
+        state:
+          c.state === null
+            ? null
+            : {
+                online: c.control === "ok",
+                camera: null,
+                params: {},
+                caps: null,
+                fpsSupported: false,
+                captureFps: null,
+                version: c.version || "0.2.6",
+                notApplied: [],
+                offlineReason: c.reason || null,
+              },
+      },
+    ],
+  });
+  const warn = page.locator('[data-role="control-warn"]');
+  const dlg = page.locator('[data-role="control-info"]');
+
+  for (const c of CONTROL_CASES) {
+    await page.evaluate((agg) => window.render(agg), view(c));
+    await expect(warn, c.control).toBeVisible();
+    await expect(warn, c.control).toContainText(c.badge);
+    // The block itself is dimmed, but the warning strip stays clickable.
+    await warn.click();
+    await expect(dlg, c.control).toBeVisible();
+    await expect(dlg.locator('[data-role="control-info-title"]')).toHaveText(c.title);
+    await expect(dlg.locator('[data-role="control-info-camera"]')).toHaveText("Cam 7");
+    if (c.cause) await expect(dlg.locator('[data-role="control-info-cause"]')).toContainText(c.cause);
+    await expect(dlg.locator('[data-role="control-info-step"]')).toContainText(c.step);
+    await dlg.locator('[data-role="control-info-close"]').click();
+    await expect(dlg).toBeHidden();
+  }
+
+  // A camera that can be controlled has no warning.
+  await page.evaluate((agg) => window.render(agg), view({ control: "ok", reachable: true }));
+  await expect(warn).toBeHidden();
+
+  expect(problems, `console problems: ${problems.join(" | ")}`).toEqual([]);
+});
+
+// shading#14 through the REAL service: the stub relay reports its camera offline with a reason, or
+// an old version; the service derives the block's control status and the panel explains it.
+test("the real service turns a relay's offline reason and an old relay into the panel warning, console clean (shading#14)", async ({
+  page,
+}) => {
+  const problems = [];
+  page.on("console", (msg) => {
+    const t = msg.type();
+    if (t === "error" || t === "warning") problems.push(`${t}: ${msg.text()}`);
+  });
+  page.on("pageerror", (err) => problems.push(`pageerror: ${err.message}`));
+  const warn = page.locator('[data-role="control-warn"]');
+  const dlg = page.locator('[data-role="control-info"]');
+  try {
+    await page.goto("/");
+    await expect(page.locator('[data-role="online"]')).toHaveText("online", { timeout: 15000 });
+    await expect(warn).toBeHidden();
+
+    // Web media manager OFF on the camera (PP cam7: 307 then 404).
+    await page.request.post(`${STUB}/__state`, { data: { online: false, offlineReason: "rest-off" } });
+    await expect(warn).toContainText("Zapni Web media manager na kamere", { timeout: 15000 });
+    await warn.click();
+    await expect(dlg.locator('[data-role="control-info-step"]')).toContainText(
+      "Zapni na kamere Web media manager"
+    );
+    await dlg.locator('[data-role="control-info-close"]').click();
+    await expect(dlg).toBeHidden();
+
+    // pp-cam4: an old 0.1.2 relay that sends no reason.
+    await page.request.post(`${STUB}/__state`, { data: { offlineReason: null, version: "0.1.2" } });
+    await expect(warn).toContainText("Starý relay", { timeout: 15000 });
+    await warn.click();
+    await expect(dlg.locator('[data-role="control-info-cause"]')).toContainText("verziu 0.1.2");
+    await dlg.locator('[data-role="control-info-close"]').click();
+
+    // The camera is back: no warning.
+    await page.request.post(`${STUB}/__reset`);
+    await expect(warn).toBeHidden({ timeout: 15000 });
+  } finally {
+    await page.request.post(`${STUB}/__reset`);
+  }
   expect(problems, `console problems: ${problems.join(" | ")}`).toEqual([]);
 });
