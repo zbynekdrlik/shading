@@ -24,11 +24,12 @@ use bkshading_proto::read::{
     RestWrite, WriteBasis,
 };
 use bkshading_proto::wire::{
-    summarize_set_request, RelayState, SetQueue, SetRequest, SubmitAction,
+    summarize_set_request, OfflineReason, RelayState, SetQueue, SetRequest, SubmitAction,
 };
 
 pub mod discover;
 mod lens_memory;
+pub mod offline;
 mod reads;
 pub mod rest;
 
@@ -102,12 +103,15 @@ impl CameraLocator {
     }
 
     /// The addresses to try this time (each with the USB product string of the camera behind it,
-    /// when discovery found one), and one line describing how they were found.
-    fn candidates(&self) -> (Vec<(CameraAddr, Option<String>)>, String) {
+    /// when discovery found one), one line describing how they were found, and whether discovery
+    /// found a camera link at all (shading#14: a link without an address is not a missing link).
+    fn candidates(&self) -> (Vec<(CameraAddr, Option<String>)>, String, bool) {
         match self {
-            CameraLocator::Fixed(addr) => {
-                (vec![(addr.clone(), None)], format!("fixed address {addr}"))
-            }
+            CameraLocator::Fixed(addr) => (
+                vec![(addr.clone(), None)],
+                format!("fixed address {addr}"),
+                true,
+            ),
             CameraLocator::Discover { paths, port } => {
                 let links = camera_links(paths);
                 let addrs = links
@@ -124,7 +128,7 @@ impl CameraLocator {
                         })
                     })
                     .collect();
-                (addrs, discover::describe(&links))
+                (addrs, discover::describe(&links), !links.is_empty())
             }
         }
     }
@@ -327,23 +331,25 @@ impl CameraSession {
         self.version.clone()
     }
 
-    fn offline(&self, camera: Option<String>) -> RelayState {
+    fn offline(&self, camera: Option<String>, reason: OfflineReason) -> RelayState {
         RelayState {
             camera,
             capture_fps: self.capture_fps,
+            offline_reason: Some(reason),
             ..RelayState::offline(self.version.clone())
         }
     }
 
     /// The camera to talk to: the one found before, else the first candidate address that answers
-    /// `GET system/product` with a product name.
-    fn link(&self) -> Option<Link> {
+    /// `GET system/product` with a product name. Without one, why not (shading#14).
+    fn link(&self) -> std::result::Result<Link, OfflineReason> {
         let mut cached = lock(&self.link);
         if let Some(l) = cached.as_ref() {
-            return Some(l.clone());
+            return Ok(l.clone());
         }
-        let (addrs, how) = self.locator.candidates();
+        let (addrs, how, links_found) = self.locator.candidates();
         let mut tried: Vec<String> = Vec::new();
+        let mut failures: Vec<OfflineReason> = Vec::new();
         for (addr, usb_product) in addrs {
             let client = RestClient::new(addr.clone(), self.timeout);
             match self.probe_camera(&client, usb_product) {
@@ -355,11 +361,15 @@ impl CameraSession {
                     *lock(&self.last_discovery) = None;
                     let link = Link { client, model };
                     *cached = Some(link.clone());
-                    return Some(link);
+                    return Ok(link);
                 }
-                Err(e) => tried.push(format!("{addr}: {e}")),
+                Err((e, why)) => {
+                    failures.push(why);
+                    tried.push(format!("{addr}: {e}"));
+                }
             }
         }
+        let reason = offline::lookup_reason(links_found, failures);
         let summary = if tried.is_empty() {
             how
         } else {
@@ -367,10 +377,10 @@ impl CameraSession {
         };
         let mut last = lock(&self.last_discovery);
         if last.as_deref() != Some(summary.as_str()) {
-            tracing::warn!(discovery = %summary, "no camera reachable over REST");
+            tracing::warn!(discovery = %summary, reason = ?reason, "no camera reachable over REST");
             *last = Some(summary);
         }
-        None
+        Err(reason)
     }
 
     /// Tells a camera from anything else at `client`'s address, and names it (shading#6, 0.2.2).
@@ -382,7 +392,8 @@ impl CameraSession {
         &self,
         client: &RestClient,
         usb_product: Option<String>,
-    ) -> std::result::Result<(String, &'static str), String> {
+    ) -> std::result::Result<(String, &'static str), (String, OfflineReason)> {
+        let fail = |e: &RestError, what: String| (what, offline::probe_error_reason(e));
         let fallback = || {
             usb_product
                 .clone()
@@ -394,11 +405,12 @@ impl CameraSession {
                     return Ok((model, "system/product"));
                 }
             }
-            Err(RestError::Transport(e)) => return Err(e),
+            Err(RestError::Transport(e)) => return Err((e, OfflineReason::CameraNotAnswering)),
             Err(e) if not_served(&e) => self.note_missing(bkshading_proto::rest::PRODUCT, &e),
             // A 500/503 (a camera still booting) or a body that does not decode: not a firmware
-            // fact. Do not settle for a fallback name; the next read probes again.
-            Err(e) => return Err(format!("system/product: {e}")),
+            // fact. Do not settle for a fallback name; the next read probes again. A redirect
+            // (307, Web media manager off on PP cam7) ends here too: REST is not served.
+            Err(e) => return Err(fail(&e, format!("system/product: {e}"))),
         }
         match client.get_json::<bkshading_proto::rest::Iris>(bkshading_proto::rest::IRIS) {
             // Only a real f-stop proves a camera: `Iris` decodes any JSON object (every field is
@@ -407,9 +419,9 @@ impl CameraSession {
                 return Ok((fallback(), "lens/iris"))
             }
             Ok(_) => {}
-            Err(RestError::Transport(e)) => return Err(e),
+            Err(RestError::Transport(e)) => return Err((e, OfflineReason::CameraNotAnswering)),
             Err(e) if not_served(&e) => self.note_missing(bkshading_proto::rest::IRIS, &e),
-            Err(e) => return Err(format!("lens/iris: {e}")),
+            Err(e) => return Err(fail(&e, format!("lens/iris: {e}"))),
         }
         match client.request("GET", "/system", None) {
             // The 6K answers 204; a 2xx with an empty or JSON-object body counts too. A catch-all web
@@ -420,11 +432,20 @@ impl CameraSession {
             {
                 Ok((fallback(), "/system"))
             }
-            Ok(r) => Err(format!(
-                "not a Blackmagic REST camera: system/product, lens/iris and /system gave no camera answer (/system: status {})",
-                r.status
+            // A camera still booting answers 5xx: not answering yet, never "REST off".
+            Ok(r) if r.status >= 500 => Err((
+                format!("/system: status {} (camera not ready)", r.status),
+                OfflineReason::CameraNotAnswering,
             )),
-            Err(e) => Err(e),
+            // Something answers HTTP, but none of the three is a camera answer: REST is off.
+            Ok(r) => Err((
+                format!(
+                    "not a Blackmagic REST camera: system/product, lens/iris and /system gave no camera answer (/system: status {})",
+                    r.status
+                ),
+                OfflineReason::RestOff,
+            )),
+            Err(e) => Err((e, OfflineReason::CameraNotAnswering)),
         }
     }
 
@@ -459,19 +480,33 @@ impl CameraSession {
     /// Model string of the attached camera (`system/product`), or `None`. Not floored: `/api/detect`
     /// is a rare manual probe, and once a camera is found this reuses it without a request.
     pub fn detect(&self) -> Option<String> {
-        self.link().map(|l| l.model)
+        self.link().ok().map(|l| l.model)
     }
 
     /// One real read cycle, no cache: find the camera, GET every endpoint, assemble the state.
     fn read_now(&self) -> Reading {
-        let Some(link) = self.link() else {
-            return Reading {
-                state: self.offline(None),
-                basis: None,
-            };
+        let link = match self.link() {
+            Ok(link) => link,
+            Err(reason) => {
+                return Reading {
+                    state: self.offline(None, reason),
+                    basis: None,
+                }
+            }
         };
         match link.client.read_all() {
             Ok((read, missing)) => {
+                // shading#14: not one endpoint answered (Web media manager switched off while the
+                // link was held: every GET 307/404). Not controllable; look the camera up again.
+                let total = bkshading_proto::rest::READ_ENDPOINTS.len();
+                if let Some(reason) = offline::lost_rest_reason(&missing, total) {
+                    tracing::warn!(camera = %link.client.addr, reason = ?reason, "no camera REST endpoint answered");
+                    self.forget_link("no REST endpoint answered");
+                    return Reading {
+                        state: self.offline(Some(link.model), reason),
+                        basis: None,
+                    };
+                }
                 for (path, e) in &missing {
                     if not_served(e) {
                         self.note_missing(path, e);
@@ -493,6 +528,7 @@ impl CameraSession {
                         capture_fps: self.capture_fps,
                         version: self.version.clone(),
                         not_applied: Vec::new(),
+                        offline_reason: None,
                     },
                     basis: Some(basis),
                 }
@@ -501,7 +537,7 @@ impl CameraSession {
                 tracing::warn!(camera = %link.client.addr, error = %e, "camera read failed");
                 self.forget_link("a read failed");
                 Reading {
-                    state: self.offline(Some(link.model)),
+                    state: self.offline(Some(link.model), OfflineReason::CameraNotAnswering),
                     basis: None,
                 }
             }

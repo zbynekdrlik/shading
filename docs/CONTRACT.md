@@ -157,6 +157,22 @@ UseDomains=no
       value as before. A reader that treats 0 / 1 as "at that end" needs no change.
     - The panel disables `-` at `0` and `+` at `1`, and a slider release past a reached end sends
       nothing.
+  - **New field `offlineReason` (v0.2.6, shading#14, additive).** Why the relay cannot reach its
+    camera this cycle, so the panel can tell the operator what to switch on. Every other key keeps
+    its name and meaning.
+    - `null` while `online` is true, or when the relay cannot tell. A relay older than 0.2.6 does
+      not send it (a reader that does not know it ignores it).
+    - `"no-camera-link"`: the box has no Blackmagic `cdc_ncm` link (no `enx` interface of vendor
+      `1edb`): the camera is off, not on USB, or the cable is out.
+    - `"camera-not-answering"`: a link (or the `BKSHADING_CAMERA` address) is there, but no camera
+      answers HTTP: no DHCP address yet, connection refused or timed out, or a 5xx (500/503) on a
+      probe while the camera boots; also a camera that stopped answering mid-read.
+    - `"rest-off"`: something answers HTTP at the camera's address, but not the REST API: a
+      redirect (307), 404 on `system/product`, `lens/iris` and `/system`, or a web page; also a camera
+      found before whose every read endpoint now answers that way. This is **Web media manager
+      OFF** (live on PP cam7: 307, then 404).
+    - Values may be added later; a reader must treat an unknown value as "offline, reason
+      unknown".
   - `caps.fNumberChoices` is NOT the lens's steps. It is only the positions the absolute aperture
     slider writes: the nominal 1/3-stop marks between the ends of `lens/iris/description` (the
     first and last entries are those ends). The camera snaps such a write to its nearest own step.
@@ -296,6 +312,14 @@ UseDomains=no
     `[[camera]]`) loads as `ok: 0 cameras`. Compare the printed count, not only the exit code.
 - **Relay registration:** `POST /api/relays/register` — a relay announces itself with its id
   (`register:<id>` addresses in the config).
+
+- **`CameraView.control` (v0.2.6, shading#14, additive, `GET /api/cameras` and `/ws`).** Whether
+  the panel can control the block: `ok`, `relay-unreachable` (no answer from the relay: no fresh
+  registration and the address / `fallback_address` does not answer), `relay-too-old` (the relay
+  answers, its camera is offline and its version is below 0.2.0, the REST transport; pp-cam4 ran
+  0.1.2), `no-camera-link`, `camera-not-answering`, `rest-off` (the relay's `offlineReason`), or
+  `camera-offline` (an offline relay that gives no reason). The panel shows a warning badge for
+  anything but `ok`; tapping it opens a Slovak popup with the cause and the step to take.
 
 ## Not shading's
 

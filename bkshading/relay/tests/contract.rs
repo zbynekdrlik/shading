@@ -72,3 +72,37 @@ fn the_aperture_step_field_is_aperture_step_on_the_wire_6() {
         "an older client simply leaves it out"
     );
 }
+
+#[test]
+fn the_offline_reason_field_is_additive_offline_reason_on_the_wire_14() {
+    // shading#14 (v0.2.6): `GET /api/state` carries `offlineReason` (null while online, else
+    // `no-camera-link` | `camera-not-answering` | `rest-off`). Every other key keeps its name.
+    let st = bkshading_proto::wire::RelayState::offline("0.2.6");
+    let json = serde_json::to_value(&st).unwrap();
+    let keys: Vec<&str> = json
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(|k| k.as_str())
+        .collect();
+    for k in [
+        "online",
+        "camera",
+        "params",
+        "caps",
+        "fpsSupported",
+        "captureFps",
+        "version",
+        "notApplied",
+        "offlineReason",
+    ] {
+        assert!(keys.contains(&k), "{k} missing from {keys:?}");
+    }
+    assert_eq!(json["offlineReason"], serde_json::Value::Null);
+    // A reader that predates it (camera-box, an older service) parses the state without it.
+    let older: bkshading_proto::wire::RelayState = serde_json::from_str(
+        r#"{"online":true,"camera":"x","params":{},"caps":null,"fpsSupported":false,"version":"0.2.5"}"#,
+    )
+    .unwrap();
+    assert_eq!(older.offline_reason, None);
+}

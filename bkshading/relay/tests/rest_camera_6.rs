@@ -844,6 +844,22 @@ fn a_late_set_is_never_written_through_a_camera_that_went_offline_6() {
         })
     };
     wait_for_put(&cam, "/lens/iris");
+    // The camera stops answering before the read-back runs.
+    let iso_gets = cam.gets_of("/video/iso");
+    cam.cam()
+        .get_delay
+        .insert("/video/iso".into(), Duration::from_secs(10));
+    // The late SET arrives once the read-back has started (its first GET is in flight). Sent right
+    // after the iris PUT, it could beat the round's own pop of pending SETs on a loaded runner and
+    // be written in the FIRST round, before the camera went offline (CI run 43714798063).
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while cam.gets_of("/video/iso") == iso_gets {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no read-back within 10 s"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
     let q = s
         .submit(&SetRequest {
             iso: Some(1600),
@@ -851,10 +867,6 @@ fn a_late_set_is_never_written_through_a_camera_that_went_offline_6() {
         })
         .unwrap();
     assert_eq!(q, ApplyOutcome::Queued);
-    // The camera stops answering before the read-back runs.
-    cam.cam()
-        .get_delay
-        .insert("/video/iso".into(), Duration::from_secs(10));
     let (count, st) = applied(first.join().unwrap().unwrap());
     assert_eq!(count, 1, "only the caller's own write");
     assert!(!st.online);

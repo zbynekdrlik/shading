@@ -168,3 +168,37 @@ body {
    the value label AND its +/- stepper. */
 .not-applied { color: var(--bad); }
 .step-btn.not-applied, .btn.not-applied { border-color: var(--bad); color: var(--bad); }
+
+/* shading#14: a camera that cannot be controlled gets a warning strip on top of its block (outside
+   the dimmed .block-params, so it stays bright and clickable) and a popup with the step to take. */
+.control-warn {
+  display: block;
+  width: 100%;
+  margin: 0 0 0.5rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--bad);
+  border-radius: 0.5rem;
+  background: rgba(229, 84, 75, 0.15);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.control-warn:hover { background: rgba(229, 84, 75, 0.28); }
+.control-warn[hidden] { display: none; }
+.control-info {
+  max-width: min(32rem, calc(100vw - 2rem));
+  border: 1px solid var(--edge);
+  border-radius: 0.75rem;
+  background: var(--panel);
+  color: var(--text);
+  padding: 1rem 1.1rem;
+}
+.control-info::backdrop { background: rgba(0, 0, 0, 0.6); }
+.control-info-title { margin: 0 0 0.5rem; font-size: 1.05rem; color: var(--bad); }
+.control-info-camera { margin: 0 0 0.6rem; color: var(--muted); font-size: 0.85rem; }
+.control-info-cause { margin: 0 0 0.6rem; }
+.control-info-step { margin: 0 0 0.9rem; font-weight: 600; }
+.control-info form { margin: 0; text-align: right; }

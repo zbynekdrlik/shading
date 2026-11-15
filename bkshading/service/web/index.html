@@ -35,9 +35,23 @@
   <main id="camera-grid" class="camera-grid" aria-live="polite"></main>
   <p id="empty-note" class="empty-note" hidden>Žiadne kamery v konfigurácii.</p>
 
+  <!-- shading#14: ONE popup for every block. app.js fills it from CONTROL_INFO for the block whose
+       warning was tapped: what is wrong and what to switch on, in plain Slovak. -->
+  <dialog id="control-info" class="control-info" data-role="control-info" aria-labelledby="control-info-title">
+    <h2 id="control-info-title" class="control-info-title" data-role="control-info-title"></h2>
+    <p class="control-info-camera" data-role="control-info-camera"></p>
+    <p class="control-info-cause" data-role="control-info-cause"></p>
+    <p class="control-info-step" data-role="control-info-step"></p>
+    <form method="dialog"><button type="submit" class="btn control-info-close" data-role="control-info-close">Zavrieť</button></form>
+  </dialog>
+
   <!-- One camera block skeleton, cloned per camera by app.js. -->
   <template id="camera-block">
     <section class="camera-block" data-role="camera-block">
+      <!-- shading#14: shown when the camera cannot be controlled (CameraView.control != ok). It sits
+           OUTSIDE .block-params, which a disabled block dims and makes unclickable. A tap opens the
+           control-info popup with the cause and the step to take. -->
+      <button type="button" class="control-warn" data-role="control-warn" aria-haspopup="dialog" hidden></button>
       <div class="block-preview" data-role="preview">
         <img class="preview-img" data-role="preview-img" alt="Živý NDI preview kamery" />
         <div class="preview-placeholder" data-role="preview-placeholder">NDI preview — čakám…</div>

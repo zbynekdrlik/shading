@@ -9,11 +9,15 @@ WITHOUT a camera or the real relay binary, so the E2E can drive the panel end-to
                          so the panel can compute the aperture +/- step.
   * PUT  /api/params   -> records the exact JSON body (what the service forwarded) and returns 200.
   * GET  /__recorded   -> the recorded PUT bodies as a JSON array (the test asserts against these).
+  * POST /__state      -> merges the JSON body into the served state (shading#14: a test turns the
+                         camera offline with an `offlineReason`, or reports an old relay version).
+  * POST /__reset      -> serves the original fixture again.
 
 Stdlib only (http.server/json/argparse), threaded so the service's concurrent poll + the browser
 never block each other. Fails loudly on error (never a silent swallow, per script-failure-policy).
 """
 import argparse
+import copy
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -52,6 +56,7 @@ STATE = {
 
 _recorded = []
 _lock = threading.Lock()
+_state = copy.deepcopy(STATE)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -65,10 +70,26 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/api/state":
-            self._json(200, STATE)
+            with _lock:
+                self._json(200, _state)
         elif self.path == "/__recorded":
             with _lock:
                 self._json(200, list(_recorded))
+        else:
+            self._json(404, {"error": "not found", "path": self.path})
+
+    def do_POST(self):
+        global _state
+        if self.path == "/__state":
+            length = int(self.headers.get("Content-Length", "0"))
+            patch = json.loads(self.rfile.read(length).decode("utf-8"))  # loud on malformed JSON
+            with _lock:
+                _state.update(patch)
+                self._json(200, _state)
+        elif self.path == "/__reset":
+            with _lock:
+                _state = copy.deepcopy(STATE)
+                self._json(200, _state)
         else:
             self._json(404, {"error": "not found", "path": self.path})
 

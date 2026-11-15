@@ -708,7 +708,12 @@ test("a live preview frame is shown, a stopped feed drops to the placeholder and
 // Owner 4.10.2026: "v shadingu maju byt online camery na zaciatku podla cisiel, a potom ofline".
 // Cameras with a live camera come first in config (= number) order, then every other block, and the
 // order follows a camera going online/offline on a later push.
-test("online cameras come first in number order, then the offline ones, console clean", async ({ page }) => {
+// shading#13 (owner ruling 15.11.2026, "1234567"): the blocks stand in camera NUMBER order, cam1
+// left, whatever the config order (strih-pp lists the visiting cams 2, 3, 5 last), and a block
+// never moves when its camera goes offline or comes back.
+test("cameras stand in number order whatever the config order, and never move on online/offline, console clean (shading#13)", async ({
+  page,
+}) => {
   const problems = [];
   page.on("console", (msg) => {
     const t = msg.type();
@@ -723,43 +728,56 @@ test("online cameras come first in number order, then the offline ones, console 
   const cam = (id, reachable, online) => ({
     id,
     label: id,
-    transport: id.startsWith("handheld") ? "sbc-relay" : "cambox-relay",
+    transport: "cambox-relay",
     hasPreview: false,
     reachable,
     grabFps: null,
     grabFpsDesync: false,
     fpsSync: "unknown",
+    control: !reachable ? "relay-unreachable" : online ? "ok" : "rest-off",
     state: reachable
       ? {
           online,
-          camera: online ? "USB PTP Class Camera" : null,
+          camera: online ? "Blackmagic Pocket Cinema Camera 4K" : null,
           params: { apertureAv: null, apertureNorm: null, iso: null, kelvin: null, tint: null,
             shutter: null, fps100: null, sensorFps100: null, focusDistance: null },
           caps: null,
           fpsSupported: false,
           captureFps: null,
-          version: "1.7.0-dev.e2e",
+          version: "0.2.6",
           notApplied: [],
+          offlineReason: online ? null : "rest-off",
         }
       : null,
   });
   const order = () => page.locator("#camera-grid > [data-id]").evaluateAll((els) => els.map((e) => e.dataset.id));
+  const show = (cams) => page.evaluate((agg) => window.render(agg), { version: "0.2.6-e2e", cameras: cams });
 
-  // cam1 + cam2 + handheld-1 live, cam3 relay up without a camera, cam4 relay down
-  await page.evaluate((agg) => window.render(agg), {
-    version: "1.7.0-dev.e2e",
-    cameras: [cam("cam1", true, true), cam("cam2", true, true), cam("cam3", true, false),
-      cam("cam4", false, false), cam("handheld-1", true, true)],
-  });
-  expect(await order()).toEqual(["cam1", "cam2", "handheld-1", "cam3", "cam4"]);
+  // strih-pp's config order: its own cams 1, 4, 6, 7, then the visiting cam2 (and cam3 relay down).
+  await show([cam("cam1", true, true), cam("cam4", true, true), cam("cam6", true, true),
+    cam("cam7", true, true), cam("cam2", true, true)]);
+  expect(await order()).toEqual(["cam1", "cam2", "cam4", "cam6", "cam7"]);
 
-  // cam1 drops its camera, cam4 comes online: the blocks follow on the next push
-  await page.evaluate((agg) => window.render(agg), {
-    version: "1.7.0-dev.e2e",
-    cameras: [cam("cam1", true, false), cam("cam2", true, true), cam("cam3", true, false),
-      cam("cam4", true, true), cam("handheld-1", true, true)],
-  });
-  expect(await order()).toEqual(["cam2", "cam4", "handheld-1", "cam1", "cam3"]);
+  // cam1 goes offline (REST off), cam6's relay drops: no block moves; the offline ones grey out
+  // in place with their warning.
+  await show([cam("cam1", true, false), cam("cam4", true, true), cam("cam6", false, false),
+    cam("cam7", true, true), cam("cam2", true, true)]);
+  expect(await order()).toEqual(["cam1", "cam2", "cam4", "cam6", "cam7"]);
+  const block = (id) => page.locator(`#camera-grid > [data-id="${id}"]`);
+  await expect(block("cam1")).toHaveClass(/disabled/);
+  await expect(block("cam1").locator('[data-role="control-warn"]')).toBeVisible();
+  await expect(block("cam6").locator('[data-role="control-warn"]')).toContainText("Relay nedostupný");
+
+  // Both come back: still the same order.
+  await show([cam("cam1", true, true), cam("cam4", true, true), cam("cam6", true, true),
+    cam("cam7", true, true), cam("cam2", true, true)]);
+  expect(await order()).toEqual(["cam1", "cam2", "cam4", "cam6", "cam7"]);
+  await expect(block("cam1")).not.toHaveClass(/disabled/);
+
+  // cam10 sorts after cam7 (a number, not text); an id without a number goes last.
+  await show([cam("cam10", true, true), cam("spare", true, true), cam("cam7", true, true),
+    cam("cam1", true, true)]);
+  expect(await order()).toEqual(["cam1", "cam7", "cam10", "spare"]);
 
   expect(problems, `console problems: ${problems.join(" | ")}`).toEqual([]);
 });
@@ -874,6 +892,16 @@ test("a handheld that registers itself becomes reachable in the panel and takes 
   // No announcement yet: the service has no address for register:handheld-e2e, never a guess.
   await expect(online).toHaveText("relay offline", { timeout: 15000 });
   await expect(page.locator('[data-role="registration"]')).toBeHidden();
+  // shading#14: the service has no answer from the relay, so the block says so and what to check.
+  const warn = page.locator('[data-role="control-warn"]');
+  await expect(warn).toContainText("Relay nedostupný");
+  await warn.click();
+  const dlg = page.locator('[data-role="control-info"]');
+  await expect(dlg.locator('[data-role="control-info-title"]')).toHaveText(
+    "Panel sa nespojí s relay pri kamere"
+  );
+  await dlg.locator('[data-role="control-info-close"]').click();
+  await expect(dlg).toBeHidden();
 
   // The stub relay (127.0.0.1:8781) announces itself; the service keeps the peer address + port.
   const reg = await page.request.post(`${REGISTER_SVC}/api/relays/register`, {
@@ -884,6 +912,7 @@ test("a handheld that registers itself becomes reachable in the panel and takes 
 
   // The next pump snapshot reaches the stub through the registration.
   await expect(online).toHaveText("online", { timeout: 15000 });
+  await expect(warn).toBeHidden();
   // issue 808: the block names the handheld, where it announced from and how fresh that is.
   const regLine = page.locator('[data-role="registration"]');
   await expect(regLine).toBeVisible();
@@ -903,5 +932,183 @@ test("a handheld that registers itself becomes reachable in the panel and takes 
   const recorded = await (await page.request.get(`${STUB}/__recorded`)).json();
   expect(recorded.slice(before).some((b) => b.kelvin === 5700), "kelvin + -> 5700 via the registration").toBeTruthy();
 
+  expect(problems, `console problems: ${problems.join(" | ")}`).toEqual([]);
+});
+
+// shading#14: a block the panel cannot control shows a warning strip; a tap opens a Slovak popup
+// with the concrete cause and the step to take. One case per CameraView.control status, rendered
+// from fixtures (the /api routes are blocked so the real service never overwrites them).
+const CONTROL_CASES = [
+  {
+    control: "relay-unreachable",
+    reachable: false,
+    state: null,
+    badge: "Relay nedostupný",
+    title: "Panel sa nespojí s relay pri kamere",
+    step: "Skontroluj, či je box pri kamere zapnutý a pripojený do siete",
+  },
+  {
+    control: "relay-too-old",
+    reachable: true,
+    version: "0.1.2",
+    badge: "Starý relay",
+    title: "Relay pri kamere je príliš starý",
+    cause: "verziu 0.1.2",
+    step: "treba nasadiť nový relay",
+  },
+  {
+    control: "no-camera-link",
+    reachable: true,
+    reason: "no-camera-link",
+    badge: "Kamera nie je pripojená cez USB",
+    title: "Relay nevidí kameru na USB",
+    step: "skontroluj USB-C kábel",
+  },
+  {
+    control: "camera-not-answering",
+    reachable: true,
+    reason: "camera-not-answering",
+    badge: "Kamera neodpovedá",
+    title: "Kamera je pripojená, ale neodpovedá",
+    step: "Zapni na kamere Web media manager",
+  },
+  {
+    control: "rest-off",
+    reachable: true,
+    reason: "rest-off",
+    badge: "Zapni Web media manager na kamere",
+    title: "Na kamere je vypnutý Web media manager",
+    step: "Zapni na kamere Web media manager",
+  },
+  {
+    control: "camera-offline",
+    reachable: true,
+    version: "0.2.5",
+    badge: "Kamera offline",
+    title: "Kamera sa nedá ovládať",
+    step: "Web media manager",
+  },
+];
+
+test("a camera that cannot be controlled shows a warning and a Slovak popup per cause, console clean (shading#14)", async ({
+  page,
+}) => {
+  const problems = [];
+  page.on("console", (msg) => {
+    const t = msg.type();
+    if (t === "error" || t === "warning") problems.push(`${t}: ${msg.text()}`);
+  });
+  page.on("pageerror", (err) => problems.push(`pageerror: ${err.message}`));
+  await page.addInitScript(DISABLE_WS);
+  await page.route("**/api/**", (route) =>
+    route.fulfill({ status: 200, contentType: "text/plain", body: "offline-fixture" })
+  );
+  await page.goto("/");
+  await page.waitForFunction(() => typeof window.render === "function");
+
+  const view = (c) => ({
+    version: "0.2.6-e2e",
+    cameras: [
+      {
+        id: "cam7",
+        label: "Cam 7",
+        transport: "cambox-relay",
+        hasPreview: false,
+        reachable: c.reachable,
+        grabFps: null,
+        grabFpsDesync: false,
+        fpsSync: "unknown",
+        control: c.control,
+        state:
+          c.state === null
+            ? null
+            : {
+                online: c.control === "ok",
+                camera: null,
+                params: {},
+                caps: null,
+                fpsSupported: false,
+                captureFps: null,
+                version: c.version || "0.2.6",
+                notApplied: [],
+                offlineReason: c.reason || null,
+              },
+      },
+    ],
+  });
+  const warn = page.locator('[data-role="control-warn"]');
+  const dlg = page.locator('[data-role="control-info"]');
+
+  for (const c of CONTROL_CASES) {
+    await page.evaluate((agg) => window.render(agg), view(c));
+    await expect(warn, c.control).toBeVisible();
+    await expect(warn, c.control).toContainText(c.badge);
+    // The block itself is dimmed, but the warning strip stays clickable.
+    await warn.click();
+    await expect(dlg, c.control).toBeVisible();
+    await expect(dlg.locator('[data-role="control-info-title"]')).toHaveText(c.title);
+    await expect(dlg.locator('[data-role="control-info-camera"]')).toHaveText("Cam 7");
+    if (c.cause) await expect(dlg.locator('[data-role="control-info-cause"]')).toContainText(c.cause);
+    await expect(dlg.locator('[data-role="control-info-step"]')).toContainText(c.step);
+    await dlg.locator('[data-role="control-info-close"]').click();
+    await expect(dlg).toBeHidden();
+  }
+
+  // An open popup follows the next push: refilled with the new cause, closed once the camera is back.
+  await page.evaluate((agg) => window.render(agg), view(CONTROL_CASES[4]));
+  await warn.click();
+  await expect(dlg.locator('[data-role="control-info-title"]')).toHaveText(CONTROL_CASES[4].title);
+  await page.evaluate((agg) => window.render(agg), view(CONTROL_CASES[2]));
+  await expect(dlg.locator('[data-role="control-info-title"]')).toHaveText(CONTROL_CASES[2].title);
+
+  // A camera that can be controlled has no warning, and its open popup closes.
+  await page.evaluate((agg) => window.render(agg), view({ control: "ok", reachable: true }));
+  await expect(warn).toBeHidden();
+  await expect(dlg).toBeHidden();
+
+  expect(problems, `console problems: ${problems.join(" | ")}`).toEqual([]);
+});
+
+// shading#14 through the REAL service: the stub relay reports its camera offline with a reason, or
+// an old version; the service derives the block's control status and the panel explains it.
+test("the real service turns a relay's offline reason and an old relay into the panel warning, console clean (shading#14)", async ({
+  page,
+}) => {
+  const problems = [];
+  page.on("console", (msg) => {
+    const t = msg.type();
+    if (t === "error" || t === "warning") problems.push(`${t}: ${msg.text()}`);
+  });
+  page.on("pageerror", (err) => problems.push(`pageerror: ${err.message}`));
+  const warn = page.locator('[data-role="control-warn"]');
+  const dlg = page.locator('[data-role="control-info"]');
+  try {
+    await page.goto("/");
+    await expect(page.locator('[data-role="online"]')).toHaveText("online", { timeout: 15000 });
+    await expect(warn).toBeHidden();
+
+    // Web media manager OFF on the camera (PP cam7: 307 then 404).
+    await page.request.post(`${STUB}/__state`, { data: { online: false, offlineReason: "rest-off" } });
+    await expect(warn).toContainText("Zapni Web media manager na kamere", { timeout: 15000 });
+    await warn.click();
+    await expect(dlg.locator('[data-role="control-info-step"]')).toContainText(
+      "Zapni na kamere Web media manager"
+    );
+    await dlg.locator('[data-role="control-info-close"]').click();
+    await expect(dlg).toBeHidden();
+
+    // pp-cam4: an old 0.1.2 relay that sends no reason.
+    await page.request.post(`${STUB}/__state`, { data: { offlineReason: null, version: "0.1.2" } });
+    await expect(warn).toContainText("Starý relay", { timeout: 15000 });
+    await warn.click();
+    await expect(dlg.locator('[data-role="control-info-cause"]')).toContainText("verziu 0.1.2");
+    await dlg.locator('[data-role="control-info-close"]').click();
+
+    // The camera is back: no warning.
+    await page.request.post(`${STUB}/__reset`);
+    await expect(warn).toBeHidden({ timeout: 15000 });
+  } finally {
+    await page.request.post(`${STUB}/__reset`);
+  }
   expect(problems, `console problems: ${problems.join(" | ")}`).toEqual([]);
 });

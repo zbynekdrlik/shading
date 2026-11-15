@@ -145,6 +145,30 @@ pub struct RelayState {
     /// [`RelayState::capture_fps`]; `rename_all = "camelCase"` emits it as `notApplied`.
     #[serde(default)]
     pub not_applied: Vec<String>,
+    /// Why the camera is offline, as far as the relay can tell (shading#14, 0.2.6, additive).
+    /// `None` while the camera is online, and from a relay older than 0.2.6. The panel turns it
+    /// into a warning badge and a popup with the step to take. `#[serde(default)]`: an older relay
+    /// that does not send it reads as `None`.
+    #[serde(default)]
+    pub offline_reason: Option<OfflineReason>,
+}
+
+/// Why a relay cannot reach its camera this cycle (shading#14). Wire: kebab-case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OfflineReason {
+    /// The box has no Blackmagic USB network link (`cdc_ncm` on vendor `1edb`): the camera is
+    /// off, not on USB, or the cable is out.
+    NoCameraLink,
+    /// A link (or a fixed address) is there but no camera answers HTTP: no DHCP address yet, a
+    /// connection refused or timed out, or the camera still booting (500/503).
+    CameraNotAnswering,
+    /// Something answers HTTP at the camera's address, but not the REST API: a redirect (307), 404
+    /// on every probe, or a web page. Live on PP cam7 with Web media manager OFF.
+    RestOff,
+    /// A reason this reader does not know (a newer relay). Never sent by this relay.
+    #[serde(other)]
+    Unknown,
 }
 
 impl RelayState {
@@ -161,6 +185,7 @@ impl RelayState {
             capture_fps: None,
             version: version.into(),
             not_applied: Vec::new(),
+            offline_reason: None,
         }
     }
 }
@@ -286,6 +311,36 @@ pub struct CameraView {
     /// `#[serde(default)]`: a view from an older service reads as `None`.
     #[serde(default)]
     pub registration: Option<RegistrationView>,
+    /// Whether the panel can control this camera and, if not, why (shading#14):
+    /// [`crate::control::control_status`] of `reachable` + `state`. The panel shows a warning
+    /// badge for anything but [`ControlStatus::Ok`]. `#[serde(default)]`: an older service's view
+    /// reads as `Ok` (no badge).
+    #[serde(default)]
+    pub control: ControlStatus,
+}
+
+/// Whether a camera block can be controlled, and why not (shading#14). Wire: kebab-case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ControlStatus {
+    /// The relay answers and the camera is online.
+    #[default]
+    Ok,
+    /// The service gets no answer from the relay: no fresh registration and the address or
+    /// `fallback_address` does not answer (box or SBC off, network cable out, relay stopped).
+    RelayUnreachable,
+    /// The relay answers, the camera is offline, and the relay is older than the REST transport
+    /// ([`crate::control::MIN_REST_RELAY_VERSION`]); pp-cam4 ran 0.1.2.
+    RelayTooOld,
+    /// [`OfflineReason::NoCameraLink`].
+    NoCameraLink,
+    /// [`OfflineReason::CameraNotAnswering`].
+    CameraNotAnswering,
+    /// [`OfflineReason::RestOff`]: Web media manager is off on the camera.
+    RestOff,
+    /// The camera is offline and the relay gives no reason (a 0.2.0-0.2.5 relay, or a reason this
+    /// service does not know).
+    CameraOffline,
 }
 
 /// A self-registering relay as the panel shows it (issue 808).
