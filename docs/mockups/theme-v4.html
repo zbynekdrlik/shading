@@ -86,7 +86,8 @@ body[data-layout="row"] main { grid-auto-flow: column; grid-auto-columns: 360px;
 .prev .ph { color: #9aa3ad; font-size: 15px; font-weight: 600; letter-spacing: .02em; }
 .prev .img { position: absolute; inset: 0;
   background: linear-gradient(135deg,#3b1f4d,#8a3a7a 45%,#21152b 70%,#0b0b12); }
-.head { display: flex; align-items: baseline; gap: 10px; padding: 12px 14px 4px; }
+.head { display: flex; align-items: center; gap: 10px; padding: 12px 14px 4px; } /* Marcel: ID, name, PGM and online share ONE vertical centre */
+.head > * { line-height: 1; display: inline-flex; align-items: center; }
 .num { font-size: 30px; font-weight: 800; line-height: 1; }
 .name { font-size: 21px; font-weight: 700; }
 .state { margin-left: auto; font-size: 16px; font-weight: 600; color: var(--ok); }
