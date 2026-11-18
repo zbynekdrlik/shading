@@ -81,6 +81,8 @@ header .sp { flex: 1; }
    - "8 v rade": all cameras in ONE row, fixed card width, the row scrolls horizontally. */
 main { display: grid; gap: 14px; padding: 14px 16px; }
 body[data-layout="grid"] main { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+body[data-layout="five"] main { grid-auto-flow: column; overflow-x: auto; overscroll-behavior-x: contain;
+  grid-auto-columns: calc((100vw - 16px - 5 * 14px) / 5 + 0.1px); } /* the 6th card starts exactly at the window edge. Marcel + Stepan: exactly 5 whole cards (the usual 3+2 event set), no partial 6th */
 body[data-layout="row"] main { grid-auto-flow: column; overflow-x: auto;
   /* Marcel: 4 + 1/3 cards on the screen (the third of the 5th tells there is more to scroll):
      4.333 cards + 4 gaps of 14 px fill the width inside the 16 px side paddings */
@@ -215,6 +217,7 @@ input[type=range]::-moz-range-thumb { width: 22px; height: 22px; border-radius: 
   <span class="sp"></span>
   <div class="seg" role="group" aria-label="Rozloženie">
     <button id="l-grid" aria-pressed="true" title="4 stĺpce, 8 kamier = 2 riadky">▦ 4+4</button>
+    <button id="l-five" aria-pressed="false" title="presne 5 celých kariet v rade (3+2), ďalšie sa posúvajú do strany">▥ 5</button>
     <button id="l-row" aria-pressed="false" title="všetky kamery v jednom rade, posúva sa do strany">▤ 8 v rade</button>
   </div>
   <div class="seg" role="group" aria-label="Režim">
@@ -324,12 +327,14 @@ function setLayout(l) {
   document.body.dataset.layout = l;
   document.getElementById("l-grid").setAttribute("aria-pressed", l === "grid");
   document.getElementById("l-row").setAttribute("aria-pressed", l === "row");
+  document.getElementById("l-five").setAttribute("aria-pressed", l === "five");
   try { localStorage.setItem("shading.layout", l); } catch {}
 }
 document.getElementById("l-grid").onclick = () => setLayout("grid");
 document.getElementById("l-row").onclick = () => setLayout("row");
+document.getElementById("l-five").onclick = () => setLayout("five");
 let saved = null; try { saved = localStorage.getItem("shading.layout"); } catch {}
-setLayout(saved === "row" ? "row" : "grid");
+setLayout(["row", "five"].includes(saved) ? saved : "grid");
 table();
 </script>
 </body>
