@@ -105,8 +105,9 @@ the camera's USB-C CDC-NCM link (since v0.2.0, shading#6; before that over USB-P
   10.11.2026: no 4.8 at 108 mm, writes of 4.6/4.8 stay 4.4; the earlier 4.8 was another zoom) while
   `lens/iris/description` says min 4.1; the PP 6K has 1/6 steps (2.8 2.9 3.1 3.2 3.3 3.5). A
   nominal grid (v0.2.0) skipped 4.8 and 6.7 (camera-box#1452 again). So:
-  - the panel's +/- send `{apertureStep: ±1}` and hold the shown f-stop as pending until a push
-    differs (`reconcileStepHold`); the display is always the true `apertureStop`;
+  - the panel's +/- send `{apertureStep: ±1}` and show the GUESSED next grid stop (shading#29,
+    `steppers::aperture_next`) until a push shows an f-stop different from the one at the press;
+    then the display is the true `apertureStop`, which may differ from the guess;
   - `CameraSession::step_iris`: GET the TRUE f-stop, PUT a target `APERTURE_PROBE_STOPS` (1/16
     stop) away (`mapping::aperture_probe_target`), wait `IRIS_PROBE_WAIT_MS` (0.5 s since 0.2.5) for the iris,
     widen by 1/16 until it lands elsewhere or the target hits the description range;
@@ -248,7 +249,7 @@ the house app stack airuleset#1333); mockup `docs/mockups/arrange-v1.html` appro
   job downloads `panel-dist`), so `docs/CONTRACT.md` ("web/ is a copy, not needed at runtime")
   stayed unchanged. Manifest and `sw.js` use RELATIVE paths.
 - **Theme v4b + version D (shading#24, design CLOSED with the PP operators in Discord 'Grading NEW',
-  normative mockups `docs/mockups/theme-v4b.html` + `theme-v4d.html`):**
+  normative mockup `docs/mockups/theme-v4d.html`; its predecessor theme-v4b.html was deleted):**
   - Tokens on `:root` (dark, the default) and `:root[data-mode="light"]` (muted grey-blue, no pure
     white). Values 26/500/letter-spacing 1px/`--val`; the 1.5 px black outline is `--outline`
     (`none` in light) on `.mid .val` and the +/- glyphs. System font (the Barlow/JetBrains files
@@ -304,10 +305,34 @@ the house app stack airuleset#1333); mockup `docs/mockups/arrange-v1.html` appro
     explicit line box.
 - **Crate `bkshading/panel`:** `behave/` = pure rules, natively tested (`cargo test -p bkshading-panel`):
   `steppers.rs` + `holds.rs` (six steppers, ends, optimistic hold: value hold 4 s ends on a push showing
-  the target; aperture STEP hold 8 s ends on a push showing a DIFFERENT f-stop), `arrange_drag.rs` +
+  the target; aperture STEP hold 8 s ends on a push showing a DIFFERENT f-stop than at the press; the
+  shading#29 lock below), `arrange_drag.rs` +
   `arrange_edit.rs`, `control_info.rs` (the #14 Slovak texts live only here), `preview.rs`, `block.rs`;
   `store/` = signals + `conn.rs` rules + `net.rs` browser IO; `components/` render. New logic goes into
   `behave/` with a test, never straight into a component.
+- **Stepper press lifecycle (shading#29, v0.2.12, Marcel: "optimistic + debounce + value update").**
+  A press shows the expected value at once (aperture: `aperture_next`, the next `fNumberChoices`
+  entry, a third of a stop past the grid's end). The hold is `pending` until the service ANSWERS the
+  PUT (`net::put_param` returns the status -> `WriteAnswer::of` -> `Steppers::answered`; the slider's
+  `apertureNorm` maps to the aperture row). While pending, or within `DEBOUNCE_MS` (300) of the last
+  accepted press, `Holds::accepts` refuses a press of that row (both +/-); the buttons are NOT
+  disabled (no visual change, `aria-busy` only) and the bar `data-role="<role>-pending"` runs under the
+  value (absolute in `.mid`, no layout shift). A 2xx ends the lock + bar but NOT the hold: the target
+  still beats a stale pump snapshot (shading#27; never end a hold at the HTTP answer). A newer view
+  with `notApplied`, a non-2xx / no answer, or the timeout of a still-UNANSWERED hold reverts and sets
+  `.val.flash` for `FLASH_MS`; an answered hold that times out settles quietly. Every hold carries
+  its write's id (`Press.id`, `send(.., write)`, `answered(key, id, ..)`): a late answer of an older
+  write never unlocks a newer press; Auto WB and the fps align button send id 0 (no hold). A
+  `notApplied` the view at the press already showed (an earlier write's, still in the relay state)
+  refuses only after this write's answer. The slider checks only the lock, never the 300 ms guard.
+  The aperture guess is only TEXT (`value: None`): the next press builds on the camera's f-stop;
+  outside the grid's span (f/1.75 under the default 2.8..) it is a third of a stop. A 502 path has
+  no E2E on purpose: Chromium logs every 5xx resource as a console error. E2E:
+  `stepper-lock.spec.js` on the :8786/:8787 pair; the stub's `POST /__write {delayMs, refuse}` delays
+  the PUT answer (sleep outside the stub lock, so polls keep answering) or answers the state with the
+  written keys in `notApplied`. "a second press after a fast answer but within 300 ms" is the one
+  E2E only the guard passes (verified: DEBOUNCE_MS 0 -> 2 writes). A row at a range end has its button disabled by the GATE (ISO 800 =
+  the stub's last choice), so a lock test that clicks both buttons uses kelvin.
 - **The service embeds `bkshading/panel/dist/` with rust-embed** (`http::PanelAssets`, `panel_file`:
   hashed files immutable, the rest `no-cache`). The folder must exist to compile: build it
   (`cd bkshading/panel && trunk build --release`) or `mkdir -p bkshading/panel/dist && echo placeholder

@@ -4,14 +4,16 @@
 //! the sixth stepper: fps).
 //!
 //! One tap = one PUT of one key, never an auto-repeat (the issue-1229 one-write rule). A tap steps
-//! from the camera's REAL current value (or the target of a tap still held), and sends:
-//! - clona: `{apertureStep: ±1}`, the relay walks the lens's own steps (shading#6);
+//! from the camera's REAL current value (or the target of a tap still held), shows the expected
+//! next value at once (shading#29), and sends:
+//! - clona: `{apertureStep: ±1}`, the relay walks the lens's own steps (shading#6); the panel shows
+//!   the next stop of the f-number grid ([`aperture_next`]) until the camera says where it landed;
 //! - ISO, uzávierka, fps: the absolute next listed choice;
 //! - biely bod ±100 K and tint ±1: the absolute value, clamped to the range.
 
 use bkshading_proto::wire::{CameraCaps, CameraView, ShadingParams};
 
-use super::holds::{HoldKind, Holds, Seen};
+use super::holds::{HoldKind, Holds, Seen, Tap, WriteAnswer};
 
 /// Kelvin per tap.
 pub const KELVIN_STEP: i64 = 100;
@@ -21,6 +23,9 @@ pub const TINT_STEP: i64 = 1;
 pub const KELVIN_RANGE: (i64, i64) = (2500, 10000);
 /// The tint range (the camera's own).
 pub const TINT_RANGE: (i64, i64) = (-50, 50);
+/// How far apart two f-numbers must be to count as different stops (the panel shows one decimal; a
+/// pushed f-number comes from `apertureAv` and is never exactly a grid entry).
+pub const F_NUMBER_EPS: f64 = 0.05;
 /// Mirror of the proto `mapping::IRIS_END_EPS`: how close to 0 / 1 `irisRangePos` is a lens end.
 pub const IRIS_END_EPS: f64 = 1e-3;
 
@@ -57,7 +62,7 @@ impl Row {
         Row::Fps,
     ];
 
-    /// The label in the block (mockup theme-v4b: sentence case).
+    /// The label in the block (mockup theme-v4d: sentence case).
     pub fn label(self) -> &'static str {
         match self {
             Row::Aperture => "Clona",
@@ -69,7 +74,7 @@ impl Row {
         }
     }
 
-    /// The card pane the row lives in (theme-v4b): EXP = exposure and colour, SYS = capture.
+    /// The card pane the row lives in (theme-v4d): EXP = exposure and colour, SYS = capture.
     pub fn pane(self) -> Pane {
         match self {
             Row::Aperture | Row::Iso | Row::Kelvin | Row::Tint => Pane::Exp,
@@ -126,7 +131,7 @@ impl Row {
     }
 }
 
-/// A card's two panes (shading#24 theme-v4b): a per-card EXP/SYS tablist switches between them,
+/// A card's two panes (shading#24 theme-v4d): a per-card EXP/SYS tablist switches between them,
 /// and both share one grid cell, so the card's height never changes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Pane {
@@ -212,6 +217,11 @@ pub struct RowView {
     pub text: String,
     /// A tap is held: the value is the target, not yet confirmed.
     pub pending: bool,
+    /// The tap's write is unanswered: the row is locked and the bar under the value runs
+    /// (shading#29).
+    pub busy: bool,
+    /// The value was just refused or timed out: it flashes red (shading#29).
+    pub flash: bool,
     /// The camera did not apply the last write of this key (issue 1343).
     pub not_applied: bool,
     /// The bar's position in `[0, 1]`, or none when unknown.
@@ -227,6 +237,8 @@ pub struct RowView {
 pub struct Press {
     pub key: &'static str,
     pub value: serde_json::Value,
+    /// The id of the write's hold: its answer carries it back to [`Steppers::answered`].
+    pub id: u64,
 }
 
 /// The f-number of an aperture value: `sqrt(2^AV)`.
@@ -259,6 +271,27 @@ pub fn nearest_index(choices: &[f64], value: f64) -> usize {
         .enumerate()
         .min_by(|a, b| (a.1 - value).abs().total_cmp(&(b.1 - value).abs()))
         .map_or(0, |(i, _)| i)
+}
+
+/// The f-stop an aperture press in `dir` is expected to reach from `f` (shading#29, shown at once
+/// until the camera answers): the next entry of the f-number grid the gates use, or one third of
+/// a stop on when `f` lies outside the grid or the grid ends before the lens does (shading#22: the
+/// default grid starts at 2.8, a lens may open to 1.75). The relay walks the lens's own steps, so the camera's answer may
+/// differ; it is the truth.
+pub fn aperture_next(f: f64, grid: &[f64], dir: i32) -> f64 {
+    let next = if dir > 0 {
+        grid.iter().copied().find(|&c| c > f + F_NUMBER_EPS)
+    } else {
+        grid.iter().copied().rev().find(|&c| c < f - F_NUMBER_EPS)
+    };
+    // Outside the grid's span the grid says nothing about the lens's steps (a lens below the
+    // default grid's 2.8 moves ~1/6 stop, not to f/2.8): a third of a stop then.
+    let inside = match (grid.first(), grid.last()) {
+        (Some(&lo), Some(&hi)) => f >= lo - F_NUMBER_EPS && f <= hi + F_NUMBER_EPS,
+        _ => false,
+    };
+    next.filter(|_| inside)
+        .unwrap_or_else(|| f * 2f64.powf(f64::from(dir.signum()) / 6.0))
 }
 
 /// Whether the iris is at the lens end a move in `dir` heads for (`irisRangePos`: 0 = wide open,
@@ -449,6 +482,8 @@ impl Steppers {
             row,
             text,
             pending: held.is_some(),
+            busy: self.holds.is_pending(row.key()),
+            flash: self.holds.flashing(row.key(), now),
             not_applied: refused,
             pos,
             dec: flag(dec),
@@ -458,31 +493,32 @@ impl Steppers {
     }
 
     /// A tap on `row`'s − (`dir` −1) or + (`dir` 1) of camera `cam`: the write, or none when the
-    /// button would be disabled. The tap is held (shown at once, pending) until a newer view of
-    /// the camera confirms or refuses it.
+    /// button would be disabled, the row's last write is unanswered, or the last accepted press
+    /// was under [`super::holds::DEBOUNCE_MS`] ago (shading#29). The tap is held (its expected
+    /// value shown at once) until a newer view of the camera confirms or refuses it.
     pub fn press(&mut self, row: Row, dir: i32, cam: &CameraView, now: f64) -> Option<Press> {
         let current = self.view(cam, now).into_iter().find(|v| v.row == row)?;
         let seq = self.seq;
         let gate = if dir < 0 { &current.dec } else { &current.inc };
-        if !gate.enabled {
+        let key = row.key();
+        if !gate.enabled || !self.holds.accepts(key, now) {
             return None;
         }
         let live = Live::of(cam);
+        let (from, pushed_value) = pushed(row, &live);
         // `view` above reconciled the holds with this push: one still standing is the base.
-        let base = self
-            .holds
-            .get(row.key())
-            .and_then(|h| h.value)
-            .or_else(|| pushed(row, &live).1);
-        let key = row.key();
-        match row {
+        let base = self.holds.get(key).and_then(|h| h.value).or(pushed_value);
+        let (kind, text, held, write) = match row {
             Row::Aperture => {
-                self.holds
-                    .hold(key, HoldKind::Step, current.text.clone(), None, seq, now);
-                Some(Press {
-                    key,
-                    value: serde_json::json!(dir.signum()),
-                })
+                // The guess is only shown: the relay steps from the camera's f-stop, so the next
+                // press builds on the pushed one (`value` none). An unknown f-stop still steps
+                // (the relay knows it); the dash stays shown.
+                let grid = choices(row, live.caps);
+                let text = base.map_or_else(
+                    || current.text.clone(),
+                    |f| format!("f/{:.1}", aperture_next(f, &grid, dir)),
+                );
+                (HoldKind::Step, text, None, serde_json::json!(dir.signum()))
             }
             Row::Iso | Row::Shutter | Row::Fps => {
                 let list = choices(row, live.caps);
@@ -493,12 +529,12 @@ impl Steppers {
                     Row::Shutter => format!("1/{value}"),
                     _ => fps_text(value),
                 };
-                self.holds
-                    .hold(key, HoldKind::Value, text, Some(value), seq, now);
-                Some(Press {
-                    key,
-                    value: serde_json::json!(value as i64),
-                })
+                (
+                    HoldKind::Value,
+                    text,
+                    Some(value),
+                    serde_json::json!(value as i64),
+                )
             }
             Row::Kelvin | Row::Tint => {
                 let (lo, hi) = linear_range(row, live.caps);
@@ -513,19 +549,39 @@ impl Steppers {
                 } else {
                     tint_text(next)
                 };
-                self.holds
-                    .hold(key, HoldKind::Value, text, Some(next as f64), seq, now);
-                Some(Press {
-                    key,
-                    value: serde_json::json!(next),
-                })
+                (
+                    HoldKind::Value,
+                    text,
+                    Some(next as f64),
+                    serde_json::json!(next),
+                )
             }
-        }
+        };
+        let tap = Tap {
+            kind,
+            text,
+            from,
+            value: held,
+            was_refused: live.refused(row),
+        };
+        let id = self.holds.hold(key, tap, seq, now);
+        Some(Press {
+            key,
+            value: write,
+            id,
+        })
     }
 
-    /// The write of `key` failed before reaching the service: drop its hold.
-    pub fn write_failed(&mut self, key: &str) {
-        self.holds.drop_key(key);
+    /// The service answered write `id` of wire key `key` at `now` (the slider's `apertureNorm`
+    /// is the aperture row's hold): a 2xx unlocks the row, anything else reverts it with a red
+    /// flash (shading#29). Only the hold of that write is touched: a write no hold owns (Auto WB,
+    /// the fps align button) answers with id 0 and changes nothing.
+    pub fn answered(&mut self, key: &str, id: u64, answer: WriteAnswer, now: f64) {
+        let hold_key = Row::ALL
+            .iter()
+            .find(|r| r.refused_keys().contains(&key))
+            .map_or(key, |r| r.key());
+        self.holds.answered(hold_key, id, answer, now);
     }
 }
 

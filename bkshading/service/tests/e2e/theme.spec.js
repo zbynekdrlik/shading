@@ -256,7 +256,6 @@ test("a tap on the value opens its slider; the release writes once; a second tap
   await expect.poll(() => puts.length).toBe(1);
   expect(puts[0].body).toEqual({ kelvin: 6400 });
   await expect(val).toHaveText("6400 K");
-  await expect(val).toHaveClass(/pending/);
 
   await val.click();
   await expect(row).not.toHaveClass(/open/);
@@ -290,20 +289,18 @@ test("the aperture slider never writes past a reached lens end (irisRangePos), c
   expect(Number(await slider.inputValue())).toBe(1);
   await slider.fill("0");
   await expect.poll(async () => Number(await slider.inputValue())).toBe(1);
-  await expect(fnum).not.toHaveClass(/pending/);
+  await expect(fnum).toHaveText("f/4.0");
   expect(puts, "no write past the wide end").toEqual([]);
 
   await slider.fill("3");
   await expect.poll(() => puts.length).toBe(1);
   expect(puts[0].body).toEqual({ apertureNorm: 1 });
   await expect(fnum).toHaveText("f/8.0");
-  await expect(fnum).toHaveClass(/pending/);
 
   // Closed: a release further closed sends nothing.
   puts.length = 0;
   await pushState(page, makeFixture({ apertureAv: 6.0, apertureNorm: 1, irisRangePos: 1.0 }));
   await expect(fnum).toHaveText("f/8.0");
-  await expect(fnum).not.toHaveClass(/pending/);
   await slider.fill("2");
   await expect.poll(() => puts.length).toBe(1);
   expect(puts[0].body.apertureNorm).toBeCloseTo(2 / 3, 6);

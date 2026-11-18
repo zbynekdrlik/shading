@@ -17,6 +17,11 @@ WITHOUT a camera or the real relay binary, so the E2E can drive the panel end-to
                          while a write lands).
   * GET  /__gets       -> how many `GET /api/state` arrived so far (a test waits for a poll to
                          be in flight).
+  * POST /__write      -> `{"delayMs": N, "refuse": bool}`: a `PUT /api/params` answers N ms
+                         after it arrives (shading#29: the panel's lock while a write is
+                         unanswered), and with `refuse` it applies nothing and answers the state
+                         with every written key in `notApplied` (the camera refused it). Dropped
+                         by /__reset.
   * `--apply-writes`   -> a PUT changes the served params (iso, kelvin, tint, shutter) and answers
                          `{"applied": n, "state": {...}}` like the real relay, so the service pushes
                          its immediate confirmation (issue 1337). Off by default: the shared stub
@@ -68,6 +73,8 @@ _recorded = []
 _lock = threading.Lock()
 _state = copy.deepcopy(STATE)
 _state_delay_ms = 0
+_write_delay_ms = 0
+_write_refuse = False
 _gets = 0
 _apply_writes = False
 # The params a PUT may change when --apply-writes is on.
@@ -103,7 +110,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(404, {"error": "not found", "path": self.path})
 
     def do_POST(self):
-        global _state, _state_delay_ms
+        global _state, _state_delay_ms, _write_delay_ms, _write_refuse
         if self.path == "/__state":
             length = int(self.headers.get("Content-Length", "0"))
             patch = json.loads(self.rfile.read(length).decode("utf-8"))  # loud on malformed JSON
@@ -114,6 +121,8 @@ class Handler(BaseHTTPRequestHandler):
             with _lock:
                 _state = copy.deepcopy(STATE)
                 _state_delay_ms = 0
+                _write_delay_ms = 0
+                _write_refuse = False
                 self._json(200, _state)
         elif self.path == "/__lag":
             length = int(self.headers.get("Content-Length", "0"))
@@ -121,6 +130,13 @@ class Handler(BaseHTTPRequestHandler):
             with _lock:
                 _state_delay_ms = int(body["stateDelayMs"])
                 self._json(200, {"stateDelayMs": _state_delay_ms})
+        elif self.path == "/__write":
+            length = int(self.headers.get("Content-Length", "0"))
+            body = json.loads(self.rfile.read(length).decode("utf-8"))  # loud on malformed JSON
+            with _lock:
+                _write_delay_ms = int(body.get("delayMs", 0))
+                _write_refuse = bool(body.get("refuse", False))
+                self._json(200, {"delayMs": _write_delay_ms, "refuse": _write_refuse})
         else:
             self._json(404, {"error": "not found", "path": self.path})
 
@@ -131,6 +147,17 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(raw.decode("utf-8"))  # loud on malformed JSON
             with _lock:
                 _recorded.append(body)
+                delay_ms = _write_delay_ms
+                refuse = _write_refuse
+            # Outside the lock: the service's state polls keep answering meanwhile.
+            if delay_ms:
+                time.sleep(delay_ms / 1000.0)
+            with _lock:
+                if refuse:
+                    answer = copy.deepcopy(_state)
+                    answer["notApplied"] = [k for k, v in body.items() if v is not None]
+                    self._json(200, {"applied": 0, "state": answer})
+                    return
                 if not _apply_writes:
                     self._json(200, {"ok": True})
                     return

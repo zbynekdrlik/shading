@@ -90,10 +90,10 @@ fn js_err(e: JsValue) -> String {
         .unwrap_or_else(|| format!("{e:?}"))
 }
 
-/// A tap's write: `PUT /api/cameras/<id>/params` with one key. `Err` only when the request never
-/// reached the service (the caller drops the tap's hold so the next push shows the truth); an
-/// HTTP error answer (502: the relay refused) is logged and left to the next push.
-pub async fn put_param(id: &str, key: &str, value: serde_json::Value) -> Result<(), String> {
+/// A tap's write: `PUT /api/cameras/<id>/params` with one key. The HTTP status of the answer, or
+/// `Err` when the request never reached the service; the caller hands either to
+/// `Steppers::answered` (a 2xx unlocks the row, anything else reverts it, shading#29).
+pub async fn put_param(id: &str, key: &str, value: serde_json::Value) -> Result<u16, String> {
     let url = format!("/api/cameras/{}/params", js_sys::encode_uri_component(id));
     let body = serde_json::json!({ key: value }).to_string();
     let started = now_ms();
@@ -104,7 +104,7 @@ pub async fn put_param(id: &str, key: &str, value: serde_json::Value) -> Result<
                 a.status,
                 now_ms() - started
             );
-            Ok(())
+            Ok(a.status)
         }
         Err(e) => {
             leptos::logging::log!("[write] {id} {body} failed: {e}");

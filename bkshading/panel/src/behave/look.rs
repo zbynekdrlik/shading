@@ -1,4 +1,4 @@
-//! The operator's two per-device choices in the top bar (shading#24, mockup theme-v4b): how the
+//! The operator's two per-device choices in the top bar (shading#24, mockup theme-v4d): how the
 //! cards are laid out and which colour mode the room needs. Both are remembered per device in
 //! `localStorage` under [`LAYOUT_KEY`] / [`MODE_KEY`]; a missing, unknown or unreadable value is
 //! the default (dark; the 4+4 grid, or a row on a phone), never an error.

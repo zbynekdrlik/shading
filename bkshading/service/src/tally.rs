@@ -52,26 +52,48 @@ pub struct TallyState {
     pub obs_connected: bool,
 }
 
-/// The `/state` body as sent: unknown fields are ignored; a `pgm`/`pvw` that is missing, `null`
-/// or below 1 means "no single camera" (0), so one odd value never clears a live tally.
+/// The `/state` body as sent: unknown fields are ignored; a `pgm`/`pvw` is read as any JSON value
+/// ([`tally_value`]), so a missing, `null`, negative or unreadable one means "no single camera"
+/// (0) and one odd value never fails the body (a failed poll would clear a live tally).
 /// `obs_connected` is required: without it the service cannot tell whether the numbers mean
 /// anything.
 #[derive(Deserialize)]
 struct RawState {
     #[serde(default)]
-    pgm: Option<i64>,
+    pgm: serde_json::Value,
     #[serde(default)]
-    pvw: Option<i64>,
+    pvw: serde_json::Value,
     obs_connected: bool,
+}
+
+/// A tally number from any JSON value: a non-negative whole number, given as a number (`3`,
+/// `3.0`) or a numeric string (`"3"`, `" 3.0 "`); anything else (null, a fraction, text, an
+/// array) is 0, "no single camera".
+pub fn tally_value(v: &serde_json::Value) -> u64 {
+    let whole = |f: f64| {
+        if f.is_finite() && f >= 0.0 && f.fract() == 0.0 && f <= u64::MAX as f64 {
+            f as u64
+        } else {
+            0
+        }
+    };
+    match v {
+        serde_json::Value::Number(n) => n.as_u64().unwrap_or_else(|| n.as_f64().map_or(0, whole)),
+        serde_json::Value::String(s) => {
+            let s = s.trim();
+            s.parse::<u64>()
+                .unwrap_or_else(|_| s.parse::<f64>().map_or(0, whole))
+        }
+        _ => 0,
+    }
 }
 
 /// Parses a `/state` body.
 pub fn parse_tally(body: &str) -> Result<TallyState, String> {
     let raw: RawState = serde_json::from_str(body).map_err(|e| format!("bad /state body: {e}"))?;
-    let number = |n: Option<i64>| n.and_then(|n| u64::try_from(n).ok()).unwrap_or(0);
     Ok(TallyState {
-        pgm: number(raw.pgm),
-        pvw: number(raw.pvw),
+        pgm: tally_value(&raw.pgm),
+        pvw: tally_value(&raw.pvw),
         obs_connected: raw.obs_connected,
     })
 }

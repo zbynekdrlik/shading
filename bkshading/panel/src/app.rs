@@ -1,5 +1,5 @@
 //! The root component: the header (version, connection, layout and mode pills, ARRANGE), the
-//! connection banner, the camera cards and the #14 popup (mockups arrange-v1 and theme-v4b).
+//! connection banner, the camera cards and the #14 popup (mockups arrange-v1 and theme-v4d).
 
 use leptos::prelude::*;
 
