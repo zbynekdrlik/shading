@@ -280,6 +280,14 @@ the house app stack airuleset#1333); mockup `docs/mockups/arrange-v1.html` appro
   only inside the binary (`grep -c shadingLoadFailed bkshading` > 0 proves the real dist, not the
   placeholder, was embedded). v0.2.7 verified that way, then run against the stub relay: `/next/`
   shows v0.2.7, ARRANGE covers render, console clean.
+- **The aperture grid's ends are NOT the lens's (shading#22, PP cam1, 18.11.2026, v0.2.9).** A camera
+  without `lens/iris/description` (Pocket 6K G2 at PP: 404) gets the default grid 2.8..22, widened
+  only after the relay has SEEN a wider stop on that link (`widen_slider_grid`, reset by a relay
+  restart). The lens opened to f/1.75, but both panels disabled "−" on the grid's first entry, so
+  the operator saw f/2.8 as the end while the Stream Deck (no grid gate) went to 1.75. Rule: with
+  `irisRangePos` (the camera's own `normalised`), ONLY it gates the aperture +/- (`aperture_gates`,
+  `refreshStepDisabled`); the grid bounds gate only without it. A live end check must walk to the
+  REAL lens end, not stop at the first grid entry or near the current stop.
 - **A removed block must not wake its own view (live PP panic, 18.11.2026, v0.2.8).** An ARRANGE
   save that hid cam4 (NDI preview live) panicked the app: `Preview`'s `on_cleanup` called
   `frame.placeholder()`, whose signal WRITES scheduled the view's closures to re-run after the block's

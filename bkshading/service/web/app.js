@@ -264,8 +264,12 @@ function refreshStepDisabled(el) {
     const pos = irisRangePos(el);
     const atWide = irisAtEnd(pos, -1);
     const atClosed = irisAtEnd(pos, 1);
-    apDec.disabled = onGridIdx === 0 || atWide;
-    apInc.disabled = onGridIdx === n - 1 || atClosed;
+    // shading#22: with the camera's own lens position, only it decides the ends. The grid's ends
+    // are not the lens's (no `lens/iris/description`: the default 2.8..22 until the relay has seen
+    // a wider stop; PP cam1 opens to f/1.75). Without `irisRangePos` the grid's ends still gate.
+    const gridGates = !Number.isFinite(pos);
+    apDec.disabled = (gridGates && onGridIdx === 0) || atWide;
+    apInc.disabled = (gridGates && onGridIdx === n - 1) || atClosed;
     apDec.title = atWide ? "Objektív je na najotvorenejšej clone" : "";
     apInc.title = atClosed ? "Objektív je na najzatvorenejšej clone" : "";
   }
