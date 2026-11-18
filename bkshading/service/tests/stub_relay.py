@@ -11,7 +11,16 @@ WITHOUT a camera or the real relay binary, so the E2E can drive the panel end-to
   * GET  /__recorded   -> the recorded PUT bodies as a JSON array (the test asserts against these).
   * POST /__state      -> merges the JSON body into the served state (shading#14: a test turns the
                          camera offline with an `offlineReason`, or reports an old relay version).
-  * POST /__reset      -> serves the original fixture again.
+  * POST /__reset      -> serves the original fixture again (and drops a /__lag delay).
+  * POST /__lag        -> `{"stateDelayMs": N}`: a `GET /api/state` copies the state when it
+                         ARRIVES and answers N ms later (shading#27: a pump poll still in flight
+                         while a write lands).
+  * GET  /__gets       -> how many `GET /api/state` arrived so far (a test waits for a poll to
+                         be in flight).
+  * `--apply-writes`   -> a PUT changes the served params (iso, kelvin, tint, shutter) and answers
+                         `{"applied": n, "state": {...}}` like the real relay, so the service pushes
+                         its immediate confirmation (issue 1337). Off by default: the shared stub
+                         keeps its fixed fixture.
 
 Stdlib only (http.server/json/argparse), threaded so the service's concurrent poll + the browser
 never block each other. Fails loudly on error (never a silent swallow, per script-failure-policy).
@@ -20,6 +29,7 @@ import argparse
 import copy
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # The RelayState fixture the service deserializes (camelCase wire, matching bkshading-proto).
@@ -57,6 +67,11 @@ STATE = {
 _recorded = []
 _lock = threading.Lock()
 _state = copy.deepcopy(STATE)
+_state_delay_ms = 0
+_gets = 0
+_apply_writes = False
+# The params a PUT may change when --apply-writes is on.
+_WRITABLE = ("iso", "kelvin", "tint", "shutter")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -69,9 +84,18 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        global _gets
         if self.path == "/api/state":
             with _lock:
-                self._json(200, _state)
+                _gets += 1
+                snap = copy.deepcopy(_state)
+                delay_ms = _state_delay_ms
+            if delay_ms:
+                time.sleep(delay_ms / 1000.0)
+            self._json(200, snap)
+        elif self.path == "/__gets":
+            with _lock:
+                self._json(200, {"gets": _gets})
         elif self.path == "/__recorded":
             with _lock:
                 self._json(200, list(_recorded))
@@ -79,7 +103,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(404, {"error": "not found", "path": self.path})
 
     def do_POST(self):
-        global _state
+        global _state, _state_delay_ms
         if self.path == "/__state":
             length = int(self.headers.get("Content-Length", "0"))
             patch = json.loads(self.rfile.read(length).decode("utf-8"))  # loud on malformed JSON
@@ -89,7 +113,14 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/__reset":
             with _lock:
                 _state = copy.deepcopy(STATE)
+                _state_delay_ms = 0
                 self._json(200, _state)
+        elif self.path == "/__lag":
+            length = int(self.headers.get("Content-Length", "0"))
+            body = json.loads(self.rfile.read(length).decode("utf-8"))  # loud on malformed JSON
+            with _lock:
+                _state_delay_ms = int(body["stateDelayMs"])
+                self._json(200, {"stateDelayMs": _state_delay_ms})
         else:
             self._json(404, {"error": "not found", "path": self.path})
 
@@ -100,7 +131,15 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(raw.decode("utf-8"))  # loud on malformed JSON
             with _lock:
                 _recorded.append(body)
-            self._json(200, {"ok": True})
+                if not _apply_writes:
+                    self._json(200, {"ok": True})
+                    return
+                applied = 0
+                for key in _WRITABLE:
+                    if body.get(key) is not None:
+                        _state["params"][key] = body[key]
+                        applied += 1
+                self._json(200, {"applied": applied, "state": _state})
         else:
             self._json(404, {"error": "not found", "path": self.path})
 
@@ -112,7 +151,10 @@ def main():
     ap = argparse.ArgumentParser(description="bkshading stub relay for the issue-1304 panel E2E")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, required=True)
+    ap.add_argument("--apply-writes", action="store_true", help="a PUT changes the served params")
     args = ap.parse_args()
+    global _apply_writes
+    _apply_writes = args.apply_writes
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"stub relay listening on http://{args.host}:{args.port}", flush=True)
     server.serve_forever()
