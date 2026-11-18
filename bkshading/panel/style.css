@@ -321,9 +321,10 @@ dialog.info button {
    version goes and the bar and the pills tighten (measured: theme.spec.js "the top bar never
    scrolls the page sideways"). */
 @media (max-width: 1000px) {
-    .bar { gap: 8px; }
+    .bar { gap: 6px; padding: 12px 10px; }
+    .bar .title { font-size: 18px; }
     .ver { display: none; }
-    .seg button { padding: 0 10px; }
+    .seg button { padding: 0 8px; font-size: 15px; }
 }
 @media (max-width: 700px) {
     .ver, .note { display: none; }
