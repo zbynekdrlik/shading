@@ -221,6 +221,31 @@ fn the_aperture_stops_at_the_lens_ends() {
     assert_eq!(r.pos, Some(0.4));
 }
 
+/// shading#22 (PP cam1, 18.11.2026): without `lens/iris/description` the grid is the default
+/// 2.8..22 until the relay SEES a wider stop, while the lens opens to f/1.75. The grid's ends are not
+/// the lens's: with the camera's own `irisRangePos` only that gates the steps.
+#[test]
+fn the_grid_ends_do_not_gate_the_aperture_when_the_camera_gives_its_lens_position() {
+    let at_grid_first = with(|p| {
+        p.aperture_av = Some(2.0 * 2.8f64.log2());
+        p.iris_range_pos = Some(0.2);
+    });
+    let r = row(&Steppers::default().view(&at_grid_first, 0.0), Row::Aperture);
+    assert_eq!(r.text, "f/2.8");
+    assert!(r.dec.enabled && r.inc.enabled && !r.at_end);
+    let at_grid_last = with(|p| {
+        p.aperture_av = Some(6.0);
+        p.iris_range_pos = Some(0.8);
+    });
+    let r = row(&Steppers::default().view(&at_grid_last, 0.0), Row::Aperture);
+    assert_eq!(r.text, "f/8.0");
+    assert!(r.dec.enabled && r.inc.enabled && !r.at_end);
+    // Without the camera's word the grid's ends still gate (nothing better is known).
+    let no_pos = with(|p| p.aperture_av = Some(2.0 * 2.8f64.log2()));
+    let r = row(&Steppers::default().view(&no_pos, 0.0), Row::Aperture);
+    assert!(!r.dec.enabled && r.inc.enabled);
+}
+
 #[test]
 fn no_choices_disable_with_a_reason() {
     let mut c = cam();
