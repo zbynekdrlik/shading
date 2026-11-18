@@ -227,18 +227,7 @@ input[type=range]::-moz-range-thumb { width: 22px; height: 22px; border-radius: 
   <button class="iconbtn" title="ARRANGE">⇄</button>
 </header>
 <main id="grid"></main>
-<section class="note">
-  <h2>Čo je iné oproti /next/ (podľa legacy webky)</h2>
-  <ul>
-    <li>Systémové písmo ako legacy, žiadne zúžené VEĽKÉ písmená. Popis riadku 16 px, hodnota 26 px tučne, meno kamery 21 px.</li>
-    <li>Tlačidlá +/− 56×56 px (bolo 36×34), hrubší posuvník (8 px, guľka 26 px).</li>
-    <li>Bloky min. 330 px široké: na tablete 3 vedľa seba ako legacy, na veľkej obrazovke 4.</li>
-    <li><b>Tma</b> = zatemnená sála: nízky jas, text nie čisto biely (bez oslnenia). <b>Svetlo</b> = svietia svetlá: biele karty, tmavý text, silný kontrast proti odleskom.</li>
-    <li>Režim sa prepína hore vpravo a pamätá sa na každom zariadení zvlášť.</li>
-  </ul>
-  <h2>Kontrast (počítaný naživo, cieľ WCAG AA: text ≥ 4,5:1)</h2>
-  <table id="ctab"><thead><tr><th>Prvok</th><th>Tma</th><th>Svetlo</th></tr></thead><tbody></tbody></table>
-</section>
+
 <script>
 const cams = [
   { n: 1, name: "Cam 1", off: true, reg: "cam1-shading · 10.77.8.121:8771 · ↻ 10m ⚠", warn: "⚠ Relay nedostupný — kamera sa nedá ovládať" },
@@ -300,22 +289,6 @@ document.querySelectorAll('.mid .val').forEach(v => v.addEventListener('click', 
   v.setAttribute('aria-expanded', open);
 }));
 
-const lum = (hex) => { const v = hex.trim().replace('#', ''); return [0, 2, 4].map(i => parseInt(v.substr(i, 2), 16) / 255)
-  .map(c => c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)).reduce((a, c, i) => a + c * [0.2126, 0.7152, 0.0722][i], 0); };
-const ratio = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
-const pairs = [["Hodnota na riadku", "--text", "--row"], ["Popis riadku", "--label", "--row"], ["Meno kamery", "--text", "--card"],
-  ["Registrácia (drobný text)", "--dim", "--card"], ["Online", "--ok", "--card"], ["Varovanie", "--bad-text", "--bad-bg"],
-  ["Koniec clony", "--warn-text", "--warn-bg"], ["Tlačidlo +/−", "--btn-text", "--btn"], ["Posuvník proti stope", "--accent", "--track"]];
-function table() {
-  const get = (mode, v) => { document.body.dataset.mode = mode; return getComputedStyle(document.body).getPropertyValue(v); };
-  const cur = document.body.dataset.mode;
-  document.querySelector('#ctab tbody').innerHTML = pairs.map(([n, f, b]) => {
-    const d = ratio(get("dark", f), get("dark", b)), l = ratio(get("light", f), get("light", b));
-    const cell = (r) => `<td class="${r >= 4.5 || n.startsWith("Posuvník") && r >= 3 ? "ok" : ""}">${r.toFixed(1)}:1</td>`;
-    return `<tr><td>${n}</td>${cell(d)}${cell(l)}</tr>`;
-  }).join("");
-  document.body.dataset.mode = cur;
-}
 function setMode(m) {
   document.body.dataset.mode = m;
   document.getElementById("m-light").setAttribute("aria-pressed", m === "light");
@@ -335,7 +308,6 @@ document.getElementById("l-row").onclick = () => setLayout("row");
 document.getElementById("l-five").onclick = () => setLayout("five");
 let saved = null; try { saved = localStorage.getItem("shading.layout"); } catch {}
 setLayout(["row", "five"].includes(saved) ? saved : "grid");
-table();
 </script>
 </body>
 </html>
