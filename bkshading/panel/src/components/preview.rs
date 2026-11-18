@@ -10,6 +10,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
 
+use leptos::html;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use wasm_bindgen::JsCast;
@@ -61,6 +62,32 @@ impl Frame {
         if let Some(old) = old {
             let _ = web_sys::Url::revoke_object_url(&old);
         }
+    }
+
+    /// The block is going away: abort a fetch in flight and release the object URL, WITHOUT
+    /// writing a signal. A write here would schedule this view's closures to re-run after the
+    /// block's signals are disposed, and they would panic reading them (PP 18.11.2026, shading#16).
+    fn release(self, img: NodeRef<html::Img>) {
+        // No source on the removed element: an image still decoding would fire `load` on a
+        // listener Leptos already dropped.
+        if let Some(Some(el)) = img.try_get_untracked() {
+            let _ = el.remove_attribute("src");
+        }
+        if let Some(ctrl) = self.abort.try_update_value(Option::take).flatten() {
+            ctrl.abort();
+        }
+        if let Some(Some(old)) = self.url.try_get_untracked() {
+            let _ = web_sys::Url::revoke_object_url(&old);
+        }
+    }
+
+    /// The `<img>` painted a frame. Its `load` event can land after the block was removed (an
+    /// ARRANGE save hid the camera while a frame was decoding: PP 18.11.2026, shading#16), so this
+    /// is `try_` too.
+    fn loaded(self) {
+        self.ready.try_set(true);
+        self.seen.try_set(true);
+        self.shown_at.try_set_value(Some(net::perf_now()));
     }
 }
 
@@ -140,6 +167,7 @@ async fn load(id: String, frame: Frame, live: Signal<bool>, busy: RwSignal<bool>
 #[component]
 pub fn Preview(id: String, live: Signal<bool>, busy: RwSignal<bool>) -> impl IntoView {
     let store = expect_context::<Store>();
+    let img = NodeRef::<html::Img>::new();
     let frame = Frame {
         url: RwSignal::new(None),
         ready: RwSignal::new(false),
@@ -157,11 +185,12 @@ pub fn Preview(id: String, live: Signal<bool>, busy: RwSignal<bool>) -> impl Int
 
     let tick_id = id.clone();
     let tick = move || {
-        if !live.get_untracked() || !store.connected_untracked() {
+        // An interval tick can still run while the block is being removed: `try_` reads.
+        if !live.try_get_untracked().unwrap_or(false) || !store.connected_untracked() {
             frame.placeholder();
             return;
         }
-        if should_fetch(true, true, busy.get_untracked()) {
+        if should_fetch(true, true, busy.try_get_untracked().unwrap_or(true)) {
             spawn_local(load(tick_id.clone(), frame, live, busy, store));
         }
     };
@@ -170,7 +199,7 @@ pub fn Preview(id: String, live: Signal<bool>, busy: RwSignal<bool>) -> impl Int
     {
         on_cleanup(move || {
             handle.clear();
-            frame.placeholder();
+            frame.release(img);
         });
     }
 
@@ -178,22 +207,20 @@ pub fn Preview(id: String, live: Signal<bool>, busy: RwSignal<bool>) -> impl Int
     view! {
         <div class="prev" data-role="preview">
             <img
+                node_ref=img
                 class="preview-img"
-                class:ready=move || frame.ready.get()
+                class:ready=move || frame.ready.try_get().unwrap_or(false)
                 data-role="preview-img"
                 alt="Živý NDI preview kamery"
-                src=move || frame.url.get()
-                on:load=move |_| {
-                    frame.ready.set(true);
-                    frame.seen.set(true);
-                    frame.shown_at.set_value(Some(net::perf_now()));
-                }
+                src=move || frame.url.try_get().flatten()
+                on:load=move |_| frame.loaded()
                 on:error=move |_| frame.placeholder()
             />
-            <div class="none" data-role="preview-placeholder" hidden=move || frame.ready.get()>
-                {move || placeholder_text(frame.seen.get())}
+            // The view's closures read with `try_`: one can still run while the block is removed.
+            <div class="none" data-role="preview-placeholder" hidden=move || frame.ready.try_get().unwrap_or(false)>
+                {move || placeholder_text(frame.seen.try_get().unwrap_or(false))}
             </div>
-            <span class="tag" hidden=move || !frame.ready.get()>{tag}</span>
+            <span class="tag" hidden=move || !frame.ready.try_get().unwrap_or(false)>{tag}</span>
         </div>
     }
 }
