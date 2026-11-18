@@ -1,12 +1,14 @@
 //! The operator's two per-device choices in the top bar (shading#24, mockup theme-v4b): how the
 //! cards are laid out and which colour mode the room needs. Both are remembered per device in
 //! `localStorage` under [`LAYOUT_KEY`] / [`MODE_KEY`]; a missing, unknown or unreadable value is
-//! the default (4+4 grid, dark), never an error.
+//! the default (dark; the 4+4 grid, or a row on a phone), never an error.
 
 /// The `localStorage` key of the card layout.
 pub const LAYOUT_KEY: &str = "shading.layout";
 /// The `localStorage` key of the colour mode.
 pub const MODE_KEY: &str = "shading.mode";
+/// A phone (the CSS folds the top bar into a menu at the same width, shading#24 version D).
+pub const PHONE_QUERY: &str = "(max-width: 700px)";
 
 /// How the camera cards stand on the screen (`data-layout` on `<html>`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -32,13 +34,25 @@ impl CardLayout {
         }
     }
 
-    /// The stored word back; anything else (missing, an older or foreign value) is the default.
-    pub fn parse(stored: Option<&str>) -> Self {
-        match stored {
-            Some("five") => CardLayout::Five,
-            Some("row") => CardLayout::Row,
-            _ => CardLayout::Grid,
+    /// The stored word back, or none for a missing, older or foreign value (no saved choice).
+    pub fn parse(stored: Option<&str>) -> Option<Self> {
+        match stored? {
+            "grid" => Some(CardLayout::Grid),
+            "five" => Some(CardLayout::Five),
+            "row" => Some(CardLayout::Row),
+            _ => None,
         }
+    }
+
+    /// The layout a page starts in: the saved choice always wins; without one a phone
+    /// ([`PHONE_QUERY`] matches) starts in a row (one card a screen, swiped aside), anything wider
+    /// in the 4+4 grid (version D, Marcel).
+    pub fn initial(stored: Option<&str>, phone: bool) -> Self {
+        CardLayout::parse(stored).unwrap_or(if phone {
+            CardLayout::Row
+        } else {
+            CardLayout::Grid
+        })
     }
 
     /// The pill's text.
@@ -110,18 +124,31 @@ mod tests {
     #[test]
     fn a_layout_round_trips_through_its_stored_word() {
         for l in CardLayout::ALL {
-            assert_eq!(CardLayout::parse(Some(l.as_str())), l);
+            assert_eq!(CardLayout::parse(Some(l.as_str())), Some(l));
         }
         assert_eq!(CardLayout::Five.as_str(), "five");
         assert_eq!(CardLayout::Row.as_str(), "row");
     }
 
     #[test]
-    fn a_missing_or_foreign_layout_is_the_grid() {
-        assert_eq!(CardLayout::parse(None), CardLayout::Grid);
-        assert_eq!(CardLayout::parse(Some("")), CardLayout::Grid);
-        assert_eq!(CardLayout::parse(Some("FIVE")), CardLayout::Grid);
-        assert_eq!(CardLayout::parse(Some("8")), CardLayout::Grid);
+    fn a_missing_or_foreign_layout_is_no_saved_choice() {
+        for stored in [None, Some(""), Some("FIVE"), Some("8")] {
+            assert_eq!(CardLayout::parse(stored), None, "{stored:?}");
+        }
+    }
+
+    /// Version D: without a saved choice a phone starts in a row, a wider screen in the grid; a
+    /// saved choice always wins, on either.
+    #[test]
+    fn the_first_layout_depends_on_the_screen_only_without_a_saved_choice() {
+        assert_eq!(CardLayout::initial(None, true), CardLayout::Row);
+        assert_eq!(CardLayout::initial(None, false), CardLayout::Grid);
+        assert_eq!(CardLayout::initial(Some("junk"), true), CardLayout::Row);
+        assert_eq!(CardLayout::initial(Some("junk"), false), CardLayout::Grid);
+        assert_eq!(CardLayout::initial(Some("grid"), true), CardLayout::Grid);
+        assert_eq!(CardLayout::initial(Some("five"), true), CardLayout::Five);
+        assert_eq!(CardLayout::initial(Some("row"), false), CardLayout::Row);
+        assert_eq!(PHONE_QUERY, "(max-width: 700px)");
     }
 
     #[test]

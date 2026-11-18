@@ -435,3 +435,26 @@ test("on a phone the bar is title + state + ☰, the controls open in an overlay
   await expect(page.locator('[data-role="version"]')).toBeVisible();
   gate.assertClean();
 });
+
+test("a phone without a saved layout starts in a row; a saved choice wins after a reload, console clean (shading#24 version D)", async ({ page }) => {
+  const gate = consoleGate(page);
+  await openWith(page, 3, 390, 844);
+  const html = page.locator("html");
+  expect(await page.evaluate(() => localStorage.getItem("shading.layout"))).toBeNull();
+  await expect(html).toHaveAttribute("data-layout", "row");
+
+  await page.locator('[data-role="menu-key"]').click();
+  await page.locator('[data-role="layout-grid"]').click();
+  await expect(html).toHaveAttribute("data-layout", "grid");
+  await page.reload();
+  await waitForApp(page);
+  await expect(html).toHaveAttribute("data-layout", "grid");
+
+  // A wide screen without a saved layout starts in the grid.
+  await page.evaluate(() => localStorage.removeItem("shading.layout"));
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await page.reload();
+  await waitForApp(page);
+  await expect(html).toHaveAttribute("data-layout", "grid");
+  gate.assertClean();
+});

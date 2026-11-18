@@ -46,6 +46,7 @@ web-sys = { version = "0.3", features = [
     "HtmlInputElement",
     "KeyboardEvent",
     "Location",
+    "MediaQueryList",
     "MessageEvent",
     "NodeList",
     "Performance",

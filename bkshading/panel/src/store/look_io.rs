@@ -4,7 +4,14 @@
 //! window, blocked site data, a WebView): then the defaults apply and nothing is remembered, with a
 //! log line, never a console error or a panic.
 
-use crate::behave::look::{CardLayout, ThemeMode, LAYOUT_KEY, MODE_KEY};
+use crate::behave::look::{CardLayout, ThemeMode, LAYOUT_KEY, MODE_KEY, PHONE_QUERY};
+
+/// Whether the screen is a phone's ([`PHONE_QUERY`]); unknown = not a phone.
+fn is_phone() -> bool {
+    web_sys::window()
+        .and_then(|w| w.match_media(PHONE_QUERY).ok().flatten())
+        .is_some_and(|m| m.matches())
+}
 
 fn storage() -> Option<web_sys::Storage> {
     match web_sys::window()?.local_storage() {
@@ -28,7 +35,7 @@ fn read(key: &str) -> Option<String> {
 
 /// The stored layout and mode (defaults when missing or unreadable).
 pub fn load() -> (CardLayout, ThemeMode) {
-    let layout = CardLayout::parse(read(LAYOUT_KEY).as_deref());
+    let layout = CardLayout::initial(read(LAYOUT_KEY).as_deref(), is_phone());
     let mode = ThemeMode::parse(read(MODE_KEY).as_deref());
     leptos::logging::log!("[look] layout {} mode {}", layout.as_str(), mode.as_str());
     (layout, mode)
