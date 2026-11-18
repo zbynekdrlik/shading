@@ -4,13 +4,14 @@
 //! line; in ARRANGE a cover with the grip and the eye over all of it. Every line is always present
 //! and one line high, so no push, tally or pane switch moves anything (no layout shift).
 
-use bkshading_proto::wire::CameraView;
+use bkshading_proto::wire::{CameraView, Tally};
 use leptos::html;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
 use crate::behave::block::{
-    fps_sync, is_online, number_text, online_text, registration_short, registration_title,
+    fps_sync, has_tally, is_online, number_text, online_text, status_line, status_title,
+    tally_badge,
 };
 use crate::behave::steppers::{Pane, Row, RowView, Steppers};
 use crate::components::arrange::Cover;
@@ -130,14 +131,18 @@ pub fn CameraBlock(id: String) -> impl IntoView {
     let control = move || cam.with(|c| c.as_ref().map(control_word).unwrap_or_default());
     let label = move || cam.with(|c| c.as_ref().map(|c| c.label.clone()).unwrap_or_default());
     let badge = move || cam.with(|c| c.as_ref().and_then(|c| warning(c.control)));
+    // shading#28: (line, tooltip, stale) — the line is never empty.
     let reg = move || {
         cam.with(|c| {
-            c.as_ref()
-                .and_then(|c| c.registration.as_ref())
-                .map(|r| (registration_short(r), registration_title(r), r.fresh))
+            c.as_ref().map(|c| {
+                let stale = c.registration.as_ref().is_some_and(|r| !r.fresh);
+                (status_line(c), status_title(c), stale)
+            })
         })
     };
     let sync = move || cam.with(|c| c.as_ref().and_then(fps_sync));
+    // shading#25: (class, badge text) of the camera's PGM/PVW tally.
+    let tally = move || cam.with(|c| c.as_ref().and_then(tally_badge));
     let has_preview = move || cam.with(|c| c.as_ref().is_some_and(|c| c.has_preview));
     let live = Signal::derive(move || {
         cam.with(|c| c.as_ref().is_some_and(|c| c.has_preview && c.preview_live))
@@ -188,6 +193,9 @@ pub fn CameraBlock(id: String) -> impl IntoView {
             class="cam"
             class:ghost=move || ghost.get()
             class:disabled=move || !online()
+            class:pgm=move || cam.with(|c| c.as_ref().is_some_and(|c| has_tally(c, Tally::Pgm)))
+            class:pvw=move || cam.with(|c| c.as_ref().is_some_and(|c| has_tally(c, Tally::Pvw)))
+            data-tally=move || tally().map(|t| t.0).unwrap_or("")
             data-role="camera-block"
             data-id=move || id.get_value()
             data-control=control
@@ -204,22 +212,19 @@ pub fn CameraBlock(id: String) -> impl IntoView {
             <div class="head">
                 <span class="num">{move || number_text(&id.get_value())}</span>
                 <span class="name" data-role="label">{label}</span>
+                {move || tally().map(|(class, text)| view! {
+                    <span class=format!("tally {class}") data-role="tally">{text}</span>
+                })}
                 <span class="state" class:off=move || !online() data-role="online">
                     {move || cam.with(|c| c.as_ref().map_or("", online_text))}
                 </span>
             </div>
-            // Always one line, present in every card (no layout shift); selectable (the address
-            // is copied); the full sentence is the tooltip.
+            // Always one line of text, present in every card (shading#28: an offline card keeps it,
+            // no layout shift); selectable (the address is copied); the full sentence is the tooltip.
             <div class="reg" title=move || reg().map(|r| r.1).unwrap_or_default()>
-                <span
-                    class="ago"
-                    class:stale=move || reg().is_some_and(|r| !r.2)
-                    data-role="registration"
-                    hidden=move || reg().is_none()
-                >
+                <span class="ago" class:stale=move || reg().is_some_and(|r| r.2) data-role="registration">
                     {move || reg().map(|r| r.0).unwrap_or_default()}
                 </span>
-                "\u{a0}"
             </div>
             <div class="rows">
                 // shading#14: an overlay over the controls (never in their flow), never dimmed.

@@ -9,6 +9,7 @@ use bkshading_proto::wire::Transport;
 use serde::Deserialize;
 
 use crate::preview::PreviewConfig;
+use crate::tally::TallyConfig;
 
 fn default_bind() -> String {
     "0.0.0.0:8770".to_string()
@@ -27,6 +28,10 @@ pub struct ServiceConfig {
     /// be omitted entirely.
     #[serde(default)]
     pub preview: PreviewConfig,
+    /// The PGM/PVW tally source (the optional `[tally]` table, shading#25): `url` = the strih tally
+    /// service's `/state`; absent or empty = no tally.
+    #[serde(default)]
+    pub tally: TallyConfig,
 }
 
 /// One camera the service controls through its relay.
@@ -101,6 +106,7 @@ impl ServiceConfig {
             bind: default_bind(),
             cameras: Vec::new(),
             preview: PreviewConfig::default(),
+            tally: TallyConfig::default(),
         }
     }
 }

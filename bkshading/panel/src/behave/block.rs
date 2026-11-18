@@ -3,7 +3,7 @@
 //! and the fps-vs-grab line with its explicit align button (issues 809, 1402).
 
 use bkshading_proto::layout::camera_number;
-use bkshading_proto::wire::{CameraView, FpsSync, RegistrationView};
+use bkshading_proto::wire::{CameraView, FpsSync, RegistrationView, Tally};
 
 /// `cam7` -> `7`; an id without a number shows the id.
 pub fn number_text(id: &str) -> String {
@@ -106,6 +106,42 @@ pub fn registration_short(reg: &RegistrationView) -> String {
 /// The registration line's tooltip: the full sentence and the legend.
 pub fn registration_title(reg: &RegistrationView) -> String {
     format!("{} ({REGISTRATION_LEGEND})", registration_text(reg))
+}
+
+/// The card's status line, always one line of text (shading#28): a registered relay's short form
+/// ([`registration_short`]); else the address the service dials + `bez ohlásenia` (a relay that
+/// never announced, or a fixed address); else `—`. An offline card keeps its line, so its controls
+/// sit where an online card's do.
+pub fn status_line(cam: &CameraView) -> String {
+    if let Some(reg) = &cam.registration {
+        return registration_short(reg);
+    }
+    match cam.address.as_deref().filter(|a| !a.is_empty()) {
+        Some(addr) => format!("{addr} · bez ohlásenia"),
+        None => "—".to_string(),
+    }
+}
+
+/// The status line's tooltip: the registration's sentence, else the line itself.
+pub fn status_title(cam: &CameraView) -> String {
+    cam.registration
+        .as_ref()
+        .map_or_else(|| status_line(cam), registration_title)
+}
+
+/// The card's tally (shading#25, mockup theme-v4d): the class on the card (`pgm` = red border +
+/// tint, `pvw` = green border; the 2 px border is always there, so nothing moves) and the badge
+/// text in the head. `None` = no tally.
+pub fn tally_badge(cam: &CameraView) -> Option<(&'static str, &'static str)> {
+    match cam.tally? {
+        Tally::Pgm => Some(("pgm", "PGM")),
+        Tally::Pvw => Some(("pvw", "PVW")),
+    }
+}
+
+/// Whether the card carries `tally` (the `.pgm` / `.pvw` card class).
+pub fn has_tally(cam: &CameraView, tally: Tally) -> bool {
+    cam.tally == Some(tally)
 }
 
 /// The fps-vs-grab line (issue 809): shown only with a grab rate.
@@ -215,6 +251,42 @@ mod tests {
         reg.fresh = false;
         reg.age_s = 600;
         assert_eq!(registration_short(&reg), "cam6 · 10.77.9.66:8771 · ↻ 10m ⚠");
+    }
+
+    #[test]
+    fn the_tally_badge_follows_the_views_tally_25() {
+        let mut c = cam();
+        assert_eq!(tally_badge(&c), None);
+        assert!(!has_tally(&c, Tally::Pgm) && !has_tally(&c, Tally::Pvw));
+        c.tally = Some(Tally::Pgm);
+        assert_eq!(tally_badge(&c), Some(("pgm", "PGM")));
+        assert!(has_tally(&c, Tally::Pgm) && !has_tally(&c, Tally::Pvw));
+        c.tally = Some(Tally::Pvw);
+        assert_eq!(tally_badge(&c), Some(("pvw", "PVW")));
+        assert!(has_tally(&c, Tally::Pvw) && !has_tally(&c, Tally::Pgm));
+    }
+
+    #[test]
+    fn the_status_line_always_has_one_line_of_text_28() {
+        let mut c = cam();
+        c.registration = Some(RegistrationView {
+            relay_id: "cam6".into(),
+            address: "10.77.9.66:8771".into(),
+            age_s: 2,
+            announcing_s: 4080,
+            fresh: true,
+        });
+        assert_eq!(status_line(&c), "cam6 · 10.77.9.66:8771 · ↻ 2s · ▲ 1h08m");
+        c.registration.as_mut().unwrap().fresh = false;
+        c.registration.as_mut().unwrap().age_s = 600;
+        assert_eq!(status_line(&c), "cam6 · 10.77.9.66:8771 · ↻ 10m ⚠");
+        c.registration = None;
+        c.address = Some("10.77.8.64:8771".into());
+        assert_eq!(status_line(&c), "10.77.8.64:8771 · bez ohlásenia");
+        c.address = None;
+        assert_eq!(status_line(&c), "—");
+        c.address = Some(String::new());
+        assert_eq!(status_line(&c), "—", "an empty address is nothing known");
     }
 
     #[test]

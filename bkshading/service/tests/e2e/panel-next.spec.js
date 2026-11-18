@@ -598,9 +598,10 @@ test("a handheld that registers itself becomes reachable in the panel and takes 
   const warn = page.locator('[data-role="control-warn"]');
   const dlg = page.locator('[data-role="control-info"]');
 
-  // No announcement yet: no address for register:handheld-next, never a guess.
+  // No announcement yet: no address for register:handheld-next, never a guess; the status line
+  // keeps its place with a dash (shading#28).
   await expect(online).toHaveText("relay offline", { timeout: 15000 });
-  await expect(regLine).toBeHidden();
+  await expect(regLine).toHaveText("—");
   await expect(warn).toContainText("Relay nedostupný");
   await warn.click();
   await expect(dlg.locator('[data-role="control-info-title"]')).toHaveText("Panel sa nespojí s relay pri kamere");

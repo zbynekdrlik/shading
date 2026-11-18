@@ -22,6 +22,10 @@ const ARRANGE_SVC_PORT = 8784;
 // issue 808 (owner 28.10.2026): a self-registration instance whose one camera is a handheld
 // (`register:<id>`, e2e-register-next-config.toml); panel-next.spec.js announces the stub to it.
 const REGISTER_NEXT_SVC_PORT = 8785;
+// shading#27: a service on its OWN write-applying stub relay (e2e-fresh-config.toml), so a test can
+// hold that service's pump poll in flight while a write lands (fresh-view.spec.js).
+const FRESH_STUB_PORT = 8786;
+const FRESH_SVC_PORT = 8787;
 const LAYOUT_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "bkshading-e2e-layout-"));
 const layout = (name) => path.join(LAYOUT_DIR, `${name}.json`);
 const BIN = process.env.BKSHADING_BIN;
@@ -33,6 +37,7 @@ const config = path.resolve(__dirname, "e2e-config.toml");
 const previewConfig = path.resolve(__dirname, "e2e-preview-config.toml");
 const arrangeConfig = path.resolve(__dirname, "e2e-arrange-config.toml");
 const registerNextConfig = path.resolve(__dirname, "e2e-register-next-config.toml");
+const freshConfig = path.resolve(__dirname, "e2e-fresh-config.toml");
 
 module.exports = defineConfig({
   testDir: ".",
@@ -73,6 +78,18 @@ module.exports = defineConfig({
     {
       command: `${BIN} --config ${registerNextConfig} --layout-file ${layout("register-next")}`,
       url: `http://127.0.0.1:${REGISTER_NEXT_SVC_PORT}/api/version`,
+      reuseExistingServer: false,
+      timeout: 30000,
+    },
+    {
+      command: `python3 ${stub} --port ${FRESH_STUB_PORT} --apply-writes`,
+      url: `http://127.0.0.1:${FRESH_STUB_PORT}/__recorded`,
+      reuseExistingServer: false,
+      timeout: 20000,
+    },
+    {
+      command: `${BIN} --config ${freshConfig} --layout-file ${layout("fresh")}`,
+      url: `http://127.0.0.1:${FRESH_SVC_PORT}/api/version`,
       reuseExistingServer: false,
       timeout: 30000,
     },

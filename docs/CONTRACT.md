@@ -321,6 +321,22 @@ UseDomains=no
   `camera-offline` (an offline relay that gives no reason). The panel shows a warning badge for
   anything but `ok`; tapping it opens a Slovak popup with the cause and the step to take.
 
+- **`CameraView.address` (v0.2.11, shading#28, additive).** The address the service dials while
+  the camera has no fresh registration: the config `address`, or a `register:<id>` camera's
+  `fallback_address`; `null` when there is none. The panel's status line shows
+  `<address> · bez ohlásenia` for a relay that never announced, `—` without an address.
+- **`CameraView.tally` (v0.2.11, shading#25, additive).** `"pgm"` while the camera is LIVE in
+  program, `"pvw"` while it is in preview, `null` otherwise (no tally source, OBS not connected,
+  the tally service not answering). The panel tints the PGM card red with a PGM badge and edges
+  the PVW card green.
+- **Service config `[tally] url` (v0.2.11, shading#25, optional).** The strih tally service's
+  state endpoint (camera-box#1417): `url = "http://127.0.0.1:9240/state"`. The service polls it
+  every 300 ms and reads `pgm`, `pvw` (camera numbers, 0 = none; `camN` <- N) and
+  `obs_connected`; other fields are ignored. Absent or empty = no tally, no error, no log lines.
+  A poll error or `obs_connected: false` clears the tally (logged once per transition).
+  camera-box: the strih seed (`strih_bkshading_config_text`) adds this table on boxes that run
+  `strih-tally.service`. `--check-config` loads it like any other table.
+
 ## Not shading's
 
 camera-box keeps the deploy and provisioning layer: every `scripts/bkshading-*` script and lib,

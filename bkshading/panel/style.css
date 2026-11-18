@@ -174,8 +174,11 @@ button { font: inherit; color: inherit; }
 .state.off { color: var(--bad-text); }
 /* Marcel: the registration line never wraps (no layout shift), full text in the tooltip, and it
    stays copyable. "↻ 3s" = the last announcement, "▲ 1h07m" = how long the relay runs. */
+/* shading#28: an explicit one-line box, so its height never depends on the glyphs (↻/▲ come from
+   a fallback font with a taller line on the operators' devices; "—" does not). */
 .reg {
     padding: 0 calc(var(--s) * 14) calc(var(--s) * 10); color: var(--dim); font-size: calc(var(--s) * 14);
+    line-height: calc(var(--s) * 18); height: calc(var(--s) * 28); /* border-box: 18 + the 10 below */
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     -webkit-user-select: text; user-select: text;
 }

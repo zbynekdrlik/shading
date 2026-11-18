@@ -119,6 +119,18 @@ async fn main() -> Result<()> {
     // issue 1337: share the publish handle so `set_params` can push an immediate confirmation over
     // the WS after a write (the pump also holds a clone for its ~2 s cadence snapshots).
     let live_tx = Arc::new(live_tx);
+    // shading#25: the PGM/PVW tally from the strih tally service, only with a `[tally] url`.
+    match config.tally.poll_url() {
+        Some(url) => {
+            tokio::spawn(bkshading::tally::run(
+                url.to_string(),
+                bkshading::tally::TALLY_POLL_INTERVAL,
+                agg.clone(),
+                live_tx.clone(),
+            ));
+        }
+        None => tracing::info!("tally: off (no [tally] url in the config)"),
+    }
     {
         let agg = agg.clone();
         let config = config.clone();
@@ -144,7 +156,8 @@ async fn main() -> Result<()> {
             loop {
                 ticker.tick().await;
                 cycle = cycle.wrapping_add(1);
-                let snapshot = Arc::new(agg.snapshot(&config, &previews).await);
+                let (fresh, polled_from) = agg.snapshot_timed(&config, &previews).await;
+                let snapshot = Arc::new(fresh);
                 // issue 809: telemetry — surface a camera fps mismatch or a config-vs-capture
                 // grab desync in the log (with the cross-reference to capture_rate_health), on
                 // transition only.
@@ -172,8 +185,10 @@ async fn main() -> Result<()> {
                         bkshading::monitor::reach_heartbeat_line(&snapshot.cameras)
                     );
                 }
-                // The AppState keeps a receiver alive, so `send` never fails for "no receivers".
-                let _ = live_tx.send(snapshot);
+                // shading#27 + shading#25: merged with the view it replaces, the write stamps and
+                // the tally, all read under the channel's lock (`send_modify` also notifies with
+                // no receivers; the AppState keeps one alive anyway).
+                agg.publish_snapshot(&live_tx, (*snapshot).clone(), polled_from);
             }
         });
     }

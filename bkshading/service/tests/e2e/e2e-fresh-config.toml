@@ -1,0 +1,11 @@
+# bkshading service config for the shading#27 E2E (a pump snapshot must not roll back a write).
+# ONE camera on its OWN stub relay (:8786, started with --apply-writes): the test delays that
+# stub's `GET /api/state`, which no other service instance polls, so the in-flight poll it waits
+# for is this service's pump poll.
+bind = "127.0.0.1:8787"
+
+[[camera]]
+id = "cam1"
+label = "Cam 1"
+transport = "cambox-relay"
+address = "127.0.0.1:8786"

@@ -312,9 +312,10 @@ async fn set_params(
 /// no-op if the camera vanished from the config in between. The pump keeps publishing full
 /// snapshots on its own cadence; this just shortcuts the confirmation for a just-applied write.
 fn push_camera_update(state: &AppState, cam: &CameraConfig, relay_state: RelayState) {
-    let current = state.live_tx.borrow().clone();
-    let updated = aggregate_with_camera_update(&current, cam, relay_state);
-    let _ = state.live_tx.send(Arc::new(updated));
+    // Under the channel's lock (shading#27): the pump's merge and this update never interleave.
+    state.live_tx.send_modify(|current| {
+        *current = Arc::new(aggregate_with_camera_update(current, cam, relay_state));
+    });
 }
 
 /// `GET /api/cameras/:id/preview.jpg` — the camera's latest preview frame, served only while it
