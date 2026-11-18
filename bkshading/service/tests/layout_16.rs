@@ -1,6 +1,6 @@
 //! shading#16: the venue's panel layout in the service — the file next to the config, the save with
 //! its revision check, the push channel, the `PUT /api/layout` status contract, and the new panel
-//! served at `/next/`.
+//! served at `/` (`/next/` redirects there since the switch, v0.2.10).
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -317,13 +317,27 @@ async fn the_layout_api_and_the_panel_routes_answer_over_http() {
         .unwrap();
     assert_eq!(r.status(), 409);
 
-    let r = http.get(url("/next")).send().await.unwrap();
-    assert_eq!(r.status(), 308);
-    assert_eq!(r.headers()["location"], "/next/");
-    let r = http.get(url("/next/")).send().await.unwrap();
+    // shading#16's switch: the panel is the main web at /, its phase-1 address redirects there.
+    let r = http.get(url("/")).send().await.unwrap();
     assert_eq!(r.status(), 200);
-    let r = http.get(url("/next/some/route")).send().await.unwrap();
+    assert_eq!(r.headers()["cache-control"], "no-cache");
+    let r = http.get(url("/some/route")).send().await.unwrap();
     assert_eq!(r.status(), 200, "a path without a dot is the page");
-    let r = http.get(url("/next/nope.wasm")).send().await.unwrap();
+    let r = http.get(url("/nope.wasm")).send().await.unwrap();
     assert_eq!(r.status(), 404);
+    let r = http.get(url("/api/nope")).send().await.unwrap();
+    assert_eq!(r.status(), 404, "an unknown api path is never the page");
+    let r = http.get(url("/api")).send().await.unwrap();
+    assert_eq!(r.status(), 404);
+    for old in ["/next", "/next/", "/next/some/route", "/next/index.html"] {
+        let r = http.get(url(old)).send().await.unwrap();
+        assert_eq!(r.status(), 308, "{old}");
+        assert_eq!(r.headers()["location"], "/", "{old}");
+    }
+    // The old JS panel's files are gone (the panel's own manifest and sw.js answer instead when the
+    // real dist is embedded).
+    for gone in ["/app.js", "/style.css", "/icon-192.png"] {
+        let r = http.get(url(gone)).send().await.unwrap();
+        assert_eq!(r.status(), 404, "{gone}");
+    }
 }

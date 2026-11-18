@@ -12,8 +12,8 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         ConnectInfo, Path, State,
     },
-    http::{header, HeaderName, StatusCode},
-    response::{Html, IntoResponse, Json, Response},
+    http::{header, StatusCode},
+    response::{IntoResponse, Json, Response},
     routing::{get, post, put},
     Router,
 };
@@ -28,47 +28,7 @@ use crate::layout::{LayoutStore, SaveError};
 use crate::preview::store::{wall_clock_ms, PreviewStore};
 use crate::registry::{announced_address, valid_relay_id, Registration, RelayRegistry};
 
-const INDEX_HTML: &str = include_str!("../web/index.html");
-const APP_JS: &str = include_str!("../web/app.js");
-const STYLE_CSS: &str = include_str!("../web/style.css");
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-
-// issue 1305: installable web app (PWA) assets, embedded so the binary stays self-contained on
-// the strih PC (same include_str!/include_bytes! model as the HTML/JS/CSS above). The generator
-// for the icons is bkshading/service/web/gen-icons.py (stdlib, no new dependency).
-const MANIFEST_JSON: &str = include_str!("../web/manifest.webmanifest");
-const SW_JS: &str = include_str!("../web/sw.js");
-const ICON_192_PNG: &[u8] = include_bytes!("../web/icon-192.png");
-const ICON_512_PNG: &[u8] = include_bytes!("../web/icon-512.png");
-const FAVICON_SVG: &str = include_str!("../web/favicon.svg");
-
-// The Content-Type each PWA asset route serves (issue 1305), exposed so the service tests can
-// pin the exact type without standing up an HTTP server (mirrors `rendered_index`).
-pub const MANIFEST_CONTENT_TYPE: &str = "application/manifest+json";
-pub const SW_JS_CONTENT_TYPE: &str = "text/javascript; charset=utf-8";
-pub const PNG_CONTENT_TYPE: &str = "image/png";
-pub const SVG_CONTENT_TYPE: &str = "image/svg+xml";
-
-/// The embedded PWA manifest JSON (issue 1305) — exposed for the service route tests.
-pub fn manifest_asset() -> &'static str {
-    MANIFEST_JSON
-}
-/// The embedded service worker JS (issue 1305).
-pub fn sw_js_asset() -> &'static str {
-    SW_JS
-}
-/// The embedded 192px PWA icon PNG bytes (issue 1305).
-pub fn icon_192_asset() -> &'static [u8] {
-    ICON_192_PNG
-}
-/// The embedded 512px PWA icon PNG bytes (issue 1305).
-pub fn icon_512_asset() -> &'static [u8] {
-    ICON_512_PNG
-}
-/// The embedded SVG favicon (issue 1305).
-pub fn favicon_svg_asset() -> &'static str {
-    FAVICON_SVG
-}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -90,28 +50,25 @@ pub struct AppState {
     pub layout: LayoutStore,
 }
 
-/// The rebuilt Leptos panel (shading#16): Trunk's `bkshading/panel/dist/`, embedded at build time
-/// so the service stays one self-contained binary. Served at `/next/` while the old JS panel stays
-/// at `/` (phase 1 of the migration). CI builds the real bundle before every service build that
+/// The operator panel (shading#16, Leptos CSR): Trunk's `bkshading/panel/dist/`, embedded at build
+/// time so the service stays one self-contained binary. Served at `/` (the switch, v0.2.10: the old
+/// JS panel is gone; `/next/` redirects here). The dist carries the page, the WASM, the manifest,
+/// the service worker and the icons. CI builds the real bundle before every service build that
 /// ships; native-only jobs create a placeholder `dist/index.html` first (the folder must exist).
 #[derive(RustEmbed)]
 #[folder = "../panel/dist/"]
 pub struct PanelAssets;
 
-/// Where the new panel is served (Trunk `public_url`).
-pub const PANEL_PREFIX: &str = "/next/";
+/// Where the panel is served (Trunk `public_url`).
+pub const PANEL_PREFIX: &str = "/";
+
+/// The panel's phase-1 address (shading#16): an old bookmark or an app installed from it is sent
+/// to [`PANEL_PREFIX`].
+pub const OLD_PANEL_PREFIX: &str = "/next";
 
 pub fn router(state: AppState) -> Router {
     Router::new()
-        .route("/", get(index))
-        .route("/app.js", get(app_js))
-        .route("/style.css", get(style_css))
-        // issue 1305: PWA assets (installable web app).
-        .route("/manifest.webmanifest", get(manifest))
-        .route("/sw.js", get(service_worker))
-        .route("/icon-192.png", get(icon_192))
-        .route("/icon-512.png", get(icon_512))
-        .route("/favicon.svg", get(favicon_svg))
+        .route("/", get(|| async { panel_file("index.html") }))
         .route("/api/version", get(version))
         .route("/api/cameras", get(cameras))
         .route("/api/cameras/:id/params", put(set_params))
@@ -119,13 +76,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/relays/register", post(register_relay))
         .route("/api/layout", get(get_layout).put(put_layout))
         .route("/ws", get(ws_upgrade))
-        // shading#16: the rebuilt panel. `/next` -> `/next/` so its relative asset paths resolve.
-        .route(
-            "/next",
-            get(|| async { axum::response::Redirect::permanent(PANEL_PREFIX) }),
-        )
-        .route("/next/", get(|| async { panel_file("index.html") }))
-        .route("/next/*path", get(panel_path))
+        // shading#16's switch: the panel moved from /next/ to /.
+        .route("/next", get(to_panel))
+        .route("/next/", get(to_panel))
+        .route("/next/*path", get(to_panel))
+        // The panel's files, and the page for a client-side address.
+        .route("/*path", get(panel_path))
         .with_state(state)
 }
 
@@ -268,9 +224,18 @@ pub fn layout_put_response(store: &LayoutStore, put: &LayoutPut, peer: &str) -> 
     }
 }
 
-/// `GET /next/<path>`: an embedded panel file, or the panel page for a path without a dot (a
-/// reload on a client-side address).
+/// `GET /next...` (the panel's phase-1 address): a permanent redirect to the panel at `/`.
+async fn to_panel() -> Response {
+    axum::response::Redirect::permanent(PANEL_PREFIX).into_response()
+}
+
+/// `GET /<path>`: an embedded panel file, or the panel page for a path without a dot (a reload on
+/// a client-side address). An unknown `api/...` path stays a 404 (never the page as an API answer).
 async fn panel_path(Path(path): Path<String>) -> Response {
+    if path == "api" || path.starts_with("api/") {
+        tracing::debug!(path, "no such api route");
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    }
     if path.contains('.') {
         panel_file(&path)
     } else {
@@ -311,61 +276,6 @@ pub fn panel_file(path: &str) -> Response {
         file.data.into_owned(),
     )
         .into_response()
-}
-
-/// Injects the compiled service version into the served HTML so the panel header shows it
-/// straight from the DOM.
-pub fn rendered_index() -> String {
-    INDEX_HTML.replace("{{VERSION}}", VERSION)
-}
-
-async fn index() -> Html<String> {
-    Html(rendered_index())
-}
-
-async fn app_js() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-        APP_JS,
-    )
-}
-
-async fn style_css() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
-        STYLE_CSS,
-    )
-}
-
-// issue 1305: PWA asset handlers. Each serves an embedded asset with its exact Content-Type.
-async fn manifest() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, MANIFEST_CONTENT_TYPE)],
-        MANIFEST_JSON,
-    )
-}
-
-async fn service_worker() -> impl IntoResponse {
-    (
-        [
-            (header::CONTENT_TYPE, SW_JS_CONTENT_TYPE),
-            // Allow the SW to control the whole origin even though it is served from /sw.js.
-            (HeaderName::from_static("service-worker-allowed"), "/"),
-        ],
-        SW_JS,
-    )
-}
-
-async fn icon_192() -> impl IntoResponse {
-    ([(header::CONTENT_TYPE, PNG_CONTENT_TYPE)], ICON_192_PNG)
-}
-
-async fn icon_512() -> impl IntoResponse {
-    ([(header::CONTENT_TYPE, PNG_CONTENT_TYPE)], ICON_512_PNG)
-}
-
-async fn favicon_svg() -> impl IntoResponse {
-    ([(header::CONTENT_TYPE, SVG_CONTENT_TYPE)], FAVICON_SVG)
 }
 
 async fn version() -> Json<serde_json::Value> {

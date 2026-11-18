@@ -45,7 +45,9 @@ ASSETS = {
     SERVICE_LINUX: os.path.join("linux", "release", "bkshading"),
     SERVICE_WINDOWS: os.path.join("windows", "bkshading.exe"),
 }
-WEB_DIR = os.path.join(REPO, "bkshading", "service", "web")
+# The tarball's `web/` is a copy of the operator panel the service embeds (shading#16: Trunk's dist,
+# downloaded by the release job from the `panel` job's artifact). Not needed at runtime (CONTRACT).
+WEB_DIR = os.path.join(REPO, "bkshading", "panel", "dist")
 
 
 class ReleaseError(Exception):

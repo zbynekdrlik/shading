@@ -77,7 +77,6 @@ jobs:
           test -f "$d/manifest.webmanifest"
           test -f "$d/icons/icon-192.png"
           test -f "$d/icons/icon-512.png"
-          test -f "$d/fonts/barlow-latin-600-normal.woff2"
           # fohmixer's guarded loader, not Trunk's default `await init(...)`.
           grep -q 'WebAssembly.compileStreaming' "$d/index.html"
           grep -q 'shadingLoadFailed' "$d/index.html"
@@ -91,8 +90,11 @@ jobs:
             echo "::error::dist/index.html preloads the WASM module"; exit 1
           fi
           grep -q 'rel="modulepreload"' "$d/index.html"
-          # Served at /next/ (phase 1 of the migration).
-          grep -q '/next/' "$d/index.html"
+          # Served at / (shading#16's switch): the assets load from the root, never from /next/.
+          grep -qE '"/bkshading-panel-[0-9a-f]+\.js"' "$d/index.html"
+          if grep -q '/next/' "$d/index.html"; then
+            echo "::error::dist/index.html still points at /next/"; exit 1
+          fi
           test -f "$d/sw.js"
           if grep -qE 'caches\.|cache\.put' "$d/sw.js"; then
             echo "::error::dist/sw.js uses the Cache Storage (the service worker is network-only)"; exit 1
@@ -309,6 +311,13 @@ jobs:
         with:
           name: bkshading-windows
           path: build/windows
+
+      # The tarball's web/ is a copy of the panel (scripts/release.py WEB_DIR).
+      - name: Download panel dist
+        uses: actions/download-artifact@v4
+        with:
+          name: panel-dist
+          path: bkshading/panel/dist
 
       - name: Stage release assets + .sha256
         run: python3 scripts/release.py stage build dist

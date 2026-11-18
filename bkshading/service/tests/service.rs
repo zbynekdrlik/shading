@@ -177,23 +177,6 @@ fn handheld_without_preview_is_params_only_and_offline_when_unreachable() {
 }
 
 #[test]
-fn served_index_injects_the_version() {
-    // The panel header must carry the compiled version straight in the DOM
-    // (version-on-dashboard), not a placeholder.
-    let html = bkshading::http::rendered_index();
-    assert!(
-        html.contains(concat!("v", env!("CARGO_PKG_VERSION"))),
-        "served index must show v{}",
-        env!("CARGO_PKG_VERSION")
-    );
-    assert!(
-        !html.contains("{{VERSION}}"),
-        "placeholder must be replaced"
-    );
-    assert!(html.contains("data-testid=\"version\""));
-}
-
-#[test]
 fn parses_preview_table_and_defaults_when_absent() {
     // M2: the optional [preview] table deserializes into PreviewConfig (fps is an f64, so the
     // shipped example uses 3.0 — this pins the deserialize path in CI).
@@ -536,83 +519,59 @@ fn camera_view_without_a_grab_never_offers_align_1402() {
     assert!(!v.fps_align_settable);
 }
 
-// --- issue 1305: installable web app (PWA) assets + routes -------------------
+// --- issue 1305: installable web app (PWA) — since shading#16's switch the panel's own assets ---
+// The panel dist (served at /) carries the manifest, the service worker and the icons; these pin
+// their sources, which Trunk copies into the dist as they are.
+
+const PANEL_MANIFEST: &str = include_str!("../../panel/manifest.webmanifest");
+const PANEL_SW: &str = include_str!("../../panel/sw.js");
 
 #[test]
 fn pwa_manifest_is_valid_standalone_1305() {
-    let m = bkshading::http::manifest_asset();
-    let v: serde_json::Value = serde_json::from_str(m).expect("manifest is valid JSON");
+    let v: serde_json::Value =
+        serde_json::from_str(PANEL_MANIFEST).expect("manifest is valid JSON");
     assert_eq!(v["display"], "standalone");
-    assert_eq!(v["start_url"], "/");
-    assert_eq!(v["scope"], "/");
+    // Relative: they follow the panel's address (/).
+    assert_eq!(v["start_url"], "./");
+    assert_eq!(v["scope"], "./");
     let icons = v["icons"].as_array().expect("icons array");
     let srcs: Vec<&str> = icons.iter().filter_map(|i| i["src"].as_str()).collect();
-    assert!(srcs.contains(&"/icon-192.png"), "192 icon listed");
-    assert!(srcs.contains(&"/icon-512.png"), "512 icon listed");
-    // a maskable entry is present (install-quality icon on Android/Chrome).
+    assert!(srcs.contains(&"icons/icon-192.png"), "192 icon listed");
+    assert!(srcs.contains(&"icons/icon-512.png"), "512 icon listed");
     assert!(
         icons.iter().any(|i| i["purpose"]
             .as_str()
             .is_some_and(|p| p.contains("maskable"))),
         "a maskable icon entry is present"
     );
-    assert_eq!(
-        bkshading::http::MANIFEST_CONTENT_TYPE,
-        "application/manifest+json"
-    );
 }
 
 #[test]
 fn pwa_service_worker_has_no_cache_1305() {
     // server-truth: the SW must be a pure passthrough, never a caching SW (no stale UI/state).
-    let sw = bkshading::http::sw_js_asset();
     assert!(
-        !sw.contains("caches"),
+        !PANEL_SW.contains("caches"),
         "sw.js must not use the Cache Storage API"
     );
     assert!(
-        sw.contains("fetch(event.request)"),
+        PANEL_SW.contains("fetch(event.request)"),
         "sw.js is a passthrough"
-    );
-    assert_eq!(
-        bkshading::http::SW_JS_CONTENT_TYPE,
-        "text/javascript; charset=utf-8"
     );
 }
 
 #[test]
 fn pwa_icons_are_png_and_favicon_is_svg_1305() {
     assert!(
-        bkshading::http::icon_192_asset().starts_with(b"\x89PNG\r\n\x1a\n"),
+        include_bytes!("../../panel/icons/icon-192.png").starts_with(b"\x89PNG\r\n\x1a\n"),
         "icon-192 is a PNG"
     );
     assert!(
-        bkshading::http::icon_512_asset().starts_with(b"\x89PNG\r\n\x1a\n"),
+        include_bytes!("../../panel/icons/icon-512.png").starts_with(b"\x89PNG\r\n\x1a\n"),
         "icon-512 is a PNG"
     );
     assert!(
-        bkshading::http::favicon_svg_asset().contains("<svg"),
+        include_str!("../../panel/icons/favicon.svg").contains("<svg"),
         "favicon is an SVG"
-    );
-    assert_eq!(bkshading::http::PNG_CONTENT_TYPE, "image/png");
-    assert_eq!(bkshading::http::SVG_CONTENT_TYPE, "image/svg+xml");
-}
-
-#[test]
-fn index_links_the_pwa_assets_1305() {
-    let html = bkshading::http::rendered_index();
-    assert!(
-        html.contains("rel=\"manifest\""),
-        "index links the manifest"
-    );
-    assert!(html.contains("/manifest.webmanifest"));
-    assert!(
-        html.contains("name=\"theme-color\""),
-        "index has theme-color"
-    );
-    assert!(
-        html.contains("apple-touch-icon"),
-        "index has apple-touch-icon"
     );
 }
 
