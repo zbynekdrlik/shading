@@ -15,6 +15,8 @@ Commands:
                             --mentions-only prints only messages that @mention the bot (owner
                             18.11.2026: work starts ONLY when someone tags the bot; the rest is
                             the team's own discussion and is not processed)
+    context                 the whole discussion since the bot's own last message (up to 100), so a
+                            tag is answered with everything the team wrote before it in view
     post TEXT [--reply ID]  post TEXT to the thread, optionally as a reply to message ID
     react ID [EMOJI]        add a reaction (default 👷 = "taken, working on it") to message ID
 
@@ -122,6 +124,26 @@ def cmd_read(token: str, channel: str, all_: bool, mentions_only: bool = False) 
     return 0
 
 
+def since_last_bot(msgs: list[dict]) -> list[dict]:
+    """The messages after the bot's own last one (oldest first); all of them when it never wrote."""
+    msgs = sorted(msgs, key=lambda m: int(m["id"]))
+    last = max((i for i, m in enumerate(msgs) if (m.get("author") or {}).get("id") == BOT_ID), default=-1)
+    return msgs[last + 1:]
+
+
+def cmd_context(token: str, channel: str) -> int:
+    check_channel(channel)
+    msgs = request("GET", f"/channels/{channel}/messages?limit=100", token)
+    if not isinstance(msgs, list):
+        raise DiscordError(f"unexpected answer: {str(msgs)[:200]}")
+    ctx = since_last_bot(msgs)
+    for m in ctx:
+        print(format_message(m))
+        print("---")
+    print(f"{len(ctx)} message(s) since the bot's last message", file=sys.stderr)
+    return 0
+
+
 def cmd_post(token: str, channel: str, text: str, reply: str | None) -> int:
     check_channel(channel)
     if not text.strip():
@@ -155,6 +177,7 @@ def main(argv: list[str] | None = None) -> int:
     w = sub.add_parser("post")
     w.add_argument("text")
     w.add_argument("--reply", help="message id to reply to")
+    sub.add_parser("context")
     a = sub.add_parser("react")
     a.add_argument("message_id")
     a.add_argument("emoji", nargs="?", default="\U0001F477")
@@ -166,6 +189,8 @@ def main(argv: list[str] | None = None) -> int:
             raise DiscordError("DISCORD_BOT_TOKEN is not set (run through `airuleset.py secret exec`)")
         if args.cmd == "read":
             return cmd_read(token, args.channel, args.all, args.mentions_only)
+        if args.cmd == "context":
+            return cmd_context(token, args.channel)
         if args.cmd == "react":
             return cmd_react(token, args.channel, args.message_id, args.emoji)
         return cmd_post(token, args.channel, args.text, args.reply)

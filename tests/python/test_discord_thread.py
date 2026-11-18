@@ -93,3 +93,17 @@ def test_mentions_only_shows_only_messages_addressed_to_the_bot(monkeypatch, tmp
     out = capsys.readouterr().out
     assert "OK" in out and "team talk" not in out and "bot's own" not in out
     assert dt.read_last_id() == "3"  # every message is marked seen, only the addressed one is shown
+
+
+def test_context_is_everything_after_the_bots_last_message(monkeypatch, capsys):
+    msgs = [
+        {"id": "5", "content": "old talk", "author": {"id": "9", "username": "m"}},
+        {"id": "6", "content": "bot answer", "author": {"id": dt.BOT_ID, "username": "shading"}},
+        {"id": "8", "content": f"<@{dt.BOT_ID}> spravte to", "author": {"id": "9", "username": "m"}},
+        {"id": "7", "content": "new idea", "author": {"id": "4", "username": "s"}},
+    ]
+    monkeypatch.setattr(dt, "request", lambda *a, **k: msgs)
+    assert dt.cmd_context("t", dt.THREAD_ID) == 0
+    out = capsys.readouterr().out
+    assert "old talk" not in out and "bot answer" not in out
+    assert out.index("new idea") < out.index("spravte to")
