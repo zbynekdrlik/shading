@@ -218,6 +218,29 @@ mod tests {
     }
 
     #[test]
+    fn the_status_line_always_has_one_line_of_text_28() {
+        let mut c = cam();
+        c.registration = Some(RegistrationView {
+            relay_id: "cam6".into(),
+            address: "10.77.9.66:8771".into(),
+            age_s: 2,
+            announcing_s: 4080,
+            fresh: true,
+        });
+        assert_eq!(status_line(&c), "cam6 · 10.77.9.66:8771 · ↻ 2s · ▲ 1h08m");
+        c.registration.as_mut().unwrap().fresh = false;
+        c.registration.as_mut().unwrap().age_s = 600;
+        assert_eq!(status_line(&c), "cam6 · 10.77.9.66:8771 · ↻ 10m ⚠");
+        c.registration = None;
+        c.address = Some("10.77.8.64:8771".into());
+        assert_eq!(status_line(&c), "10.77.8.64:8771 · bez ohlásenia");
+        c.address = None;
+        assert_eq!(status_line(&c), "—");
+        c.address = Some(String::new());
+        assert_eq!(status_line(&c), "—", "an empty address is nothing known");
+    }
+
+    #[test]
     fn the_align_button_needs_a_mismatch_and_a_settable_grab() {
         let mut c = cam();
         assert_eq!(fps_sync(&c), None, "no grab, no line");

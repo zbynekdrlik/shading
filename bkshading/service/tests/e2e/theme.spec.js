@@ -503,3 +503,66 @@ test("a slider dragged away and back (no change event) follows the camera again,
   expect(puts, "a drag that ends where it started writes nothing").toEqual([]);
   gate.assertClean();
 });
+
+/** Each card's first control row, measured from the card's own top (the status-line probe). */
+async function firstRowOffsets(page) {
+  return page.evaluate(() =>
+    Object.fromEntries(
+      [...document.querySelectorAll('[data-role="camera-block"]')].map((card) => {
+        const row = card.querySelector(".row");
+        const offset = row.getBoundingClientRect().top - card.getBoundingClientRect().top;
+        return [card.dataset.id, Math.round(offset * 10) / 10];
+      })
+    )
+  );
+}
+
+test("the status line is always one line: online and offline cards put their first control row at the same offset, console clean (shading#28)", async ({ page }) => {
+  const gate = consoleGate(page);
+  await openWith(page, 3);
+  const reg = { relayId: "cam1", address: "10.77.8.61:8771", ageS: 2, announcingS: 4080, fresh: true };
+  const agg = cams(3);
+  agg.cameras[0].registration = reg;
+  agg.cameras[1].reachable = false;
+  agg.cameras[1].state = null;
+  agg.cameras[1].control = "relay-unreachable";
+  agg.cameras[1].address = "10.77.8.64:8771";
+  agg.cameras[2].reachable = false;
+  agg.cameras[2].state = null;
+  agg.cameras[2].control = "relay-unreachable";
+  await pushState(page, agg);
+  await expect(page.locator('[data-id="cam1"] [data-role="registration"]')).toHaveText("cam1 · 10.77.8.61:8771 · ↻ 2s · ▲ 1h08m");
+  await expect(page.locator('[data-id="cam2"] [data-role="registration"]')).toHaveText("10.77.8.64:8771 · bez ohlásenia");
+  await expect(page.locator('[data-id="cam3"] [data-role="registration"]')).toHaveText("—");
+  await expect(page.locator('[data-id="cam2"] [data-role="registration"]')).toBeVisible();
+  // The line's height never depends on its glyphs (the ↻/▲ fallback font is taller on the
+  // operators' devices): an explicit line-height and height, equal in every card.
+  const regBoxes = await page.evaluate(() =>
+    [...document.querySelectorAll('[data-role="camera-block"] .reg')].map((el) => {
+      const cs = getComputedStyle(el);
+      return [cs.lineHeight, cs.height];
+    })
+  );
+  expect(regBoxes[0][0]).not.toBe("normal");
+  expect(regBoxes[0][1]).not.toBe("auto");
+  expect(regBoxes.every((b) => b[0] === regBoxes[0][0] && b[1] === regBoxes[0][1])).toBeTruthy();
+  const offsets = await firstRowOffsets(page);
+  expect(offsets.cam2).toBe(offsets.cam1);
+  expect(offsets.cam3).toBe(offsets.cam1);
+  const before = await geometry(page);
+
+  // The relays swap: cam1 drops out (no registration any more), cam2 comes back registered.
+  const flipped = cams(3);
+  flipped.cameras[0].reachable = false;
+  flipped.cameras[0].state = null;
+  flipped.cameras[0].control = "relay-unreachable";
+  flipped.cameras[1].registration = { ...reg, relayId: "cam2", address: "10.77.8.64:8771" };
+  flipped.cameras[2].reachable = false;
+  flipped.cameras[2].state = null;
+  flipped.cameras[2].control = "relay-unreachable";
+  await pushState(page, flipped);
+  await expect(page.locator('[data-id="cam1"] [data-role="registration"]')).toHaveText("—");
+  await expect(page.locator('[data-id="cam2"] [data-role="registration"]')).toHaveText("cam2 · 10.77.8.64:8771 · ↻ 2s · ▲ 1h08m");
+  expect(await geometry(page)).toEqual(before);
+  gate.assertClean();
+});

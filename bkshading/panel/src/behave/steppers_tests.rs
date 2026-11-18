@@ -50,6 +50,7 @@ pub(crate) fn cam() -> CameraView {
             offline_reason: None,
         }),
         registration: None,
+        address: None,
         control: ControlStatus::Ok,
     }
 }
