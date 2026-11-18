@@ -68,3 +68,14 @@ def test_read_lists_oldest_first_and_remembers_the_newest(monkeypatch, tmp_path,
     assert out.index("prva") < out.index("druha")
     assert "attachment: a.png" in out
     assert dt.read_last_id() == "20"
+
+
+def test_react_puts_the_worker_emoji_on_the_thread_only(monkeypatch):
+    seen = []
+    monkeypatch.setattr(dt, "request", lambda method, path, token, body=None: seen.append((method, path)))
+    assert dt.cmd_react("t", dt.THREAD_ID, "55", "\U0001F477") == 0
+    assert seen == [("PUT", f"/channels/{dt.THREAD_ID}/messages/55/reactions/%F0%9F%91%B7/@me")]
+    with pytest.raises(dt.DiscordError):
+        dt.cmd_react("t", "999", "55", "x")
+    with pytest.raises(dt.DiscordError):
+        dt.cmd_react("t", dt.THREAD_ID, "../x", "x")

@@ -12,6 +12,7 @@ Commands:
     read [--all]            messages newer than the last one seen (or the last 100 with --all),
                             oldest first, with attachment URLs; remembers the newest id
     post TEXT [--reply ID]  post TEXT to the thread, optionally as a reply to message ID
+    react ID [EMOJI]        add a reaction (default 👷 = "taken, working on it") to message ID
 
 Any other channel id is refused: the thread id is a constant and `--channel` must equal it.
 Stdlib only. Fails loudly (non-zero exit with the HTTP status and Discord's answer).
@@ -24,6 +25,7 @@ import json
 import os
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -121,6 +123,15 @@ def cmd_post(token: str, channel: str, text: str, reply: str | None) -> int:
     return 0
 
 
+def cmd_react(token: str, channel: str, msg_id: str, emoji: str) -> int:
+    check_channel(channel)
+    if not msg_id.isdigit():
+        raise DiscordError(f"refused: {msg_id!r} is not a message id")
+    request("PUT", f"/channels/{channel}/messages/{msg_id}/reactions/{urllib.parse.quote(emoji)}/@me", token)
+    print(f"reacted {emoji} on {msg_id}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--channel", default=THREAD_ID, help="must be the feedback thread id")
@@ -130,6 +141,9 @@ def main(argv: list[str] | None = None) -> int:
     w = sub.add_parser("post")
     w.add_argument("text")
     w.add_argument("--reply", help="message id to reply to")
+    a = sub.add_parser("react")
+    a.add_argument("message_id")
+    a.add_argument("emoji", nargs="?", default="\U0001F477")
     args = p.parse_args(argv)
     try:
         check_channel(args.channel)
@@ -138,6 +152,8 @@ def main(argv: list[str] | None = None) -> int:
             raise DiscordError("DISCORD_BOT_TOKEN is not set (run through `airuleset.py secret exec`)")
         if args.cmd == "read":
             return cmd_read(token, args.channel, args.all)
+        if args.cmd == "react":
+            return cmd_react(token, args.channel, args.message_id, args.emoji)
         return cmd_post(token, args.channel, args.text, args.reply)
     except DiscordError as e:
         print(f"discord_thread: {e}", file=sys.stderr)
