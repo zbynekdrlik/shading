@@ -86,7 +86,9 @@ main {
 .state { margin-left: auto; font-size: 16px; font-weight: 600; color: var(--ok); }
 .state.off { color: var(--bad-text); }
 .reg { padding: 0 14px 10px; color: var(--dim); font-size: 14px;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } /* Marcel: never wraps (no layout shift); full text in the tooltip */
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; /* Marcel: never wraps (no layout shift); full text in the tooltip */
+  -webkit-user-select: text; user-select: text; } /* Marcel: the status line with the IP address stays copyable */
+.reg .ago { font-variant-numeric: tabular-nums; } /* short, technical: "↻ 3s" = last announcement, "▲ 1h07m" = relay uptime */
 .warn { /* Marcel: an overlay over the controls (absolute in the relative .rows), never in the flow */
   position: absolute; top: 0; left: 10px; right: 10px; z-index: 2;
   padding: 10px 12px; border-radius: 10px; font-size: 16px; font-weight: 600;
@@ -172,10 +174,10 @@ input[type=range]::-moz-range-thumb { width: 22px; height: 22px; border-radius: 
 </section>
 <script>
 const cams = [
-  { n: 1, name: "Cam 1", off: true, reg: "cam1-shading · 10.77.8.121:8771 · neohlásil sa 10 min", warn: "⚠ Relay nedostupný — kamera sa nedá ovládať" },
-  { n: 4, name: "Cam 4", reg: "cam4-shading · 10.77.8.75:8771 · ohlásený pred 3 s", f: "f/4.0", end: true, p: 0 },
-  { n: 6, name: "Cam 6", reg: "cam6 · 10.77.9.66:8771 · ohlásený pred 2 s", f: "f/3.7", p: 15 },
-  { n: 7, name: "Cam 7", reg: "cam7 · 10.77.9.67:8771 · ohlásený pred 5 s", f: "f/3.5", p: 10 },
+  { n: 1, name: "Cam 1", off: true, reg: "cam1-shading · 10.77.8.121:8771 · ↻ 10m ⚠", warn: "⚠ Relay nedostupný — kamera sa nedá ovládať" },
+  { n: 4, name: "Cam 4", reg: "cam4-shading · 10.77.8.75:8771 · ↻ 3s · ▲ 1h07m", f: "f/4.0", end: true, p: 0 },
+  { n: 6, name: "Cam 6", reg: "cam6 · 10.77.9.66:8771 · ↻ 2s · ▲ 1h08m", f: "f/3.7", p: 15 },
+  { n: 7, name: "Cam 7", reg: "cam7 · 10.77.9.67:8771 · ↻ 5s · ▲ 1h08m", f: "f/3.5", p: 10 },
 ];
 const row = (lab, val, p, end = false, off = false) => `
   <div class="row">
@@ -189,7 +191,7 @@ document.getElementById("grid").innerHTML = cams.map(c => `
     <div class="prev">${c.off ? '<span class="ph">BEZ OBRAZU</span>' : '<div class="img"></div>'}</div>
     <div class="head"><span class="num">${c.n}</span><span class="name">${c.name}</span>
       <span class="state ${c.off ? "off" : ""}">${c.off ? "● relay offline" : "● online"}</span></div>
-    <div class="reg" title="${c.reg}">${c.reg}</div>
+    <div class="reg" title="${c.reg} (↻ = posledné ohlásenie relaya, ▲ = ako dlho relay beží)">${c.reg}</div>
     <div class="rows">
       ${c.warn ? `<div class="warn">${c.warn}</div>` : ""}
       ${row("Clona", c.off ? "—" : c.f, c.p ?? 0, !!c.end, c.off)}
