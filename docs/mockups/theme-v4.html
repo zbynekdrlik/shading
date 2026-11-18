@@ -26,23 +26,24 @@
   --bad-bg: #3b1a1e;
   --bad-text: #ff8f99;
 }
-[data-mode="light"] {
-  --bg: #e6eaef;
-  --card: #ffffff;
-  --row: #f2f4f7;
-  --line: #d3d9e0;
+[data-mode="light"] { /* owner 18.11: the first light mode was "extremely bright": no pure white, a muted grey-blue
+     paper (about 70-80 % luminance) so a lit room is readable without the screen glowing */
+  --bg: #b9c1cb;
+  --card: #cdd4dc;
+  --row: #c2cad3;
+  --line: #a3adb9;
   --text: #0e1319;
-  --label: #3d4855;
-  --dim: #56626f;
-  --btn: #e3e8ee;
+  --label: #2c3640;
+  --dim: #3a4550;
+  --btn: #d8dee5;
   --btn-text: #0e1319;
-  --accent: #1a5ed0;
-  --track: #c3cbd5;
-  --ok: #137a43;
-  --warn-bg: #fff1d6;
-  --warn-text: #7a4a00;
-  --bad-bg: #ffe1e4;
-  --bad-text: #9b1424;
+  --accent: #16509f;
+  --track: #9aa5b2;
+  --ok: #0c5a30;
+  --warn-bg: #e9d9b6;
+  --warn-text: #5b3600;
+  --bad-bg: #e5c4c8;
+  --bad-text: #7d0f1c;
 }
 * { box-sizing: border-box; }
 /* Marcel: an app, not a web page: no text selection on controls (a double tap never selects). */
