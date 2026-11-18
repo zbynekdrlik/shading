@@ -328,3 +328,37 @@ async fn the_tally_task_follows_the_tally_service_and_clears_on_failure_25() {
     assert_eq!(agg.tally(), None, "the stored tally is cleared too");
     task.abort();
 }
+
+/// v0.2.11 deep review: a `pgm`/`pvw` sent as a numeric string or a float with no fraction is the
+/// camera number; any other value is 0 ("no single camera"). Neither fails the whole body, so one
+/// odd value never turns a live tally into a failed poll that clears it.
+#[test]
+fn a_numeric_string_or_whole_float_reads_as_the_number_and_garbage_as_none_25() {
+    assert_eq!(
+        parse_tally(r#"{"pgm": "3", "pvw": 2.0, "obs_connected": true}"#),
+        Ok(t(3, 2, true))
+    );
+    assert_eq!(
+        parse_tally(r#"{"pgm": " 4 ", "pvw": "5.0", "obs_connected": true}"#),
+        Ok(t(4, 5, true))
+    );
+    assert_eq!(
+        parse_tally(r#"{"pgm": "x", "pvw": 2.5, "obs_connected": true}"#),
+        Ok(t(0, 0, true))
+    );
+    assert_eq!(
+        parse_tally(r#"{"pgm": [1], "pvw": {"n": 2}, "obs_connected": true}"#),
+        Ok(t(0, 0, true))
+    );
+
+    let mut tr = TallyTracker::default();
+    tr.observe(Ok(t(3, 2, true)));
+    let s = tr.observe(parse_tally(
+        r#"{"pgm": 3, "pvw": "garbage", "obs_connected": true}"#,
+    ));
+    assert!(
+        s.warn.is_empty(),
+        "a garbage value is not a failed poll: {s:?}"
+    );
+    assert_eq!(s.changed, Some(Some(t(3, 0, true))), "pgm stays live");
+}
