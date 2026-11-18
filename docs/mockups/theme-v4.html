@@ -128,10 +128,11 @@ body[data-layout="row"] main { grid-auto-flow: column; overflow-x: auto;
 .mid .lab { font-size: 15px; font-weight: 500; color: var(--label); line-height: 1.2; }
 .mid .val { font-size: 26px; font-weight: 500; font-variant-numeric: tabular-nums; line-height: 1.15;
   color: var(--val); letter-spacing: 1px; } /* Stepan: "len troška hrubšie" (500); Marcel: letter-spacing 1px */
-/* Marcel: a 1 px pitch-black shadow around the value letters, forming an outline (dark mode; on the light
-   paper a black outline would muddy dark text) */
-[data-mode="dark"] .mid .val { text-shadow: 1px 0 0 #000, -1px 0 0 #000, 0 1px 0 #000, 0 -1px 0 #000,
-  1px 1px 0 #000, -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000; } /* Marcel: a lighter weight, same size. Stepan (multifocal glasses): bold white numbers glare and blur, so the value is light grey, not white */
+/* Marcel: a pitch-black outline around the value letters AND the +/- glyphs, 1.5 px (he knows a half
+   pixel only shows on HiDPI). Dark mode only: on the light paper a black outline muddies dark text. */
+[data-mode="dark"] { --outline: 1.5px 0 0 #000, -1.5px 0 0 #000, 0 1.5px 0 #000, 0 -1.5px 0 #000,
+  1.5px 1.5px 0 #000, -1.5px -1.5px 0 #000, 1.5px -1.5px 0 #000, -1.5px 1.5px 0 #000; }
+[data-mode="dark"] .mid .val, [data-mode="dark"] .ctl > button, [data-mode="dark"] .endbox > button { text-shadow: var(--outline); } /* Marcel: a lighter weight, same size. Stepan (multifocal glasses): bold white numbers glare and blur, so the value is light grey, not white */
 .mid .val { cursor: pointer; border-radius: 6px; padding: 0 6px; }
 .row.open .mid .val { background: var(--accent); color: var(--card); } /* the open slider's value is highlighted */
 .slider { display: none; padding: 8px 6px 0; }
