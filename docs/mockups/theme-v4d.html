@@ -81,7 +81,7 @@ header .sp { flex: 1; }
    - "8 v rade": all cameras in ONE row, fixed card width, the row scrolls horizontally. */
 /* Version D (Marcel): a card is never narrower than --card-min (no trimmed or overflowing text) and never
    wider than --card-max (no endless stretch; on a 3840 px (4K) screen all 8 cards fit in one row). */
-:root { --card-min: 300px; --card-max: 460px; --gap: 14px; } /* 460: all 8 cards fit a 3840 px (4K) screen */
+:root { --card-min: 250px; --card-max: 460px; --gap: 14px; } /* 250: "5" fits 5 whole cards down to a 1366 px screen (Marcel: 1456 px HiDPI Mac) */ /* 460: all 8 cards fit a 3840 px (4K) screen */
 main { display: grid; gap: var(--gap); padding: 14px 16px; justify-content: start; }
 body[data-layout="grid"] main { grid-template-columns: repeat(4, clamp(var(--card-min), (100vw - 32px - 3 * var(--gap)) / 4, var(--card-max))); }
 body[data-layout="five"] main { grid-auto-flow: column; overflow-x: auto; overscroll-behavior-x: contain;
