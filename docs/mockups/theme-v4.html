@@ -73,7 +73,7 @@ header .sp { flex: 1; }
 }
 main {
   display: grid; gap: 14px; padding: 14px 16px;
-  grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); /* owner: 8 cameras on a 1920 px screen */
 }
 .cam { background: var(--card); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
 .prev { aspect-ratio: 16/9; background: #000; position: relative; display: grid; place-items: center; }
@@ -105,11 +105,12 @@ main {
 .ctl > button:disabled { background: transparent; border-color: transparent; color: var(--track); cursor: default; }
 /* The end label is centred by an absolutely placed wrapper filling the button: Safari does not lay out
    a <button> as grid/flex reliably, so the button itself only positions. */
-.ctl > button.atend { position: relative; padding: 0; border: 1px dashed var(--line); }
-.ctl > button.atend .endwrap { position: absolute; inset: 0; display: flex; flex-direction: column;
-  align-items: center; justify-content: center; gap: 2px; }
-.ctl > button.atend .endwrap > span { display: block; line-height: 1; font-size: 22px; }
-.ctl > button.atend small { display: block; line-height: 1; font-size: 12px; font-weight: 700; color: var(--warn-text); }
+/* Marcel: "koniec" is an OVERLAY on the dead button, not a line under the "−": the symbol stays where it
+   always is (centred), the label sits over it, centred both ways (absolute inset 0 + flex: Safari-safe). */
+.ctl > button.atend { position: relative; border: 1px dashed var(--line); }
+.ctl > button.atend .endlab { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  font-size: 12px; font-weight: 700; line-height: 1; color: var(--warn-text);
+  background: color-mix(in srgb, var(--row) 70%, transparent); border-radius: inherit; }
 .mid { display: flex; flex-direction: column; align-items: center; text-align: center; min-width: 0; }
 .mid .lab { font-size: 15px; font-weight: 500; color: var(--label); line-height: 1.2; }
 .mid .val { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.15; }
@@ -146,6 +147,29 @@ input[type=range]::-moz-range-thumb { width: 22px; height: 22px; border-radius: 
 .note table { border-collapse: collapse; width: 100%; font-size: 15px; }
 .note td, .note th { border-bottom: 1px solid var(--line); padding: 6px 8px; text-align: left; }
 .note td.ok { color: var(--ok); font-weight: 700; }
+/* owner 18.11: 8 cameras on 1920 px = ~224 px cards. Below 300 px a card goes compact, and NOTHING wraps
+   (no layout shift): 44 px +/- (still a touch target), value 22 px, one-line label, name and status. */
+.cam { container-type: inline-size; }
+.head .name, .head .state, .mid .lab, .mid .val { white-space: nowrap; }
+.mid .lab { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+@container (max-width: 300px) {
+  .head { gap: 6px; padding: 10px 10px 2px; }
+  .num { font-size: 24px; }
+  .name { font-size: 17px; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .state { font-size: 13px; }
+  .reg { padding: 0 10px 8px; font-size: 12px; }
+  .rows { padding: 0 8px 10px; gap: 6px; }
+  .warn { left: 8px; right: 8px; font-size: 13px; padding: 8px 10px;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .ctl { grid-template-columns: 44px 1fr 44px; gap: 6px; }
+  .ctl > button { height: 44px; font-size: 22px; border-radius: 10px; }
+  .mid .lab { font-size: 13px; }
+  .mid .val { font-size: 22px; padding: 0 4px; }
+  .ctl > button.atend .endlab { font-size: 11px; }
+  .more > summary { min-height: 38px; font-size: 13px; }
+  .wb { min-height: 44px; font-size: 14px; }
+  .foot { padding: 0 10px 10px; font-size: 13px; }
+}
 @media (max-width: 420px) { main { padding: 10px; grid-template-columns: 1fr; } header { flex-wrap: wrap; } }
 </style>
 </head>
@@ -175,13 +199,17 @@ input[type=range]::-moz-range-thumb { width: 22px; height: 22px; border-radius: 
 <script>
 const cams = [
   { n: 1, name: "Cam 1", off: true, reg: "cam1-shading · 10.77.8.121:8771 · ↻ 10m ⚠", warn: "⚠ Relay nedostupný — kamera sa nedá ovládať" },
+  { n: 2, name: "Cam 2", reg: "cam2 · 10.77.9.62:8771 · ↻ 1s · ▲ 3h12m", f: "f/2.8", p: 5 },
+  { n: 3, name: "Cam 3", reg: "cam3 · 10.77.9.63:8771 · ↻ 4s · ▲ 3h12m", f: "f/4.5", p: 30 },
   { n: 4, name: "Cam 4", reg: "cam4-shading · 10.77.8.75:8771 · ↻ 3s · ▲ 1h07m", f: "f/4.0", end: true, p: 0 },
+  { n: 5, name: "Cam 5", reg: "cam5 · 10.77.9.65:8771 · ↻ 2s · ▲ 2h40m", f: "f/5.6", p: 40 },
   { n: 6, name: "Cam 6", reg: "cam6 · 10.77.9.66:8771 · ↻ 2s · ▲ 1h08m", f: "f/3.7", p: 15 },
   { n: 7, name: "Cam 7", reg: "cam7 · 10.77.9.67:8771 · ↻ 5s · ▲ 1h08m", f: "f/3.5", p: 10 },
+  { n: 8, name: "Cam 8", reg: "cam8 · 10.77.9.68:8771 · ↻ 1s · ▲ 0h52m", f: "f/8.0", p: 55 },
 ];
 const row = (lab, val, p, end = false, off = false) => `
   <div class="row">
-    <div class="ctl"><button ${end || off ? "disabled" : ""} class="${end ? "atend" : ""}" aria-label="${lab} menej">${end ? '<span class="endwrap"><span>−</span><small>koniec</small></span>' : "−"}</button>
+    <div class="ctl"><button ${end || off ? "disabled" : ""} class="${end ? "atend" : ""}" aria-label="${lab} menej">−${end ? '<span class="endlab">koniec</span>' : ""}</button>
       <div class="mid"><span class="lab">${lab}</span><span class="val" role="button" tabindex="0" aria-expanded="false" aria-label="${lab}: posuvník">${val}</span></div>
       <button aria-label="${lab} viac">+</button></div>
     <div class="slider"><input type="range" value="${p}" style="--p:${p}%" aria-label="${lab}"></div>
