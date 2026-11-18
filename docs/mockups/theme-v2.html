@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="sk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shading Theme v2</title>
+<style>
+/* shading#24 mockup v2. Operator feedback on v1 (PP, Stepan): "nepotrebujem veľké, len iné farby;
+   bold písma mi vadia; tento štýl je super" = the LEGACY panel. So v2 IS the legacy panel's look:
+   its palette, system font, normal weights and sizes (labels 0.8rem, values normal weight, camera
+   name 1rem/600, +/- 2.6rem), carried into the new panel's structure (number, ARRANGE, warnings).
+   Mode "Tma" = the legacy colours unchanged. Mode "Svetlo" = the same layout, light for a lit room. */
+[data-mode="dark"] {
+  --bg: #14171c; --panel: #1e232b; --panel-2: #262c36; --edge: #333b47;
+  --text: #e7ecf2; --muted: #9aa6b4; --accent: #4f9dff; --ok: #3ecb7a; --bad: #ef6a61;
+  --warn-bg: rgba(229, 84, 75, 0.15); --end: #f0b45a; --preview: #0d0f13;
+}
+[data-mode="light"] {
+  --bg: #e4e8ee; --panel: #ffffff; --panel-2: #f1f3f6; --edge: #cfd5dd;
+  --text: #161b22; --muted: #4f5b69; --accent: #1f63d6; --ok: #177a45; --bad: #b4231a;
+  --warn-bg: rgba(180, 35, 26, 0.09); --end: #8a5300; --preview: #0d0f13;
+}
+* { box-sizing: border-box; }
+body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); }
+.app-header { display: flex; align-items: center; gap: 0.75rem; padding: 0.6rem 1rem; background: var(--panel); border-bottom: 1px solid var(--edge); position: sticky; top: 0; }
+.app-title { font-size: 1.1rem; margin: 0; letter-spacing: 0.02em; }
+.app-version { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 0.85rem; }
+.conn-status { color: var(--ok); font-size: 0.8rem; }
+.sp { flex: 1; }
+.seg { display: inline-flex; border: 1px solid var(--edge); border-radius: 0.4rem; overflow: hidden; }
+.seg button { background: transparent; color: var(--muted); border: 0; font: inherit; font-size: 0.82rem; padding: 0.4rem 0.7rem; min-height: 2.1rem; cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--panel-2); color: var(--text); }
+.btn { background: var(--panel); color: var(--text); border: 1px solid var(--edge); border-radius: 0.4rem; padding: 0.4rem 0.6rem; font-size: 0.82rem; cursor: pointer; min-height: 2.1rem; font-family: inherit; }
+.camera-grid { display: grid; gap: 0.9rem; padding: 0.9rem; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
+.camera-block { background: var(--panel); border: 1px solid var(--edge); border-radius: 0.6rem; overflow: hidden; display: flex; flex-direction: column; }
+.camera-block.disabled .controls { opacity: 0.45; pointer-events: none; }
+.block-preview { position: relative; aspect-ratio: 16/9; background: var(--preview); display: flex; align-items: center; justify-content: center; border-bottom: 1px solid var(--edge); }
+.block-preview .img { position: absolute; inset: 0; background: linear-gradient(135deg,#3b1f4d,#8a3a7a 45%,#21152b 70%,#0b0b12); }
+.preview-placeholder { color: #9aa6b4; font-size: 0.85rem; letter-spacing: 0.03em; }
+.block-params { padding: 0.7rem 0.8rem 0.9rem; display: flex; flex-direction: column; gap: 0.7rem; }
+.block-head { display: flex; align-items: baseline; gap: 0.45rem; }
+.cam-num { font-weight: 600; color: var(--muted); font-variant-numeric: tabular-nums; }
+.cam-label { font-weight: 600; }
+.cam-online { margin-left: auto; font-size: 0.72rem; color: var(--ok); }
+.cam-online.bad { color: var(--bad); }
+.cam-registration { font-size: 0.68rem; color: var(--muted); margin: -0.5rem 0 0; }
+.control-warn { padding: 0.5rem 0.6rem; border: 1px solid var(--bad); border-radius: 0.5rem; background: var(--warn-bg); color: var(--text); font-size: 0.85rem; font-weight: 600; }
+.controls { display: flex; flex-direction: column; gap: 0.7rem; }
+.control { background: var(--panel-2); border-radius: 0.5rem; padding: 0.55rem 0.6rem; }
+.control-head { display: flex; justify-content: space-between; color: var(--muted); font-size: 0.8rem; margin-bottom: 0.35rem; }
+.control-head .value { color: var(--text); font-variant-numeric: tabular-nums; }
+.end { color: var(--end); font-size: 0.72rem; margin-left: 0.4rem; }
+.slider-row { display: flex; align-items: center; gap: 0.4rem; }
+.slider { flex: 1 1 auto; min-width: 0; width: 100%; accent-color: var(--accent); height: 1.6rem; }
+.iris .slider { height: 2rem; }
+.step-btn { flex: 0 0 auto; min-width: 2.6rem; min-height: 2.6rem; font-size: 1.15rem; line-height: 1; padding: 0.4rem 0.55rem; }
+.step-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.foot { display: flex; align-items: center; justify-content: space-between; color: var(--muted); font-size: 0.78rem; }
+.note { max-width: 1100px; margin: 0.4rem 1rem 2rem; color: var(--muted); font-size: 0.9rem; }
+.note h2 { color: var(--text); font-size: 1rem; margin: 1rem 0 0.5rem; }
+.note table { border-collapse: collapse; width: 100%; }
+.note td, .note th { border-bottom: 1px solid var(--edge); padding: 0.35rem 0.5rem; text-align: left; }
+.note td.ok { color: var(--ok); }
+@media (max-width: 480px) { .camera-grid { grid-template-columns: 1fr; } .app-header { flex-wrap: wrap; } }
+</style>
+</head>
+<body data-mode="dark">
+<header class="app-header">
+  <h1 class="app-title">bkshading</h1><span class="app-version">v0.3.0</span><span class="conn-status">● spojené</span>
+  <span class="sp"></span>
+  <div class="seg" role="group" aria-label="Režim">
+    <button id="m-light" aria-pressed="false">☀ Svetlo</button>
+    <button id="m-dark" aria-pressed="true">☾ Tma</button>
+  </div>
+  <button class="btn" title="ARRANGE">⇄</button>
+</header>
+<main class="camera-grid" id="grid"></main>
+<section class="note">
+  <h2>v2 podľa spätnej väzby operátora</h2>
+  <ul>
+    <li>Vzhľad je presne ako legacy webka: rovnaké farby, písmo, veľkosti a žiadne tučné hodnoty. Nič nie je zväčšené.</li>
+    <li>Z novej webky ostáva: číslo kamery pred menom, ARRANGE (⇄), varovanie pri kamere, ktorú nejde ovládať, a značka „koniec“ pri clone.</li>
+    <li><b>Tma</b> = farby legacy webky (iba červená je o odtieň svetlejšia, aby bola čitateľná: 5,2:1 namiesto 4,3:1). <b>Svetlo</b> = to isté rozloženie na svetlom podklade pre svietiacu sálu. Každé zariadenie si režim pamätá.</li>
+  </ul>
+  <h2>Kontrast (počítaný naživo, cieľ ≥ 4,5:1)</h2>
+  <table id="ctab"><thead><tr><th>Prvok</th><th>Tma</th><th>Svetlo</th></tr></thead><tbody></tbody></table>
+</section>
+<script>
+const cams = [
+  { n: 1, name: "Cam 1", off: true, reg: "cam1-shading · 10.77.8.121:8771 · neohlásil sa 10 min", warn: "⚠ Relay nedostupný — kamera sa nedá ovládať" },
+  { n: 4, name: "Cam 4", reg: "cam4-shading · 10.77.8.75:8771 · ohlásený pred 3 s · beží 1 h 7 min", f: "f/4.0", end: true, p: 0 },
+  { n: 6, name: "Cam 6", reg: "cam6 · 10.77.9.66:8771 · ohlásený pred 2 s · beží 1 h 8 min", f: "f/3.7", p: 15 },
+  { n: 7, name: "Cam 7", reg: "cam7 · 10.77.9.67:8771 · ohlásený pred 5 s · beží 1 h 8 min", f: "f/3.5", p: 10 },
+];
+const ctl = (lab, val, p, cls = "", extra = "", decOff = false) => `
+  <div class="control ${cls}"><div class="control-head"><span>${lab}</span><span><span class="value">${val}</span>${extra}</span></div>
+  <div class="slider-row"><button class="btn step-btn" ${decOff ? "disabled" : ""}>−</button>
+  <input class="slider" type="range" value="${p}"><button class="btn step-btn">+</button></div></div>`;
+document.getElementById("grid").innerHTML = cams.map(c => `
+  <section class="camera-block ${c.off ? "disabled" : ""}">
+    <div class="block-preview">${c.off ? '<span class="preview-placeholder">NO VIDEO</span>' : '<div class="img"></div>'}</div>
+    <div class="block-params">
+      <div class="block-head"><span class="cam-num">${c.n}</span><span class="cam-label">${c.name}</span>
+        <span class="cam-online ${c.off ? "bad" : ""}">${c.off ? "relay offline" : "online"}</span></div>
+      <div class="cam-registration">${c.reg}</div>
+      ${c.warn ? `<div class="control-warn">${c.warn}</div>` : ""}
+      <div class="controls">
+        ${ctl("Clona", c.off ? "f/—" : c.f, c.p ?? 0, "iris", c.end ? '<span class="end">koniec</span>' : "", !!c.end || c.off)}
+        ${ctl("ISO", c.off ? "—" : "640", 40)}
+        ${ctl("Biely bod", c.off ? "—" : "5000K", 33)}
+        ${ctl("Tint", c.off ? "—" : "0", 50)}
+        ${ctl("Uzávierka", c.off ? "—" : "1/100", 20)}
+        <div class="foot"><span>fps 60.00 · grab 60</span><button class="btn">Auto WB</button></div>
+      </div>
+    </div>
+  </section>`).join("");
+const lum = (hex) => { const v = hex.trim().replace('#', ''); return [0, 2, 4].map(i => parseInt(v.substr(i, 2), 16) / 255)
+  .map(c => c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)).reduce((a, c, i) => a + c * [0.2126, 0.7152, 0.0722][i], 0); };
+const ratio = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
+const pairs = [["Hodnota", "--text", "--panel-2"], ["Popis riadku", "--muted", "--panel-2"], ["Meno kamery", "--text", "--panel"],
+  ["Registrácia", "--muted", "--panel"], ["Online", "--ok", "--panel"], ["Offline / chyba", "--bad", "--panel"], ["Koniec clony", "--end", "--panel-2"]];
+function table() {
+  const cur = document.body.dataset.mode;
+  const get = (m, v) => { document.body.dataset.mode = m; return getComputedStyle(document.body).getPropertyValue(v); };
+  document.querySelector('#ctab tbody').innerHTML = pairs.map(([n, f, b]) => {
+    const d = ratio(get("dark", f), get("dark", b)), l = ratio(get("light", f), get("light", b));
+    const cell = r => `<td class="${r >= 4.5 ? "ok" : ""}">${r.toFixed(1)}:1</td>`;
+    return `<tr><td>${n}</td>${cell(d)}${cell(l)}</tr>`; }).join("");
+  document.body.dataset.mode = cur;
+}
+function setMode(m) { document.body.dataset.mode = m;
+  document.getElementById("m-light").setAttribute("aria-pressed", m === "light");
+  document.getElementById("m-dark").setAttribute("aria-pressed", m === "dark"); }
+document.getElementById("m-light").onclick = () => setMode("light");
+document.getElementById("m-dark").onclick = () => setMode("dark");
+table();
+</script>
+</body>
+</html>
