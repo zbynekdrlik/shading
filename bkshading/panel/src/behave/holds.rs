@@ -21,6 +21,12 @@
 //! shading#27); a refusal (a newer view with `notApplied`, or a write answer that is not 2xx /
 //! never came) or the timeout of a still-unanswered hold reverts the value and flashes it red for
 //! [`FLASH_MS`].
+//!
+//! Each hold carries the id of ITS write ([`Holds::hold`] returns it): an answer is applied only to
+//! the hold whose write it answers, so a late answer of an older write never unlocks or ends a
+//! newer press. A refusal that the view at the press ALREADY showed (a `notApplied` the relay
+//! still carries from an earlier write) counts only once this write is answered: the service
+//! pushes the write's own read-back before it answers.
 
 use std::collections::HashMap;
 
@@ -41,8 +47,9 @@ pub enum HoldKind {
 }
 
 /// One held tap: the text shown, the camera's text at the tap (a step's confirmation basis), the
-/// value the next step builds on (none for a step), the push it was made against, when, and
-/// whether the service already answered its write.
+/// value the next step builds on (none for a step: it builds on the camera's f-stop), the push it
+/// was made against, when, whether that push already flagged the key refused, its write's id, and
+/// whether the service already answered that write.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Hold {
     pub kind: HoldKind,
@@ -51,7 +58,20 @@ pub struct Hold {
     pub value: Option<f64>,
     pub seq: u64,
     pub at_ms: f64,
+    pub was_refused: bool,
+    pub id: u64,
     pub answered: bool,
+}
+
+/// What a press holds: the text shown at once, the camera's text at the press, the base of the
+/// next step, and whether the view at the press already flagged the key refused.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Tap {
+    pub kind: HoldKind,
+    pub text: String,
+    pub from: String,
+    pub value: Option<f64>,
+    pub was_refused: bool,
 }
 
 /// What the service said to a write (`PUT /api/cameras/<id>/params`).
@@ -90,36 +110,33 @@ pub struct Holds {
     map: HashMap<&'static str, Hold>,
     last_press: HashMap<&'static str, f64>,
     flash_until: HashMap<&'static str, f64>,
+    /// The last write id handed out (0 = none: a write no hold owns answers with id 0).
+    last_id: u64,
 }
 
 impl Holds {
-    /// A tap on `key`, made against push `seq` at `now`, holds `text` (and `value`, the base of the
-    /// next step; `from`, the camera's text at the tap). It is also the key's last accepted press.
-    #[allow(clippy::too_many_arguments)]
-    pub fn hold(
-        &mut self,
-        key: &'static str,
-        kind: HoldKind,
-        text: String,
-        from: String,
-        value: Option<f64>,
-        seq: u64,
-        now: f64,
-    ) {
+    /// A tap on `key`, made against push `seq` at `now`, holds `tap`. It is also the key's last
+    /// accepted press. Returns the id of the tap's write (never 0), which its answer carries back.
+    pub fn hold(&mut self, key: &'static str, tap: Tap, seq: u64, now: f64) -> u64 {
+        self.last_id += 1;
+        let id = self.last_id;
         self.map.insert(
             key,
             Hold {
-                kind,
-                text,
-                from,
-                value,
+                kind: tap.kind,
+                text: tap.text,
+                from: tap.from,
+                value: tap.value,
                 seq,
                 at_ms: now,
+                was_refused: tap.was_refused,
+                id,
                 answered: false,
             },
         );
         self.last_press.insert(key, now);
         self.flash_until.remove(key);
+        id
     }
 
     /// Whether a press of `key` at `now` goes through: no write of the key is still unanswered
@@ -134,13 +151,14 @@ impl Holds {
         !locked && !bounced
     }
 
-    /// The service answered the write of `key`: a 2xx ends the lock (the hold keeps its target
-    /// until a view confirms it), anything else ends the hold and flashes the value red.
-    pub fn answered(&mut self, key: &str, answer: WriteAnswer, now: f64) {
+    /// The service answered write `id` of `key`: a 2xx ends the lock (the hold keeps its target
+    /// until a view confirms it), anything else ends the hold and flashes the value red. An answer
+    /// of another write (an older press, a write no hold owns) changes nothing.
+    pub fn answered(&mut self, key: &str, id: u64, answer: WriteAnswer, now: f64) {
         let Some((&k, h)) = self.map.get_key_value(key) else {
             return;
         };
-        if h.answered {
+        if h.answered || h.id != id {
             return;
         }
         match answer {
@@ -167,7 +185,9 @@ impl Holds {
             HoldKind::Step => (STEP_HOLD_MS, seen.pushed != h.from),
         };
         let newer = seen.seq > h.seq;
-        let refused = newer && seen.refused;
+        // A refusal the press's own view already showed is an earlier write's until this write's
+        // read-back (pushed before the answer) is in.
+        let refused = newer && seen.refused && (!h.was_refused || h.answered);
         let timed_out = seen.now - h.at_ms >= limit;
         let ends = refused || (newer && confirmed) || timed_out;
         if !ends {
@@ -215,28 +235,27 @@ mod tests {
         }
     }
 
-    fn value(h: &mut Holds, key: &'static str, text: &str, v: f64, seq: u64, now: f64) {
-        h.hold(
-            key,
-            HoldKind::Value,
-            text.into(),
-            "old".into(),
-            Some(v),
-            seq,
-            now,
-        );
+    fn tap(kind: HoldKind, text: &str, from: &str, value: Option<f64>) -> Tap {
+        Tap {
+            kind,
+            text: text.into(),
+            from: from.into(),
+            value,
+            was_refused: false,
+        }
     }
 
-    fn step(h: &mut Holds, guess: &str, from: &str, seq: u64, now: f64) {
+    fn value(h: &mut Holds, key: &'static str, text: &str, v: f64, seq: u64, now: f64) -> u64 {
+        h.hold(key, tap(HoldKind::Value, text, "old", Some(v)), seq, now)
+    }
+
+    fn step(h: &mut Holds, guess: &str, from: &str, seq: u64, now: f64) -> u64 {
         h.hold(
             "apertureStep",
-            HoldKind::Step,
-            guess.into(),
-            from.into(),
-            None,
+            tap(HoldKind::Step, guess, from, None),
             seq,
             now,
-        );
+        )
     }
 
     #[test]
@@ -284,8 +303,8 @@ mod tests {
     #[test]
     fn an_answered_hold_that_times_out_settles_quietly() {
         let mut h = Holds::default();
-        value(&mut h, "iso", "800", 800.0, 1, 0.0);
-        h.answered("iso", WriteAnswer::Accepted, 50.0);
+        let id = value(&mut h, "iso", "800", 800.0, 1, 0.0);
+        h.answered("iso", id, WriteAnswer::Accepted, 50.0);
         assert!(h.reconcile("iso", seen("400", false, 2, 100.0)).is_some());
         assert!(h
             .reconcile("iso", seen("400", false, 2, VALUE_HOLD_MS))
@@ -336,12 +355,12 @@ mod tests {
     fn the_row_is_locked_until_the_answer_and_debounced_for_300_ms() {
         let mut h = Holds::default();
         assert!(h.accepts("tint", 0.0), "a free key accepts");
-        value(&mut h, "tint", "+1", 1.0, 1, 1000.0);
+        let id = value(&mut h, "tint", "+1", 1.0, 1, 1000.0);
         assert!(h.is_pending("tint"));
         assert!(!h.accepts("tint", 1010.0), "a double press");
         assert!(!h.accepts("tint", 5000.0), "still unanswered: locked");
         assert!(h.accepts("iso", 1010.0), "only the pressed row");
-        h.answered("tint", WriteAnswer::Accepted, 1100.0);
+        h.answered("tint", id, WriteAnswer::Accepted, 1100.0);
         assert!(!h.is_pending("tint") && h.is_held("tint"));
         assert!(
             !h.accepts("tint", 1000.0 + DEBOUNCE_MS - 1.0),
@@ -354,19 +373,75 @@ mod tests {
     #[test]
     fn a_failed_write_drops_its_hold_and_flashes() {
         let mut h = Holds::default();
-        value(&mut h, "tint", "+1", 1.0, 1, 0.0);
-        h.answered("tint", WriteAnswer::Failed, 20.0);
+        let id = value(&mut h, "tint", "+1", 1.0, 1, 0.0);
+        h.answered("tint", id, WriteAnswer::Failed, 20.0);
         assert!(!h.is_held("tint") && h.flashing("tint", 20.0));
         assert!(h.accepts("tint", 20.0 + DEBOUNCE_MS));
         assert!(h.reconcile("tint", seen("0", false, 2, 30.0)).is_none());
         assert!(h.reconcile("nothing", seen("x", false, 2, 1.0)).is_none());
         // An answer for a hold that already ended, or a second answer, changes nothing.
-        h.answered("nothing", WriteAnswer::Failed, 40.0);
+        h.answered("nothing", 1, WriteAnswer::Failed, 40.0);
         assert!(!h.flashing("nothing", 40.0));
-        value(&mut h, "iso", "800", 800.0, 1, 0.0);
-        h.answered("iso", WriteAnswer::Accepted, 10.0);
-        h.answered("iso", WriteAnswer::Failed, 20.0);
+        let id = value(&mut h, "iso", "800", 800.0, 1, 0.0);
+        h.answered("iso", id, WriteAnswer::Accepted, 10.0);
+        h.answered("iso", id, WriteAnswer::Failed, 20.0);
         assert!(h.is_held("iso") && !h.flashing("iso", 20.0));
+    }
+
+    /// Review finding: a late answer of an older write must never unlock or end a newer press.
+    #[test]
+    fn an_answer_reaches_only_the_hold_of_its_own_write() {
+        let mut h = Holds::default();
+        let first = value(&mut h, "iso", "800", 800.0, 1, 0.0);
+        // The first hold timed out unanswered; the operator pressed again.
+        assert!(h
+            .reconcile("iso", seen("400", false, 1, VALUE_HOLD_MS))
+            .is_none());
+        let second = value(&mut h, "iso", "800", 800.0, 1, VALUE_HOLD_MS + 10.0);
+        assert_ne!(first, second);
+        h.answered("iso", first, WriteAnswer::Accepted, VALUE_HOLD_MS + 20.0);
+        assert!(
+            h.is_pending("iso"),
+            "the old answer does not unlock the new press"
+        );
+        h.answered("iso", first, WriteAnswer::Failed, VALUE_HOLD_MS + 30.0);
+        assert!(h.is_held("iso"), "nor end it");
+        h.answered("iso", 0, WriteAnswer::Failed, VALUE_HOLD_MS + 40.0);
+        assert!(
+            h.is_pending("iso"),
+            "a write no hold owns (id 0) changes nothing"
+        );
+        h.answered("iso", second, WriteAnswer::Failed, VALUE_HOLD_MS + 50.0);
+        assert!(!h.is_held("iso") && h.flashing("iso", VALUE_HOLD_MS + 50.0));
+    }
+
+    /// Review finding: a `notApplied` an EARLIER write left in the relay's state, still in the
+    /// view the press was made against, must not refuse the new press from an unrelated newer
+    /// push (a tally change); it counts once the write's own answer is in.
+    #[test]
+    fn an_earlier_refusal_counts_only_after_this_writes_answer() {
+        let mut h = Holds::default();
+        let mut t = tap(HoldKind::Value, "5700 K", "5600 K", Some(5700.0));
+        t.was_refused = true;
+        let id = h.hold("kelvin", t, 1, 0.0);
+        assert!(
+            h.reconcile("kelvin", seen("5600 K", true, 2, 10.0))
+                .is_some(),
+            "a newer push about the tally still carries the old refusal"
+        );
+        h.answered("kelvin", id, WriteAnswer::Accepted, 20.0);
+        assert!(h
+            .reconcile("kelvin", seen("5600 K", true, 2, 30.0))
+            .is_none());
+        assert!(
+            h.flashing("kelvin", 30.0),
+            "refused again: the write's own read-back"
+        );
+        // Without an earlier refusal a newer refusing view ends the hold at once.
+        value(&mut h, "kelvin", "5700 K", 5700.0, 1, 100.0);
+        assert!(h
+            .reconcile("kelvin", seen("5600 K", true, 2, 110.0))
+            .is_none());
     }
 
     #[test]

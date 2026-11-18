@@ -255,17 +255,19 @@ button { font: inherit; color: inherit; }
     border-radius: calc(var(--s) * 2); background: var(--track); overflow: hidden; pointer-events: none;
 }
 .mid .pend::before {
-    content: ""; position: absolute; top: 0; bottom: 0; width: 40%; border-radius: inherit;
+    content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 40%; border-radius: inherit;
     background: var(--accent); animation: pend-run 0.9s ease-in-out infinite;
 }
-@keyframes pend-run { from { left: -40%; } to { left: 100%; } }
-.mid .val.flash { animation: val-flash 1.4s ease-out; }
+/* transform only (no layout per frame); 250 % of the runner = the whole bar. */
+@keyframes pend-run { from { transform: translateX(-100%); } to { transform: translateX(250%); } }
+/* As long as FLASH_MS (behave/holds.rs). */
+.mid .val.flash { animation: val-flash 1.5s ease-out; }
 @keyframes val-flash {
     0%, 35% { color: var(--bad-text); background: var(--bad-bg); }
     100% { background: transparent; }
 }
 @media (prefers-reduced-motion: reduce) {
-    .mid .pend::before { animation: none; left: 30%; }
+    .mid .pend::before { animation: none; transform: translateX(75%); }
 }
 /* The value opens the slider; the open slider's value is highlighted. */
 .row.open .mid .val { background: var(--accent); color: var(--card); text-shadow: none; }

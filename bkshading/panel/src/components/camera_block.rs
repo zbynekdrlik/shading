@@ -37,8 +37,9 @@ fn set_rows(rows: RwSignal<Vec<RowView>>, v: Vec<RowView>) {
     }
 }
 
-/// Sends one write and hands the service's answer to the steppers (shading#29: a 2xx unlocks the
-/// row, anything else or no answer reverts it with a red flash), then redraws the block.
+/// Sends write `write` (the id of its hold, 0 for a write no hold owns) and hands the service's
+/// answer to the steppers (shading#29: a 2xx unlocks the row, anything else or no answer reverts
+/// it with a red flash), then redraws the block.
 fn send(
     store: Store,
     steppers: StoredValue<Steppers>,
@@ -46,13 +47,14 @@ fn send(
     id: String,
     key: &'static str,
     value: serde_json::Value,
+    write: u64,
 ) {
     spawn_local(async move {
         let answer = WriteAnswer::of(net::put_param(&id, key, value).await.ok());
         let now = net::now_ms();
         // The block may be gone by now (hidden in ARRANGE): every access is fallible.
         if steppers
-            .try_update_value(|s| s.answered(key, answer, now))
+            .try_update_value(|s| s.answered(key, write, answer, now))
             .is_none()
         {
             return;
@@ -103,7 +105,7 @@ pub fn CameraBlock(id: String) -> impl IntoView {
         if let Some(v) = steppers.try_update_value(|s| s.view(&c, now)) {
             set_rows(rows, v);
         }
-        send(store, steppers, rows, c.id.clone(), p.key, p.value);
+        send(store, steppers, rows, c.id.clone(), p.key, p.value, p.id);
     };
 
     // The slider of `row` released at `raw`: the write (held like a tap), or false when nothing
@@ -129,7 +131,7 @@ pub fn CameraBlock(id: String) -> impl IntoView {
             p.key,
             p.value
         );
-        send(store, steppers, rows, c.id.clone(), p.key, p.value);
+        send(store, steppers, rows, c.id.clone(), p.key, p.value, p.id);
         true
     };
 
@@ -259,7 +261,7 @@ pub fn CameraBlock(id: String) -> impl IntoView {
                             type="button"
                             class="wb"
                             data-role="auto-wb"
-                            on:click=move |_| send(store, steppers, rows, id.get_value(), "autoWb", serde_json::json!(true))
+                            on:click=move |_| send(store, steppers, rows, id.get_value(), "autoWb", serde_json::json!(true), 0)
                         >
                             "Auto WB"
                         </button>
@@ -286,7 +288,7 @@ pub fn CameraBlock(id: String) -> impl IntoView {
                         on:click=move |_| {
                             // issue 809: an explicit click only, never an automatic write.
                             if let Some((_, grab)) = sync().and_then(|s| s.align) {
-                                send(store, steppers, rows, id.get_value(), "fps", serde_json::json!(grab));
+                                send(store, steppers, rows, id.get_value(), "fps", serde_json::json!(grab), 0);
                             }
                         }
                     >

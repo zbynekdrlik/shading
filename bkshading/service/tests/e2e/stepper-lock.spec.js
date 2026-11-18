@@ -95,6 +95,37 @@ test("a double click sends ONE write, console clean (shading#29)", async ({ page
   gate.assertClean();
 });
 
+// The lock alone already drops the second click of a fast double click; this one proves the 300 ms
+// guard: the second press lands AFTER the first write's answer (the row is free again) but within
+// 300 ms of the first press, so only the guard can drop it.
+test("a second press after a fast answer but within 300 ms is ignored, console clean (shading#29)", async ({ page }) => {
+  const gate = consoleGate(page);
+  try {
+    await open(page);
+    const inc = page.locator('[data-role="kelvin-inc"]');
+    const bar = page.locator('[data-role="kelvin-pending"]');
+    const before = await writes(page);
+    const t0 = Date.now();
+    await inc.click();
+    await expect(bar).toBeHidden({ timeout: 2000 });
+    await expect(inc).not.toHaveAttribute("aria-busy", "true");
+    const answeredAfter = Date.now() - t0;
+    await inc.click();
+    const secondAfter = Date.now() - t0;
+    // Loud, never vacuous: if the answer was slower than the window the test proves nothing.
+    expect(secondAfter, `the answer took ${answeredAfter} ms`).toBeLessThan(300);
+    await page.waitForTimeout(800);
+    expect(await writes(page), "the second press was dropped").toBe(before + 1);
+    await expect(page.locator('[data-role="kelvin-val"]')).toHaveText("5700 K");
+    // Past the window a press writes again.
+    await inc.click();
+    await expect.poll(() => writes(page)).toBe(before + 2);
+  } finally {
+    await page.request.post(`${STUB}/__reset`);
+  }
+  gate.assertClean();
+});
+
 test("a refused write reverts the value and flashes it red, console clean (shading#29)", async ({ page }) => {
   const gate = consoleGate(page);
   try {

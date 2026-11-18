@@ -15,7 +15,7 @@
 
 use bkshading_proto::wire::CameraView;
 
-use super::holds::HoldKind;
+use super::holds::{HoldKind, Tap};
 use super::steppers::{
     choices, fps_text, iris_at_end, linear_range, nearest_index, pushed, tint_text, Live, Press,
     Row, Steppers,
@@ -90,6 +90,11 @@ impl Steppers {
         let seq = self.seq;
         let live = Live::of(cam);
         let key = row.key();
+        // shading#29: a release while the row's last write is unanswered writes nothing; the thumb
+        // goes back. (The 300 ms double-press guard is for the buttons: a release is deliberate.)
+        if self.holds.is_pending(key) {
+            return None;
+        }
         let from = pushed(row, &live).0;
         let base = self
             .holds
@@ -143,8 +148,14 @@ impl Steppers {
                 (text, v as f64, serde_json::json!(v))
             }
         };
-        self.holds
-            .hold(key, HoldKind::Value, text, from, Some(target), seq, now);
+        let tap = Tap {
+            kind: HoldKind::Value,
+            text,
+            from,
+            value: Some(target),
+            was_refused: current.not_applied,
+        };
+        let id = self.holds.hold(key, tap, seq, now);
         Some(Press {
             key: if row == Row::Aperture {
                 "apertureNorm"
@@ -152,6 +163,7 @@ impl Steppers {
                 key
             },
             value,
+            id,
         })
     }
 }
@@ -159,6 +171,7 @@ impl Steppers {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::behave::holds::WriteAnswer;
     use crate::behave::steppers::tests::cam;
     use crate::behave::steppers::RowView;
     use bkshading_proto::wire::ShadingParams;
@@ -279,7 +292,10 @@ mod tests {
         assert_eq!(p.value, serde_json::json!(1.0));
         let r = row(&s.view(&c, 1.0), Row::Aperture);
         assert_eq!((r.text.as_str(), r.pending), ("f/8.0", true));
-        let p = s.slide(Row::Aperture, 1.0, &c, 0.0).unwrap();
+        // shading#29: a second release waits for the first write's answer.
+        assert_eq!(s.slide(Row::Aperture, 1.0, &c, 500.0), None);
+        s.answered("apertureNorm", p.id, WriteAnswer::Accepted, 600.0);
+        let p = s.slide(Row::Aperture, 1.0, &c, 610.0).unwrap();
         assert!((p.value.as_f64().unwrap() - 1.0 / 3.0).abs() < 1e-9);
     }
 
