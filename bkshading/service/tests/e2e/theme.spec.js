@@ -263,8 +263,10 @@ test("a tap on the value opens its slider; the release writes once; a second tap
   await expect(slider).toBeHidden();
   // No text was selected by the taps (an app, not a web page).
   expect(await page.evaluate(() => String(window.getSelection()))).toBe("");
-  expect(await val.evaluate((el) => getComputedStyle(el).userSelect)).toBe("none");
-  expect(await page.locator(".reg").first().evaluate((el) => getComputedStyle(el).userSelect)).toBe("text");
+  // WebKit reports it only as the prefixed property.
+  const select = (el) => getComputedStyle(el).userSelect || getComputedStyle(el).webkitUserSelect;
+  expect(await val.evaluate(select)).toBe("none");
+  expect(await page.locator(".reg").first().evaluate(select)).toBe("text");
   gate.assertClean();
 });
 
@@ -389,5 +391,47 @@ test("no layout shift: a push, a warning, a tally and a pane switch move no card
   // A pane switch.
   await page.locator('[data-role="pane-sys"]').first().click();
   expect(await geometry(page)).toEqual(before);
+  gate.assertClean();
+});
+
+test("on a phone the bar is title + state + ☰, the controls open in an overlay menu, console clean (shading#24 version D)", async ({ page }) => {
+  const gate = consoleGate(page);
+  await openWith(page, 3, 390, 844);
+  const burger = page.locator('[data-role="menu-key"]');
+  const five = page.locator('[data-role="layout-five"]');
+
+  await expect(burger).toBeVisible();
+  await expect(burger).toHaveAttribute("aria-expanded", "false");
+  await expect(burger).toHaveAttribute("aria-controls", "top-menu");
+  await expect(page.locator('[data-role="version"]')).toBeHidden();
+  for (const role of ["layout-pill", "mode-pill", "arrange-key"]) await expect(page.locator(`[data-role="${role}"]`)).toBeHidden();
+  const noScrollX = () => page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth);
+  expect(await noScrollX()).toBe(true);
+
+  // Opening the menu moves no card (an overlay over them).
+  const before = await geometry(page);
+  await burger.click();
+  await expect(burger).toHaveAttribute("aria-expanded", "true");
+  await expect(five).toBeVisible();
+  await expect(page.locator('[data-role="mode-pill"]')).toBeVisible();
+  const key = page.locator('[data-role="arrange-key"]');
+  await expect(key).toBeVisible();
+  expect(await key.evaluate((el) => getComputedStyle(el, "::after").content)).toBe('" ARRANGE"');
+  expect(await geometry(page)).toEqual(before);
+  expect(await noScrollX()).toBe(true);
+
+  // "5" chosen in the menu applies the layout (a phone shows one card a screen, the row scrolls).
+  await five.click();
+  await expect(page.locator("html")).toHaveAttribute("data-layout", "five");
+  await expect(five).toHaveAttribute("aria-pressed", "true");
+  expect(await noScrollX()).toBe(true);
+  await burger.click();
+  await expect(five).toBeHidden();
+
+  // Above 700 px nothing changed: no burger, the pills sit in the bar.
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await expect(burger).toBeHidden();
+  await expect(five).toBeVisible();
+  await expect(page.locator('[data-role="version"]')).toBeVisible();
   gate.assertClean();
 });

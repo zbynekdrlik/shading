@@ -311,7 +311,24 @@ dialog.info button {
     background: var(--btn); color: var(--btn-text); font-weight: 600; cursor: pointer;
 }
 
-@media (max-width: 420px) {
-    .bar { flex-wrap: wrap; white-space: normal; }
-    .note { display: none; }
+/* Version D (Marcel): on a phone the top bar is only the title, the connection state and a
+   hamburger; the pills, ARRANGE and its helpers live in the menu it opens: an overlay under the bar
+   (z-index 10, right-aligned, a column), so the cards never move. Above 700 px the menu is
+   `display: contents` (its buttons sit in the bar as before) and the burger is gone. */
+.menu { display: contents; }
+.burger { display: none; }
+@media (max-width: 700px) {
+    .ver, .note { display: none; }
+    .burger { display: inline-block; }
+    .menu {
+        display: none; position: absolute; top: 100%; right: 8px; z-index: 10;
+        flex-direction: column; align-items: stretch; gap: 10px; padding: 12px;
+        background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+    }
+    .menu.open { display: flex; }
+    .menu .seg { display: flex; }
+    .menu .seg button { flex: 1; white-space: nowrap; padding: 0 10px; }
+    .menu .arrange-key { display: block; padding: 0 14px; }
+    .menu .arrange-key::after { content: " ARRANGE"; font-size: 15px; font-weight: 600; }
 }

@@ -276,6 +276,13 @@ the house app stack airuleset#1333); mockup `docs/mockups/arrange-v1.html` appro
     clona index over `fNumberChoices` -> `apertureNorm = idx/(n-1)` (refused toward a reached
     `irisRangePos` end), ISO/uzávierka/FPS index -> absolute choice, biely bod 50 K grain / tint ->
     absolute; held as a Value hold under the row's key; a release on the shown value writes nothing.
+  - Phone (< 700 px, version D): the bar is title + connection + `☰` (`data-role="menu-key"`,
+    `aria-controls="top-menu"`); `.menu` holds the hidden chip, `↺`, both pills and `⇄` (labelled
+    "⇄ ARRANGE" by `::after`) as an absolute overlay under the sticky bar; above 700 px `.menu` is
+    `display: contents`, so the desktop bar is unchanged. WebKit: run `theme.spec.js` with
+    `@playwright/test@1.58.2` in a scratch dir (its webkit-2248 is in `/opt/ms-playwright`; the
+    repo's 1.49.1 wants webkit-2104) and `PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright`; WebKit
+    reports `user-select` only as `webkitUserSelect`.
   - Tally: only the `.cam.pgm` / `.cam.pvw` / `.tally` CSS (the 2 px border is always there); the
     data is shading#25.
 - **Crate `bkshading/panel`:** `behave/` = pure rules, natively tested (`cargo test -p bkshading-panel`):
