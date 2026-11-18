@@ -318,12 +318,29 @@ pub struct CameraView {
     /// reads as `None`.
     #[serde(default)]
     pub address: Option<String>,
+    /// The camera's tally (shading#25, additive): `pgm` while it is LIVE in program, `pvw` while it
+    /// is in preview, `null` otherwise, with no tally source configured, while OBS is not
+    /// connected, or while the tally service does not answer. From the strih tally service's
+    /// `/state` (`pgm`/`pvw` = camera NUMBERS, `camN` <- N). `#[serde(default)]`: an older
+    /// service's view reads as `None`.
+    #[serde(default)]
+    pub tally: Option<Tally>,
     /// Whether the panel can control this camera and, if not, why (shading#14):
     /// [`crate::control::control_status`] of `reachable` + `state`. The panel shows a warning
     /// badge for anything but [`ControlStatus::Ok`]. `#[serde(default)]`: an older service's view
     /// reads as `Ok` (no badge).
     #[serde(default)]
     pub control: ControlStatus,
+}
+
+/// A camera's tally (shading#25). Wire: `"pgm"` / `"pvw"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Tally {
+    /// LIVE in program.
+    Pgm,
+    /// In preview (the next cut).
+    Pvw,
 }
 
 /// Whether a camera block can be controlled, and why not (shading#14). Wire: kebab-case.

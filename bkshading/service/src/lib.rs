@@ -9,3 +9,4 @@ pub mod layout;
 pub mod monitor;
 pub mod preview;
 pub mod registry;
+pub mod tally;

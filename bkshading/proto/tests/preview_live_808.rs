@@ -21,6 +21,7 @@ fn view(preview_live: bool) -> CameraView {
         state: None,
         registration: None,
         address: None,
+        tally: None,
         control: Default::default(),
     }
 }

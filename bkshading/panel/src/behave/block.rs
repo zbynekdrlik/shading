@@ -3,7 +3,7 @@
 //! and the fps-vs-grab line with its explicit align button (issues 809, 1402).
 
 use bkshading_proto::layout::camera_number;
-use bkshading_proto::wire::{CameraView, FpsSync, RegistrationView};
+use bkshading_proto::wire::{CameraView, FpsSync, RegistrationView, Tally};
 
 /// `cam7` -> `7`; an id without a number shows the id.
 pub fn number_text(id: &str) -> String {
@@ -129,6 +129,16 @@ pub fn status_title(cam: &CameraView) -> String {
         .map_or_else(|| status_line(cam), registration_title)
 }
 
+/// The card's tally (shading#25, mockup theme-v4d): the class on the card (`pgm` = red border +
+/// tint, `pvw` = green border; the 2 px border is always there, so nothing moves) and the badge
+/// text in the head. `None` = no tally.
+pub fn tally_badge(cam: &CameraView) -> Option<(&'static str, &'static str)> {
+    match cam.tally? {
+        Tally::Pgm => Some(("pgm", "PGM")),
+        Tally::Pvw => Some(("pvw", "PVW")),
+    }
+}
+
 /// The fps-vs-grab line (issue 809): shown only with a grab rate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FpsSyncView {
@@ -236,6 +246,16 @@ mod tests {
         reg.fresh = false;
         reg.age_s = 600;
         assert_eq!(registration_short(&reg), "cam6 · 10.77.9.66:8771 · ↻ 10m ⚠");
+    }
+
+    #[test]
+    fn the_tally_badge_follows_the_views_tally_25() {
+        let mut c = cam();
+        assert_eq!(tally_badge(&c), None);
+        c.tally = Some(Tally::Pgm);
+        assert_eq!(tally_badge(&c), Some(("pgm", "PGM")));
+        c.tally = Some(Tally::Pvw);
+        assert_eq!(tally_badge(&c), Some(("pvw", "PVW")));
     }
 
     #[test]

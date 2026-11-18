@@ -164,6 +164,7 @@ fn camera_view_carries_grab_fps_desync_camel_case() {
         state: None,
         registration: None,
         address: None,
+        tally: None,
         control: Default::default(),
     };
     let json = serde_json::to_string(&view).unwrap();

@@ -19,6 +19,7 @@ use bkshading_proto::wire::{
 use crate::config::{CameraConfig, ServiceConfig};
 use crate::preview::store::{wall_clock_ms, PreviewStore};
 use crate::registry::RelayRegistry;
+use crate::tally::{apply_tally, TallyState};
 
 /// Pure assembly of a [`CameraView`] from a camera's config and its (optional) relay state.
 /// Split out so the mapping — including "has NDI preview iff `ndi_preview` is configured"
@@ -76,6 +77,7 @@ pub fn camera_view(
         state,
         registration: None,
         address: static_address(cam),
+        tally: None,
         control,
     }
 }
@@ -114,8 +116,11 @@ pub fn aggregate_with_camera_update(
     let mut agg = current.clone();
     if let Some(slot) = agg.cameras.iter_mut().find(|c| c.id == cam.id) {
         let registration = slot.registration.take();
+        let tally = slot.tally;
         *slot = camera_view(cam, Some(relay_state), slot.preview_live);
         slot.registration = registration;
+        // shading#25: the tally comes from the tally service, not the relay.
+        slot.tally = tally;
     }
     agg
 }
@@ -169,6 +174,9 @@ pub struct Aggregator {
     /// When each camera's last write got its relay answer with the post-write state (shading#27):
     /// the pump keeps the confirmed view of a camera written after its snapshot's polls started.
     last_write_done: Arc<Mutex<HashMap<String, Instant>>>,
+    /// The latest tally from the strih tally service (shading#25), `None` while off / unknown.
+    /// Every snapshot carries it, so the pump and `GET /api/cameras` never drop it.
+    tally: Arc<Mutex<Option<TallyState>>>,
 }
 
 impl Aggregator {
@@ -194,7 +202,18 @@ impl Aggregator {
             version: version.into(),
             registry,
             last_write_done: Arc::new(Mutex::new(HashMap::new())),
+            tally: Arc::new(Mutex::new(None)),
         })
+    }
+
+    /// The tally every snapshot applies (shading#25).
+    pub fn tally(&self) -> Option<TallyState> {
+        *self.tally.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Stores the tally the tally task read (shading#25).
+    pub fn set_tally(&self, tally: Option<TallyState>) {
+        *self.tally.lock().unwrap_or_else(|e| e.into_inner()) = tally;
     }
 
     /// The write stamps [`merge_fresher`] reads (a copy: one entry per camera).
@@ -261,13 +280,11 @@ impl Aggregator {
                 view
             })
             .collect();
-        (
-            Aggregate {
-                version: self.version.clone(),
-                cameras,
-            },
-            polled_from,
-        )
+        let agg = Aggregate {
+            version: self.version.clone(),
+            cameras,
+        };
+        (apply_tally(&agg, self.tally().as_ref()), polled_from)
     }
 
     /// Reads one relay's `/api/state`, returning `None` if unreachable / malformed.

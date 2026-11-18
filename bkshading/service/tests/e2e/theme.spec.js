@@ -379,12 +379,11 @@ test("no layout shift: a push, a warning, a tally and a pane switch move no card
   await expect(page.locator('[data-id="cam4"] [data-role="fps-set-grab"]')).toBeVisible();
   expect(await geometry(page)).toEqual(before);
 
-  // The tally recolours only (its data comes later): PGM on one card, PVW on another.
-  await page.evaluate(() => {
-    const cards = document.querySelectorAll('[data-role="camera-block"]');
-    cards[0].classList.add("pgm");
-    cards[2].classList.add("pvw");
-  });
+  // The tally recolours only (shading#25): PGM on one card, PVW on another.
+  agg.cameras[0].tally = "pgm";
+  agg.cameras[2].tally = "pvw";
+  await pushState(page, agg);
+  await expect(page.locator('[data-id="cam1"] [data-role="tally"]')).toHaveText("PGM");
   expect(await page.locator('[data-role="camera-block"]').first().evaluate((el) => getComputedStyle(el).borderTopColor)).toBe("rgb(229, 52, 58)");
   expect(await geometry(page)).toEqual(before);
 
@@ -563,6 +562,56 @@ test("the status line is always one line: online and offline cards put their fir
   await pushState(page, flipped);
   await expect(page.locator('[data-id="cam1"] [data-role="registration"]')).toHaveText("—");
   await expect(page.locator('[data-id="cam2"] [data-role="registration"]')).toHaveText("cam2 · 10.77.8.64:8771 · ↻ 2s · ▲ 1h08m");
+  expect(await geometry(page)).toEqual(before);
+  gate.assertClean();
+});
+
+test("the PGM/PVW tally follows the push: red border + tint + PGM badge, green PVW edge, nothing moves, console clean (shading#25)", async ({ page }) => {
+  const gate = consoleGate(page);
+  await openWith(page, 4);
+  const card = (id) => page.locator(`[data-id="${id}"]`);
+  const look = (id) =>
+    card(id).evaluate((el) => {
+      const cs = getComputedStyle(el);
+      return { border: cs.borderTopColor, width: cs.borderTopWidth, bg: cs.backgroundColor };
+    });
+  const plain = await look("cam1");
+  expect(plain.width).toBe("2px");
+  const before = await geometry(page);
+
+  const agg = cams(4);
+  agg.cameras[0].tally = "pgm";
+  agg.cameras[2].tally = "pvw";
+  await pushState(page, agg);
+  await expect(card("cam1")).toHaveClass(/\bpgm\b/);
+  await expect(card("cam1").locator('[data-role="tally"]')).toHaveText("PGM");
+  await expect(card("cam3")).toHaveClass(/\bpvw\b/);
+  await expect(card("cam3").locator('[data-role="tally"]')).toHaveText("PVW");
+  await expect(card("cam2").locator('[data-role="tally"]')).toHaveCount(0);
+  const pgm = await look("cam1");
+  expect(pgm.border).toBe("rgb(229, 52, 58)");
+  expect(pgm.width).toBe("2px");
+  expect(pgm.bg, "the PGM card is tinted").not.toBe(plain.bg);
+  const pvw = await look("cam3");
+  expect(pvw.border).toBe("rgb(47, 174, 92)");
+  expect(pvw.bg, "PVW is an edge only").toBe(plain.bg);
+  expect(await geometry(page)).toEqual(before);
+
+  // A cut: cam3 goes live, cam1 to preview.
+  agg.cameras[0].tally = "pvw";
+  agg.cameras[2].tally = "pgm";
+  await pushState(page, agg);
+  await expect(card("cam3")).toHaveClass(/\bpgm\b/);
+  await expect(card("cam1")).toHaveClass(/\bpvw\b/);
+  await expect(card("cam1")).not.toHaveClass(/\bpgm\b/);
+  expect((await look("cam3")).bg).toBe(pgm.bg);
+  expect(await geometry(page)).toEqual(before);
+
+  // The tally goes away (OBS lost): every card plain again.
+  for (const c of agg.cameras) c.tally = null;
+  await pushState(page, agg);
+  await expect(page.locator('[data-role="tally"]')).toHaveCount(0);
+  expect(await look("cam3")).toEqual(plain);
   expect(await geometry(page)).toEqual(before);
   gate.assertClean();
 });

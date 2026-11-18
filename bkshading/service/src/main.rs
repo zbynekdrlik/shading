@@ -119,6 +119,18 @@ async fn main() -> Result<()> {
     // issue 1337: share the publish handle so `set_params` can push an immediate confirmation over
     // the WS after a write (the pump also holds a clone for its ~2 s cadence snapshots).
     let live_tx = Arc::new(live_tx);
+    // shading#25: the PGM/PVW tally from the strih tally service, only with a `[tally] url`.
+    match config.tally.poll_url() {
+        Some(url) => {
+            tokio::spawn(bkshading::tally::run(
+                url.to_string(),
+                bkshading::tally::TALLY_POLL_INTERVAL,
+                agg.clone(),
+                live_tx.clone(),
+            ));
+        }
+        None => tracing::info!("tally: off (no [tally] url in the config)"),
+    }
     {
         let agg = agg.clone();
         let config = config.clone();
@@ -185,6 +197,9 @@ async fn main() -> Result<()> {
                         polled_from,
                         &writes,
                     );
+                    // shading#25: the tally as it is NOW (the tally task may have moved it while
+                    // the polls ran; it publishes under this same lock).
+                    let merged = bkshading::tally::apply_tally(&merged, agg.tally().as_ref());
                     *current = Arc::new(merged);
                 });
             }

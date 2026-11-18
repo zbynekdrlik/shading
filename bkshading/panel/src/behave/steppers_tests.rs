@@ -51,6 +51,7 @@ pub(crate) fn cam() -> CameraView {
         }),
         registration: None,
         address: None,
+        tally: None,
         control: ControlStatus::Ok,
     }
 }

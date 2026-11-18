@@ -10,7 +10,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 
 use crate::behave::block::{
-    fps_sync, is_online, number_text, online_text, status_line, status_title,
+    fps_sync, is_online, number_text, online_text, status_line, status_title, tally_badge,
 };
 use crate::behave::steppers::{Pane, Row, RowView, Steppers};
 use crate::components::arrange::Cover;
@@ -140,6 +140,8 @@ pub fn CameraBlock(id: String) -> impl IntoView {
         })
     };
     let sync = move || cam.with(|c| c.as_ref().and_then(fps_sync));
+    // shading#25: (class, badge text) of the camera's PGM/PVW tally.
+    let tally = move || cam.with(|c| c.as_ref().and_then(tally_badge));
     let has_preview = move || cam.with(|c| c.as_ref().is_some_and(|c| c.has_preview));
     let live = Signal::derive(move || {
         cam.with(|c| c.as_ref().is_some_and(|c| c.has_preview && c.preview_live))
@@ -190,6 +192,9 @@ pub fn CameraBlock(id: String) -> impl IntoView {
             class="cam"
             class:ghost=move || ghost.get()
             class:disabled=move || !online()
+            class:pgm=move || tally().is_some_and(|t| t.0 == "pgm")
+            class:pvw=move || tally().is_some_and(|t| t.0 == "pvw")
+            data-tally=move || tally().map(|t| t.0).unwrap_or("")
             data-role="camera-block"
             data-id=move || id.get_value()
             data-control=control
@@ -206,6 +211,9 @@ pub fn CameraBlock(id: String) -> impl IntoView {
             <div class="head">
                 <span class="num">{move || number_text(&id.get_value())}</span>
                 <span class="name" data-role="label">{label}</span>
+                {move || tally().map(|(class, text)| view! {
+                    <span class=format!("tally {class}") data-role="tally">{text}</span>
+                })}
                 <span class="state" class:off=move || !online() data-role="online">
                     {move || cam.with(|c| c.as_ref().map_or("", online_text))}
                 </span>

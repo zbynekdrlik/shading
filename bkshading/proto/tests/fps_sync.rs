@@ -83,6 +83,7 @@ fn camera_view_wire_carries_grab_and_sync_camel_case() {
         state: None,
         registration: None,
         address: None,
+        tally: None,
         control: Default::default(),
     };
     let json = serde_json::to_string(&view).unwrap();
