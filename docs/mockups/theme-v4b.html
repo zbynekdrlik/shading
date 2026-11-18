@@ -89,7 +89,9 @@ body[data-layout="row"] main { grid-auto-flow: column; overflow-x: auto;
   grid-auto-columns: calc((100vw - 32px - 4 * 14px) / 4.3333);
   overscroll-behavior-x: contain; } /* Marcel: no scroll snap */
 @media (max-width: 1100px) { body[data-layout="grid"] main { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-.cam { background: var(--card); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
+.cam { background: var(--card); border: 2px solid transparent; box-shadow: inset 0 0 0 1px var(--line); border-radius: 14px; overflow: hidden; }
+/* Marcel: every card always has a 2 px border (transparent; the 1 px edge is an inset shadow), so PGM / PVW
+   only recolour it and a tally change never moves anything (no layout shift). */
 .prev { aspect-ratio: 16/9; background: #000; position: relative; display: grid; place-items: center; }
 .prev .ph { color: #9aa3ad; font-size: 15px; font-weight: 600; letter-spacing: .02em; }
 .prev .img { position: absolute; inset: 0;
@@ -171,8 +173,8 @@ input[type=range]::-moz-range-thumb { width: 22px; height: 22px; border-radius: 
 .note td.ok { color: var(--ok); font-weight: 700; }
 /* Marcel: the camera LIVE in program (PGM tally) gets a red tint; on a live change it is critical to see it.
    Preview (PVW) gets a green edge. Source: camera-box's tally service on the strih (camera-box#1417). */
-.cam.pgm { border: 2px solid #e5343a; box-shadow: 0 0 0 2px rgba(229, 52, 58, .35); background: color-mix(in srgb, #e5343a 10%, var(--card)); }
-.cam.pvw { border: 2px solid #2fae5c; }
+.cam.pgm { border-color: #e5343a; box-shadow: 0 0 0 2px rgba(229, 52, 58, .35); background: color-mix(in srgb, #e5343a 10%, var(--card)); }
+.cam.pvw { border-color: #2fae5c; box-shadow: none; }
 .tally { font-size: 13px; font-weight: 800; letter-spacing: .04em; padding: 2px 7px; border-radius: 6px; margin-left: 6px; }
 .tally.pgm { background: #e5343a; color: #fff; }
 .tally.pvw { background: #2fae5c; color: #fff; }
