@@ -230,7 +230,10 @@ fn the_grid_ends_do_not_gate_the_aperture_when_the_camera_gives_its_lens_positio
         p.aperture_av = Some(2.0 * 2.8f64.log2());
         p.iris_range_pos = Some(0.2);
     });
-    let r = row(&Steppers::default().view(&at_grid_first, 0.0), Row::Aperture);
+    let r = row(
+        &Steppers::default().view(&at_grid_first, 0.0),
+        Row::Aperture,
+    );
     assert_eq!(r.text, "f/2.8");
     assert!(r.dec.enabled && r.inc.enabled && !r.at_end);
     let at_grid_last = with(|p| {
