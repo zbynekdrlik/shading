@@ -317,7 +317,11 @@ async fn the_layout_api_and_the_panel_routes_answer_over_http() {
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), 200, "a stale save is refused in the body, not by status");
+    assert_eq!(
+        r.status(),
+        200,
+        "a stale save is refused in the body, not by status"
+    );
     assert_eq!(
         r.json::<serde_json::Value>().await.unwrap(),
         serde_json::json!({"error": "stale"})
