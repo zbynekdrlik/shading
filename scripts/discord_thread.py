@@ -9,8 +9,12 @@ environment (`DISCORD_BOT_TOKEN`), injected by:
         --env DISCORD_BOT_TOKEN -- python3 scripts/discord_thread.py read
 
 Commands:
-    read [--all]            messages newer than the last one seen (or the last 100 with --all),
-                            oldest first, with attachment URLs; remembers the newest id
+    read [--all] [--mentions-only]
+                            messages newer than the last one seen (or the last 100 with --all),
+                            oldest first, with attachment URLs; remembers the newest id.
+                            --mentions-only prints only messages that @mention the bot (owner
+                            18.11.2026: work starts ONLY when someone tags the bot; the rest is
+                            the team's own discussion and is not processed)
     post TEXT [--reply ID]  post TEXT to the thread, optionally as a reply to message ID
     react ID [EMOJI]        add a reaction (default 👷 = "taken, working on it") to message ID
 
@@ -30,6 +34,7 @@ import urllib.request
 from pathlib import Path
 
 THREAD_ID = "1561136322570231898"
+BOT_ID = "1572692720793813114"  # the 'shading' bot (airuleset#1368)
 API = "https://discord.com/api/v10"
 USER_AGENT = "DiscordBot (shading, 1)"
 STATE = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "shading" / "discord-last-id"
@@ -92,7 +97,14 @@ def format_message(m: dict) -> str:
     return "\n".join(lines)
 
 
-def cmd_read(token: str, channel: str, all_: bool) -> int:
+def mentions_bot(m: dict) -> bool:
+    """A message addressed to the bot: an @mention of it, never the bot's own message."""
+    if (m.get("author") or {}).get("id") == BOT_ID:
+        return False
+    return any(u.get("id") == BOT_ID for u in m.get("mentions") or []) or f"<@{BOT_ID}>" in (m.get("content") or "")
+
+
+def cmd_read(token: str, channel: str, all_: bool, mentions_only: bool = False) -> int:
     check_channel(channel)
     after = None if all_ else read_last_id()
     path = f"/channels/{channel}/messages?limit=100" + (f"&after={after}" if after else "")
@@ -100,12 +112,13 @@ def cmd_read(token: str, channel: str, all_: bool) -> int:
     if not isinstance(msgs, list):
         raise DiscordError(f"unexpected answer: {str(msgs)[:200]}")
     msgs.sort(key=lambda m: int(m["id"]))
-    for m in msgs:
+    shown = [m for m in msgs if mentions_bot(m)] if mentions_only else msgs
+    for m in shown:
         print(format_message(m))
         print("---")
     if msgs:
         write_last_id(msgs[-1]["id"])
-    print(f"{len(msgs)} message(s); last seen id {read_last_id()}", file=sys.stderr)
+    print(f"{len(msgs)} message(s), {len(shown)} shown; last seen id {read_last_id()}", file=sys.stderr)
     return 0
 
 
@@ -138,6 +151,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("read")
     r.add_argument("--all", action="store_true", help="the last 100 messages, not only new ones")
+    r.add_argument("--mentions-only", action="store_true", help="only messages that @mention the bot")
     w = sub.add_parser("post")
     w.add_argument("text")
     w.add_argument("--reply", help="message id to reply to")
@@ -151,7 +165,7 @@ def main(argv: list[str] | None = None) -> int:
         if not token:
             raise DiscordError("DISCORD_BOT_TOKEN is not set (run through `airuleset.py secret exec`)")
         if args.cmd == "read":
-            return cmd_read(token, args.channel, args.all)
+            return cmd_read(token, args.channel, args.all, args.mentions_only)
         if args.cmd == "react":
             return cmd_react(token, args.channel, args.message_id, args.emoji)
         return cmd_post(token, args.channel, args.text, args.reply)

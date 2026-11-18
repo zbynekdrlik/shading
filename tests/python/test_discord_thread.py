@@ -79,3 +79,17 @@ def test_react_puts_the_worker_emoji_on_the_thread_only(monkeypatch):
         dt.cmd_react("t", "999", "55", "x")
     with pytest.raises(dt.DiscordError):
         dt.cmd_react("t", dt.THREAD_ID, "../x", "x")
+
+
+def test_mentions_only_shows_only_messages_addressed_to_the_bot(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(dt, "STATE", tmp_path / "last")
+    msgs = [
+        {"id": "1", "content": "team talk", "author": {"id": "9", "username": "m"}},
+        {"id": "2", "content": f"<@{dt.BOT_ID}> OK", "author": {"id": "9", "username": "m"}, "mentions": [{"id": dt.BOT_ID}]},
+        {"id": "3", "content": f"bot's own <@{dt.BOT_ID}>", "author": {"id": dt.BOT_ID, "username": "shading"}},
+    ]
+    monkeypatch.setattr(dt, "request", lambda *a, **k: msgs)
+    assert dt.cmd_read("t", dt.THREAD_ID, False, mentions_only=True) == 0
+    out = capsys.readouterr().out
+    assert "OK" in out and "team talk" not in out and "bot's own" not in out
+    assert dt.read_last_id() == "3"  # every message is marked seen, only the addressed one is shown
