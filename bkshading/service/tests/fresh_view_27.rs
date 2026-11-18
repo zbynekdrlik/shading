@@ -113,3 +113,45 @@ fn a_camera_new_in_the_snapshot_is_taken_even_with_a_late_write_stamp_27() {
         "the snapshot's camera list is kept"
     );
 }
+
+#[test]
+fn the_kept_camera_takes_its_service_side_fields_from_the_snapshot_27() {
+    let polled_from = Instant::now();
+    let writes = HashMap::from([("cam6".to_string(), polled_from + Duration::from_millis(400))]);
+    let current = agg(800, 400);
+    let mut snapshot = agg(400, 400);
+    snapshot.cameras[0].preview_live = true;
+    snapshot.cameras[0].address = Some("10.77.8.99:8771".into());
+    let merged = merge_fresher(&current, snapshot, polled_from, &writes);
+    assert_eq!(
+        iso(&merged, "cam6"),
+        Some(800),
+        "the relay half is the confirmed one"
+    );
+    assert!(
+        merged.cameras[0].preview_live,
+        "preview liveness is the snapshot's"
+    );
+    assert_eq!(
+        merged.cameras[0].address.as_deref(),
+        Some("10.77.8.99:8771"),
+        "service-side fields are the snapshot's"
+    );
+}
+
+/// The pump's publish path: a write stamped AFTER the snapshot was taken (while the pump runs its
+/// monitors) still keeps the confirmed view, because the stamps are read under the channel lock.
+#[test]
+fn publish_snapshot_reads_the_write_stamps_at_the_publish_27() {
+    let aggregator = bkshading::aggregator::Aggregator::new("0.2.11").unwrap();
+    let (tx, rx) = tokio::sync::watch::channel(std::sync::Arc::new(agg(400, 400)));
+    let polled_from = Instant::now();
+    let snapshot = agg(400, 200); // polled before the write
+                                  // The write lands now: its stamp, then its confirmation push.
+    aggregator.note_write_done("cam6");
+    tx.send_modify(|cur| *cur = std::sync::Arc::new(agg(800, 400)));
+    aggregator.publish_snapshot(&tx, snapshot, polled_from);
+    let live = rx.borrow().clone();
+    assert_eq!(iso(&live, "cam6"), Some(800), "no rollback");
+    assert_eq!(iso(&live, "cam7"), Some(200));
+}

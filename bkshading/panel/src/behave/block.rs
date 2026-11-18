@@ -139,6 +139,11 @@ pub fn tally_badge(cam: &CameraView) -> Option<(&'static str, &'static str)> {
     }
 }
 
+/// Whether the card carries `tally` (the `.pgm` / `.pvw` card class).
+pub fn has_tally(cam: &CameraView, tally: Tally) -> bool {
+    cam.tally == Some(tally)
+}
+
 /// The fps-vs-grab line (issue 809): shown only with a grab rate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FpsSyncView {
@@ -252,10 +257,13 @@ mod tests {
     fn the_tally_badge_follows_the_views_tally_25() {
         let mut c = cam();
         assert_eq!(tally_badge(&c), None);
+        assert!(!has_tally(&c, Tally::Pgm) && !has_tally(&c, Tally::Pvw));
         c.tally = Some(Tally::Pgm);
         assert_eq!(tally_badge(&c), Some(("pgm", "PGM")));
+        assert!(has_tally(&c, Tally::Pgm) && !has_tally(&c, Tally::Pvw));
         c.tally = Some(Tally::Pvw);
         assert_eq!(tally_badge(&c), Some(("pvw", "PVW")));
+        assert!(has_tally(&c, Tally::Pvw) && !has_tally(&c, Tally::Pgm));
     }
 
     #[test]

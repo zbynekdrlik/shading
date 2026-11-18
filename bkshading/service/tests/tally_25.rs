@@ -93,6 +93,19 @@ fn the_state_body_parses_and_ignores_the_other_fields_25() {
         "studio_mode": true, "obs_connected": true}"#;
     assert_eq!(parse_tally(body), Ok(t(6, 3, true)));
     assert!(parse_tally("not json").is_err());
+    assert_eq!(
+        parse_tally(r#"{"pgm": null, "pvw": -1, "obs_connected": true}"#),
+        Ok(t(0, 0, true)),
+        "null / negative = no single camera, never a failed poll"
+    );
+    assert_eq!(
+        parse_tally(r#"{"obs_connected": false}"#),
+        Ok(t(0, 0, false))
+    );
+    assert!(
+        parse_tally(r#"{"pgm": 2, "pvw": 3}"#).is_err(),
+        "without obs_connected the numbers mean nothing"
+    );
     assert!(
         parse_tally(r#"{"pgm": 1}"#).is_err(),
         "a body without pvw/obs"

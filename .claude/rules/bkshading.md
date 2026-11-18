@@ -283,8 +283,25 @@ the house app stack airuleset#1333); mockup `docs/mockups/arrange-v1.html` appro
     `@playwright/test@1.58.2` in a scratch dir (its webkit-2248 is in `/opt/ms-playwright`; the
     repo's 1.49.1 wants webkit-2104) and `PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright`; WebKit
     reports `user-select` only as `webkitUserSelect`.
-  - Tally: only the `.cam.pgm` / `.cam.pvw` / `.tally` CSS (the 2 px border is always there); the
-    data is shading#25.
+  - **Tally (shading#25, v0.2.11):** `CameraView.tally` `"pgm"|"pvw"|null` ->
+    `behave::block::tally_badge` -> `.cam.pgm` (red border + tint + PGM badge) / `.cam.pvw` (green
+    border + PVW badge), `data-tally`, badge `data-role="tally"` in `.head` after the name; the 2 px
+    border is always there. Service: `service/src/tally.rs` polls `[tally] url` (absent/empty = off,
+    no log) every 300 ms (1 s timeout), `TallyTracker` logs once per health transition (live / OBS
+    away / failed) plus each cut; the tally lives in the `Aggregator` (`set_tally`/`tally`) so every
+    `snapshot` (pump AND `GET /api/cameras`) carries it; the task republishes with
+    `send_modify(apply_tally)`, the pump re-applies `agg.tally()` INSIDE its `send_modify`, and
+    `aggregate_with_camera_update` carries the slot's tally over. `camN` <- N only for an id that is
+    exactly `cam<digits>` (`tally_number`), never `handheld-1`. Tests `service/tests/tally_25.rs`
+    (stub axum tally server on port 0), theme.spec.js "the PGM/PVW tally follows the push".
+  - **The status line `.reg` is never empty (shading#28, v0.2.11):** `behave::block::status_line` =
+    the registration short form, else `CameraView.address` (additive; `aggregator::static_address`:
+    the plain address, or a `register:` camera's `fallback_address`) + ` · bez ohlásenia`, else `—`.
+    `.reg` has an explicit `line-height` + `height` (border-box: 18 + the 10 padding): the ↻/▲
+    glyphs come from a fallback font with a taller line box on the operators' devices, so a line
+    whose height follows its content shifts the controls there even though dev1's Chromium measures
+    every variant equal (35.9 px). Any one-line slot whose text can contain symbols: give it an
+    explicit line box.
 - **Crate `bkshading/panel`:** `behave/` = pure rules, natively tested (`cargo test -p bkshading-panel`):
   `steppers.rs` + `holds.rs` (six steppers, ends, optimistic hold: value hold 4 s ends on a push showing
   the target; aperture STEP hold 8 s ends on a push showing a DIFFERENT f-stop), `arrange_drag.rs` +
@@ -1587,6 +1604,21 @@ slider norm (0) instead of the real f-number. Fixed across THREE layers, each un
   confirmation over the WS (pure `aggregate_with_camera_update` — rebuilds ONLY the target camera's
   view, no fleet re-poll), instead of waiting up to 2 s for the pump tick. The publish handle is
   shared (`Arc<watch::Sender>`) between the pump and `set_params`.
+
+### A pump snapshot never rolls back a write's confirmation (shading#27, v0.2.11)
+Live PP cam6 (v0.2.10): a press showed f/3.8, flicked back to f/3.7 ~0.9 s later, settled at the
+next pump tick. The pump's relay polls can START before a write and END after its confirmation
+push. Rule: `Aggregator::note_write_done` (stamped in `forward_set` only when the relay answered
+with its post-write state), `snapshot_timed` returns `polled_from` (taken before the polls), and the
+pump publishes `merge_fresher(current, snapshot, polled_from, last_writes)`: a camera written after
+`polled_from` keeps its current view. Every writer of `live_tx` uses `send_modify` (the merge must
+read the view it replaces under the channel lock; a borrow-then-send can still overwrite a
+confirmation landing in between). Never add a `live_tx.send(...)` of a freshly built aggregate.
+E2E `fresh-view.spec.js`: its OWN stub relay (:8786, `--apply-writes`) + service (:8787), the stub's
+`POST /__lag {"stateDelayMs":1000}` copies the state when a GET arrives and answers later, the test
+waits on `GET /__gets` for the pump poll to be in flight, presses ISO + and samples every 100 ms
+(pre-fix: 800 x10, 400 x19, 800). A test needing "a poll in flight" needs a stub no other instance
+polls.
 
 ### Layer 3 — optimistic panel + step-from-real-value (`web/app.js`)
 - A click shows its new value immediately as `.pending` (accent + italic), reconciled by the next

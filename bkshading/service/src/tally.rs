@@ -41,8 +41,8 @@ impl TallyConfig {
     }
 }
 
-/// The part of the tally service's `/state` the panel needs (unknown fields are ignored).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+/// The part of the tally service's `/state` the panel needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TallyState {
     /// The camera number in program, 0 = none.
     pub pgm: u64,
@@ -52,9 +52,28 @@ pub struct TallyState {
     pub obs_connected: bool,
 }
 
+/// The `/state` body as sent: unknown fields are ignored; a `pgm`/`pvw` that is missing, `null`
+/// or below 1 means "no single camera" (0), so one odd value never clears a live tally.
+/// `obs_connected` is required: without it the service cannot tell whether the numbers mean
+/// anything.
+#[derive(Deserialize)]
+struct RawState {
+    #[serde(default)]
+    pgm: Option<i64>,
+    #[serde(default)]
+    pvw: Option<i64>,
+    obs_connected: bool,
+}
+
 /// Parses a `/state` body.
 pub fn parse_tally(body: &str) -> Result<TallyState, String> {
-    serde_json::from_str(body).map_err(|e| format!("bad /state body: {e}"))
+    let raw: RawState = serde_json::from_str(body).map_err(|e| format!("bad /state body: {e}"))?;
+    let number = |n: Option<i64>| n.and_then(|n| u64::try_from(n).ok()).unwrap_or(0);
+    Ok(TallyState {
+        pgm: number(raw.pgm),
+        pvw: number(raw.pvw),
+        obs_connected: raw.obs_connected,
+    })
 }
 
 /// The camera number a tally number refers to: exactly `cam<N>` (a handheld or any other id has

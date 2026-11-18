@@ -4,13 +4,14 @@
 //! line; in ARRANGE a cover with the grip and the eye over all of it. Every line is always present
 //! and one line high, so no push, tally or pane switch moves anything (no layout shift).
 
-use bkshading_proto::wire::CameraView;
+use bkshading_proto::wire::{CameraView, Tally};
 use leptos::html;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
 use crate::behave::block::{
-    fps_sync, is_online, number_text, online_text, status_line, status_title, tally_badge,
+    fps_sync, has_tally, is_online, number_text, online_text, status_line, status_title,
+    tally_badge,
 };
 use crate::behave::steppers::{Pane, Row, RowView, Steppers};
 use crate::components::arrange::Cover;
@@ -192,8 +193,8 @@ pub fn CameraBlock(id: String) -> impl IntoView {
             class="cam"
             class:ghost=move || ghost.get()
             class:disabled=move || !online()
-            class:pgm=move || tally().is_some_and(|t| t.0 == "pgm")
-            class:pvw=move || tally().is_some_and(|t| t.0 == "pvw")
+            class:pgm=move || cam.with(|c| c.as_ref().is_some_and(|c| has_tally(c, Tally::Pgm)))
+            class:pvw=move || cam.with(|c| c.as_ref().is_some_and(|c| has_tally(c, Tally::Pvw)))
             data-tally=move || tally().map(|t| t.0).unwrap_or("")
             data-role="camera-block"
             data-id=move || id.get_value()

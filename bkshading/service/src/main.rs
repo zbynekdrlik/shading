@@ -185,23 +185,10 @@ async fn main() -> Result<()> {
                         bkshading::monitor::reach_heartbeat_line(&snapshot.cameras)
                     );
                 }
-                // shading#27: merged under the channel's lock with the view it replaces, so a
-                // write confirmed while this snapshot's polls ran keeps its camera's view (and a
-                // confirmation can never land between a read and this publish). `send_modify`
-                // notifies even with no receivers (the AppState keeps one alive anyway).
-                let writes = agg.last_writes();
-                live_tx.send_modify(|current| {
-                    let merged = bkshading::aggregator::merge_fresher(
-                        current,
-                        (*snapshot).clone(),
-                        polled_from,
-                        &writes,
-                    );
-                    // shading#25: the tally as it is NOW (the tally task may have moved it while
-                    // the polls ran; it publishes under this same lock).
-                    let merged = bkshading::tally::apply_tally(&merged, agg.tally().as_ref());
-                    *current = Arc::new(merged);
-                });
+                // shading#27 + shading#25: merged with the view it replaces, the write stamps and
+                // the tally, all read under the channel's lock (`send_modify` also notifies with
+                // no receivers; the AppState keeps one alive anyway).
+                agg.publish_snapshot(&live_tx, (*snapshot).clone(), polled_from);
             }
         });
     }

@@ -9,6 +9,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use tokio::sync::watch;
+
 use bkshading_proto::control::control_status;
 use bkshading_proto::mapping::fps_settable;
 use bkshading_proto::wire::{
@@ -130,9 +132,11 @@ pub fn aggregate_with_camera_update(
 /// The pump's `snapshot` polled every relay from `polled_from` on; a write whose relay answer
 /// arrived AFTER that (`last_write_done[id] > polled_from`) already published a newer view of its
 /// camera (`aggregate_with_camera_update`), and the snapshot may have read that relay before the
-/// write landed. Such a camera keeps its `current` view; every other camera comes from the
-/// snapshot. The snapshot's camera list and version win (a camera missing from `current` is taken
-/// from the snapshot whatever its stamp). Live PP cam6, v0.2.10: f/3.8 flicked back to f/3.7
+/// write landed. Such a camera keeps its `current` RELAY half (the state and what is derived from
+/// it: reachability, the fps-vs-grab verdict, the control status); everything the service knows on
+/// its own (registration, preview liveness, address, tally) comes from the snapshot, as does every
+/// other camera. The snapshot's camera list and version win (a camera missing from `current` is
+/// taken from the snapshot whatever its stamp). Live PP cam6, v0.2.10: f/3.8 flicked back to f/3.7
 /// ~0.9 s after the press, then settled at the next pump tick.
 pub fn merge_fresher(
     current: &Aggregate,
@@ -149,8 +153,14 @@ pub fn merge_fresher(
             continue;
         }
         if let Some(fresher) = current.cameras.iter().find(|c| c.id == view.id) {
-            tracing::debug!(id = %view.id, "pump snapshot older than the last write: kept the confirmed view");
-            *view = fresher.clone();
+            tracing::debug!(id = %view.id, "pump snapshot older than the last write: kept the confirmed relay state");
+            view.state = fresher.state.clone();
+            view.reachable = fresher.reachable;
+            view.grab_fps = fresher.grab_fps;
+            view.grab_fps_desync = fresher.grab_fps_desync;
+            view.fps_sync = fresher.fps_sync;
+            view.fps_align_settable = fresher.fps_align_settable;
+            view.control = fresher.control;
         }
     }
     merged
@@ -204,6 +214,24 @@ impl Aggregator {
             last_write_done: Arc::new(Mutex::new(HashMap::new())),
             tally: Arc::new(Mutex::new(None)),
         })
+    }
+
+    /// Publishes a pump snapshot (shading#27, shading#25): under the channel's lock, so the view it
+    /// replaces, the write stamps and the tally are all read at the moment of the publish. A write
+    /// confirmed while the snapshot's polls ran (stamped before or during this call) keeps its
+    /// camera's relay state; the tally is the one stored now (the tally task may have moved it
+    /// while the polls ran; it publishes under this same lock). Lock order: the channel, then the
+    /// stamp / tally mutexes; nothing takes them the other way round.
+    pub fn publish_snapshot(
+        &self,
+        live_tx: &watch::Sender<Arc<Aggregate>>,
+        snapshot: Aggregate,
+        polled_from: Instant,
+    ) {
+        live_tx.send_modify(|current| {
+            let merged = merge_fresher(current, snapshot, polled_from, &self.last_writes());
+            *current = Arc::new(apply_tally(&merged, self.tally().as_ref()));
+        });
     }
 
     /// The tally every snapshot applies (shading#25).
