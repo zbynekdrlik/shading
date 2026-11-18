@@ -204,10 +204,11 @@ test("ARRANGE: another device's save during the mode ends it unsaved, console cl
   gate.assertClean();
 });
 
-test("ARRANGE: a save the service refuses as stale shows the refusal, console clean apart from that 409", async ({ page }) => {
+test("ARRANGE: a save the service refuses as stale shows the refusal, console clean", async ({ page }) => {
   const gate = consoleGate(page);
   // This page hears no push (no socket, its layout polls answer the old document), so it saves on a
-  // revision another device already replaced: the service answers 409 stale.
+  // revision another device already replaced: the service answers 200 {"error":"stale"} (shading#16:
+  // a refusal is never a 4xx, which Chromium would log as a console error).
   await page.addInitScript(DISABLE_WS);
   const stale = await (await page.request.get(`${SVC}/api/layout`)).json();
   await page.route("**/api/layout", (route) => {
@@ -229,11 +230,6 @@ test("ARRANGE: a save the service refuses as stale shows the refusal, console cl
   // The other device's layout stands.
   expect((await (await page.request.get(`${SVC}/api/layout`)).json()).order).toEqual(["cam2", "cam1", "cam3"]);
 
-  // Chromium logs the refused request itself ("Failed to load resource ... 409"); that line, and
-  // nothing else, is expected.
-  const expected = gate.problems.filter((p) => /status of 409/.test(p));
-  expect(expected.length, gate.problems.join(" | ")).toBe(1);
-  gate.problems.splice(0, gate.problems.length, ...gate.problems.filter((p) => !/status of 409/.test(p)));
   gate.assertClean();
 });
 
