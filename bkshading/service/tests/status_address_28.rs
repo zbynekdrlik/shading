@@ -29,9 +29,21 @@ address = \"10.77.8.66:8771\"
 fn the_view_names_the_static_address_the_service_dials_28() {
     let cfg = ServiceConfig::from_toml_str(CONFIG).unwrap();
     let addr = |i: usize| camera_view(&cfg.cameras[i], None, false).address;
-    assert_eq!(addr(0).as_deref(), Some("10.77.8.61:8771"), "register: + fallback");
-    assert_eq!(addr(1), None, "register: without a fallback has no static address");
-    assert_eq!(addr(2).as_deref(), Some("10.77.8.66:8771"), "a plain address");
+    assert_eq!(
+        addr(0).as_deref(),
+        Some("10.77.8.61:8771"),
+        "register: + fallback"
+    );
+    assert_eq!(
+        addr(1),
+        None,
+        "register: without a fallback has no static address"
+    );
+    assert_eq!(
+        addr(2).as_deref(),
+        Some("10.77.8.66:8771"),
+        "a plain address"
+    );
 }
 
 #[test]
