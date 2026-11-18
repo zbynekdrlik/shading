@@ -385,6 +385,34 @@ test("a block removed while its preview fetch is in flight leaves a clean consol
   gate.assertClean();
 });
 
+// shading#22 (PP cam1, 18.11.2026): a camera without `lens/iris/description` gets the default
+// grid 2.8..22 until the relay has SEEN a wider stop, so f/2.8 is the grid's first entry while the
+// lens opens to f/1.75. With the camera's own lens position (`irisRangePos` 0.2, not 0) "−" must
+// stay enabled and send a step; only `irisRangePos` says where the lens ends.
+test("aperture \u2212 stays enabled at the grid's first stop when the lens is not at its end (shading#22), console clean", async ({ page }) => {
+  const gate = consoleGate(page);
+  const puts = [];
+  await page.addInitScript(DISABLE_WS);
+  await blockApi(page, (p) => puts.push(p));
+  await page.goto(NEXT);
+  await waitForApp(page);
+  const dec = page.locator('[data-role="aperture-dec"]');
+  const inc = page.locator('[data-role="aperture-inc"]');
+  const fnum = page.locator('[data-role="fnum"]');
+  // f/2.8 = the fixture grid's first entry, the lens 20 % into its range.
+  await pushState(page, makeFixture({ apertureAv: 2.9708536543404836, apertureNorm: 0, irisRangePos: 0.2 }));
+  await expect(fnum).toHaveText("f/2.8");
+  await expect(dec).toBeEnabled();
+  await dec.click();
+  await expect.poll(() => puts.length).toBe(1);
+  expect(puts[0].body).toEqual({ apertureStep: -1 });
+  // f/8.0 = the grid's last entry, the lens not closed: "+" stays enabled.
+  await pushState(page, makeFixture({ apertureAv: 6.0, apertureNorm: 1, irisRangePos: 0.8 }));
+  await expect(fnum).toHaveText("f/8.0");
+  await expect(inc).toBeEnabled();
+  gate.assertClean();
+});
+
 // shading#16, found live on PP 18.11.2026: an ARRANGE save that hid cam4 (its NDI preview live)
 // panicked the WASM app ("Tried to access a reactive value that has already been disposed", then
 // "RefCell already borrowed"). The preview <img>'s load event can land AFTER its block was removed

@@ -543,15 +543,20 @@ fn aperture_gates(live: &Live, base: Option<f64>) -> (Gate, Gate, Option<f64>, b
     let on_grid = base.and_then(|f| list.iter().position(|&c| (c - f).abs() < 1e-6));
     let wide = iris_at_end(iris, -1);
     let closed = iris_at_end(iris, 1);
+    // shading#22: the camera's own lens position decides the ends when it gives one. The grid's
+    // ends are not the lens's: without `lens/iris/description` the relay sends the default 2.8..22
+    // until it has seen a wider stop (PP cam1 opens to f/1.75). Only without `irisRangePos` do the
+    // grid's ends gate, as nothing better is known.
+    let grid_gates = iris.is_none();
     let dec = if wide {
         Gate::off(AT_WIDE)
     } else {
-        Gate::off_if(on_grid == Some(0), AT_END)
+        Gate::off_if(grid_gates && on_grid == Some(0), AT_END)
     };
     let inc = if closed {
         Gate::off(AT_CLOSED)
     } else {
-        Gate::off_if(on_grid == Some(n - 1), AT_END)
+        Gate::off_if(grid_gates && on_grid == Some(n - 1), AT_END)
     };
     let at_end = !dec.enabled || !inc.enabled;
     (dec, inc, pos.map(|p| p.clamp(0.0, 1.0)), at_end)

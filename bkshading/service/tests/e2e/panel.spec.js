@@ -456,6 +456,43 @@ test("the aperture stepper and slider stop at the lens's ends (irisRangePos), co
   expect(problems, `console problems: ${problems.join(" | ")}`).toEqual([]);
 });
 
+// shading#22 (PP cam1, 18.11.2026): the default grid (no `lens/iris/description`) starts at f/2.8
+// while the lens opens to f/1.75. With `irisRangePos` 0.2 the old panel must keep "-" enabled at the
+// grid's first entry and send the step; only `irisRangePos` says where the lens ends.
+test("aperture - stays enabled at the grid's first stop when the lens is not at its end (shading#22), console clean", async ({ page }) => {
+  const problems = [];
+  page.on("console", (msg) => {
+    const t = msg.type();
+    if (t === "error" || t === "warning") problems.push(`${t}: ${msg.text()}`);
+  });
+  page.on("pageerror", (err) => problems.push(`pageerror: ${err.message}`));
+  const puts = [];
+  await page.addInitScript(DISABLE_WS);
+  await page.route("**/api/**", (route) => {
+    const req = route.request();
+    if (req.method() === "PUT") {
+      puts.push(JSON.parse(req.postData() || "{}"));
+      return route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
+    }
+    return route.fulfill({ status: 200, contentType: "text/plain", body: "offline-fixture" });
+  });
+  await page.goto("/");
+  await page.waitForFunction(() => typeof window.render === "function");
+  const dec = page.locator('[data-role="aperture-dec"]');
+  const inc = page.locator('[data-role="aperture-inc"]');
+  const fnum = page.locator('[data-role="fnum"]');
+  await page.evaluate((agg) => window.render(agg), makeFixture({ apertureAv: 2.9708536543404836, apertureNorm: 0, irisRangePos: 0.2 }));
+  await expect(fnum).toHaveText("f/2.8");
+  await expect(dec).toBeEnabled();
+  await dec.click();
+  await expect.poll(() => puts.length).toBe(1);
+  expect(puts[0]).toEqual({ apertureStep: -1 });
+  await page.evaluate((agg) => window.render(agg), makeFixture({ apertureAv: 6.0, apertureNorm: 1, irisRangePos: 0.8 }));
+  await expect(fnum).toHaveText("f/8.0");
+  await expect(inc).toBeEnabled();
+  expect(problems, `console problems: ${problems.join(" | ")}`).toEqual([]);
+});
+
 // --- issue 808: the preview of a camera whose NDI feed is absent / stopped ---------------------
 // The second service instance (playwright.config.js, e2e-preview-config.toml) has ONE camera WITH
 // an `ndi_preview` and no feed (CI has no libndi, the source does not exist). Before the fix the
