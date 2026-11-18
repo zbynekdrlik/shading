@@ -178,9 +178,10 @@ async fn get_layout(State(state): State<AppState>) -> Json<LayoutDoc> {
 }
 
 /// `PUT /api/layout {rev, order, hidden}` (shading#16): saves the panel's ARRANGE edit. 200
-/// `{rev}`; 409 `{"error":"stale"}` when `rev` is not the current revision (another device saved
-/// first); 422 `{"error":"invalid"}` for a repeated id or a hidden id outside the order; 500
-/// `{"error":"write"}` when the file write failed (nothing changed). On 200 every `/ws` client
+/// `{rev}`; 200 `{"error":"stale"}` when `rev` is not the current revision (another device saved
+/// first); 200 `{"error":"invalid"}` for a repeated id or a hidden id outside the order (a refusal
+/// is an answer, never a 4xx: Chromium logs those as console errors, shading#16); 500
+/// `{"error":"write"}` when the file write failed (nothing changed). On a taken save every `/ws` client
 /// gets the new layout.
 async fn put_layout(
     State(state): State<AppState>,
@@ -209,12 +210,10 @@ async fn put_layout(
 pub fn layout_put_response(store: &LayoutStore, put: &LayoutPut, peer: &str) -> Response {
     match store.save(put, peer) {
         Ok(doc) => Json(serde_json::json!({ "rev": doc.rev })).into_response(),
+        // shading#16: a refusal (stale revision, invalid document) is an ANSWER, 200 with its word:
+        // Chromium logs every 4xx as a console error, and the panel's console must stay clean.
         Err(SaveError::Refused(refusal)) => {
-            let status = match refusal {
-                bkshading_proto::LayoutRefusal::Stale => StatusCode::CONFLICT,
-                bkshading_proto::LayoutRefusal::Invalid => StatusCode::UNPROCESSABLE_ENTITY,
-            };
-            (status, Json(serde_json::json!({ "error": refusal.text() }))).into_response()
+            Json(serde_json::json!({ "error": refusal.text() })).into_response()
         }
         Err(SaveError::Write(_)) => (
             StatusCode::INTERNAL_SERVER_ERROR,

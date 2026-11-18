@@ -63,6 +63,21 @@ pub enum SaveFail {
     Other,
 }
 
+/// The service's answer to `PUT /api/layout` (status + body) as the save's outcome. A refusal is
+/// a 200 `{"error":"stale"|"invalid"}` (shading#16: never a 4xx, which Chromium logs as a console
+/// error); a taken save is a 200 `{"rev":N}`; anything else (a failed write: 500) is `Other`. A
+/// refusal word this panel does not know is `Other` too.
+pub fn save_answer(status: u16, body: &str) -> Result<u64, SaveFail> {
+    let json: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+    if let Some(word) = json["error"].as_str() {
+        return Err(LayoutRefusal::from_text(word).map_or(SaveFail::Other, SaveFail::Refused));
+    }
+    if status != 200 {
+        return Err(SaveFail::Other);
+    }
+    json["rev"].as_u64().ok_or(SaveFail::Other)
+}
+
 /// How a note looks: plain, a taken save (green), a save that did not land (orange).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tone {

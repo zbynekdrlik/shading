@@ -303,7 +303,9 @@ the house app stack airuleset#1333); mockup `docs/mockups/arrange-v1.html` appro
 - **The venue layout** (`proto/src/layout.rs`, `service/src/layout.rs`): `LayoutDoc {rev, order,
   hidden}` in `bkshading-layout.json` next to `--config` (`--layout-file` overrides; no config =
   memory only, WARN), atomic tmp+rename, a broken file is moved to `<file>.bad` and number order is
-  used. `GET`/`PUT /api/layout` (200 `{rev}`, 409 `stale`, 422 `invalid`, 500 `write`); `/ws` sends
+  used. `GET`/`PUT /api/layout` (200 `{rev}`; a refusal is 200 `{"error":"stale"|"invalid"}` since v0.2.10,
+  was 409/422 — Chromium logs every 4xx as a console error; 500 `write`; the panel reads the outcome
+  from the body, `behave::arrange_drag::save_answer`); `/ws` sends
   `{"type":"layout",...}` on connect BEFORE the first state and after every save. Ids the config does
   not list are kept in the document (a visiting camera keeps its place). A camera new to the config
   lands after the last placed id with a lower number (`effective_order`). Hiding is panel-only: the
@@ -345,8 +347,9 @@ the house app stack airuleset#1333); mockup `docs/mockups/arrange-v1.html` appro
   load event lands after its block was hidden". Locate a WASM panic with a DEBUG panel build
   (`trunk build`, no `--release`): the message then names the access and the definition `file:line`.
 - **E2E gotchas:** a synthetic `visibilitychange` must be dispatched with `{bubbles: true}` (the real
-  one bubbles; the app listens on `window`). A refused `PUT /api/layout` (409) is logged by Chromium as
-  "Failed to load resource"; the stale test allows exactly that line. A click on a control under the
+  one bubbles; the app listens on `window`). Chromium logs ANY 4xx/5xx resource as a console
+  error, which is why a refused `PUT /api/layout` answers 200 with its refusal (v0.2.10); the stale
+  test asserts a fully clean console. A click on a control under the
   ARRANGE cover must go through `page.mouse.click(x, y)` (a locator click fails actionability).
 
 ## Workspace, version and release (shading#1)
