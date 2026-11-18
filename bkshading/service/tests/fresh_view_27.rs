@@ -67,8 +67,16 @@ fn a_snapshot_polled_before_a_write_keeps_the_post_write_view_27() {
     let current = agg(800, 400); // the confirmation push: cam6 at 800
     let snapshot = agg(400, 200); // the polls read cam6 before the write; cam7 changed on its own
     let merged = merge_fresher(&current, snapshot, polled_from, &writes);
-    assert_eq!(iso(&merged, "cam6"), Some(800), "no rollback of the written camera");
-    assert_eq!(iso(&merged, "cam7"), Some(200), "every other camera comes from the snapshot");
+    assert_eq!(
+        iso(&merged, "cam6"),
+        Some(800),
+        "no rollback of the written camera"
+    );
+    assert_eq!(
+        iso(&merged, "cam7"),
+        Some(200),
+        "every other camera comes from the snapshot"
+    );
 }
 
 #[test]
@@ -79,7 +87,11 @@ fn a_snapshot_polled_after_the_write_replaces_the_view_27() {
     let current = agg(800, 400);
     let snapshot = agg(1600, 400); // the camera moved on after the write (e.g. on the body)
     let merged = merge_fresher(&current, snapshot, polled_from, &writes);
-    assert_eq!(iso(&merged, "cam6"), Some(1600), "a post-write poll is the truth");
+    assert_eq!(
+        iso(&merged, "cam6"),
+        Some(1600),
+        "a post-write poll is the truth"
+    );
 }
 
 #[test]
@@ -90,6 +102,14 @@ fn a_camera_new_in_the_snapshot_is_taken_even_with_a_late_write_stamp_27() {
     current.cameras.retain(|c| c.id == "cam6"); // cam7 not in the current view (e.g. visiting)
     let snapshot = agg(800, 200);
     let merged = merge_fresher(&current, snapshot, polled_from, &writes);
-    assert_eq!(iso(&merged, "cam7"), Some(200), "nothing current to keep: the snapshot's view");
-    assert_eq!(merged.cameras.len(), 2, "the snapshot's camera list is kept");
+    assert_eq!(
+        iso(&merged, "cam7"),
+        Some(200),
+        "nothing current to keep: the snapshot's view"
+    );
+    assert_eq!(
+        merged.cameras.len(),
+        2,
+        "the snapshot's camera list is kept"
+    );
 }

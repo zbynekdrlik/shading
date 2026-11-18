@@ -144,7 +144,8 @@ async fn main() -> Result<()> {
             loop {
                 ticker.tick().await;
                 cycle = cycle.wrapping_add(1);
-                let snapshot = Arc::new(agg.snapshot(&config, &previews).await);
+                let (fresh, polled_from) = agg.snapshot_timed(&config, &previews).await;
+                let snapshot = Arc::new(fresh);
                 // issue 809: telemetry — surface a camera fps mismatch or a config-vs-capture
                 // grab desync in the log (with the cross-reference to capture_rate_health), on
                 // transition only.
@@ -172,8 +173,20 @@ async fn main() -> Result<()> {
                         bkshading::monitor::reach_heartbeat_line(&snapshot.cameras)
                     );
                 }
-                // The AppState keeps a receiver alive, so `send` never fails for "no receivers".
-                let _ = live_tx.send(snapshot);
+                // shading#27: merged under the channel's lock with the view it replaces, so a
+                // write confirmed while this snapshot's polls ran keeps its camera's view (and a
+                // confirmation can never land between a read and this publish). `send_modify`
+                // notifies even with no receivers (the AppState keeps one alive anyway).
+                let writes = agg.last_writes();
+                live_tx.send_modify(|current| {
+                    let merged = bkshading::aggregator::merge_fresher(
+                        current,
+                        (*snapshot).clone(),
+                        polled_from,
+                        &writes,
+                    );
+                    *current = Arc::new(merged);
+                });
             }
         });
     }

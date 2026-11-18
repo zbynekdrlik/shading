@@ -5,6 +5,8 @@
 //! does not answer within the timeout is reported `reachable: false` (never a panic — the
 //! panel greys that block out).
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use bkshading_proto::control::control_status;
@@ -107,6 +109,37 @@ pub fn aggregate_with_camera_update(
     agg
 }
 
+/// The per-camera freshness rule between the pump and a write's confirmation (shading#27), pure.
+///
+/// The pump's `snapshot` polled every relay from `polled_from` on; a write whose relay answer
+/// arrived AFTER that (`last_write_done[id] > polled_from`) already published a newer view of its
+/// camera (`aggregate_with_camera_update`), and the snapshot may have read that relay before the
+/// write landed. Such a camera keeps its `current` view; every other camera comes from the
+/// snapshot. The snapshot's camera list and version win (a camera missing from `current` is taken
+/// from the snapshot whatever its stamp). Live PP cam6, v0.2.10: f/3.8 flicked back to f/3.7
+/// ~0.9 s after the press, then settled at the next pump tick.
+pub fn merge_fresher(
+    current: &Aggregate,
+    snapshot: Aggregate,
+    polled_from: Instant,
+    last_write_done: &HashMap<String, Instant>,
+) -> Aggregate {
+    let mut merged = snapshot;
+    for view in &mut merged.cameras {
+        let written_after = last_write_done
+            .get(&view.id)
+            .is_some_and(|done| *done > polled_from);
+        if !written_after {
+            continue;
+        }
+        if let Some(fresher) = current.cameras.iter().find(|c| c.id == view.id) {
+            tracing::debug!(id = %view.id, "pump snapshot older than the last write: kept the confirmed view");
+            *view = fresher.clone();
+        }
+    }
+    merged
+}
+
 /// Polls relays and assembles the aggregate the panel renders.
 #[derive(Clone)]
 pub struct Aggregator {
@@ -122,6 +155,9 @@ pub struct Aggregator {
     version: String,
     /// Self-registered relays (issue 808): resolves a `register:<id>` camera address.
     registry: RelayRegistry,
+    /// When each camera's last write got its relay answer with the post-write state (shading#27):
+    /// the pump keeps the confirmed view of a camera written after its snapshot's polls started.
+    last_write_done: Arc<Mutex<HashMap<String, Instant>>>,
 }
 
 impl Aggregator {
@@ -146,13 +182,41 @@ impl Aggregator {
             write_client,
             version: version.into(),
             registry,
+            last_write_done: Arc::new(Mutex::new(HashMap::new())),
         })
+    }
+
+    /// The write stamps [`merge_fresher`] reads (a copy: one entry per camera).
+    pub fn last_writes(&self) -> HashMap<String, Instant> {
+        self.last_write_done
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Records that `id`'s write just got its post-write state from the relay (shading#27).
+    pub fn note_write_done(&self, id: &str) {
+        self.last_write_done
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id.to_string(), Instant::now());
     }
 
     /// One aggregate snapshot across every configured camera. `previews` is the preview store
     /// the per-camera workers fill; each camera's `preview_live` is read from it after the relay
     /// polls, against `cfg.preview`'s freshness bound (issue 808).
     pub async fn snapshot(&self, cfg: &ServiceConfig, previews: &PreviewStore) -> Aggregate {
+        self.snapshot_timed(cfg, previews).await.0
+    }
+
+    /// [`Self::snapshot`] and the moment its relay polls started (`polled_from`, taken BEFORE any
+    /// poll), for the pump's [`merge_fresher`] (shading#27).
+    pub async fn snapshot_timed(
+        &self,
+        cfg: &ServiceConfig,
+        previews: &PreviewStore,
+    ) -> (Aggregate, Instant) {
+        let polled_from = Instant::now();
         // issue 1431: a visiting camera (the other venue's) is listed, and polled, only once its
         // relay has announced itself here; a normal event lists only the venue's own cameras.
         let listed: Vec<&CameraConfig> = cfg
@@ -186,10 +250,13 @@ impl Aggregator {
                 view
             })
             .collect();
-        Aggregate {
-            version: self.version.clone(),
-            cameras,
-        }
+        (
+            Aggregate {
+                version: self.version.clone(),
+                cameras,
+            },
+            polled_from,
+        )
     }
 
     /// Reads one relay's `/api/state`, returning `None` if unreachable / malformed.
@@ -257,6 +324,11 @@ impl Aggregator {
                     .and_then(|s| serde_json::from_value::<RelayState>(s.clone()).ok());
                 tracing::info!(id = %cam.id, params = %params, status = %status, latency_ms,
                     has_state = state.is_some(), "PUT /api/params -> relay ok");
+                if state.is_some() {
+                    // shading#27: the caller publishes this post-write state; a pump snapshot
+                    // polled before now must not replace it.
+                    self.note_write_done(&cam.id);
+                }
                 Ok(state)
             }
             Ok(resp) => {
