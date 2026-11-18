@@ -21,7 +21,7 @@ The code came over with its history on 2.11.2026 (camera-box `dev` @ 390ae50, pa
 - Rust: `cargo fmt --all --check`, `cargo clippy -p bkshading-proto -p bkshading-relay -p bkshading --all-targets -- -D warnings` (and `-p bkshading --no-default-features`), `cargo test -p bkshading-proto -p bkshading-relay -p bkshading`, `cargo test -p bkshading --no-default-features`.
 - Python: `ruff check scripts tests`, `python3 -m pytest -q tests/python`.
 - Panel (shading#16, Leptos CSR): `cd bkshading/panel && trunk build --release` (the service embeds `dist/`; native-only work can use a placeholder `dist/index.html`), `cargo test -p bkshading-panel`, `cargo clippy -p bkshading-panel --target wasm32-unknown-unknown -- -D warnings`.
-- Panel E2E (Playwright, chromium): `bkshading/service/tests/e2e`, `npm install`, then `BKSHADING_BIN=<release bkshading> npx playwright test` (old panel at `/`: `panel.spec.js`; new panel at `/next/`: `panel-next.spec.js`, `arrange.spec.js`).
+- Panel E2E (Playwright, chromium): `bkshading/service/tests/e2e`, `npm install`, then `BKSHADING_BIN=<release bkshading> npx playwright test` (the panel at `/`: `panel-next.spec.js`, `theme.spec.js`, `arrange.spec.js`; the old JS panel and its `panel.spec.js` were removed in v0.2.10).
 
 ## Site facts
 

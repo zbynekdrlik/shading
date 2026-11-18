@@ -1,11 +1,14 @@
-//! The header (mockup arrange-v1): title, version, connection, the hidden-cameras chip, the note,
-//! `↺ podľa čísel` (in ARRANGE) and the `⇄` key.
+//! The top bar (mockups arrange-v1 and theme-v4b): title, version, connection, the hidden-cameras
+//! chip, the note, `↺ podľa čísel` (in ARRANGE), the layout pill (4+4 | 5 | 8 v rade), the mode
+//! pill (Svetlo | Tma) and the `⇄` key. On a phone (< 700 px, version D) only the title, the
+//! connection and a `☰` stay in the bar; the rest opens in an overlay menu under it.
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
 use crate::behave::arrange_drag::{Note, Tap, Tone, ARRANGE_NOTE, SAVING_NOTE, UNCHANGED_NOTE};
-use crate::store::{net, Store};
+use crate::behave::look::{CardLayout, ThemeMode, LAYOUT_KEY, MODE_KEY};
+use crate::store::{look_io, net, Store};
 
 /// The chip's text: how many cameras are hidden and how to bring them back.
 pub fn hidden_chip_text(n: usize) -> String {
@@ -78,9 +81,50 @@ pub fn Header() -> impl IntoView {
         });
     };
 
+    // shading#24: the layout and mode pills; a choice is remembered on this device at once.
+    let layouts = CardLayout::ALL
+        .iter()
+        .map(|&l| {
+            view! {
+                <button
+                    type="button"
+                    data-role=format!("layout-{}", l.as_str())
+                    aria-pressed=move || (store.card_layout.get() == l).to_string()
+                    title=l.title()
+                    on:click=move |_| {
+                        store.card_layout.set(l);
+                        look_io::save(LAYOUT_KEY, l.as_str());
+                    }
+                >
+                    {l.label()}
+                </button>
+            }
+        })
+        .collect_view();
+    let modes = ThemeMode::ALL
+        .iter()
+        .map(|&m| {
+            view! {
+                <button
+                    type="button"
+                    data-role=format!("mode-{}", m.as_str())
+                    aria-pressed=move || (store.theme_mode.get() == m).to_string()
+                    on:click=move |_| {
+                        store.theme_mode.set(m);
+                        look_io::save(MODE_KEY, m.as_str());
+                    }
+                >
+                    {m.label()}
+                </button>
+            }
+        })
+        .collect_view();
+
+    let menu_open = RwSignal::new(false);
+
     view! {
-        <header class="head">
-            <span class="title">"SHADING"</span>
+        <header class="bar">
+            <h1 class="title">"Shading"</h1>
             <span class="ver" id="app-version" data-role="version" data-testid="version">
                 {crate::version_text()}
             </span>
@@ -88,39 +132,56 @@ pub fn Header() -> impl IntoView {
                 {move || if store.connected() { "spojené" } else { "odpojené" }}
             </span>
             <span class="spacer"></span>
-            <button
-                type="button"
-                class="hidden-chip"
-                data-role="hidden-chip"
-                title="Skryté kamery vrátiš cez ⇄"
-                hidden=move || arranging() || hidden() == 0
-                on:click=move |_| tap_arrange(store)
-            >
-                {move || hidden_chip_text(hidden())}
-            </button>
             <span class=move || note().1 data-role="arrange-note">{move || note().0}</span>
+            // shading#24 version D: under 700 px the controls below fold into this menu (an overlay
+            // under the bar, so the cards never move); above it the menu is invisible to layout.
             <button
                 type="button"
-                class="reset-num"
-                data-role="reset-num"
-                title="Vráti poradie podľa čísel kamier a ukáže všetky"
-                hidden=move || !arranging()
-                on:click=on_reset
+                class="iconbtn burger"
+                data-role="menu-key"
+                aria-controls="top-menu"
+                aria-expanded=move || menu_open.get().to_string()
+                title="Menu"
+                on:click=move |_| menu_open.update(|o| *o = !*o)
             >
-                "↺ podľa čísel"
+                "☰"
             </button>
-            <button
-                type="button"
-                class="arrange-key"
-                class:selected=arranging
-                disabled=move || !store.layout_heard.get()
-                data-role="arrange-key"
-                aria-pressed=move || arranging().to_string()
-                title="Usporiadať kamery"
-                on:click=move |_| tap_arrange(store)
-            >
-                "⇄"
-            </button>
+            <div class="menu" class:open=move || menu_open.get() id="top-menu" data-role="menu">
+                <button
+                    type="button"
+                    class="hidden-chip"
+                    data-role="hidden-chip"
+                    title="Skryté kamery vrátiš cez ⇄"
+                    hidden=move || arranging() || hidden() == 0
+                    on:click=move |_| tap_arrange(store)
+                >
+                    {move || hidden_chip_text(hidden())}
+                </button>
+                <button
+                    type="button"
+                    class="reset-num"
+                    data-role="reset-num"
+                    title="Vráti poradie podľa čísel kamier a ukáže všetky"
+                    hidden=move || !arranging()
+                    on:click=on_reset
+                >
+                    "↺ podľa čísel"
+                </button>
+                <div class="seg" role="group" aria-label="Rozloženie" data-role="layout-pill">{layouts}</div>
+                <div class="seg" role="group" aria-label="Režim" data-role="mode-pill">{modes}</div>
+                <button
+                    type="button"
+                    class="arrange-key iconbtn"
+                    class:selected=arranging
+                    disabled=move || !store.layout_heard.get()
+                    data-role="arrange-key"
+                    aria-pressed=move || arranging().to_string()
+                    title="Usporiadať kamery"
+                    on:click=move |_| tap_arrange(store)
+                >
+                    "⇄"
+                </button>
+            </div>
         </header>
     }
 }

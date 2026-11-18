@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="sk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shading Theme v1</title>
+<style>
+/* shading#24 mockup v1: the rebuilt panel's theme, based on the legacy panel (system font,
+   sentence case, calm cards), with two modes for the venue light. Sizes are chosen for a tablet
+   at arm's length (~50-60 cm): body text >= 15 px, values 26 px, touch targets 56 px. */
+:root, [data-mode="dark"] {
+  --bg: #0f1216;        /* page */
+  --card: #171b21;      /* camera block */
+  --row: #1f242c;       /* one control row */
+  --line: #2c333d;
+  --text: #e3e8ee;      /* values, camera name: not pure white (no glare in a dark room) */
+  --label: #aab4c0;     /* row labels */
+  --dim: #8b96a3;       /* registration line, hints */
+  --btn: #262c35;
+  --btn-text: #e3e8ee;
+  --accent: #5b9bff;    /* slider fill + thumb */
+  --track: #39414c;
+  --ok: #4cc98a;
+  --warn-bg: #3a2a12;
+  --warn-text: #ffc46b;
+  --bad-bg: #3b1a1e;
+  --bad-text: #ff8f99;
+}
+[data-mode="light"] {
+  --bg: #e6eaef;
+  --card: #ffffff;
+  --row: #f2f4f7;
+  --line: #d3d9e0;
+  --text: #0e1319;
+  --label: #3d4855;
+  --dim: #56626f;
+  --btn: #e3e8ee;
+  --btn-text: #0e1319;
+  --accent: #1a5ed0;
+  --track: #c3cbd5;
+  --ok: #137a43;
+  --warn-bg: #fff1d6;
+  --warn-text: #7a4a00;
+  --bad-bg: #ffe1e4;
+  --bad-text: #9b1424;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--bg); color: var(--text);
+  font: 16px/1.35 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+header {
+  display: flex; align-items: center; gap: 14px; padding: 12px 16px;
+  border-bottom: 1px solid var(--line); background: var(--card);
+}
+header h1 { font-size: 21px; margin: 0; font-weight: 700; }
+header .ver { color: var(--dim); font-size: 15px; }
+header .conn { color: var(--ok); font-size: 15px; font-weight: 600; }
+header .sp { flex: 1; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.seg button {
+  font: inherit; font-size: 16px; font-weight: 600; min-height: 48px; padding: 0 16px;
+  background: transparent; color: var(--label); border: 0; cursor: pointer;
+}
+.seg button[aria-pressed="true"] { background: var(--btn); color: var(--text); }
+.iconbtn {
+  min-width: 48px; min-height: 48px; border-radius: 12px; border: 1px solid var(--line);
+  background: var(--btn); color: var(--btn-text); font-size: 22px; cursor: pointer;
+}
+main {
+  display: grid; gap: 14px; padding: 14px 16px;
+  grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+}
+.cam { background: var(--card); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
+.prev { aspect-ratio: 16/9; background: #000; position: relative; display: grid; place-items: center; }
+.prev .ph { color: #9aa3ad; font-size: 15px; font-weight: 600; letter-spacing: .02em; }
+.prev .img { position: absolute; inset: 0;
+  background: linear-gradient(135deg,#3b1f4d,#8a3a7a 45%,#21152b 70%,#0b0b12); }
+.head { display: flex; align-items: baseline; gap: 10px; padding: 12px 14px 4px; }
+.num { font-size: 30px; font-weight: 800; line-height: 1; }
+.name { font-size: 21px; font-weight: 700; }
+.state { margin-left: auto; font-size: 16px; font-weight: 600; color: var(--ok); }
+.state.off { color: var(--bad-text); }
+.reg { padding: 0 14px 10px; color: var(--dim); font-size: 14px; }
+.warn {
+  margin: 0 14px 10px; padding: 10px 12px; border-radius: 10px; font-size: 16px; font-weight: 600;
+  background: var(--bad-bg); color: var(--bad-text); display: flex; gap: 8px; align-items: center;
+}
+.rows { padding: 0 10px 12px; display: grid; gap: 8px; }
+.row { background: var(--row); border-radius: 12px; padding: 10px 12px 12px; }
+.row .top { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 8px; }
+.row .lab { font-size: 16px; font-weight: 500; color: var(--label); }
+.row .val { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.row .end { font-size: 14px; font-weight: 700; color: var(--warn-text); background: var(--warn-bg);
+  padding: 2px 8px; border-radius: 6px; margin-left: 8px; vertical-align: middle; }
+.ctl { display: grid; grid-template-columns: 56px 1fr 56px; gap: 12px; align-items: center; }
+.ctl button {
+  height: 56px; border-radius: 12px; border: 1px solid var(--line); background: var(--btn);
+  color: var(--btn-text); font-size: 28px; font-weight: 600; cursor: pointer;
+}
+.ctl button:disabled { opacity: .35; cursor: default; }
+input[type=range] { width: 100%; height: 32px; -webkit-appearance: none; appearance: none; background: transparent; }
+input[type=range]::-webkit-slider-runnable-track { height: 8px; border-radius: 4px;
+  background: linear-gradient(var(--accent),var(--accent)) 0/var(--p,50%) 100% no-repeat, var(--track); }
+input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 26px; height: 26px; margin-top: -9px;
+  border-radius: 50%; background: var(--accent); border: 3px solid var(--card); }
+input[type=range]::-moz-range-track { height: 8px; border-radius: 4px; background: var(--track); }
+input[type=range]::-moz-range-progress { height: 8px; border-radius: 4px; background: var(--accent); }
+input[type=range]::-moz-range-thumb { width: 22px; height: 22px; border-radius: 50%; background: var(--accent); border: 3px solid var(--card); }
+.foot { display: flex; justify-content: space-between; align-items: center; padding: 0 14px 14px; color: var(--dim); font-size: 15px; }
+.foot button { min-height: 48px; padding: 0 16px; border-radius: 12px; border: 1px solid var(--line);
+  background: var(--btn); color: var(--btn-text); font: inherit; font-weight: 600; font-size: 16px; }
+.disabled .rows, .disabled .foot { opacity: .45; }
+.note { max-width: 1100px; margin: 8px 16px 24px; color: var(--label); font-size: 15px; }
+.note h2 { color: var(--text); font-size: 19px; margin: 18px 0 8px; }
+.note table { border-collapse: collapse; width: 100%; font-size: 15px; }
+.note td, .note th { border-bottom: 1px solid var(--line); padding: 6px 8px; text-align: left; }
+.note td.ok { color: var(--ok); font-weight: 700; }
+@media (max-width: 420px) { main { padding: 10px; grid-template-columns: 1fr; } header { flex-wrap: wrap; } }
+</style>
+</head>
+<body data-mode="dark">
+<header>
+  <h1>Shading</h1><span class="ver">v0.3.0</span><span class="conn">● spojené</span>
+  <span class="sp"></span>
+  <div class="seg" role="group" aria-label="Režim">
+    <button id="m-light" aria-pressed="false">☀ Svetlo</button>
+    <button id="m-dark" aria-pressed="true">☾ Tma</button>
+  </div>
+  <button class="iconbtn" title="ARRANGE">⇄</button>
+</header>
+<main id="grid"></main>
+<section class="note">
+  <h2>Čo je iné oproti /next/ (podľa legacy webky)</h2>
+  <ul>
+    <li>Systémové písmo ako legacy, žiadne zúžené VEĽKÉ písmená. Popis riadku 16 px, hodnota 26 px tučne, meno kamery 21 px.</li>
+    <li>Tlačidlá +/− 56×56 px (bolo 36×34), hrubší posuvník (8 px, guľka 26 px).</li>
+    <li>Bloky min. 330 px široké: na tablete 3 vedľa seba ako legacy, na veľkej obrazovke 4.</li>
+    <li><b>Tma</b> = zatemnená sála: nízky jas, text nie čisto biely (bez oslnenia). <b>Svetlo</b> = svietia svetlá: biele karty, tmavý text, silný kontrast proti odleskom.</li>
+    <li>Režim sa prepína hore vpravo a pamätá sa na každom zariadení zvlášť.</li>
+  </ul>
+  <h2>Kontrast (počítaný naživo, cieľ WCAG AA: text ≥ 4,5:1)</h2>
+  <table id="ctab"><thead><tr><th>Prvok</th><th>Tma</th><th>Svetlo</th></tr></thead><tbody></tbody></table>
+</section>
+<script>
+const cams = [
+  { n: 1, name: "Cam 1", off: true, reg: "cam1-shading · 10.77.8.121:8771 · neohlásil sa 10 min", warn: "⚠ Relay nedostupný — kamera sa nedá ovládať" },
+  { n: 4, name: "Cam 4", reg: "cam4-shading · 10.77.8.75:8771 · ohlásený pred 3 s", f: "f/4.0", end: true, p: 0 },
+  { n: 6, name: "Cam 6", reg: "cam6 · 10.77.9.66:8771 · ohlásený pred 2 s", f: "f/3.7", p: 15 },
+  { n: 7, name: "Cam 7", reg: "cam7 · 10.77.9.67:8771 · ohlásený pred 5 s", f: "f/3.5", p: 10 },
+];
+const row = (lab, val, p, extra = "", decOff = false) => `
+  <div class="row"><div class="top"><span class="lab">${lab}</span><span><span class="val">${val}</span>${extra}</span></div>
+  <div class="ctl"><button ${decOff ? "disabled" : ""} aria-label="${lab} menej">−</button>
+  <input type="range" value="${p}" style="--p:${p}%"><button aria-label="${lab} viac">+</button></div></div>`;
+document.getElementById("grid").innerHTML = cams.map(c => `
+  <section class="cam ${c.off ? "disabled" : ""}">
+    <div class="prev">${c.off ? '<span class="ph">BEZ OBRAZU</span>' : '<div class="img"></div>'}</div>
+    <div class="head"><span class="num">${c.n}</span><span class="name">${c.name}</span>
+      <span class="state ${c.off ? "off" : ""}">${c.off ? "● relay offline" : "● online"}</span></div>
+    <div class="reg">${c.reg}</div>
+    ${c.warn ? `<div class="warn">${c.warn}</div>` : ""}
+    <div class="rows">
+      ${row("Clona", c.off ? "—" : c.f, c.p ?? 0, c.end ? '<span class="end">koniec</span>' : "", !!c.end || c.off)}
+      ${row("ISO", c.off ? "—" : "640", 40)}
+      ${row("Biely bod", c.off ? "—" : "5000 K", 33)}
+      ${row("Tint", c.off ? "—" : "0", 50)}
+      ${row("Uzávierka", c.off ? "—" : "1/100", 20)}
+    </div>
+    <div class="foot"><span>fps 60.00 · grab 60</span><button>Auto WB</button></div>
+  </section>`).join("");
+document.querySelectorAll('input[type=range]').forEach(r => r.addEventListener('input', () => r.style.setProperty('--p', r.value + '%')));
+
+const lum = (hex) => { const v = hex.trim().replace('#', ''); return [0, 2, 4].map(i => parseInt(v.substr(i, 2), 16) / 255)
+  .map(c => c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)).reduce((a, c, i) => a + c * [0.2126, 0.7152, 0.0722][i], 0); };
+const ratio = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
+const pairs = [["Hodnota na riadku", "--text", "--row"], ["Popis riadku", "--label", "--row"], ["Meno kamery", "--text", "--card"],
+  ["Registrácia (drobný text)", "--dim", "--card"], ["Online", "--ok", "--card"], ["Varovanie", "--bad-text", "--bad-bg"],
+  ["Koniec clony", "--warn-text", "--warn-bg"], ["Tlačidlo +/−", "--btn-text", "--btn"], ["Posuvník proti stope", "--accent", "--track"]];
+function table() {
+  const get = (mode, v) => { document.body.dataset.mode = mode; return getComputedStyle(document.body).getPropertyValue(v); };
+  const cur = document.body.dataset.mode;
+  document.querySelector('#ctab tbody').innerHTML = pairs.map(([n, f, b]) => {
+    const d = ratio(get("dark", f), get("dark", b)), l = ratio(get("light", f), get("light", b));
+    const cell = (r) => `<td class="${r >= 4.5 || n.startsWith("Posuvník") && r >= 3 ? "ok" : ""}">${r.toFixed(1)}:1</td>`;
+    return `<tr><td>${n}</td>${cell(d)}${cell(l)}</tr>`;
+  }).join("");
+  document.body.dataset.mode = cur;
+}
+function setMode(m) {
+  document.body.dataset.mode = m;
+  document.getElementById("m-light").setAttribute("aria-pressed", m === "light");
+  document.getElementById("m-dark").setAttribute("aria-pressed", m === "dark");
+}
+document.getElementById("m-light").onclick = () => setMode("light");
+document.getElementById("m-dark").onclick = () => setMode("dark");
+table();
+</script>
+</body>
+</html>

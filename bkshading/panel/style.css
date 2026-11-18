@@ -1,222 +1,343 @@
-/* The bkshading panel (shading#16): fohmixer-ui's tokens and fonts (crates/fohmixer-ui/style.css,
-   the house app stack), the look of the owner's approved mockup docs/mockups/arrange-v1.html.
-   Cascade: style.css (fonts, tokens, page, header, banner, grid, camera block, steppers, popup),
-   then arrange.css (the ⇄ key's mode: covers, grips, eyes, the carried block). The fonts ship
-   with the panel (the venue LAN has no internet): Barlow, Barlow Condensed, JetBrains Mono (OFL). */
-@font-face {
-    font-family: "Barlow Condensed";
-    font-weight: 700;
-    font-display: block;
-    src: url("fonts/barlow-condensed-latin-700-normal.woff2") format("woff2");
-    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+2000-206F, U+2212, U+221E;
-}
-@font-face {
-    font-family: "Barlow Condensed";
-    font-weight: 700;
-    font-display: block;
-    src: url("fonts/barlow-condensed-latin-ext-700-normal.woff2") format("woff2");
-    unicode-range: U+0100-02AF, U+0304, U+0308, U+0329, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
-}
-@font-face {
-    font-family: "Barlow";
-    font-weight: 600;
-    font-display: block;
-    src: url("fonts/barlow-latin-600-normal.woff2") format("woff2");
-    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+2000-206F, U+2212, U+221E;
-}
-@font-face {
-    font-family: "Barlow";
-    font-weight: 600;
-    font-display: block;
-    src: url("fonts/barlow-latin-ext-600-normal.woff2") format("woff2");
-    unicode-range: U+0100-02AF, U+0304, U+0308, U+0329, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
-}
-@font-face {
-    font-family: "Barlow";
-    font-weight: 700;
-    font-display: block;
-    src: url("fonts/barlow-latin-700-normal.woff2") format("woff2");
-    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+2000-206F, U+2212, U+221E;
-}
-@font-face {
-    font-family: "Barlow";
-    font-weight: 700;
-    font-display: block;
-    src: url("fonts/barlow-latin-ext-700-normal.woff2") format("woff2");
-    unicode-range: U+0100-02AF, U+0304, U+0308, U+0329, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
-}
-@font-face {
-    font-family: "JetBrains Mono";
-    font-weight: 500;
-    font-display: block;
-    src: url("fonts/jetbrains-mono-latin-500-normal.woff2") format("woff2");
-    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+2000-206F, U+2212, U+221E;
-}
-@font-face {
-    font-family: "JetBrains Mono";
-    font-weight: 500;
-    font-display: block;
-    src: url("fonts/jetbrains-mono-latin-ext-500-normal.woff2") format("woff2");
-    unicode-range: U+0100-02AF, U+0304, U+0308, U+0329, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
-}
-@font-face {
-    font-family: "JetBrains Mono";
-    font-weight: 600;
-    font-display: block;
-    src: url("fonts/jetbrains-mono-latin-600-normal.woff2") format("woff2");
-    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+2000-206F, U+2212, U+221E;
-}
-@font-face {
-    font-family: "JetBrains Mono";
-    font-weight: 600;
-    font-display: block;
-    src: url("fonts/jetbrains-mono-latin-ext-600-normal.woff2") format("woff2");
-    unicode-range: U+0100-02AF, U+0304, U+0308, U+0329, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
-}
+/* The bkshading panel (shading#16, theme shading#24): the look of mockup docs/mockups/theme-v4b.html,
+   agreed with the PP operators on 18.11.2026 (Marcel "final", Stepan "za mňa top"). Based on the
+   legacy JS panel the operators read well: the system font, sentence case, calm cards; a dark mode
+   (the default, a darkened room) and a muted light mode (a lit room, no pure white).
+   Cascade: style.css (tokens, page, top bar, banner, card layouts, card, rows, popup), then
+   arrange.css (the ⇄ key's mode: covers, grips, eyes, the carried card).
+   `data-mode` and `data-layout` sit on <html> (store/look_io.rs), remembered per device. */
 
 :root {
     color-scheme: dark;
-    --bg: #07070c;
-    --page: #0b0b12;
-    --bar: #11111b;
-    --section: #151522;
-    --panel: #1a1a28;
-    --panel-hi: #20203a;
-    --track: #0a0a14;
-    --line: #2a2a44;
-    --accent: #4ecdc4;
-    --solo: #f4d35e;
-    --text: #eaeaf0;
-    --muted: #9a9ab4;
-    --faint: #5c5c78;
-    --ok: #36d67a;
-    --bad: #ff4757;
-    --warn: #f5a623;
-    --display: "Barlow Condensed", "Arial Narrow", sans-serif;
-    --ui: "Barlow", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    --mono: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+    --val: #cdd5de;      /* values: light grey (Stepan, multifocal glasses), not the near-white --text */
+    --bg: #0f1216;        /* page */
+    --card: #171b21;      /* camera card */
+    --row: #1f242c;       /* one control row */
+    --line: #2c333d;
+    --text: #e3e8ee;      /* camera name, headings: not pure white (no glare in a dark room) */
+    --label: #aab4c0;     /* row labels */
+    --dim: #8b96a3;       /* registration line, hints */
+    --btn: #262c35;
+    --btn-text: #e3e8ee;
+    --accent: #5b9bff;    /* slider fill + thumb, the open value */
+    --track: #39414c;
+    --ok: #4cc98a;
+    --warn-bg: #3a2a12;
+    --warn-text: #ffc46b;
+    --bad-bg: #3b1a1e;
+    --bad-text: #ff8f99;
+    --solo: #f4d35e;      /* ARRANGE's yellow (fohmixer's key) */
+    /* Marcel: a pitch-black 1.5 px outline around the values and the +/- glyphs (dark mode only). */
+    --outline: 1.5px 0 0 #000, -1.5px 0 0 #000, 0 1.5px 0 #000, 0 -1.5px 0 #000,
+        1.5px 1.5px 0 #000, -1.5px -1.5px 0 #000, 1.5px -1.5px 0 #000, -1.5px 1.5px 0 #000;
 }
+/* owner 18.11: the first light mode was "extremely bright": a muted grey-blue paper, no pure white. */
+:root[data-mode="light"] {
+    color-scheme: light;
+    --val: #1f262e;
+    --bg: #b9c1cb;
+    --card: #cdd4dc;
+    --row: #c2cad3;
+    --line: #a3adb9;
+    --text: #0e1319;
+    --label: #2c3640;
+    --dim: #3a4550;
+    --btn: #d8dee5;
+    --btn-text: #0e1319;
+    --accent: #16509f;
+    --track: #9aa5b2;
+    --ok: #0c5a30;
+    --warn-bg: #e9d9b6;
+    --warn-text: #5b3600;
+    --bad-bg: #e5c4c8;
+    --bad-text: #7d0f1c;
+    --solo: #8a6a00;
+    --outline: none;      /* on the light paper a black outline muddies dark text */
+}
+
 * { box-sizing: border-box; }
-html, body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--ui); }
+html, body { margin: 0; }
+body {
+    background: var(--bg); color: var(--text);
+    font: 16px/1.35 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+}
 button { font: inherit; color: inherit; }
 [hidden] { display: none !important; }
 
-.app { background: var(--page); min-height: 100vh; }
+/* Marcel: an app, not a web page: no text selection (a double tap never selects); the
+   registration line is the one exception (its address is copied). */
+.app { min-height: 100vh; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
 
-/* The header. */
-.head {
+/* The top bar. Nothing wraps (no layout shift); on a phone it may wrap (below). */
+.bar {
     position: sticky; top: 0; z-index: 20;
-    display: flex; align-items: center; gap: 10px;
-    padding: 8px 16px; background: var(--bar); border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: 14px; padding: 12px 16px;
+    border-bottom: 1px solid var(--line); background: var(--card); white-space: nowrap;
 }
-.title { font: 700 20px/1 var(--display); letter-spacing: 0.06em; }
-.ver { font: 500 12px/1 var(--mono); color: var(--muted); }
-.conn { font: 600 12px/1 var(--ui); color: var(--ok); }
+.bar .title { font-size: 21px; margin: 0; font-weight: 700; }
+.ver { color: var(--dim); font-size: 15px; }
+.conn { color: var(--ok); font-size: 15px; font-weight: 600; }
 .conn::before { content: "● "; }
-.conn.bad { color: var(--bad); }
+.conn.bad { color: var(--bad-text); }
 .spacer { flex: 1; }
-.hidden-chip {
-    padding: 5px 9px; border-radius: 999px; border: 1px dashed var(--faint);
-    background: transparent; color: var(--muted); font: 600 12px/1 var(--ui); cursor: pointer;
+.seg { display: inline-flex; flex: none; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.seg button {
+    font: inherit; font-size: 16px; font-weight: 600; min-height: 48px; padding: 0 16px;
+    background: transparent; color: var(--label); border: 0; cursor: pointer; white-space: nowrap;
 }
-.note { font: 600 11px/1.2 var(--ui); color: var(--muted); letter-spacing: 0.03em; min-width: 0; text-align: right; }
+.seg button[aria-pressed="true"], .seg button[aria-selected="true"] { background: var(--btn); color: var(--text); }
+.iconbtn {
+    flex: none; min-width: 48px; min-height: 48px; border-radius: 12px; border: 1px solid var(--line);
+    background: var(--btn); color: var(--btn-text); font-size: 22px; cursor: pointer;
+}
+.hidden-chip {
+    flex: none; padding: 8px 12px; border-radius: 999px; border: 1px dashed var(--dim);
+    background: transparent; color: var(--label); font-size: 14px; font-weight: 600; cursor: pointer;
+}
+.note { font-size: 14px; font-weight: 600; color: var(--label); min-width: 0; overflow: hidden; text-overflow: ellipsis; text-align: right; }
 .note.saved { color: var(--ok); }
-.note.refused { color: var(--warn); }
+.note.refused { color: var(--warn-text); }
 
 /* The connection banner (issue 1343). */
 .banner {
-    padding: 12px 16px; background: var(--bad); color: #fff;
-    font: 700 15px/1.3 var(--ui); text-align: center;
+    padding: 12px 16px; background: var(--bad-bg); color: var(--bad-text);
+    border-bottom: 1px solid var(--bad-text); font-size: 16px; font-weight: 700; text-align: center;
 }
 
-/* The camera grid: it reflows with the screen width. */
-.grid {
-    position: relative;
-    display: grid; gap: 10px; padding: 12px 16px 24px;
-    grid-template-columns: repeat(auto-fill, minmax(236px, 1fr));
+/* ===== Card sizing (shading#24 version D, Marcel): the ONE place for card widths and in-card sizes.
+   A card is never narrower than --card-min (no trimmed or overflowing text) and never wider than
+   --card-max (no endless stretch: on a 3840 px (4K) screen all 8 cards fit in one row). Everything
+   inside a card scales with the card's own width: --s = 1 design px = 1/367 of the card width (the
+   "5" card at 1920 px), via container query units, so text, +/- buttons and paddings keep their
+   proportions at any resolution. Borders (1-2 px), the 1.5 px outline and the slider stay fixed.
+   The layouts (the operator's pill): 4+4 = a grid of 4 columns (2 under 1340 px, 1 on a phone);
+   5 = exactly 5 whole cards in a row, the 6th starts just past the edge (the usual 3+2 event set);
+   8 v rade = 4 1/3 cards in a row (the third tells there is more). No scroll snap (Marcel). ===== */
+:root { --card-min: 250px; --card-max: 460px; --gap: 14px; } /* 250: "5" fits 5 whole cards down to a 1366 px screen */
+.grid { position: relative; display: grid; gap: var(--gap); padding: 14px 16px; justify-content: start; }
+:root[data-layout="grid"] .grid, :root:not([data-layout]) .grid {
+    grid-template-columns: repeat(4, clamp(var(--card-min), (100vw - 32px - 3 * var(--gap)) / 4, var(--card-max)));
 }
-.empty-note { padding: 24px 16px; color: var(--muted); text-align: center; }
+:root[data-layout="five"] .grid {
+    grid-auto-flow: column; overflow-x: auto; overscroll-behavior-x: contain;
+    grid-auto-columns: clamp(var(--card-min), (100vw - 16px - 5 * var(--gap)) / 5 + 0.1px, var(--card-max));
+}
+:root[data-layout="row"] .grid {
+    grid-auto-flow: column; overflow-x: auto; overscroll-behavior-x: contain;
+    grid-auto-columns: clamp(var(--card-min), (100vw - 32px - 4 * var(--gap)) / 4.3333, var(--card-max));
+}
+@media (max-width: 1340px) {
+    :root[data-layout="grid"] .grid, :root:not([data-layout]) .grid {
+        grid-template-columns: repeat(2, clamp(var(--card-min), (100vw - 32px - var(--gap)) / 2, var(--card-max)));
+    }
+}
+@media (max-width: 420px) {
+    .grid { padding: 10px; }
+    :root[data-layout="grid"] .grid, :root:not([data-layout]) .grid { grid-template-columns: 1fr; }
+    :root[data-layout="five"] .grid, :root[data-layout="row"] .grid { grid-auto-columns: calc(100vw - 32px); }
+}
+.cam { container-type: inline-size; }
+/* cqw resolves against the nearest container, so --s is set on the card's children (the card is it). */
+.cam > * { --s: calc(100cqw / 367); }
 
-/* A camera block. */
+/* A camera card. Every card always has a 2 px border (transparent; the 1 px edge is an inset
+   shadow), so PGM / PVW only recolour it and a tally change moves nothing (Marcel). */
 .cam {
-    position: relative; display: flex; flex-direction: column;
-    background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden;
+    position: relative;
+    background: var(--card); border: 2px solid transparent; box-shadow: inset 0 0 0 1px var(--line);
+    /* The card's own corner cannot follow --s (cqw on the card would measure the page, not the
+       card), so it stays 14 px; every corner inside the card scales. */
+    border-radius: 14px; overflow: hidden;
 }
-.prev { position: relative; aspect-ratio: 16 / 9; background: #000; border-bottom: 1px solid var(--line); }
+.prev { aspect-ratio: 16 / 9; background: #000; position: relative; }
 .prev .preview-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; visibility: hidden; }
 .prev .preview-img.ready { visibility: visible; }
 .prev .tag {
-    position: absolute; left: 6px; bottom: 5px; padding: 2px 5px; border-radius: 4px;
-    background: rgba(0, 0, 0, 0.55); font: 500 10px/1 var(--mono); color: var(--muted);
+    position: absolute; left: calc(var(--s) * 8); bottom: calc(var(--s) * 6);
+    padding: calc(var(--s) * 2) calc(var(--s) * 6); border-radius: calc(var(--s) * 4);
+    background: rgba(0, 0, 0, 0.55); color: #9aa3ad; font-size: calc(var(--s) * 12);
 }
 .prev .none {
-    position: absolute; inset: 0; display: grid; place-items: center; padding: 0 12px;
-    color: var(--faint); font: 600 12px/1.3 var(--ui); text-align: center;
+    position: absolute; inset: 0; display: grid; place-items: center; padding: 0 calc(var(--s) * 12);
+    color: #9aa3ad; font-size: calc(var(--s) * 15); font-weight: 600; letter-spacing: 0.02em; text-align: center;
 }
-.body { padding: 8px 10px 10px; display: flex; flex-direction: column; gap: 6px; }
-.bhead { display: flex; align-items: baseline; gap: 8px; }
-.num { font: 700 26px/0.9 var(--display); color: var(--text); }
-.lbl { font: 700 13px/1 var(--ui); color: var(--muted); letter-spacing: 0.04em; text-transform: uppercase; }
-.on-dot { margin-left: auto; font: 600 11px/1 var(--ui); color: var(--ok); white-space: nowrap; }
-.on-dot::before { content: "● "; }
-.on-dot.bad { color: var(--bad); }
-.reg { font: 500 10.5px/1.3 var(--mono); color: var(--muted); overflow-wrap: anywhere; }
-.reg.stale { color: var(--warn); }
+/* Marcel: number, name, tally and online state share ONE vertical centre. */
+.head {
+    display: flex; align-items: center; gap: calc(var(--s) * 10);
+    padding: calc(var(--s) * 12) calc(var(--s) * 14) calc(var(--s) * 4);
+}
+.head > * { line-height: 1; display: inline-flex; align-items: center; white-space: nowrap; }
+.num { font-size: calc(var(--s) * 30); font-weight: 800; }
+.name { font-size: calc(var(--s) * 21); font-weight: 700; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.state { margin-left: auto; font-size: calc(var(--s) * 16); font-weight: 600; color: var(--ok); }
+.state::before { content: "●\00a0"; }
+.state.off { color: var(--bad-text); }
+/* Marcel: the registration line never wraps (no layout shift), full text in the tooltip, and it
+   stays copyable. "↻ 3s" = the last announcement, "▲ 1h07m" = how long the relay runs. */
+.reg {
+    padding: 0 calc(var(--s) * 14) calc(var(--s) * 10); color: var(--dim); font-size: calc(var(--s) * 14);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    -webkit-user-select: text; user-select: text;
+}
+.reg .ago { font-variant-numeric: tabular-nums; }
+.reg .ago.stale { color: var(--warn-text); }
 
-/* shading#14: the warning badge, outside the dimmed controls, bright and tappable. */
+/* The controls; the warning is an overlay over them (absolute in the relative .rows), never in the
+   flow, never dimmed, at most 2 lines (shading#14's popup opens on a tap). */
+.rows {
+    padding: 0 calc(var(--s) * 10) calc(var(--s) * 12); display: grid; gap: calc(var(--s) * 8); position: relative;
+}
 .warn {
-    display: block; width: 100%; padding: 7px 9px; border: 1px solid var(--bad); border-radius: 8px;
-    background: rgba(255, 71, 87, 0.14); color: var(--text); font: 700 12.5px/1.25 var(--ui);
-    text-align: left; cursor: pointer;
+    position: absolute; top: 0; left: calc(var(--s) * 10); right: calc(var(--s) * 10); z-index: 2;
+    padding: calc(var(--s) * 10) calc(var(--s) * 12); border-radius: calc(var(--s) * 10);
+    font-size: calc(var(--s) * 16); font-weight: 600; line-height: 1.25;
+    background: var(--bad-bg); color: var(--bad-text); text-align: left; cursor: pointer;
+    border: 1px solid var(--bad-text); box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
-.cam.disabled .ctrls { opacity: 0.4; pointer-events: none; }
+.cam.disabled .rows > :not(.warn), .cam.disabled .foot { opacity: 0.45; }
+.cam.disabled .panes { pointer-events: none; }
 
-/* The six steppers. */
-.ctrls { display: flex; flex-direction: column; gap: 5px; }
-.row {
-    display: grid; grid-template-columns: 58px 36px 1fr 36px; align-items: center; gap: 5px;
-    padding: 4px 5px; border-radius: 8px; background: var(--section);
+/* EXP / SYS (Marcel, version B): a 2-state pill per card; both panes share ONE grid cell, so the
+   cell is as tall as the taller pane and a switch never changes the card's height. */
+.pane-pill { display: grid; grid-template-columns: 1fr 1fr; border-radius: calc(var(--s) * 10); }
+.pane-pill button {
+    min-height: calc(var(--s) * 36); padding: 0 calc(var(--s) * 16);
+    font-size: calc(var(--s) * 14); font-weight: 700; letter-spacing: 0.06em;
 }
-.row .k { font: 600 11px/1.1 var(--ui); color: var(--muted); letter-spacing: 0.03em; }
-.step {
-    height: 34px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel);
-    font: 700 18px/1 var(--ui); cursor: pointer; touch-action: manipulation;
+.panes { display: grid; }
+.panes > .pane { grid-area: 1 / 1; display: grid; gap: calc(var(--s) * 8); align-content: start; visibility: hidden; }
+.panes[data-show="exp"] > .pane[data-pane="exp"], .panes[data-show="sys"] > .pane[data-pane="sys"] { visibility: visible; }
+
+/* One row: − | label over value | +. */
+.row { background: var(--row); border-radius: calc(var(--s) * 12); padding: calc(var(--s) * 5.6); } /* Marcel: -30 % */
+.ctl {
+    display: grid; grid-template-columns: calc(var(--s) * 56) 1fr calc(var(--s) * 56);
+    gap: calc(var(--s) * 8); align-items: center;
 }
-.step:hover:not(:disabled) { border-color: var(--accent); }
-.step:disabled { opacity: 0.3; cursor: not-allowed; }
-.step.not-applied { border-color: var(--bad); }
-.val { display: flex; flex-direction: column; gap: 4px; align-items: center; min-width: 0; }
-.val .v { font: 600 15px/1 var(--mono); }
-.val .v.pending { color: var(--accent); font-style: italic; }
-.val .v.not-applied { color: var(--bad); text-decoration: underline dotted; }
-.val .bar { position: relative; width: 100%; height: 4px; border-radius: 2px; background: var(--track); }
-.val .bar i { position: absolute; top: -2px; width: 8px; height: 8px; margin-left: -4px; border-radius: 50%; background: var(--accent); }
-.val .end { white-space: nowrap; font: 600 9px/1 var(--ui); color: var(--warn); letter-spacing: 0.04em; }
-.extras { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-.autowb {
-    margin-left: auto; padding: 6px 9px; border: 1px solid var(--line); border-radius: 7px;
-    background: var(--panel); font: 600 11px/1 var(--ui); cursor: pointer;
+/* The button sits in a relative wrapper; at a range end its "min"/"max" is a SIBLING overlay
+   (absolute inset 0, flex-centred, pointer-events none): Safari does not lay out a <button> as
+   grid/flex reliably, and Marcel wants an overlay of the button, not its child. */
+.endbox { position: relative; display: grid; }
+.endbox > button {
+    height: calc(var(--s) * 56); padding: 0; border-radius: calc(var(--s) * 12); border: 1px solid var(--line);
+    background: var(--btn); color: var(--btn-text); font-size: calc(var(--s) * 28); font-weight: 600; line-height: 1;
+    cursor: pointer; touch-action: manipulation; text-shadow: var(--outline);
 }
-.fps-sync { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font: 600 11px/1.2 var(--ui); color: var(--muted); }
-.fps-warn, .fps-desync { color: var(--warn); }
+.endbox > button:disabled { background: transparent; border-color: transparent; color: var(--track); cursor: default; }
+.endbox > button.atend { border: 1px dashed var(--line); }
+.endbox > button.not-applied { border-color: var(--bad-text); }
+.endbox > .endlab {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    font-size: calc(var(--s) * 12); font-weight: 700; line-height: 1; color: var(--warn-text); pointer-events: none;
+    background: color-mix(in srgb, var(--row) 70%, transparent); border-radius: calc(var(--s) * 12);
+}
+.mid { display: flex; flex-direction: column; align-items: center; text-align: center; min-width: 0; }
+.mid .lab {
+    font-size: calc(var(--s) * 15); font-weight: 500; color: var(--label); line-height: 1.2;
+    white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis;
+}
+/* Stepan: "len troška hrubšie" (500), light grey; Marcel: letter-spacing 1px + the outline. */
+.mid .val {
+    font-size: calc(var(--s) * 26); font-weight: 500; font-variant-numeric: tabular-nums; line-height: 1.15;
+    color: var(--val); letter-spacing: 1px; text-shadow: var(--outline); white-space: nowrap;
+    cursor: pointer; border-radius: calc(var(--s) * 6); padding: 0 calc(var(--s) * 6);
+}
+.mid .val.pending { color: var(--accent); font-style: italic; }
+.mid .val.not-applied { color: var(--bad-text); text-decoration: underline dotted; }
+/* The value opens the slider; the open slider's value is highlighted. */
+.row.open .mid .val { background: var(--accent); color: var(--card); text-shadow: none; }
+.slider { display: none; padding: calc(var(--s) * 8) calc(var(--s) * 6) 0; }
+.row.open .slider { display: block; }
+input[type=range] { width: 100%; height: 32px; margin: 0; -webkit-appearance: none; appearance: none; background: transparent; }
+input[type=range]::-webkit-slider-runnable-track {
+    height: 8px; border-radius: 4px;
+    background: linear-gradient(var(--accent), var(--accent)) 0 / var(--p, 50%) 100% no-repeat, var(--track);
+}
+input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 26px; height: 26px; margin-top: -9px;
+    border-radius: 50%; background: var(--accent); border: 3px solid var(--card);
+}
+input[type=range]::-moz-range-track { height: 8px; border-radius: 4px; background: var(--track); }
+input[type=range]::-moz-range-progress { height: 8px; border-radius: 4px; background: var(--accent); }
+input[type=range]::-moz-range-thumb { width: 22px; height: 22px; border-radius: 50%; background: var(--accent); border: 3px solid var(--card); }
+input[type=range]:disabled { opacity: 0.4; }
+.wb {
+    min-height: calc(var(--s) * 56); border-radius: calc(var(--s) * 12); border: 1px solid var(--line);
+    background: var(--btn); color: var(--btn-text); font: inherit; font-weight: 600; font-size: calc(var(--s) * 16);
+    cursor: pointer;
+}
+
+/* The fps-vs-grab line: always present, one line, a fixed height (no layout shift). */
+.foot {
+    display: flex; align-items: center; height: calc(var(--s) * 62); padding: 0 calc(var(--s) * 14) calc(var(--s) * 14);
+    color: var(--dim); font-size: calc(var(--s) * 15); white-space: nowrap; overflow: hidden;
+}
+.fps-sync { display: flex; align-items: center; gap: calc(var(--s) * 8); min-width: 0; }
+.fps-sync > span { overflow: hidden; text-overflow: ellipsis; }
+.fps-warn, .fps-desync { color: var(--warn-text); }
 .fps-set-grab {
-    padding: 5px 8px; border: 1px solid var(--warn); border-radius: 7px; background: transparent;
-    color: var(--warn); font: 700 11px/1 var(--ui); cursor: pointer;
+    flex: none; min-height: calc(var(--s) * 48); padding: 0 calc(var(--s) * 14); border-radius: calc(var(--s) * 12);
+    border: 1px solid var(--warn-text); background: transparent; color: var(--warn-text);
+    font-weight: 600; font-size: calc(var(--s) * 15); cursor: pointer;
 }
+
+/* Tally (its data is a separate ticket): PGM (the camera LIVE in program) a red border + tint +
+   badge, PVW a green border. Only the border colour changes, so a cut moves nothing. */
+.cam.pgm { border-color: #e5343a; box-shadow: 0 0 0 2px rgba(229, 52, 58, 0.35); background: color-mix(in srgb, #e5343a 10%, var(--card)); }
+.cam.pvw { border-color: #2fae5c; box-shadow: none; }
+.tally {
+    font-size: calc(var(--s) * 13); font-weight: 800; letter-spacing: 0.04em;
+    padding: calc(var(--s) * 2) calc(var(--s) * 7); border-radius: calc(var(--s) * 6);
+}
+.tally.pgm { background: #e5343a; color: #fff; }
+.tally.pvw { background: #2fae5c; color: #fff; }
+/* ===== end of card sizing ===== */
+
+.empty-note { padding: 24px 16px; color: var(--label); text-align: center; }
 
 /* shading#14's popup. */
 dialog.info {
     max-width: min(30rem, calc(100vw - 32px)); padding: 16px 18px; border: 1px solid var(--line);
-    border-radius: 12px; background: var(--panel); color: var(--text);
+    border-radius: 14px; background: var(--card); color: var(--text);
 }
 dialog.info::backdrop { background: rgba(0, 0, 0, 0.6); }
-dialog.info h2 { margin: 0 0 6px; font: 700 18px/1.2 var(--ui); color: var(--bad); }
-dialog.info .cam-n { margin: 0 0 10px; color: var(--muted); font-size: 13px; }
+dialog.info h2 { margin: 0 0 6px; font-size: 19px; line-height: 1.2; color: var(--bad-text); }
+dialog.info .cam-n { margin: 0 0 10px; color: var(--label); font-size: 15px; }
 dialog.info .step-t { font-weight: 700; }
 dialog.info form { text-align: right; margin: 0; }
-dialog.info button { padding: 8px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--section); cursor: pointer; }
+dialog.info button {
+    min-height: 48px; padding: 0 16px; border: 1px solid var(--line); border-radius: 12px;
+    background: var(--btn); color: var(--btn-text); font-weight: 600; cursor: pointer;
+}
 
-@media (max-width: 520px) {
-    .grid { grid-template-columns: 1fr; }
-    .note { display: none; }
+/* Version D (Marcel): on a phone the top bar is only the title, the connection state and a
+   hamburger; the pills, ARRANGE and its helpers live in the menu it opens: an overlay under the bar
+   (z-index 10, right-aligned, a column), so the cards never move. Above 700 px the menu is
+   `display: contents` (its buttons sit in the bar as before) and the burger is gone. */
+.menu { display: contents; }
+.burger { display: none; }
+/* Between the phone menu (700 px) and ~1000 px the full bar would push the page sideways: the
+   version goes and the bar and the pills tighten (measured: theme.spec.js "the top bar never
+   scrolls the page sideways"). */
+@media (max-width: 1000px) {
+    .bar { gap: 6px; padding: 12px 10px; }
+    .bar .title { font-size: 18px; }
+    .ver { display: none; }
+    .seg button { padding: 0 8px; font-size: 15px; }
+}
+@media (max-width: 700px) {
+    .ver, .note { display: none; }
+    .burger { display: inline-block; }
+    .menu {
+        display: none; position: absolute; top: 100%; right: 8px; z-index: 10;
+        flex-direction: column; align-items: stretch; gap: 10px; padding: 12px;
+        background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+    }
+    .menu.open { display: flex; }
+    .menu .seg { display: flex; }
+    .menu .seg button { flex: 1; white-space: nowrap; padding: 0 10px; }
+    .menu .arrange-key { display: block; padding: 0 14px; }
+    .menu .arrange-key::after { content: " ARRANGE"; font-size: 15px; font-weight: 600; }
 }

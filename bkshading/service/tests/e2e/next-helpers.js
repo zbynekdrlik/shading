@@ -4,8 +4,8 @@
 const { expect } = require("@playwright/test");
 
 const STUB = process.env.STUB_BASE_URL || "http://127.0.0.1:8781";
-/** The rebuilt panel's address (phase 1: next to the old panel at /). */
-const NEXT = "/next/";
+/** The panel's address: the service's main web since shading#16's switch (v0.2.10). */
+const PANEL = "/";
 
 /**
  * Collects console errors/warnings and page errors; `assertClean` is every test's last assertion
@@ -132,7 +132,7 @@ function makeFixture(opts = {}) {
 
 module.exports = {
   STUB,
-  NEXT,
+  PANEL,
   consoleGate,
   neutraliseServiceWorker,
   DISABLE_WS,

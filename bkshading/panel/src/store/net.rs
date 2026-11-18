@@ -8,7 +8,7 @@
 use std::cell::RefCell;
 use std::time::Duration;
 
-use bkshading_proto::layout::{LayoutDoc, LayoutPut, LayoutRefusal};
+use bkshading_proto::layout::{LayoutDoc, LayoutPut};
 use bkshading_proto::wire::{Aggregate, ServerMsg};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -17,7 +17,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 
 use super::{conn, Store};
-use crate::behave::arrange_drag::SaveFail;
+use crate::behave::arrange_drag::{save_answer, SaveFail};
 
 /// `Date.now()`: wall-clock ms (the connection age).
 pub fn now_ms() -> f64 {
@@ -134,20 +134,13 @@ pub async fn put_layout(put: &LayoutPut) -> Result<u64, SaveFail> {
         leptos::logging::log!("[layout] save did not reach the service: {e}");
         SaveFail::Offline
     })?;
-    let json: serde_json::Value = serde_json::from_str(&answer.text).unwrap_or_default();
     leptos::logging::log!(
         "[layout] save rev {} -> {} {}",
         put.rev,
         answer.status,
         answer.text
     );
-    if answer.status == 200 {
-        return json["rev"].as_u64().ok_or(SaveFail::Other);
-    }
-    Err(json["error"]
-        .as_str()
-        .and_then(LayoutRefusal::from_text)
-        .map_or(SaveFail::Other, SaveFail::Refused))
+    save_answer(answer.status, &answer.text)
 }
 
 /// The open socket and its handlers (dropped with it).

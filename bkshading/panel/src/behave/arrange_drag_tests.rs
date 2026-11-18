@@ -225,3 +225,32 @@ fn each_tone_has_its_class() {
     assert_eq!(Tone::Saved.class(), "note saved");
     assert_eq!(Tone::Refused.class(), "note refused");
 }
+
+/// shading#16: a refusal arrives as a 200 with its word; the save's outcome is read from the body.
+#[test]
+fn a_save_answer_reads_the_refusal_from_the_body() {
+    assert_eq!(save_answer(200, r#"{"rev":7}"#), Ok(7));
+    assert_eq!(
+        save_answer(200, r#"{"error":"stale"}"#),
+        Err(SaveFail::Refused(LayoutRefusal::Stale))
+    );
+    assert_eq!(
+        save_answer(200, r#"{"error":"invalid"}"#),
+        Err(SaveFail::Refused(LayoutRefusal::Invalid))
+    );
+    // An older service still answers 409/422 with the same body: the same refusal.
+    assert_eq!(
+        save_answer(409, r#"{"error":"stale"}"#),
+        Err(SaveFail::Refused(LayoutRefusal::Stale))
+    );
+    assert_eq!(
+        save_answer(500, r#"{"error":"write"}"#),
+        Err(SaveFail::Other)
+    );
+    assert_eq!(
+        save_answer(200, r#"{"error":"later"}"#),
+        Err(SaveFail::Other)
+    );
+    assert_eq!(save_answer(200, "not json"), Err(SaveFail::Other));
+    assert_eq!(save_answer(500, r#"{"rev":3}"#), Err(SaveFail::Other));
+}

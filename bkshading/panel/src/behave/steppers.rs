@@ -57,15 +57,23 @@ impl Row {
         Row::Fps,
     ];
 
-    /// The label in the block (mockup arrange-v1).
+    /// The label in the block (mockup theme-v4b: sentence case).
     pub fn label(self) -> &'static str {
         match self {
-            Row::Aperture => "CLONA",
+            Row::Aperture => "Clona",
             Row::Iso => "ISO",
-            Row::Kelvin => "BIELY BOD",
-            Row::Tint => "TINT",
-            Row::Shutter => "UZÁVIERKA",
+            Row::Kelvin => "Biely bod",
+            Row::Tint => "Tint",
+            Row::Shutter => "Uzávierka",
             Row::Fps => "FPS",
+        }
+    }
+
+    /// The card pane the row lives in (theme-v4b): EXP = exposure and colour, SYS = capture.
+    pub fn pane(self) -> Pane {
+        match self {
+            Row::Aperture | Row::Iso | Row::Kelvin | Row::Tint => Pane::Exp,
+            Row::Shutter | Row::Fps => Pane::Sys,
         }
     }
 
@@ -118,10 +126,51 @@ impl Row {
     }
 }
 
-/// Whether one of the −/+ buttons can be pressed, and its title.
+/// A card's two panes (shading#24 theme-v4b): a per-card EXP/SYS tablist switches between them,
+/// and both share one grid cell, so the card's height never changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Pane {
+    /// Clona, ISO, biely bod, tint.
+    #[default]
+    Exp,
+    /// Uzávierka, FPS, Auto WB.
+    Sys,
+}
+
+impl Pane {
+    pub const ALL: [Pane; 2] = [Pane::Exp, Pane::Sys];
+
+    /// The tab's text and the `data-pane` word.
+    pub fn label(self) -> &'static str {
+        match self {
+            Pane::Exp => "EXP",
+            Pane::Sys => "SYS",
+        }
+    }
+
+    pub fn word(self) -> &'static str {
+        match self {
+            Pane::Exp => "exp",
+            Pane::Sys => "sys",
+        }
+    }
+
+    /// The tab's tooltip: what the pane holds.
+    pub fn title(self) -> &'static str {
+        match self {
+            Pane::Exp => "expozícia a farba: clona, ISO, biely bod, tint",
+            Pane::Sys => "snímanie: uzávierka, FPS, auto WB",
+        }
+    }
+}
+
+/// Whether one of the −/+ buttons can be pressed, and its title. `end`: it is off because the
+/// value reached the end of its range in that direction (the card lays the `min`/`max` overlay
+/// over it), not because the value or the steps are unknown.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Gate {
     pub enabled: bool,
+    pub end: bool,
     pub title: String,
 }
 
@@ -129,18 +178,27 @@ impl Gate {
     fn on() -> Self {
         Gate {
             enabled: true,
+            end: false,
             title: String::new(),
         }
     }
     fn off(title: &str) -> Self {
         Gate {
             enabled: false,
+            end: false,
             title: title.to_string(),
         }
     }
-    fn off_if(disabled: bool, title: &str) -> Self {
-        if disabled {
-            Gate::off(title)
+    fn at_end(title: &str) -> Self {
+        Gate {
+            enabled: false,
+            end: true,
+            title: title.to_string(),
+        }
+    }
+    fn end_if(reached: bool, title: &str) -> Self {
+        if reached {
+            Gate::at_end(title)
         } else {
             Gate::on()
         }
@@ -160,8 +218,8 @@ pub struct RowView {
     pub pos: Option<f64>,
     pub dec: Gate,
     pub inc: Gate,
-    /// The lens is at an end (the mockup's "KONIEC" under the clona value).
-    pub at_end: bool,
+    /// The slider a tap on the value opens (shading#24), or none when it cannot write.
+    pub slider: Option<super::slider::SliderSpec>,
 }
 
 /// A tap's write: the PUT body's one key and value.
@@ -247,19 +305,19 @@ pub fn tint_text(t: i64) -> String {
     }
 }
 
-fn fps_text(fps: f64) -> String {
+pub(super) fn fps_text(fps: f64) -> String {
     format!("{fps:.2}")
 }
 
 /// A camera's live values, as far as this push knows them.
-struct Live<'a> {
-    params: Option<&'a ShadingParams>,
-    caps: Option<&'a CameraCaps>,
+pub(super) struct Live<'a> {
+    pub(super) params: Option<&'a ShadingParams>,
+    pub(super) caps: Option<&'a CameraCaps>,
     not_applied: &'a [String],
 }
 
 impl<'a> Live<'a> {
-    fn of(cam: &'a CameraView) -> Self {
+    pub(super) fn of(cam: &'a CameraView) -> Self {
         let state = cam.state.as_ref().filter(|s| cam.reachable && s.online);
         Live {
             params: state.map(|s| &s.params),
@@ -275,7 +333,7 @@ impl<'a> Live<'a> {
 }
 
 /// One stepper's live value: its text and number from the push.
-fn pushed(row: Row, live: &Live) -> (String, Option<f64>) {
+pub(super) fn pushed(row: Row, live: &Live) -> (String, Option<f64>) {
     let p = live.params;
     let num = |v: Option<i64>| v.map(|v| v as f64);
     match row {
@@ -308,7 +366,7 @@ fn pushed(row: Row, live: &Live) -> (String, Option<f64>) {
 
 /// The listed choices a row steps over (aperture: the slider grid that bounds the ±; kelvin/tint:
 /// none, they are linear).
-fn choices(row: Row, caps: Option<&CameraCaps>) -> Vec<f64> {
+pub(super) fn choices(row: Row, caps: Option<&CameraCaps>) -> Vec<f64> {
     let ints = |v: &[i64]| v.iter().map(|&x| x as f64).collect::<Vec<f64>>();
     match (row, caps) {
         (Row::Aperture, Some(c)) => c.fnumber_choices.clone(),
@@ -320,7 +378,7 @@ fn choices(row: Row, caps: Option<&CameraCaps>) -> Vec<f64> {
 }
 
 /// The linear range of biely bod / tint.
-fn linear_range(row: Row, caps: Option<&CameraCaps>) -> (i64, i64) {
+pub(super) fn linear_range(row: Row, caps: Option<&CameraCaps>) -> (i64, i64) {
     match row {
         Row::Kelvin => caps
             .filter(|c| c.kelvin_min < c.kelvin_max)
@@ -332,12 +390,12 @@ fn linear_range(row: Row, caps: Option<&CameraCaps>) -> (i64, i64) {
 /// A camera block's steppers, with the taps it holds. One per block; the component keeps it.
 #[derive(Debug, Clone, Default)]
 pub struct Steppers {
-    holds: Holds,
+    pub(super) holds: Holds,
     /// The camera's view last drawn, and how many different views this block has seen: a tap's
     /// hold is confirmed or refused only by a view of THIS camera newer than the tap (a push about
     /// another camera, or the clock, changes nothing here).
     last: Option<CameraView>,
-    seq: u64,
+    pub(super) seq: u64,
 }
 
 impl Steppers {
@@ -375,11 +433,12 @@ impl Steppers {
             Some(h) => (h.text.clone(), h.value.or(pushed_value)),
             None => (pushed_text, pushed_value),
         };
-        let (dec, inc, pos, at_end) = gates(row, live, base);
+        let (dec, inc, pos) = gates(row, live, base);
         let flag = |g: Gate| {
             if refused && g.enabled {
                 Gate {
                     enabled: true,
+                    end: false,
                     title: NOT_APPLIED_TITLE.into(),
                 }
             } else {
@@ -394,7 +453,7 @@ impl Steppers {
             pos,
             dec: flag(dec),
             inc: flag(inc),
-            at_end,
+            slider: super::slider::spec(row, live, base),
         }
     }
 
@@ -470,8 +529,8 @@ impl Steppers {
     }
 }
 
-/// The −/+ gates, the bar position and the end flag of `row` at value `base`.
-fn gates(row: Row, live: &Live, base: Option<f64>) -> (Gate, Gate, Option<f64>, bool) {
+/// The −/+ gates and the position in the range of `row` at value `base`.
+fn gates(row: Row, live: &Live, base: Option<f64>) -> (Gate, Gate, Option<f64>) {
     match row {
         Row::Aperture => aperture_gates(live, base),
         Row::Iso | Row::Shutter | Row::Fps => {
@@ -482,43 +541,31 @@ fn gates(row: Row, live: &Live, base: Option<f64>) -> (Gate, Gate, Option<f64>, 
                 _ => NO_FPS_STEPS,
             };
             if list.len() < 2 {
-                return (Gate::off(empty), Gate::off(empty), None, false);
+                return (Gate::off(empty), Gate::off(empty), None);
             }
             let Some(v) = base else {
-                return (
-                    Gate::off(UNKNOWN_VALUE),
-                    Gate::off(UNKNOWN_VALUE),
-                    None,
-                    false,
-                );
+                return (Gate::off(UNKNOWN_VALUE), Gate::off(UNKNOWN_VALUE), None);
             };
             let n = list.len();
             let on_grid = list.iter().position(|&c| (c - v).abs() < 1e-6);
             let pos = nearest_index(&list, v) as f64 / (n - 1) as f64;
             (
-                Gate::off_if(on_grid == Some(0), AT_END),
-                Gate::off_if(on_grid == Some(n - 1), AT_END),
+                Gate::end_if(on_grid == Some(0), AT_END),
+                Gate::end_if(on_grid == Some(n - 1), AT_END),
                 Some(pos),
-                false,
             )
         }
         Row::Kelvin | Row::Tint => {
             let (lo, hi) = linear_range(row, live.caps);
             let Some(v) = base else {
-                return (
-                    Gate::off(UNKNOWN_VALUE),
-                    Gate::off(UNKNOWN_VALUE),
-                    None,
-                    false,
-                );
+                return (Gate::off(UNKNOWN_VALUE), Gate::off(UNKNOWN_VALUE), None);
             };
             let v = v.round() as i64;
             let pos = (v - lo) as f64 / (hi - lo).max(1) as f64;
             (
-                Gate::off_if(v <= lo, AT_END),
-                Gate::off_if(v >= hi, AT_END),
+                Gate::end_if(v <= lo, AT_END),
+                Gate::end_if(v >= hi, AT_END),
                 Some(pos.clamp(0.0, 1.0)),
-                false,
             )
         }
     }
@@ -527,7 +574,7 @@ fn gates(row: Row, live: &Live, base: Option<f64>) -> (Gate, Gate, Option<f64>, 
 /// Clona: disabled without the camera's f-number grid; at the grid's ends; and at the lens's own
 /// ends from `irisRangePos` (shading#6 0.2.3: the grid is not the lens range on fw 8.6, and a zoom
 /// moves the wide end).
-fn aperture_gates(live: &Live, base: Option<f64>) -> (Gate, Gate, Option<f64>, bool) {
+fn aperture_gates(live: &Live, base: Option<f64>) -> (Gate, Gate, Option<f64>) {
     let list = choices(Row::Aperture, live.caps);
     let iris = live.params.and_then(|p| p.iris_range_pos);
     let pos = iris.or_else(|| live.params.and_then(|p| p.aperture_norm));
@@ -536,7 +583,6 @@ fn aperture_gates(live: &Live, base: Option<f64>) -> (Gate, Gate, Option<f64>, b
             Gate::off(NO_APERTURE_STEPS),
             Gate::off(NO_APERTURE_STEPS),
             pos,
-            false,
         );
     }
     let n = list.len();
@@ -549,17 +595,16 @@ fn aperture_gates(live: &Live, base: Option<f64>) -> (Gate, Gate, Option<f64>, b
     // grid's ends gate, as nothing better is known.
     let grid_gates = iris.is_none();
     let dec = if wide {
-        Gate::off(AT_WIDE)
+        Gate::at_end(AT_WIDE)
     } else {
-        Gate::off_if(grid_gates && on_grid == Some(0), AT_END)
+        Gate::end_if(grid_gates && on_grid == Some(0), AT_END)
     };
     let inc = if closed {
-        Gate::off(AT_CLOSED)
+        Gate::at_end(AT_CLOSED)
     } else {
-        Gate::off_if(grid_gates && on_grid == Some(n - 1), AT_END)
+        Gate::end_if(grid_gates && on_grid == Some(n - 1), AT_END)
     };
-    let at_end = !dec.enabled || !inc.enabled;
-    (dec, inc, pos.map(|p| p.clamp(0.0, 1.0)), at_end)
+    (dec, inc, pos.map(|p| p.clamp(0.0, 1.0)))
 }
 
 #[cfg(test)]

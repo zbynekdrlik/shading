@@ -3,6 +3,7 @@
 //! `conn` holds the connection's pure rules, `net` the browser IO that feeds the store.
 
 pub mod conn;
+pub mod look_io;
 pub mod net;
 
 use std::time::Duration;
@@ -12,6 +13,7 @@ use bkshading_proto::wire::{Aggregate, CameraView, ServerMsg};
 use leptos::prelude::*;
 
 use crate::behave::arrange_drag::{Arrange, Note, NoteTimer, NOTE_MS};
+use crate::behave::look::{CardLayout, ThemeMode};
 
 /// The page's state. Cheap to copy (signals).
 #[derive(Clone, Copy)]
@@ -36,6 +38,10 @@ pub struct Store {
     note_timer: StoredValue<NoteTimer>,
     /// The camera whose #14 popup is open.
     pub info_for: RwSignal<Option<String>>,
+    /// How the cards stand (shading#24), remembered per device.
+    pub card_layout: RwSignal<CardLayout>,
+    /// The colour mode for the room (shading#24), remembered per device.
+    pub theme_mode: RwSignal<ThemeMode>,
 }
 
 impl Store {
@@ -53,6 +59,8 @@ impl Store {
             note: RwSignal::new(None),
             note_timer: StoredValue::new(NoteTimer::default()),
             info_for: RwSignal::new(None),
+            card_layout: RwSignal::new(CardLayout::default()),
+            theme_mode: RwSignal::new(ThemeMode::default()),
         }
     }
 

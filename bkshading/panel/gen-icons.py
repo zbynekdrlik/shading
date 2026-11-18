@@ -9,8 +9,9 @@ icon in the Windows dock / Start. Emits:
                                     icons are safe as a maskable icon (the crop keeps the glyph).
   * favicon.svg                  — the same glyph as scalable SVG.
 
-Run from anywhere: it writes next to itself (bkshading/service/web/). Committed as small binaries
-so the service embeds them via include_bytes! (self-contained, no runtime file dependency). Re-run
+Run from anywhere: it writes into the panel's `icons/` (bkshading/panel/icons/, moved from
+bkshading/service/web/ with shading#16's switch). Committed as small binaries; Trunk copies them
+into the dist the service embeds (self-contained, no runtime file dependency). Re-run
 after changing the palette/glyph; the output is deterministic (fixed geometry + zlib level 9).
 """
 import os
@@ -23,7 +24,7 @@ RING = (79, 157, 255)
 DISK = (38, 44, 54)
 HI = (231, 236, 242)
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+HERE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icons")
 
 
 def _sample(fx, fy, size):
