@@ -9,6 +9,7 @@
    sentence case, calm cards), with two modes for the venue light. Sizes are chosen for a tablet
    at arm's length (~50-60 cm): body text >= 15 px, values 26 px, touch targets 56 px. */
 :root, [data-mode="dark"] {
+  --val: #cdd5de;      /* values: light grey (Stepan), not the near-white --text */
   --bg: #0f1216;        /* page */
   --card: #171b21;      /* camera block */
   --row: #1f242c;       /* one control row */
@@ -26,7 +27,8 @@
   --bad-bg: #3b1a1e;
   --bad-text: #ff8f99;
 }
-[data-mode="light"] { /* owner 18.11: the first light mode was "extremely bright": no pure white, a muted grey-blue
+[data-mode="light"] {
+  --val: #1f262e; /* owner 18.11: the first light mode was "extremely bright": no pure white, a muted grey-blue
      paper (about 70-80 % luminance) so a lit room is readable without the screen glowing */
   --bg: #b9c1cb;
   --card: #cdd4dc;
@@ -78,7 +80,10 @@ header .sp { flex: 1; }
    - "8 v rade": all cameras in ONE row, fixed card width, the row scrolls horizontally. */
 main { display: grid; gap: 14px; padding: 14px 16px; }
 body[data-layout="grid"] main { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-body[data-layout="row"] main { grid-auto-flow: column; grid-auto-columns: 360px; overflow-x: auto;
+body[data-layout="row"] main { grid-auto-flow: column; overflow-x: auto;
+  /* Marcel: 4 + 1/3 cards on the screen (the third of the 5th tells there is more to scroll):
+     4.333 cards + 4 gaps of 14 px fill the width inside the 16 px side paddings */
+  grid-auto-columns: calc((100vw - 32px - 4 * 14px) / 4.3333);
   overscroll-behavior-x: contain; } /* Marcel: no scroll snap */
 @media (max-width: 1100px) { body[data-layout="grid"] main { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .cam { background: var(--card); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
@@ -121,7 +126,8 @@ body[data-layout="row"] main { grid-auto-flow: column; grid-auto-columns: 360px;
   background: color-mix(in srgb, var(--row) 70%, transparent); border-radius: 12px; }
 .mid { display: flex; flex-direction: column; align-items: center; text-align: center; min-width: 0; }
 .mid .lab { font-size: 15px; font-weight: 500; color: var(--label); line-height: 1.2; }
-.mid .val { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.15; }
+.mid .val { font-size: 26px; font-weight: 400; font-variant-numeric: tabular-nums; line-height: 1.15;
+  color: var(--val); } /* Marcel: a lighter weight, same size. Stepan (multifocal glasses): bold white numbers glare and blur, so the value is light grey, not white */
 .mid .val { cursor: pointer; border-radius: 6px; padding: 0 6px; }
 .row.open .mid .val { background: var(--accent); color: var(--card); } /* the open slider's value is highlighted */
 .slider { display: none; padding: 8px 6px 0; }
