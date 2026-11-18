@@ -45,6 +45,8 @@
   --bad-text: #9b1424;
 }
 * { box-sizing: border-box; }
+/* Marcel: an app, not a web page: no text selection on controls (a double tap never selects). */
+header, .cam { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
 html, body { margin: 0; }
 body {
   background: var(--bg); color: var(--text);
@@ -92,29 +94,24 @@ main {
   border: 1px solid var(--bad-text); box-shadow: 0 6px 18px rgba(0,0,0,.35);
 }
 .rows { padding: 0 10px 12px; display: grid; gap: 8px; position: relative; }
-.row { background: var(--row); border-radius: 12px; padding: 8px; }
+.row { background: var(--row); border-radius: 12px; padding: 5.6px; } /* Marcel: -30 % */
 .ctl { display: grid; grid-template-columns: 56px 1fr 56px; gap: 8px; align-items: center; }
 .ctl > button {
   height: 56px; border-radius: 12px; border: 1px solid var(--line); background: var(--btn);
   color: var(--btn-text); font-size: 28px; font-weight: 600; cursor: pointer;
 }
 .ctl > button:disabled { background: transparent; border-color: transparent; color: var(--track); cursor: default; }
-.ctl > button.atend { display: flex; flex-direction: column; align-items: center; justify-content: center;
-  line-height: 1; border: 1px dashed var(--line); }
-.ctl > button.atend small { font-size: 12px; font-weight: 700; color: var(--warn-text); margin-top: 4px; }
+.ctl > button.atend { display: grid; place-items: center; padding: 0; line-height: 1; border: 1px dashed var(--line); }
+.ctl > button.atend .endwrap { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; }
+.ctl > button.atend small { display: block; font-size: 12px; font-weight: 700; color: var(--warn-text); }
 .mid { display: flex; flex-direction: column; align-items: center; text-align: center; min-width: 0; }
 .mid .lab { font-size: 15px; font-weight: 500; color: var(--label); line-height: 1.2; }
 .mid .val { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.15; }
-.mini {
-  margin-top: 2px; width: 40px; height: 18px; padding: 0; border-radius: 9px;
-  border: 1px solid var(--line); background: transparent; color: var(--dim);
-  font-size: 12px; line-height: 1; cursor: pointer; position: relative;
-}
-.mini::before { content: ""; position: absolute; inset: -10px -8px; }
-.mini[aria-expanded="true"] { background: var(--accent); border-color: var(--accent); color: var(--card); }
+.mid .val { cursor: pointer; border-radius: 6px; padding: 0 6px; }
+.row.open .mid .val { background: var(--accent); color: var(--card); } /* the open slider's value is highlighted */
 .slider { display: none; padding: 8px 6px 0; }
 .row.open .slider { display: block; }
-.more { border-radius: 12px; background: var(--row); }
+.more { border-radius: 12px; } /* Marcel: no box around its controls (no nested look) */
 .more > summary {
   list-style: none; display: flex; align-items: center; justify-content: center; gap: 8px;
   min-height: 44px; font-size: 15px; font-weight: 600; color: var(--label); cursor: pointer;
@@ -122,8 +119,8 @@ main {
 .more > summary::-webkit-details-marker { display: none; }
 .more > summary::after { content: "▾"; transition: transform .15s; }
 .more[open] > summary::after { transform: rotate(180deg); }
-.more .in { display: grid; gap: 8px; padding: 0 8px 8px; }
-.more .in .row { background: var(--card); }
+.more > summary { background: var(--row); border-radius: 12px; }
+.more .in { display: grid; gap: 8px; padding: 8px 0 0; }
 .wb { min-height: 56px; border-radius: 12px; border: 1px solid var(--line); background: var(--btn);
   color: var(--btn-text); font: inherit; font-weight: 600; font-size: 16px; cursor: pointer; }
 input[type=range] { width: 100%; height: 32px; -webkit-appearance: none; appearance: none; background: transparent; }
@@ -178,9 +175,8 @@ const cams = [
 ];
 const row = (lab, val, p, end = false, off = false) => `
   <div class="row">
-    <div class="ctl"><button ${end || off ? "disabled" : ""} class="${end ? "atend" : ""}" aria-label="${lab} menej">−${end ? "<small>koniec</small>" : ""}</button>
-      <div class="mid"><span class="lab">${lab}</span><span class="val">${val}</span>
-        <button class="mini" aria-expanded="false" aria-label="${lab}: posuvník">•••</button></div>
+    <div class="ctl"><button ${end || off ? "disabled" : ""} class="${end ? "atend" : ""}" aria-label="${lab} menej">${end ? '<span class="endwrap"><span>−</span><small>koniec</small></span>' : "−"}</button>
+      <div class="mid"><span class="lab">${lab}</span><span class="val" role="button" tabindex="0" aria-expanded="false" aria-label="${lab}: posuvník">${val}</span></div>
       <button aria-label="${lab} viac">+</button></div>
     <div class="slider"><input type="range" value="${p}" style="--p:${p}%" aria-label="${lab}"></div>
   </div>`;
@@ -204,9 +200,9 @@ document.getElementById("grid").innerHTML = cams.map(c => `
     <div class="foot"><span>fps 60.00 · grab 60</span></div>
   </section>`).join("");
 document.querySelectorAll('input[type=range]').forEach(r => r.addEventListener('input', () => r.style.setProperty('--p', r.value + '%')));
-document.querySelectorAll('.mini').forEach(b => b.addEventListener('click', () => {
-  const open = b.closest('.row').classList.toggle('open');
-  b.setAttribute('aria-expanded', open);
+document.querySelectorAll('.mid .val').forEach(v => v.addEventListener('click', () => {
+  const open = v.closest('.row').classList.toggle('open');
+  v.setAttribute('aria-expanded', open);
 }));
 
 const lum = (hex) => { const v = hex.trim().replace('#', ''); return [0, 2, 4].map(i => parseInt(v.substr(i, 2), 16) / 255)
