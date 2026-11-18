@@ -385,6 +385,55 @@ test("a block removed while its preview fetch is in flight leaves a clean consol
   gate.assertClean();
 });
 
+// shading#16, found live on PP 18.11.2026: an ARRANGE save that hid cam4 (its NDI preview live)
+// panicked the WASM app ("Tried to access a reactive value that has already been disposed", then
+// "RefCell already borrowed"). The preview <img>'s load event can land AFTER its block was removed
+// (the frame decodes while the save removes the block); the handler must not touch the disposed
+// block, and the removed <img> must keep no source (so no late load event). Deterministic: a frame
+// on screen, keep the <img>, hide the camera.
+test("a preview image whose load event lands after its block was hidden leaves a clean console (shading#16, PP 18.11)", async ({ page }) => {
+  const gate = consoleGate(page);
+  let hidden = false;
+  await page.addInitScript(DISABLE_WS);
+  await page.route("**/api/cameras", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(makeFixture({ hasPreview: true, previewLive: true })) })
+  );
+  await page.route("**/api/layout", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(hidden ? { rev: 1, order: ["cam1"], hidden: ["cam1"] } : { rev: 0, order: [], hidden: [] }),
+    })
+  );
+  await page.route(PREVIEW_URL_RE, (route) =>
+    route.fulfill({ status: 200, contentType: "image/jpeg", headers: { "cache-control": "no-store" }, body: PREVIEW_JPEG })
+  );
+  await page.goto(`${PREVIEW_SVC}${NEXT}`);
+  await waitForApp(page);
+  const img = page.locator('[data-role="preview-img"]');
+  await expect(img).toHaveClass(/ready/, { timeout: 12000 });
+  // Keep the element itself: it stays a live object after Leptos removes it from the page.
+  await img.evaluate((e) => {
+    window.__keptPreviewImg = e;
+  });
+  hidden = true;
+  await page.evaluate(() => window.shadingPush({ type: "layout", rev: 1, order: ["cam1"], hidden: ["cam1"] }));
+  await expect(page.locator('[data-role="camera-block"]')).toHaveCount(0);
+  await page.waitForTimeout(500);
+  // The live bug: removing the block panicked the app right here.
+  gate.assertClean();
+  // The removed element must not load anything any more: its source is gone, so no late load
+  // event can reach the removed block (a synthetic event would only hit Leptos's dropped listener).
+  expect(await page.evaluate(() => window.__keptPreviewImg.hasAttribute("src")), "the removed preview keeps no source").toBe(false);
+  await page.waitForTimeout(1000);
+  // The app is still alive: the camera comes back on the next push and shows its preview again.
+  hidden = false;
+  await page.evaluate(() => window.shadingPush({ type: "layout", rev: 2, order: [], hidden: [] }));
+  await expect(page.locator('[data-role="camera-block"]')).toHaveCount(1);
+  await expect(img).toHaveClass(/ready/, { timeout: 12000 });
+  gate.assertClean();
+});
+
 // shading#13 (owner ruling 15.11.2026, "1234567"): number order whatever the config order, and a
 // block never moves when its camera goes offline or comes back. It is the default of ARRANGE.
 test("cameras stand in number order whatever the config order, and never move on online/offline, console clean (shading#13)", async ({ page }) => {

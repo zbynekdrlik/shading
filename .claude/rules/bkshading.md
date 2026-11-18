@@ -276,6 +276,22 @@ the house app stack airuleset#1333); mockup `docs/mockups/arrange-v1.html` appro
   fresh `--layout-file` in the temp dir. Fixtures go in through `window.shadingPush(msg)` (the panel's
   own entry for a `/ws` message; wait for it with `waitForFunction`). Local run without a release
   build: `BKSHADING_BIN=target/debug/bkshading npx playwright test` (debug rust-embed reads `dist/`).
+- **Release check:** the service tarball's `web/` folder is still the OLD panel; the new panel is
+  only inside the binary (`grep -c shadingLoadFailed bkshading` > 0 proves the real dist, not the
+  placeholder, was embedded). v0.2.7 verified that way, then run against the stub relay: `/next/`
+  shows v0.2.7, ARRANGE covers render, console clean.
+- **A removed block must not wake its own view (live PP panic, 18.11.2026, v0.2.8).** An ARRANGE
+  save that hid cam4 (NDI preview live) panicked the app: `Preview`'s `on_cleanup` called
+  `frame.placeholder()`, whose signal WRITES scheduled the view's closures to re-run after the block's
+  signals were disposed ("Tried to access a reactive value that has already been disposed", then
+  "RefCell already borrowed" for every later task). Rules: `on_cleanup` releases resources (timers,
+  aborts, object URLs, the `<img>` `src`) and never writes a signal; view closures and handlers that
+  can outlive the block read with `try_`; a removed `<img>` keeps no `src` (a late `load` would hit a
+  listener Leptos already dropped: "closure invoked ... after being dropped"). CI did not catch it:
+  only a block with a SHOWN frame (`ready` + `url` set) has anything to write at cleanup, and the
+  E2E fixtures had no live frame at hide. Regression: `panel-next.spec.js` "a preview image whose
+  load event lands after its block was hidden". Locate a WASM panic with a DEBUG panel build
+  (`trunk build`, no `--release`): the message then names the access and the definition `file:line`.
 - **E2E gotchas:** a synthetic `visibilitychange` must be dispatched with `{bubbles: true}` (the real
   one bubbles; the app listens on `window`). A refused `PUT /api/layout` (409) is logged by Chromium as
   "Failed to load resource"; the stale test allows exactly that line. A click on a control under the
