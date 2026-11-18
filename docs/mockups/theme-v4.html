@@ -126,8 +126,12 @@ body[data-layout="row"] main { grid-auto-flow: column; overflow-x: auto;
   background: color-mix(in srgb, var(--row) 70%, transparent); border-radius: 12px; }
 .mid { display: flex; flex-direction: column; align-items: center; text-align: center; min-width: 0; }
 .mid .lab { font-size: 15px; font-weight: 500; color: var(--label); line-height: 1.2; }
-.mid .val { font-size: 26px; font-weight: 400; font-variant-numeric: tabular-nums; line-height: 1.15;
-  color: var(--val); } /* Marcel: a lighter weight, same size. Stepan (multifocal glasses): bold white numbers glare and blur, so the value is light grey, not white */
+.mid .val { font-size: 26px; font-weight: 500; font-variant-numeric: tabular-nums; line-height: 1.15;
+  color: var(--val); letter-spacing: 1px; } /* Stepan: "len troška hrubšie" (500); Marcel: letter-spacing 1px */
+/* Marcel: a 1 px pitch-black shadow around the value letters, forming an outline (dark mode; on the light
+   paper a black outline would muddy dark text) */
+[data-mode="dark"] .mid .val { text-shadow: 1px 0 0 #000, -1px 0 0 #000, 0 1px 0 #000, 0 -1px 0 #000,
+  1px 1px 0 #000, -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000; } /* Marcel: a lighter weight, same size. Stepan (multifocal glasses): bold white numbers glare and blur, so the value is light grey, not white */
 .mid .val { cursor: pointer; border-radius: 6px; padding: 0 6px; }
 .row.open .mid .val { background: var(--accent); color: var(--card); } /* the open slider's value is highlighted */
 .slider { display: none; padding: 8px 6px 0; }
