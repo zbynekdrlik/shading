@@ -346,6 +346,11 @@ the house app stack airuleset#1333); mockup `docs/mockups/arrange-v1.html` appro
   E2E fixtures had no live frame at hide. Regression: `panel-next.spec.js` "a preview image whose
   load event lands after its block was hidden". Locate a WASM panic with a DEBUG panel build
   (`trunk build`, no `--release`): the message then names the access and the definition `file:line`.
+- **Local E2E binary gotcha (v0.2.10):** `cargo test -p bkshading --no-default-features` REBUILDS
+  `target/debug/bkshading` WITHOUT `ndi`, whose preview source is the animated TEST PATTERN: the
+  preview instance (:8782) then reports `previewLive` and serves frames, and "a preview camera with
+  no NDI feed shows the placeholder" fails. Run `cargo build -p bkshading` (default features) right
+  before `BKSHADING_BIN=target/debug/bkshading npx playwright test`.
 - **E2E gotchas:** a synthetic `visibilitychange` must be dispatched with `{bubbles: true}` (the real
   one bubbles; the app listens on `window`). Chromium logs ANY 4xx/5xx resource as a console
   error, which is why a refused `PUT /api/layout` answers 200 with its refusal (v0.2.10); the stale
