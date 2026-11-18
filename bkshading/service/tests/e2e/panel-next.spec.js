@@ -1,13 +1,14 @@
 // @ts-check
-// Real-browser E2E of the REBUILT panel at /next/ (shading#16, Leptos CSR): every scenario of the
-// JS panel's panel.spec.js, ported one-to-one to the new panel (parity), each ending on a clean
+// Real-browser E2E of the operator panel at / (shading#16, Leptos CSR): every scenario of the old JS
+// panel's panel.spec.js, ported to the new panel (the old panel and its spec are gone since the
+// switch, v0.2.10; its slider-only scenario lives in theme.spec.js), each ending on a clean
 // console. Fixtures go in through `window.shadingPush`, the panel's own entry for a /ws message.
-// The old panel at / keeps its own panel.spec.js until the switch.
+// Uzávierka, FPS and Auto WB sit in a card's SYS pane (shading#24): a test opens it first.
 const fs = require("fs");
 const path = require("path");
 const { test, expect } = require("@playwright/test");
 const {
-  NEXT,
+  PANEL,
   consoleGate,
   neutraliseServiceWorker,
   DISABLE_WS,
@@ -24,7 +25,7 @@ test.beforeEach(async ({ page }) => {
 
 test("the rebuilt panel shows the service's version, console clean (version-on-dashboard)", async ({ page }) => {
   const gate = consoleGate(page);
-  await page.goto(NEXT);
+  await page.goto(PANEL);
   const svc = await (await page.request.get("/api/version")).json();
   await expect(page.locator('[data-role="version"]')).toHaveText(`v${svc.version}`, { timeout: 15000 });
   await expect(page.locator('[data-role="conn"]')).toHaveText("spojené");
@@ -33,20 +34,20 @@ test("the rebuilt panel shows the service's version, console clean (version-on-d
 
 test("+/- steppers PUT the expected absolute values, console clean (issue 1304/1337)", async ({ page }) => {
   const gate = consoleGate(page);
-  await page.goto(NEXT);
+  await page.goto(PANEL);
 
   const apInc = page.locator('[data-role="aperture-inc"]');
   await expect(apInc).toBeEnabled({ timeout: 15000 });
   const isoInc = page.locator('[data-role="iso-inc"]');
   const shInc = page.locator('[data-role="shutter-inc"]');
   await expect(isoInc).toBeEnabled();
-  await expect(shInc).toBeEnabled();
 
   const before = (await recorded(page)).length;
   await apInc.click();
   await page.locator('[data-role="kelvin-inc"]').click();
   await page.locator('[data-role="tint-inc"]').click();
   await isoInc.click();
+  await page.locator('[data-role="pane-sys"]').click();
   await shInc.click();
 
   await expect.poll(async () => (await recorded(page)).length, { timeout: 10000 }).toBeGreaterThanOrEqual(before + 5);
@@ -67,11 +68,12 @@ test("the fps stepper writes only a whole rate the camera lists, console clean (
   const puts = [];
   await page.addInitScript(DISABLE_WS);
   await blockApi(page, (p) => puts.push(p));
-  await page.goto(NEXT);
+  await page.goto(PANEL);
   await waitForApp(page);
   const agg = makeFixture({});
   agg.cameras[0].state.caps.fpsChoices = [8, 2398, 2400, 2500, 2997, 3000, 5000, 5994, 6000];
   await pushState(page, agg);
+  await page.locator('[data-role="pane-sys"]').click();
   const val = page.locator('[data-role="fps-val"]');
   await expect(val).toHaveText("60.00");
   await expect(page.locator('[data-role="fps-inc"]')).toBeDisabled();
@@ -88,7 +90,7 @@ test("offline banner shows when the service is unreachable and clears on reconne
   const gate = consoleGate(page);
   await page.addInitScript(DISABLE_WS);
   await blockApi(page);
-  await page.goto(NEXT);
+  await page.goto(PANEL);
 
   const banner = page.locator("#conn-banner");
   await expect(banner).toBeVisible({ timeout: 9000 });
@@ -105,7 +107,7 @@ test("a not-applied write flags the aperture value + stepper, console clean (iss
   const gate = consoleGate(page);
   await page.addInitScript(DISABLE_WS);
   await blockApi(page);
-  await page.goto(NEXT);
+  await page.goto(PANEL);
   await waitForApp(page);
   await pushState(page, makeFixture({ notApplied: ["apertureNorm"] }));
 
@@ -121,7 +123,7 @@ test("an optimistic tap holds its target against a stale pump snapshot, clears o
   const gate = consoleGate(page);
   await page.addInitScript(DISABLE_WS);
   await blockApi(page, () => {});
-  await page.goto(NEXT);
+  await page.goto(PANEL);
   await waitForApp(page);
 
   await pushState(page, makeFixture({}));
@@ -157,7 +159,7 @@ test("a not-applied push after an optimistic tap surfaces the refusal (clears th
   const gate = consoleGate(page);
   await page.addInitScript(DISABLE_WS);
   await blockApi(page, () => {});
-  await page.goto(NEXT);
+  await page.goto(PANEL);
   await waitForApp(page);
 
   await pushState(page, makeFixture({}));
@@ -181,13 +183,15 @@ test("the aperture stepper stops at the lens's ends (irisRangePos), console clea
   const puts = [];
   await page.addInitScript(DISABLE_WS);
   await blockApi(page, (p) => puts.push(p));
-  await page.goto(NEXT);
+  await page.goto(PANEL);
   await waitForApp(page);
 
   const dec = page.locator('[data-role="aperture-dec"]');
   const inc = page.locator('[data-role="aperture-inc"]');
   const fnum = page.locator('[data-role="fnum"]');
-  const end = page.locator('.row[data-row="aperture"] .end');
+  // shading#24: at a lens end the dead button gets a sibling "min"/"max" overlay.
+  const end = page.locator('.row[data-row="aperture"] [data-role="dec-end"]');
+  const endMax = page.locator('.row[data-row="aperture"] [data-role="inc-end"]');
 
   await pushState(page, makeFixture({ apertureAv: 4.0, apertureNorm: 1 / 3, irisRangePos: 0.0 }));
   await expect(fnum).toHaveText("f/4.0");
@@ -203,7 +207,9 @@ test("the aperture stepper stops at the lens's ends (irisRangePos), console clea
 
   await pushState(page, makeFixture({ apertureAv: 4.78, irisRangePos: 1.0 }));
   await expect(inc).toBeDisabled();
+  await expect(endMax).toHaveText("max");
   await expect(dec).toBeEnabled();
+  await expect(end).toBeHidden();
   await dec.click();
   await expect.poll(() => puts.length).toBe(1);
   expect(puts[0].body).toEqual({ apertureStep: -1 });
@@ -221,7 +227,7 @@ test("a preview camera with no NDI feed shows the placeholder, never a 4xx/5xx, 
   page.on("request", (req) => {
     if (PREVIEW_URL_RE.test(req.url())) previewRequests.push(req.url());
   });
-  await page.goto(`${PREVIEW_SVC}${NEXT}`);
+  await page.goto(`${PREVIEW_SVC}${PANEL}`);
 
   const preview = page.locator('[data-role="preview"]');
   const placeholder = page.locator('[data-role="preview-placeholder"]');
@@ -257,7 +263,7 @@ test("a hung preview fetch is aborted after its timeout, frees the block, and re
     return route.fulfill({ status: 200, contentType: "image/jpeg", body: PREVIEW_JPEG });
   });
 
-  await page.goto(`${PREVIEW_SVC}${NEXT}`);
+  await page.goto(`${PREVIEW_SVC}${PANEL}`);
   const img = page.locator('[data-role="preview-img"]');
   const placeholder = page.locator('[data-role="preview-placeholder"]');
   await expect.poll(() => previewHits, { timeout: 8000, intervals: [100] }).toBeGreaterThanOrEqual(2);
@@ -292,7 +298,7 @@ test("a timed-out fetch keeps a frame younger than 3 s, then the stall drops it,
     return route.fulfill({ status: 200, contentType: "image/jpeg", body: PREVIEW_JPEG });
   });
 
-  await page.goto(`${PREVIEW_SVC}${NEXT}`);
+  await page.goto(`${PREVIEW_SVC}${PANEL}`);
   const img = page.locator('[data-role="preview-img"]');
   const placeholder = page.locator('[data-role="preview-placeholder"]');
   await expect(img).toHaveClass(/ready/, { timeout: 12000 });
@@ -323,7 +329,7 @@ test("a live preview frame is shown, a stopped feed drops to the placeholder and
     return route.fulfill({ status: 204, headers: { "cache-control": "no-store" }, body: "" });
   });
 
-  await page.goto(`${PREVIEW_SVC}${NEXT}`);
+  await page.goto(`${PREVIEW_SVC}${PANEL}`);
   const img = page.locator('[data-role="preview-img"]');
   const placeholder = page.locator('[data-role="preview-placeholder"]');
   await expect(img).toHaveClass(/ready/, { timeout: 12000 });
@@ -372,7 +378,7 @@ test("a block removed while its preview fetch is in flight leaves a clean consol
       // aborted by the page
     }
   });
-  await page.goto(`${PREVIEW_SVC}${NEXT}`);
+  await page.goto(`${PREVIEW_SVC}${PANEL}`);
   await waitForApp(page);
   await expect.poll(() => held, { timeout: 8000, intervals: [100] }).toBeGreaterThanOrEqual(1);
   // The venue hides the camera (another device's save) while its frame is still on its way.
@@ -394,7 +400,7 @@ test("aperture \u2212 stays enabled at the grid's first stop when the lens is no
   const puts = [];
   await page.addInitScript(DISABLE_WS);
   await blockApi(page, (p) => puts.push(p));
-  await page.goto(NEXT);
+  await page.goto(PANEL);
   await waitForApp(page);
   const dec = page.locator('[data-role="aperture-dec"]');
   const inc = page.locator('[data-role="aperture-inc"]');
@@ -436,7 +442,7 @@ test("a preview image whose load event lands after its block was hidden leaves a
   await page.route(PREVIEW_URL_RE, (route) =>
     route.fulfill({ status: 200, contentType: "image/jpeg", headers: { "cache-control": "no-store" }, body: PREVIEW_JPEG })
   );
-  await page.goto(`${PREVIEW_SVC}${NEXT}`);
+  await page.goto(`${PREVIEW_SVC}${PANEL}`);
   await waitForApp(page);
   const img = page.locator('[data-role="preview-img"]');
   await expect(img).toHaveClass(/ready/, { timeout: 12000 });
@@ -468,7 +474,7 @@ test("cameras stand in number order whatever the config order, and never move on
   const gate = consoleGate(page);
   await page.addInitScript(DISABLE_WS);
   await blockApi(page);
-  await page.goto(NEXT);
+  await page.goto(PANEL);
   await waitForApp(page);
 
   const cam = (id, reachable, online) => ({
@@ -522,7 +528,7 @@ test("the align-to-grab button is offered only for a grab the camera lists, cons
   const puts = [];
   await page.addInitScript(DISABLE_WS);
   await blockApi(page, (p) => puts.push(p));
-  await page.goto(NEXT);
+  await page.goto(PANEL);
   await waitForApp(page);
 
   const BMPCC_D006 = [8, 2398, 2400, 2500, 2997, 3000, 5000, 5994];
@@ -556,6 +562,7 @@ test("the align-to-grab button is offered only for a grab the camera lists, cons
   const btn = page.locator('[data-role="fps-set-grab"]');
 
   await show({ fps100: 6000, sensorFps100: 5000, grabFps: 60, fpsSync: "synced", fpsAlignSettable: false });
+  await page.locator('[data-role="pane-sys"]').click();
   await expect(fpsVal).toHaveText("60.00");
   await expect(page.locator('[data-role="fps-grab"]')).toHaveText("grab 60");
   await expect(warn).toBeHidden();
@@ -584,7 +591,7 @@ const REGISTER_SVC = process.env.REGISTER_NEXT_SVC_BASE_URL || "http://127.0.0.1
 
 test("a handheld that registers itself becomes reachable in the panel and takes a write, console clean (issue 808)", async ({ page }) => {
   const gate = consoleGate(page);
-  await page.goto(`${REGISTER_SVC}${NEXT}`);
+  await page.goto(`${REGISTER_SVC}${PANEL}`);
   const online = page.locator('[data-role="online"]');
   const regLine = page.locator('[data-role="registration"]');
   const warn = page.locator('[data-role="control-warn"]');
@@ -606,7 +613,9 @@ test("a handheld that registers itself becomes reachable in the panel and takes 
   await expect(online).toHaveText("online", { timeout: 15000 });
   await expect(warn).toBeHidden();
   await expect(regLine).toBeVisible();
-  await expect(regLine).toContainText("handheld-next · 127.0.0.1:8781 · ohlásený pred");
+  // shading#24: one short technical line; the full sentence is the tooltip.
+  await expect(regLine).toHaveText(/^handheld-next · 127\.0\.0\.1:8781 · ↻ \d+s · ▲ 0h00m$/);
+  await expect(page.locator(".reg")).toHaveAttribute("title", /ohlásený pred/);
   await expect(regLine).not.toHaveClass(/stale/);
 
   const before = (await recorded(page)).length;
@@ -632,7 +641,7 @@ test("a camera that cannot be controlled shows a warning and a Slovak popup per 
   const gate = consoleGate(page);
   await page.addInitScript(DISABLE_WS);
   await blockApi(page);
-  await page.goto(NEXT);
+  await page.goto(PANEL);
   await waitForApp(page);
 
   const view = (c) => ({
@@ -690,7 +699,7 @@ test("the real service turns a relay's offline reason and an old relay into the 
   const warn = page.locator('[data-role="control-warn"]');
   const dlg = page.locator('[data-role="control-info"]');
   try {
-    await page.goto(NEXT);
+    await page.goto(PANEL);
     await expect(page.locator('[data-role="online"]')).toHaveText("online", { timeout: 15000 });
     await expect(warn).toBeHidden();
 
@@ -715,21 +724,35 @@ test("the real service turns a relay's offline reason and an old relay into the 
   gate.assertClean();
 });
 
+test("the panel's old address /next/ leads to the panel at /, console clean (shading#16 switch)", async ({ page }) => {
+  const gate = consoleGate(page);
+  const svc = await (await page.request.get("/api/version")).json();
+  for (const old of ["/next", "/next/", "/next/some/route"]) {
+    await page.goto(old);
+    expect(new URL(page.url()).pathname, old).toBe("/");
+    await waitForApp(page);
+    await expect(page.locator('[data-role="version"]')).toHaveText(`v${svc.version}`);
+  }
+  // The old JS panel's files are gone.
+  expect((await page.request.get("/app.js")).status()).toBe(404);
+  gate.assertClean();
+});
+
 test("the PWA assets are served next to the panel, console clean (issue 1305)", async ({ page }) => {
   const gate = consoleGate(page);
-  await page.goto(NEXT);
+  await page.goto(PANEL);
   await waitForApp(page);
-  const manifest = await page.request.get(`${NEXT}manifest.webmanifest`);
+  const manifest = await page.request.get(`${PANEL}manifest.webmanifest`);
   expect(manifest.status()).toBe(200);
   expect(manifest.headers()["content-type"]).toContain("application/manifest+json");
   const m = await manifest.json();
   expect(m.lang).toBe("sk");
   expect(m.start_url).toBe("./");
-  const sw = await page.request.get(`${NEXT}sw.js`);
+  const sw = await page.request.get(`${PANEL}sw.js`);
   expect(sw.status()).toBe(200);
   expect(await sw.text()).not.toMatch(/caches\.|cache\.put/);
   for (const icon of ["icons/icon-192.png", "icons/icon-512.png", "icons/favicon.svg"]) {
-    expect((await page.request.get(`${NEXT}${icon}`)).status(), icon).toBe(200);
+    expect((await page.request.get(`${PANEL}${icon}`)).status(), icon).toBe(200);
   }
   await expect(page.locator('link[rel="manifest"]')).toHaveAttribute("href", "manifest.webmanifest");
   gate.assertClean();

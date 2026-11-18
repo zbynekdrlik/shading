@@ -10,7 +10,7 @@
 
 .cover {
     position: absolute; inset: 0; z-index: 5; display: none;
-    border-radius: 12px; box-shadow: inset 0 0 0 1.5px var(--dim);
+    border-radius: calc(var(--s) * 12); box-shadow: inset 0 0 0 1.5px var(--dim);
     cursor: grab; touch-action: none; -webkit-user-select: none; user-select: none;
 }
 .app[data-arrange="true"] .cover { display: block; }

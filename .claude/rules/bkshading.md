@@ -226,9 +226,9 @@ knowing a part:
   no answer = `relay-unreachable`; online = `ok` (even an old relay); offline + version below
   `MIN_REST_RELAY_VERSION` 0.2.0 = `relay-too-old` (pp-cam4 0.1.2); else the relay's reason, or
   `camera-offline` when it gives none (0.2.0-0.2.5).
-- **Panel** (`app.js` `CONTROL_INFO`, one `<dialog id="control-info">`): the warning strip
-  `data-role="control-warn"` sits OUTSIDE `.block-params`, because a disabled block's params get
-  `pointer-events: none`. The Slovak texts live only in the panel (the wire carries enums). An open
+- **Panel** (`behave/control_info.rs`, one `<dialog id="control-info">`; the JS panel's
+  `CONTROL_INFO` until v0.2.10): the warning `data-role="control-warn"` is an overlay OUTSIDE
+  `.panes`, because a disabled card's panes get `pointer-events: none`. The Slovak texts live only in the panel (the wire carries enums). An open
   popup follows the push for its block (`dlg.dataset.cameraId`): refilled, closed when `ok`.
 - Tests: `relay/tests/offline_reason_14.rs`, `proto/tests/control_14.rs`,
   `service/tests/control_14.rs`, the contract pin in `relay/tests/contract.rs`, Playwright
@@ -236,13 +236,48 @@ knowing a part:
   (the stub relay's `POST /__state` / `POST /__reset`; always reset in `finally`, the stub is shared).
 - Not done: a per-key reason for `notApplied` (followup).
 
-## The rebuilt panel: Leptos CSR at /next/, ARRANGE, the venue layout (shading#16, v0.2.7)
+## The panel: Leptos CSR at /, ARRANGE, the venue layout (shading#16 v0.2.7, switch + theme shading#24 v0.2.10)
 Owner decision A (15.11.2026): the panel is rebuilt on fohmixer-ui's stack (Leptos 0.7.8 CSR, Trunk,
 the house app stack airuleset#1333); mockup `docs/mockups/arrange-v1.html` approved as is.
-- **Phase 1 (this release): the new panel at `/next/`, the old JS panel (`service/web/*`) still at `/`.**
-  The switch PR moves it to `/`, deletes `service/web/{app.js,index.html,style.css}` and
-  `panel.spec.js`, after a live check at both venues. Trunk `public_url = "/next/"`; manifest and
-  `sw.js` use RELATIVE paths, so they follow the panel's address.
+- **Since v0.2.10 the Leptos panel is the ONLY panel, at `/`** (owner 18.11.2026: "zbytočne mať
+  dva"). `service/web/` is gone entirely (the dist carries manifest, `sw.js`, `icons/`); Trunk
+  `public_url = "/"`; the router serves `/` + `/*path` from `PanelAssets` (a path without a dot =
+  the page; an unknown `api/...` stays 404), and `/next`, `/next/`, `/next/*` answer **308 to `/`**
+  (old bookmarks and apps installed from /next/). The release tarball's `bkshading-service/web/`
+  is now a COPY of the panel dist (`release.py WEB_DIR` = `bkshading/panel/dist`; the `release`
+  job downloads `panel-dist`), so `docs/CONTRACT.md` ("web/ is a copy, not needed at runtime")
+  stayed unchanged. Manifest and `sw.js` use RELATIVE paths.
+- **Theme v4b + version D (shading#24, design CLOSED with the PP operators in Discord 'Grading NEW',
+  normative mockups `docs/mockups/theme-v4b.html` + `theme-v4d.html`):**
+  - Tokens on `:root` (dark, the default) and `:root[data-mode="light"]` (muted grey-blue, no pure
+    white). Values 26/500/letter-spacing 1px/`--val`; the 1.5 px black outline is `--outline`
+    (`none` in light) on `.mid .val` and the +/- glyphs. System font (the Barlow/JetBrains files
+    are deleted).
+  - `behave/look.rs` = `CardLayout {Grid,Five,Row}` + `ThemeMode`; `store/look_io.rs` reads/writes
+    `localStorage` `shading.layout` / `shading.mode` (every access fallible: blocked storage =
+    defaults + a log line) and puts `data-layout`/`data-mode` on `<html>`.
+  - **Card sizing lives in ONE section of `style.css`** ("Card sizing (version D)"): `--card-min`
+    300, `--card-max` 460, `--gap` 14; grid = `repeat(4, clamp(min, (100vw-32-3gap)/4, max))` (2
+    under 1340 px), five = `clamp(min, (100vw-16-5gap)/5 + 0.1px, max)` (the 6th starts just past
+    the edge), row = `clamp(min, (100vw-32-4gap)/4.3333, max)`; no scroll snap. In-card sizes are
+    `calc(var(--s) * N)` with `.cam > * { --s: calc(100cqw / 367) }` (N = the v4b px at a 367 px
+    card) — set on the CHILDREN, since cqw on `.cam` itself measures the page. 1-2 px borders, the
+    outline and the slider internals stay fixed; so does the card's own 14 px corner.
+  - Card: `.head` (number, name, state on one centre), `.reg` ALWAYS present (one line, ellipsis,
+    `user-select: text`; `registration_short` = `relay · addr · ↻ 2s · ▲ 1h08m`, stale `↻ 10m ⚠`,
+    long sentence in the tooltip), `.rows` (relative) with the #14 warning as an ABSOLUTE overlay
+    button, the EXP/SYS tablist (`Row::pane()`; both panes `grid-area: 1/1`, toggled by
+    `visibility`), `.foot` = the fps-vs-grab line at a fixed height. Every line is always present,
+    so pushes, warnings, tally and pane switches move nothing.
+  - Row: `.endbox` (relative) > `button.step` + `span.endlab` (sibling overlay `min`/`max`,
+    `data-role="dec-end"`/`"inc-end"`) shown when `Gate.end` (off at a RANGE END, never for an
+    unknown value / missing steps). The value (`role="button"`) toggles `.row.open` and the hidden
+    slider (`<role>-slider`); `behave/slider.rs` = the old JS panel's slider writes on RELEASE only:
+    clona index over `fNumberChoices` -> `apertureNorm = idx/(n-1)` (refused toward a reached
+    `irisRangePos` end), ISO/uzávierka/FPS index -> absolute choice, biely bod 50 K grain / tint ->
+    absolute; held as a Value hold under the row's key; a release on the shown value writes nothing.
+  - Tally: only the `.cam.pgm` / `.cam.pvw` / `.tally` CSS (the 2 px border is always there); the
+    data is shading#25.
 - **Crate `bkshading/panel`:** `behave/` = pure rules, natively tested (`cargo test -p bkshading-panel`):
   `steppers.rs` + `holds.rs` (six steppers, ends, optimistic hold: value hold 4 s ends on a push showing
   the target; aperture STEP hold 8 s ends on a push showing a DIFFERENT f-stop), `arrange_drag.rs` +
@@ -270,16 +305,18 @@ the house app stack airuleset#1333); mockup `docs/mockups/arrange-v1.html` appro
   edit the mode STARTED from (which already holds new cameras), never with the stored doc. While
   Saving a `/ws` layout push is ignored: the PUT answer ends the mode (the push of the save can come
   first). On a 200 the panel applies the saved doc at once.
-- **E2E** (`service/tests/e2e`): `panel-next.spec.js` = every `panel.spec.js` scenario on `/next/`;
-  `arrange.spec.js` against a 3-camera instance (`e2e-arrange-config.toml`, :8784); a second
-  registration instance (:8785) so the two specs never share a registration. Every instance gets a
+- **E2E** (`service/tests/e2e`): `panel-next.spec.js` = the old `panel.spec.js` scenarios on `/`
+  (Uzávierka/FPS/Auto WB live in the SYS pane: click `[data-role="pane-sys"]` first);
+  `theme.spec.js` = shading#24 (pill widths at 1920/4000/1280 px, scaling ratio, mode + outline,
+  persistence, blocked storage, EXP/SYS height, value slider, the aperture slider's lens-end guard,
+  the min/max overlay geometry, no layout shift), fixtures of N cameras through `shadingPush`;
+  `arrange.spec.js` against a 3-camera instance (`e2e-arrange-config.toml`, :8784); the
+  registration instance (:8785). Every instance gets a
   fresh `--layout-file` in the temp dir. Fixtures go in through `window.shadingPush(msg)` (the panel's
   own entry for a `/ws` message; wait for it with `waitForFunction`). Local run without a release
   build: `BKSHADING_BIN=target/debug/bkshading npx playwright test` (debug rust-embed reads `dist/`).
-- **Release check:** the service tarball's `web/` folder is still the OLD panel; the new panel is
-  only inside the binary (`grep -c shadingLoadFailed bkshading` > 0 proves the real dist, not the
-  placeholder, was embedded). v0.2.7 verified that way, then run against the stub relay: `/next/`
-  shows v0.2.7, ARRANGE covers render, console clean.
+- **Release check:** `grep -c shadingLoadFailed bkshading` > 0 proves the real dist (not the
+  placeholder) was embedded; since v0.2.10 the tarball's `web/` holds the same dist.
 - **The aperture grid's ends are NOT the lens's (shading#22, PP cam1, 18.11.2026, v0.2.9).** A camera
   without `lens/iris/description` (Pocket 6K G2 at PP: 404) gets the default grid 2.8..22, widened
   only after the relay has SEEN a wider stop on that link (`widen_slider_grid`, reset by a relay

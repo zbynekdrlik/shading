@@ -6,13 +6,16 @@
 // the stub relay (e2e-arrange-config.toml, config order 3 1 2). Every test ends on a clean console
 // and puts the venue layout back to number order (one shared service).
 const { test, expect } = require("@playwright/test");
-const { NEXT, consoleGate, neutraliseServiceWorker, DISABLE_WS, waitForApp, recorded } = require("./next-helpers");
+const { PANEL: PANEL_PATH, consoleGate, neutraliseServiceWorker, DISABLE_WS, waitForApp, recorded } = require("./next-helpers");
 
 const SVC = process.env.ARRANGE_SVC_BASE_URL || "http://127.0.0.1:8784";
-const PANEL = `${SVC}${NEXT}`;
+const PANEL = `${SVC}${PANEL_PATH}`;
 
 test.beforeEach(async ({ page }) => {
   await neutraliseServiceWorker(page);
+  // shading#24: a card is now up to 460 px wide and ~900 px tall; the drags grab a card's middle,
+  // which must lie inside the window.
+  await page.setViewportSize({ width: 1920, height: 1200 });
 });
 
 /** The venue layout back to number order, nothing hidden (after every test). */

@@ -95,8 +95,12 @@ pub fn StepperRow(
         }
     };
 
+    // The bounds first: a value set while the old bounds stand is clamped to them.
     let place = move |s: &SliderSpec| {
         if let Some(el) = input.get_untracked() {
+            el.set_min(&s.min.to_string());
+            el.set_max(&s.max.to_string());
+            el.set_step(&s.step.to_string());
             el.set_value(&s.value.to_string());
             set_fill(&el, s.percent());
         }
@@ -147,9 +151,6 @@ pub fn StepperRow(
                     type="range"
                     data-role=slider_role
                     aria-label=row.label()
-                    min=move || spec.with(|s| s.as_ref().map_or(0.0, |s| s.min))
-                    max=move || spec.with(|s| s.as_ref().map_or(1.0, |s| s.max))
-                    step=move || spec.with(|s| s.as_ref().map_or(1.0, |s| s.step))
                     disabled=move || spec.with(Option::is_none)
                     on:input=move |_| {
                         dragging.set_value(true);
