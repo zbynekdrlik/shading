@@ -389,7 +389,8 @@ test("a block removed while its preview fetch is in flight leaves a clean consol
 // panicked the WASM app ("Tried to access a reactive value that has already been disposed", then
 // "RefCell already borrowed"). The preview <img>'s load event can land AFTER its block was removed
 // (the frame decodes while the save removes the block); the handler must not touch the disposed
-// block. Deterministic: keep the <img>, hide the camera, then fire `load` on the detached element.
+// block, and the removed <img> must keep no source (so no late load event). Deterministic: a frame
+// on screen, keep the <img>, hide the camera.
 test("a preview image whose load event lands after its block was hidden leaves a clean console (shading#16, PP 18.11)", async ({ page }) => {
   const gate = consoleGate(page);
   let hidden = false;
@@ -418,9 +419,12 @@ test("a preview image whose load event lands after its block was hidden leaves a
   hidden = true;
   await page.evaluate(() => window.shadingPush({ type: "layout", rev: 1, order: ["cam1"], hidden: ["cam1"] }));
   await expect(page.locator('[data-role="camera-block"]')).toHaveCount(0);
-  // The frame that was decoding finishes now, on the removed element.
-  await page.evaluate(() => window.__keptPreviewImg.dispatchEvent(new Event("load")));
-  await page.evaluate(() => window.__keptPreviewImg.dispatchEvent(new Event("error")));
+  await page.waitForTimeout(500);
+  // The live bug: removing the block panicked the app right here.
+  gate.assertClean();
+  // The removed element must not load anything any more: its source is gone, so no late load
+  // event can reach the removed block (a synthetic event would only hit Leptos's dropped listener).
+  expect(await page.evaluate(() => window.__keptPreviewImg.hasAttribute("src")), "the removed preview keeps no source").toBe(false);
   await page.waitForTimeout(1000);
   // The app is still alive: the camera comes back on the next push and shows its preview again.
   hidden = false;
