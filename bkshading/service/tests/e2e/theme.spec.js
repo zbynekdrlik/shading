@@ -135,11 +135,17 @@ test("version D: cards keep their min/max width and everything inside scales wit
   await page.locator('[data-role="layout-five"]').click();
   ratios.push(await probe());
 
-  // "8 v rade" on a 1280 px notebook: the card would be 280 px, so it holds its 300 px minimum.
-  await page.setViewportSize({ width: 1280, height: 900 });
+  // "5" on a 1366 px notebook: still exactly five whole cards (Marcel, version D: card-min 250).
+  await page.setViewportSize({ width: 1366, height: 900 });
+  v = await cardsInView(page);
+  expect(v.whole, JSON.stringify(v)).toBe(5);
+  expect(v.partial, JSON.stringify(v)).toBe(0);
+
+  // "8 v rade" on a 1000 px window: the card would be 210 px, so it holds its 250 px minimum.
+  await page.setViewportSize({ width: 1000, height: 900 });
   await page.locator('[data-role="layout-row"]').click();
   v = await cardsInView(page);
-  for (const w of v.widths) expect(w).toBeCloseTo(300, 0);
+  for (const w of v.widths) expect(w).toBeCloseTo(250, 0);
   ratios.push(await probe());
 
   // The value and the +/- button keep the same share of the card's width at every size.

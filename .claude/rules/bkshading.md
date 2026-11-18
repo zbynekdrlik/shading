@@ -257,7 +257,7 @@ the house app stack airuleset#1333); mockup `docs/mockups/arrange-v1.html` appro
     `localStorage` `shading.layout` / `shading.mode` (every access fallible: blocked storage =
     defaults + a log line) and puts `data-layout`/`data-mode` on `<html>`.
   - **Card sizing lives in ONE section of `style.css`** ("Card sizing (version D)"): `--card-min`
-    300, `--card-max` 460, `--gap` 14; grid = `repeat(4, clamp(min, (100vw-32-3gap)/4, max))` (2
+    250 ("5" keeps 5 whole cards down to 1366 px), `--card-max` 460 (8 fit a 4K screen), `--gap` 14; grid = `repeat(4, clamp(min, (100vw-32-3gap)/4, max))` (2
     under 1340 px), five = `clamp(min, (100vw-16-5gap)/5 + 0.1px, max)` (the 6th starts just past
     the edge), row = `clamp(min, (100vw-32-4gap)/4.3333, max)`; no scroll snap. In-card sizes are
     `calc(var(--s) * N)` with `.cam > * { --s: calc(100cqw / 367) }` (N = the v4b px at a 367 px
