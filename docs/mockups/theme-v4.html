@@ -83,12 +83,15 @@ main {
 .name { font-size: 21px; font-weight: 700; }
 .state { margin-left: auto; font-size: 16px; font-weight: 600; color: var(--ok); }
 .state.off { color: var(--bad-text); }
-.reg { padding: 0 14px 10px; color: var(--dim); font-size: 14px; }
-.warn {
-  margin: 0 14px 10px; padding: 10px 12px; border-radius: 10px; font-size: 16px; font-weight: 600;
+.reg { padding: 0 14px 10px; color: var(--dim); font-size: 14px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } /* Marcel: never wraps (no layout shift); full text in the tooltip */
+.warn { /* Marcel: an overlay over the controls (absolute in the relative .rows), never in the flow */
+  position: absolute; top: 0; left: 10px; right: 10px; z-index: 2;
+  padding: 10px 12px; border-radius: 10px; font-size: 16px; font-weight: 600;
   background: var(--bad-bg); color: var(--bad-text); display: flex; gap: 8px; align-items: center;
+  border: 1px solid var(--bad-text); box-shadow: 0 6px 18px rgba(0,0,0,.35);
 }
-.rows { padding: 0 10px 12px; display: grid; gap: 8px; }
+.rows { padding: 0 10px 12px; display: grid; gap: 8px; position: relative; }
 .row { background: var(--row); border-radius: 12px; padding: 8px; }
 .ctl { display: grid; grid-template-columns: 56px 1fr 56px; gap: 8px; align-items: center; }
 .ctl > button {
@@ -134,7 +137,7 @@ input[type=range]::-moz-range-thumb { width: 22px; height: 22px; border-radius: 
 .foot { display: flex; justify-content: space-between; align-items: center; padding: 0 14px 14px; color: var(--dim); font-size: 15px; }
 .foot button { min-height: 48px; padding: 0 16px; border-radius: 12px; border: 1px solid var(--line);
   background: var(--btn); color: var(--btn-text); font: inherit; font-weight: 600; font-size: 16px; }
-.disabled .rows, .disabled .foot { opacity: .45; }
+.disabled .rows > :not(.warn), .disabled .foot { opacity: .45; }
 .note { max-width: 1100px; margin: 8px 16px 24px; color: var(--label); font-size: 15px; }
 .note h2 { color: var(--text); font-size: 19px; margin: 18px 0 8px; }
 .note table { border-collapse: collapse; width: 100%; font-size: 15px; }
@@ -186,9 +189,9 @@ document.getElementById("grid").innerHTML = cams.map(c => `
     <div class="prev">${c.off ? '<span class="ph">BEZ OBRAZU</span>' : '<div class="img"></div>'}</div>
     <div class="head"><span class="num">${c.n}</span><span class="name">${c.name}</span>
       <span class="state ${c.off ? "off" : ""}">${c.off ? "● relay offline" : "● online"}</span></div>
-    <div class="reg">${c.reg}</div>
-    ${c.warn ? `<div class="warn">${c.warn}</div>` : ""}
+    <div class="reg" title="${c.reg}">${c.reg}</div>
     <div class="rows">
+      ${c.warn ? `<div class="warn">${c.warn}</div>` : ""}
       ${row("Clona", c.off ? "—" : c.f, c.p ?? 0, !!c.end, c.off)}
       ${row("ISO", c.off ? "—" : "640", 40)}
       ${row("Biely bod", c.off ? "—" : "5000 K", 33)}
