@@ -232,19 +232,21 @@ const cams = [
   { n: 1, name: "Cam 1", off: true, reg: "cam1-shading · 10.77.8.121:8771 · ↻ 10m ⚠", warn: "⚠ Relay nedostupný — kamera sa nedá ovládať" },
   { n: 2, name: "Cam 2", reg: "cam2 · 10.77.9.62:8771 · ↻ 1s · ▲ 3h12m", f: "f/2.8", p: 5 },
   { n: 3, name: "Cam 3", tally: "pvw", reg: "cam3 · 10.77.9.63:8771 · ↻ 4s · ▲ 3h12m", f: "f/4.5", p: 30 },
-  { n: 4, name: "Cam 4", reg: "cam4-shading · 10.77.8.75:8771 · ↻ 3s · ▲ 1h07m", f: "f/4.0", end: true, p: 0 },
+  { n: 4, name: "Cam 4", reg: "cam4-shading · 10.77.8.75:8771 · ↻ 3s · ▲ 1h07m", f: "f/4.0", end: "min", p: 0 },
   { n: 5, name: "Cam 5", reg: "cam5 · 10.77.9.65:8771 · ↻ 2s · ▲ 2h40m", f: "f/5.6", p: 40 },
   { n: 6, name: "Cam 6", tally: "pgm", reg: "cam6 · 10.77.9.66:8771 · ↻ 2s · ▲ 1h08m", f: "f/3.7", p: 15 },
   { n: 7, name: "Cam 7", reg: "cam7 · 10.77.9.67:8771 · ↻ 5s · ▲ 1h08m", f: "f/3.5", p: 10 },
-  { n: 8, name: "Cam 8", reg: "cam8 · 10.77.9.68:8771 · ↻ 1s · ▲ 0h52m", f: "f/8.0", p: 55 },
+  { n: 8, name: "Cam 8", reg: "cam8 · 10.77.9.68:8771 · ↻ 1s · ▲ 0h52m", f: "f/22", end: "max", p: 100 },
 ];
+/* end: false | "min" (the "-" side is at its end) | "max" (the "+" side is at its end). Marcel: the overlay
+   label reads "min" on the minus button and "max" on the plus button. */
+const endBtn = (lab, sym, word, aria) =>
+  `<span class="endbox"><button disabled class="atend" aria-label="${lab} ${aria} (${word})">${sym}</button><span class="endlab" aria-hidden="true">${word}</span></span>`;
 const row = (lab, val, p, end = false, off = false) => `
   <div class="row">
-    <div class="ctl">${end
-        ? `<span class="endbox"><button disabled class="atend" aria-label="${lab} menej (koniec rozsahu)">−</button><span class="endlab" aria-hidden="true">koniec</span></span>`
-        : `<button ${off ? "disabled" : ""} aria-label="${lab} menej">−</button>`}
+    <div class="ctl">${end === "min" ? endBtn(lab, "−", "min", "menej") : `<button ${off ? "disabled" : ""} aria-label="${lab} menej">−</button>`}
       <div class="mid"><span class="lab">${lab}</span><span class="val" role="button" tabindex="0" aria-expanded="false" aria-label="${lab}: posuvník">${val}</span></div>
-      <button aria-label="${lab} viac">+</button></div>
+      ${end === "max" ? endBtn(lab, "+", "max", "viac") : `<button ${off ? "disabled" : ""} aria-label="${lab} viac">+</button>`}</div>
     <div class="slider"><input type="range" value="${p}" style="--p:${p}%" aria-label="${lab}"></div>
   </div>`;
 document.getElementById("grid").innerHTML = cams.map(c => `
@@ -255,12 +257,13 @@ document.getElementById("grid").innerHTML = cams.map(c => `
     <div class="reg" title="${c.reg} (↻ = posledné ohlásenie relaya, ▲ = ako dlho relay beží)">${c.reg}</div>
     <div class="rows">
       ${c.warn ? `<div class="warn">${c.warn}</div>` : ""}
-      ${row("Clona", c.off ? "—" : c.f, c.p ?? 0, !!c.end, c.off)}
+      ${row("Clona", c.off ? "—" : c.f, c.p ?? 0, c.end || false, c.off)}
       ${row("ISO", c.off ? "—" : "640", 40)}
       ${row("Biely bod", c.off ? "—" : "5000 K", 33)}
       ${row("Tint", c.off ? "—" : "0", 50)}
       <details class="more"><summary>More</summary><div class="in">
         ${row("Uzávierka", c.off ? "—" : "1/100", 20)}
+        ${row("FPS", c.off ? "—" : "60.00", 100)}
         <button class="wb">Auto WB</button>
       </div></details>
     </div>
