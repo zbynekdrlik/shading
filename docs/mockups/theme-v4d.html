@@ -57,7 +57,7 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 header {
-  display: flex; align-items: center; gap: 14px; padding: 12px 16px;
+  position: relative; display: flex; align-items: center; gap: 14px; padding: 12px 16px;
   border-bottom: 1px solid var(--line); background: var(--card);
 }
 header h1 { font-size: 21px; margin: 0; font-weight: 700; }
@@ -198,14 +198,30 @@ input[type=range]::-moz-range-thumb { width: 22px; height: 22px; border-radius: 
 .cam > * { --s: calc(100cqw / 367); }
 .head .name, .head .state, .mid .lab, .mid .val { white-space: nowrap; }
 .mid .lab { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+/* Marcel: on a phone the top bar is only the title, the connection state and a hamburger; the layout pill,
+   the mode pill and ARRANGE live in the menu it opens (an overlay, so the cards do not move). */
+.menu { display: contents; }
+.burger { display: none; }
+@media (max-width: 700px) {
+  header .ver { display: none; }
+  .burger { display: inline-block; }
+  .menu { display: none; position: absolute; top: 100%; right: 8px; z-index: 10; flex-direction: column; align-items: stretch;
+    gap: 10px; padding: 12px; background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    box-shadow: 0 10px 30px rgba(0,0,0,.45); }
+  .menu.open { display: flex; }
+  .menu .seg { display: flex; } .menu .seg button { flex: 1; white-space: nowrap; padding: 0 10px; }
+  .menu .iconbtn::after { content: " ARRANGE"; font-size: 15px; font-weight: 600; }
+}
 @media (max-width: 420px) { main { padding: 10px; } body[data-layout="grid"] main { grid-template-columns: 1fr; }
-  body[data-layout="row"] main, body[data-layout="five"] main { grid-auto-columns: calc(100vw - 32px); } header { flex-wrap: wrap; } }
+  body[data-layout="row"] main, body[data-layout="five"] main { grid-auto-columns: calc(100vw - 32px); } }
 </style>
 </head>
 <body data-mode="dark" data-layout="grid">
 <header>
   <h1>Shading</h1><span class="ver">v0.3.0</span><span class="conn">● spojené</span>
   <span class="sp"></span>
+  <button class="iconbtn burger" id="burger" aria-expanded="false" aria-controls="menu" title="Menu">☰</button>
+  <div class="menu" id="menu">
   <div class="seg" role="group" aria-label="Rozloženie">
     <button id="l-grid" aria-pressed="true" title="4 stĺpce, 8 kamier = 2 riadky">▦ 4+4</button>
     <button id="l-five" aria-pressed="false" title="presne 5 celých kariet v rade (3+2), ďalšie sa posúvajú do strany">▥ 5</button>
@@ -216,6 +232,7 @@ input[type=range]::-moz-range-thumb { width: 22px; height: 22px; border-radius: 
     <button id="m-dark" aria-pressed="true">☾ Tma</button>
   </div>
   <button class="iconbtn" title="ARRANGE">⇄</button>
+  </div>
 </header>
 <main id="grid"></main>
 
@@ -280,6 +297,10 @@ document.querySelectorAll('.mid .val').forEach(v => v.addEventListener('click', 
   v.setAttribute('aria-expanded', open);
 }));
 
+document.getElementById("burger").onclick = () => {
+  const m = document.getElementById("menu"); const open = m.classList.toggle("open");
+  document.getElementById("burger").setAttribute("aria-expanded", open);
+};
 function setMode(m) {
   document.body.dataset.mode = m;
   document.getElementById("m-light").setAttribute("aria-pressed", m === "light");
