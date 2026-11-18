@@ -319,7 +319,9 @@ document.getElementById("l-grid").onclick = () => setLayout("grid");
 document.getElementById("l-row").onclick = () => setLayout("row");
 document.getElementById("l-five").onclick = () => setLayout("five");
 let saved = null; try { saved = localStorage.getItem("shading.layout"); } catch {}
-setLayout(["row", "five"].includes(saved) ? saved : "grid");
+// Marcel: on a phone (<= 700 px) the default layout is the inline row; a saved choice always wins.
+const phone = window.matchMedia("(max-width: 700px)").matches;
+setLayout(["grid", "row", "five"].includes(saved) ? saved : (phone ? "row" : "grid"));
 </script>
 </body>
 </html>
