@@ -1,11 +1,13 @@
-//! The header (mockup arrange-v1): title, version, connection, the hidden-cameras chip, the note,
-//! `↺ podľa čísel` (in ARRANGE) and the `⇄` key.
+//! The top bar (mockups arrange-v1 and theme-v4b): title, version, connection, the hidden-cameras
+//! chip, the note, `↺ podľa čísel` (in ARRANGE), the layout pill (4+4 | 5 | 8 v rade), the mode
+//! pill (Svetlo | Tma) and the `⇄` key.
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
 use crate::behave::arrange_drag::{Note, Tap, Tone, ARRANGE_NOTE, SAVING_NOTE, UNCHANGED_NOTE};
-use crate::store::{net, Store};
+use crate::behave::look::{CardLayout, ThemeMode, LAYOUT_KEY, MODE_KEY};
+use crate::store::{look_io, net, Store};
 
 /// The chip's text: how many cameras are hidden and how to bring them back.
 pub fn hidden_chip_text(n: usize) -> String {
@@ -78,9 +80,48 @@ pub fn Header() -> impl IntoView {
         });
     };
 
+    // shading#24: the layout and mode pills; a choice is remembered on this device at once.
+    let layouts = CardLayout::ALL
+        .iter()
+        .map(|&l| {
+            view! {
+                <button
+                    type="button"
+                    data-role=format!("layout-{}", l.as_str())
+                    aria-pressed=move || (store.card_layout.get() == l).to_string()
+                    title=l.title()
+                    on:click=move |_| {
+                        store.card_layout.set(l);
+                        look_io::save(LAYOUT_KEY, l.as_str());
+                    }
+                >
+                    {l.label()}
+                </button>
+            }
+        })
+        .collect_view();
+    let modes = ThemeMode::ALL
+        .iter()
+        .map(|&m| {
+            view! {
+                <button
+                    type="button"
+                    data-role=format!("mode-{}", m.as_str())
+                    aria-pressed=move || (store.theme_mode.get() == m).to_string()
+                    on:click=move |_| {
+                        store.theme_mode.set(m);
+                        look_io::save(MODE_KEY, m.as_str());
+                    }
+                >
+                    {m.label()}
+                </button>
+            }
+        })
+        .collect_view();
+
     view! {
-        <header class="head">
-            <span class="title">"SHADING"</span>
+        <header class="bar">
+            <h1 class="title">"Shading"</h1>
             <span class="ver" id="app-version" data-role="version" data-testid="version">
                 {crate::version_text()}
             </span>
@@ -109,9 +150,11 @@ pub fn Header() -> impl IntoView {
             >
                 "↺ podľa čísel"
             </button>
+            <div class="seg" role="group" aria-label="Rozloženie" data-role="layout-pill">{layouts}</div>
+            <div class="seg" role="group" aria-label="Režim" data-role="mode-pill">{modes}</div>
             <button
                 type="button"
-                class="arrange-key"
+                class="arrange-key iconbtn"
                 class:selected=arranging
                 disabled=move || !store.layout_heard.get()
                 data-role="arrange-key"

@@ -2,8 +2,8 @@
 [build]
 target = "index.html"
 dist = "dist"
-# Phase 1 of the migration: the new panel is served at /next/ (the old JS panel stays at /).
-public_url = "/next/"
+# The panel is the service's main web at / (shading#16's switch, v0.2.10; /next/ redirects here).
+public_url = "/"
 # fohmixer's guarded loader (copied from fohmixer-ui @ b65cf52, which took it from iemmixer), in
 # place of Trunk's default (`await init(...)` at module top level, which turns a failed download
 # into an uncaught error and leaves the shell spinning). Getting the code — the bindings, and the

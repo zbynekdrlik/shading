@@ -210,14 +210,14 @@ fn the_aperture_stops_at_the_lens_ends() {
     });
     let r = row(&Steppers::default().view(&wide, 0.0), Row::Aperture);
     assert_eq!(r.text, "f/4.0");
-    assert!(!r.dec.enabled && r.inc.enabled && r.at_end);
+    assert!(!r.dec.enabled && r.dec.end && r.inc.enabled && !r.inc.end);
     assert_eq!(r.dec.title, "Objektív je na najotvorenejšej clone");
     let closed = with(|p| p.iris_range_pos = Some(1.0));
     let r = row(&Steppers::default().view(&closed, 0.0), Row::Aperture);
-    assert!(r.dec.enabled && !r.inc.enabled && r.at_end);
+    assert!(r.dec.enabled && !r.inc.enabled && r.inc.end);
     let mid = with(|p| p.iris_range_pos = Some(0.4));
     let r = row(&Steppers::default().view(&mid, 0.0), Row::Aperture);
-    assert!(r.dec.enabled && r.inc.enabled && !r.at_end);
+    assert!(r.dec.enabled && r.inc.enabled && !r.dec.end && !r.inc.end);
     assert_eq!(r.pos, Some(0.4));
 }
 
@@ -235,14 +235,14 @@ fn the_grid_ends_do_not_gate_the_aperture_when_the_camera_gives_its_lens_positio
         Row::Aperture,
     );
     assert_eq!(r.text, "f/2.8");
-    assert!(r.dec.enabled && r.inc.enabled && !r.at_end);
+    assert!(r.dec.enabled && r.inc.enabled && !r.dec.end && !r.inc.end);
     let at_grid_last = with(|p| {
         p.aperture_av = Some(6.0);
         p.iris_range_pos = Some(0.8);
     });
     let r = row(&Steppers::default().view(&at_grid_last, 0.0), Row::Aperture);
     assert_eq!(r.text, "f/8.0");
-    assert!(r.dec.enabled && r.inc.enabled && !r.at_end);
+    assert!(r.dec.enabled && r.inc.enabled && !r.dec.end && !r.inc.end);
     // Without the camera's word the grid's ends still gate (nothing better is known).
     let no_pos = with(|p| p.aperture_av = Some(2.0 * 2.8f64.log2()));
     let r = row(&Steppers::default().view(&no_pos, 0.0), Row::Aperture);
@@ -364,4 +364,66 @@ fn a_retap_against_a_view_that_still_carries_a_refusal_stays_pending() {
     c.state.as_mut().unwrap().params.iso = Some(800);
     let r = row(&s.view(&c, 20.0), Row::Kelvin);
     assert!(!r.pending && r.not_applied);
+}
+
+/// shading#24: a button off at a range END carries the end flag (the card lays `min`/`max` over
+/// it); a button off because the value or the steps are unknown does not.
+#[test]
+fn only_a_reached_end_draws_the_end_overlay() {
+    let low = with(|p| p.iso = Some(100));
+    let r = row(&Steppers::default().view(&low, 0.0), Row::Iso);
+    assert!(
+        !r.dec.enabled && r.dec.end,
+        "ISO 100 = the first listed choice"
+    );
+    assert!(r.inc.enabled && !r.inc.end);
+    let high = with(|p| p.kelvin = Some(10000));
+    let r = row(&Steppers::default().view(&high, 0.0), Row::Kelvin);
+    assert!(!r.inc.enabled && r.inc.end && !r.dec.end);
+    let unknown = with(|p| p.tint = None);
+    let r = row(&Steppers::default().view(&unknown, 0.0), Row::Tint);
+    assert!(!r.dec.enabled && !r.dec.end && !r.inc.enabled && !r.inc.end);
+    let mut offline = cam();
+    offline.reachable = false;
+    for r in Steppers::default().view(&offline, 0.0) {
+        assert!(
+            !r.dec.end && !r.inc.end,
+            "{:?}: an offline camera has no end",
+            r.row
+        );
+    }
+    let mut no_caps = cam();
+    no_caps.state.as_mut().unwrap().caps = None;
+    let r = row(&Steppers::default().view(&no_caps, 0.0), Row::Shutter);
+    assert!(!r.dec.enabled && !r.dec.end, "no steps is not an end");
+}
+
+/// shading#24: a refused key keeps its button enabled and never flags an end.
+#[test]
+fn a_refused_enabled_button_is_not_an_end() {
+    let c = cam();
+    let mut refused = c.clone();
+    refused.state.as_mut().unwrap().not_applied = vec!["iso".into()];
+    let r = row(&Steppers::default().view(&refused, 0.0), Row::Iso);
+    assert!(r.dec.enabled && !r.dec.end);
+    assert_eq!(r.dec.title, NOT_APPLIED_TITLE);
+}
+
+#[test]
+fn the_rows_sit_in_the_exp_and_sys_panes_with_sentence_case_labels() {
+    let exp: Vec<&str> = Row::ALL
+        .iter()
+        .filter(|r| r.pane() == Pane::Exp)
+        .map(|r| r.label())
+        .collect();
+    let sys: Vec<&str> = Row::ALL
+        .iter()
+        .filter(|r| r.pane() == Pane::Sys)
+        .map(|r| r.label())
+        .collect();
+    assert_eq!(exp, ["Clona", "ISO", "Biely bod", "Tint"]);
+    assert_eq!(sys, ["Uzávierka", "FPS"]);
+    assert_eq!(Pane::default(), Pane::Exp);
+    let words: Vec<(&str, &str)> = Pane::ALL.iter().map(|p| (p.label(), p.word())).collect();
+    assert_eq!(words, [("EXP", "exp"), ("SYS", "sys")]);
 }

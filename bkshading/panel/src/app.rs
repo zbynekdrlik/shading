@@ -1,12 +1,12 @@
-//! The root component: the header (version, connection, ARRANGE), the connection banner, the
-//! camera grid and the #14 popup (mockup arrange-v1).
+//! The root component: the header (version, connection, layout and mode pills, ARRANGE), the
+//! connection banner, the camera cards and the #14 popup (mockups arrange-v1 and theme-v4b).
 
 use leptos::prelude::*;
 
 use crate::components::camera_block::CameraBlock;
 use crate::components::control_info::ControlInfo;
 use crate::components::header::Header;
-use crate::store::{conn, net, Store};
+use crate::store::{conn, look_io, net, Store};
 
 /// The app.
 #[component]
@@ -15,6 +15,12 @@ pub fn App() -> impl IntoView {
     provide_context(store);
     net::start(store);
     crate::components::arrange::end_on_page_hide(store);
+
+    // shading#24: the per-device layout and colour mode, read once, put on <html> on every change.
+    let (layout, mode) = look_io::load();
+    store.card_layout.set(layout);
+    store.theme_mode.set(mode);
+    Effect::new(move |_| look_io::apply(store.card_layout.get(), store.theme_mode.get()));
 
     let banner = move || {
         conn::banner_text(

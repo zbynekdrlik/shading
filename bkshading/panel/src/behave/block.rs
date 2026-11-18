@@ -1,6 +1,6 @@
 //! A camera block's lines outside the steppers (ported from the JS panel's `updateBlock`): the
-//! online line, the handheld registration line (issue 808) and the fps-vs-grab line with its
-//! explicit align button (issues 809, 1402).
+//! online line, the handheld registration line (issue 808; its one-line short form, shading#24)
+//! and the fps-vs-grab line with its explicit align button (issues 809, 1402).
 
 use bkshading_proto::layout::camera_number;
 use bkshading_proto::wire::{CameraView, FpsSync, RegistrationView};
@@ -60,6 +60,52 @@ pub fn registration_text(reg: &RegistrationView) -> String {
             reg.address
         )
     }
+}
+
+/// The registration line's age, short and technical (shading#24): `2s`, `10m`, `1h08m`.
+pub fn short_age(s: u64) -> String {
+    if s < 60 {
+        format!("{s}s")
+    } else if s < 3600 {
+        format!("{}m", s / 60)
+    } else {
+        uptime_text(s)
+    }
+}
+
+/// How long a relay has announced, always hours and minutes (shading#24): `0h52m`, `3h12m`.
+pub fn uptime_text(s: u64) -> String {
+    format!("{}h{:02}m", s / 3600, (s % 3600) / 60)
+}
+
+/// The legend the registration line's tooltip carries after the full text.
+pub const REGISTRATION_LEGEND: &str = "↻ = posledné ohlásenie relaya, ▲ = ako dlho relay beží";
+
+/// The one-line registration of a handheld (shading#24, Marcel): `relay · address · ↻ 2s · ▲
+/// 1h08m`; a relay that stopped announcing: `relay · address · ↻ 10m ⚠`. The full sentence
+/// ([`registration_text`]) is the tooltip.
+pub fn registration_short(reg: &RegistrationView) -> String {
+    if reg.fresh {
+        format!(
+            "{} · {} · ↻ {} · ▲ {}",
+            reg.relay_id,
+            reg.address,
+            short_age(reg.age_s),
+            uptime_text(reg.announcing_s)
+        )
+    } else {
+        format!(
+            "{} · {} · ↻ {} ⚠",
+            reg.relay_id,
+            reg.address,
+            short_age(reg.age_s)
+        )
+    }
+}
+
+/// The registration line's tooltip: the full sentence and the legend.
+pub fn registration_title(reg: &RegistrationView) -> String {
+    format!("{} ({REGISTRATION_LEGEND})", registration_text(reg))
 }
 
 /// The fps-vs-grab line (issue 809): shown only with a grab rate.
@@ -140,6 +186,35 @@ mod tests {
             registration_text(&reg),
             "handheld-1 sa neohlásil 2 min (naposledy 10.0.0.9:8771)"
         );
+    }
+
+    #[test]
+    fn the_registration_line_is_short_and_technical() {
+        assert_eq!(short_age(2), "2s");
+        assert_eq!(short_age(59), "59s");
+        assert_eq!(short_age(600), "10m");
+        assert_eq!(short_age(4080), "1h08m");
+        assert_eq!(uptime_text(3120), "0h52m");
+        assert_eq!(uptime_text(11520), "3h12m");
+        let mut reg = RegistrationView {
+            relay_id: "cam6".into(),
+            address: "10.77.9.66:8771".into(),
+            age_s: 2,
+            announcing_s: 4080,
+            fresh: true,
+        };
+        assert_eq!(
+            registration_short(&reg),
+            "cam6 · 10.77.9.66:8771 · ↻ 2s · ▲ 1h08m"
+        );
+        assert_eq!(
+            registration_title(&reg),
+            "cam6 · 10.77.9.66:8771 · ohlásený pred 2 s · beží 1 h 8 min \
+             (↻ = posledné ohlásenie relaya, ▲ = ako dlho relay beží)"
+        );
+        reg.fresh = false;
+        reg.age_s = 600;
+        assert_eq!(registration_short(&reg), "cam6 · 10.77.9.66:8771 · ↻ 10m ⚠");
     }
 
     #[test]

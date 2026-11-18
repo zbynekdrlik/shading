@@ -104,9 +104,12 @@ fn mark(target: Option<(&Spot, DropKind)>) {
     } else {
         spot.left + spot.width + 5.0
     };
+    // The line is placed inside the grid, which scrolls aside in the 5 and 8-in-a-row layouts
+    // (shading#24): its scroll offset moves the line's frame.
+    let (sx, sy) = (f64::from(grid.scroll_left()), f64::from(grid.scroll_top()));
     let style = line.style();
-    let _ = style.set_property("left", &format!("{}px", x - g.left()));
-    let _ = style.set_property("top", &format!("{}px", spot.top - g.top()));
+    let _ = style.set_property("left", &format!("{}px", x - g.left() + sx));
+    let _ = style.set_property("top", &format!("{}px", spot.top - g.top() + sy));
     let _ = style.set_property("height", &format!("{}px", spot.height));
     let _ = line.class_list().add_1("on");
 }

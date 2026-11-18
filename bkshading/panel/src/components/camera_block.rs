@@ -1,14 +1,18 @@
-//! One camera block (mockup arrange-v1): the NDI preview on top, then the number, label and online
-//! line, the #14 warning, the handheld's registration line, the six steppers, Auto WB and the
-//! fps-vs-grab line; in ARRANGE a cover with the grip and the eye over all of it.
+//! One camera card (mockup theme-v4b, shading#24): the NDI preview on top, then the number, name and
+//! online state on one centre, the handheld's one-line registration, the controls (the #14 warning
+//! as an overlay over them, the EXP/SYS tablist, both panes in one grid cell), and the fps-vs-grab
+//! line; in ARRANGE a cover with the grip and the eye over all of it. Every line is always present
+//! and one line high, so no push, tally or pane switch moves anything (no layout shift).
 
 use bkshading_proto::wire::CameraView;
 use leptos::html;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
-use crate::behave::block::{fps_sync, is_online, number_text, online_text, registration_text};
-use crate::behave::steppers::{Row, RowView, Steppers};
+use crate::behave::block::{
+    fps_sync, is_online, number_text, online_text, registration_short, registration_title,
+};
+use crate::behave::steppers::{Pane, Row, RowView, Steppers};
 use crate::components::arrange::Cover;
 use crate::components::control_info::warning;
 use crate::components::preview::Preview;
@@ -93,6 +97,33 @@ pub fn CameraBlock(id: String) -> impl IntoView {
         send(store, steppers, rows, c.id.clone(), p.key, p.value);
     };
 
+    // The slider of `row` released at `raw`: the write (held like a tap), or false when nothing
+    // was written (the thumb goes back).
+    let slide = move |row: Row, raw: f64| -> bool {
+        let Some(c) = cam.get_untracked() else {
+            return false;
+        };
+        let now = net::now_ms();
+        let Some(p) = steppers
+            .try_update_value(|s| s.slide(row, raw, &c, now))
+            .flatten()
+        else {
+            leptos::logging::log!("[slider] {} release at {raw}: nothing to write", row.role());
+            return false;
+        };
+        if let Some(v) = steppers.try_update_value(|s| s.view(&c, now)) {
+            set_rows(rows, v);
+        }
+        leptos::logging::log!(
+            "[slider] {} release at {raw}: {}={}",
+            row.role(),
+            p.key,
+            p.value
+        );
+        send(store, steppers, rows, c.id.clone(), p.key, p.value);
+        true
+    };
+
     // Whether this block is a hidden camera's dashed place in ARRANGE: only while the mode is on.
     let ghost = Memo::new(move |_| store.arrange.with(|a| a.hidden_in_edit(&id.get_value())));
     let online = move || cam.with(|c| c.as_ref().is_some_and(is_online));
@@ -103,7 +134,7 @@ pub fn CameraBlock(id: String) -> impl IntoView {
         cam.with(|c| {
             c.as_ref()
                 .and_then(|c| c.registration.as_ref())
-                .map(|r| (registration_text(r), r.fresh))
+                .map(|r| (registration_short(r), registration_title(r), r.fresh))
         })
     };
     let sync = move || cam.with(|c| c.as_ref().and_then(fps_sync));
@@ -113,10 +144,42 @@ pub fn CameraBlock(id: String) -> impl IntoView {
     });
 
     let row_view = move |i: usize| Signal::derive(move || rows.with(|r| r.get(i).cloned()));
-    let steppers_view = Row::ALL
+    let pane = RwSignal::new(Pane::default());
+    let stepper = move |i: usize, row: Row| {
+        view! {
+            <StepperRow
+                row=row
+                view=row_view(i)
+                on_press=Callback::new(move |dir: i32| press(row, dir))
+                on_slide=Callback::new(move |raw: f64| slide(row, raw))
+            />
+        }
+    };
+    let pane_rows = move |p: Pane| {
+        Row::ALL
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.pane() == p)
+            .map(|(i, &row)| stepper(i, row))
+            .collect_view()
+    };
+    let tabs = Pane::ALL
         .iter()
-        .enumerate()
-        .map(|(i, &row)| view! { <StepperRow row=row view=row_view(i) on_press=Callback::new(move |dir: i32| press(row, dir)) /> })
+        .map(|&p| {
+            view! {
+                <button
+                    type="button"
+                    role="tab"
+                    data-pane=p.word()
+                    data-role=format!("pane-{}", p.word())
+                    aria-selected=move || (pane.get() == p).to_string()
+                    title=p.title()
+                    on:click=move |_| pane.set(p)
+                >
+                    {p.label()}
+                </button>
+            }
+        })
         .collect_view();
 
     view! {
@@ -138,14 +201,28 @@ pub fn CameraBlock(id: String) -> impl IntoView {
             >
                 <Preview id=id.get_value() live=live busy=preview_busy />
             </Show>
-            <div class="body">
-                <div class="bhead">
-                    <span class="num">{move || number_text(&id.get_value())}</span>
-                    <span class="lbl" data-role="label">{label}</span>
-                    <span class="on-dot" class:bad=move || !online() data-role="online">
-                        {move || cam.with(|c| c.as_ref().map_or("", online_text))}
-                    </span>
-                </div>
+            <div class="head">
+                <span class="num">{move || number_text(&id.get_value())}</span>
+                <span class="name" data-role="label">{label}</span>
+                <span class="state" class:off=move || !online() data-role="online">
+                    {move || cam.with(|c| c.as_ref().map_or("", online_text))}
+                </span>
+            </div>
+            // Always one line, present in every card (no layout shift); selectable (the address
+            // is copied); the full sentence is the tooltip.
+            <div class="reg" title=move || reg().map(|r| r.1).unwrap_or_default()>
+                <span
+                    class="ago"
+                    class:stale=move || reg().is_some_and(|r| !r.2)
+                    data-role="registration"
+                    hidden=move || reg().is_none()
+                >
+                    {move || reg().map(|r| r.0).unwrap_or_default()}
+                </span>
+                "\u{a0}"
+            </div>
+            <div class="rows">
+                // shading#14: an overlay over the controls (never in their flow), never dimmed.
                 <button
                     type="button"
                     class="warn"
@@ -157,51 +234,51 @@ pub fn CameraBlock(id: String) -> impl IntoView {
                 >
                     {move || badge().unwrap_or_default()}
                 </button>
-                <div
-                    class="reg"
-                    class:stale=move || reg().is_some_and(|r| !r.1)
-                    data-role="registration"
-                    hidden=move || reg().is_none()
-                >
-                    {move || reg().map(|r| r.0).unwrap_or_default()}
+                <div class="pane-pill seg" role="tablist" aria-label=move || format!("{}: ovládače", label())>
+                    {tabs}
                 </div>
-                <div class="ctrls" data-role="params">
-                    {steppers_view}
-                    <div class="extras">
-                        <div class="fps-sync" data-role="fps-sync" hidden=move || sync().is_none()>
-                            <span class="fps-grab" data-role="fps-grab">
-                                {move || sync().map(|s| s.grab).unwrap_or_default()}
-                            </span>
-                            <span class="fps-desync" data-role="fps-desync" hidden=move || sync().and_then(|s| s.desync).is_none()>
-                                {move || sync().and_then(|s| s.desync).unwrap_or_default()}
-                            </span>
-                            <span class="fps-warn" data-role="fps-warn" hidden=move || sync().and_then(|s| s.warn).is_none()>
-                                {move || sync().and_then(|s| s.warn).unwrap_or_default()}
-                            </span>
-                            <button
-                                type="button"
-                                class="fps-set-grab"
-                                data-role="fps-set-grab"
-                                hidden=move || sync().and_then(|s| s.align).is_none()
-                                on:click=move |_| {
-                                    // issue 809: an explicit click only, never an automatic write.
-                                    if let Some((_, grab)) = sync().and_then(|s| s.align) {
-                                        send(store, steppers, rows, id.get_value(), "fps", serde_json::json!(grab));
-                                    }
-                                }
-                            >
-                                {move || sync().and_then(|s| s.align).map(|a| a.0).unwrap_or_default()}
-                            </button>
-                        </div>
+                // Both panes share one grid cell: the card is as tall as the taller pane, always.
+                <div class="panes" data-show=move || pane.get().word() data-role="params">
+                    <div class="pane" data-pane="exp" role="tabpanel">{pane_rows(Pane::Exp)}</div>
+                    <div class="pane" data-pane="sys" role="tabpanel">
+                        {pane_rows(Pane::Sys)}
                         <button
                             type="button"
-                            class="autowb"
+                            class="wb"
                             data-role="auto-wb"
                             on:click=move |_| send(store, steppers, rows, id.get_value(), "autoWb", serde_json::json!(true))
                         >
                             "Auto WB"
                         </button>
                     </div>
+                </div>
+            </div>
+            // The fps-vs-grab line: always present and one line high (no layout shift).
+            <div class="foot">
+                <div class="fps-sync" data-role="fps-sync" hidden=move || sync().is_none()>
+                    <span class="fps-grab" data-role="fps-grab">
+                        {move || sync().map(|s| s.grab).unwrap_or_default()}
+                    </span>
+                    <span class="fps-desync" data-role="fps-desync" hidden=move || sync().and_then(|s| s.desync).is_none()>
+                        {move || sync().and_then(|s| s.desync).unwrap_or_default()}
+                    </span>
+                    <span class="fps-warn" data-role="fps-warn" hidden=move || sync().and_then(|s| s.warn).is_none()>
+                        {move || sync().and_then(|s| s.warn).unwrap_or_default()}
+                    </span>
+                    <button
+                        type="button"
+                        class="fps-set-grab"
+                        data-role="fps-set-grab"
+                        hidden=move || sync().and_then(|s| s.align).is_none()
+                        on:click=move |_| {
+                            // issue 809: an explicit click only, never an automatic write.
+                            if let Some((_, grab)) = sync().and_then(|s| s.align) {
+                                send(store, steppers, rows, id.get_value(), "fps", serde_json::json!(grab));
+                            }
+                        }
+                    >
+                        {move || sync().and_then(|s| s.align).map(|a| a.0).unwrap_or_default()}
+                    </button>
                 </div>
             </div>
             <Cover id=id.get_value() block=root ghost=Signal::from(ghost) />
