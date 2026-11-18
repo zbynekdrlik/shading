@@ -10,7 +10,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 
 use crate::behave::block::{
-    fps_sync, is_online, number_text, online_text, registration_short, registration_title,
+    fps_sync, is_online, number_text, online_text, status_line, status_title,
 };
 use crate::behave::steppers::{Pane, Row, RowView, Steppers};
 use crate::components::arrange::Cover;
@@ -130,11 +130,13 @@ pub fn CameraBlock(id: String) -> impl IntoView {
     let control = move || cam.with(|c| c.as_ref().map(control_word).unwrap_or_default());
     let label = move || cam.with(|c| c.as_ref().map(|c| c.label.clone()).unwrap_or_default());
     let badge = move || cam.with(|c| c.as_ref().and_then(|c| warning(c.control)));
+    // shading#28: (line, tooltip, stale) — the line is never empty.
     let reg = move || {
         cam.with(|c| {
-            c.as_ref()
-                .and_then(|c| c.registration.as_ref())
-                .map(|r| (registration_short(r), registration_title(r), r.fresh))
+            c.as_ref().map(|c| {
+                let stale = c.registration.as_ref().is_some_and(|r| !r.fresh);
+                (status_line(c), status_title(c), stale)
+            })
         })
     };
     let sync = move || cam.with(|c| c.as_ref().and_then(fps_sync));
@@ -208,18 +210,12 @@ pub fn CameraBlock(id: String) -> impl IntoView {
                     {move || cam.with(|c| c.as_ref().map_or("", online_text))}
                 </span>
             </div>
-            // Always one line, present in every card (no layout shift); selectable (the address
-            // is copied); the full sentence is the tooltip.
+            // Always one line of text, present in every card (shading#28: an offline card keeps it,
+            // no layout shift); selectable (the address is copied); the full sentence is the tooltip.
             <div class="reg" title=move || reg().map(|r| r.1).unwrap_or_default()>
-                <span
-                    class="ago"
-                    class:stale=move || reg().is_some_and(|r| !r.2)
-                    data-role="registration"
-                    hidden=move || reg().is_none()
-                >
+                <span class="ago" class:stale=move || reg().is_some_and(|r| r.2) data-role="registration">
                     {move || reg().map(|r| r.0).unwrap_or_default()}
                 </span>
-                "\u{a0}"
             </div>
             <div class="rows">
                 // shading#14: an overlay over the controls (never in their flow), never dimmed.

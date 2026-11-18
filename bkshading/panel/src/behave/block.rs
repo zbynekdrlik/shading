@@ -108,6 +108,27 @@ pub fn registration_title(reg: &RegistrationView) -> String {
     format!("{} ({REGISTRATION_LEGEND})", registration_text(reg))
 }
 
+/// The card's status line, always one line of text (shading#28): a registered relay's short form
+/// ([`registration_short`]); else the address the service dials + `bez ohlásenia` (a relay that
+/// never announced, or a fixed address); else `—`. An offline card keeps its line, so its controls
+/// sit where an online card's do.
+pub fn status_line(cam: &CameraView) -> String {
+    if let Some(reg) = &cam.registration {
+        return registration_short(reg);
+    }
+    match cam.address.as_deref().filter(|a| !a.is_empty()) {
+        Some(addr) => format!("{addr} · bez ohlásenia"),
+        None => "—".to_string(),
+    }
+}
+
+/// The status line's tooltip: the registration's sentence, else the line itself.
+pub fn status_title(cam: &CameraView) -> String {
+    cam.registration
+        .as_ref()
+        .map_or_else(|| status_line(cam), registration_title)
+}
+
 /// The fps-vs-grab line (issue 809): shown only with a grab rate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FpsSyncView {

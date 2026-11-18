@@ -311,6 +311,13 @@ pub struct CameraView {
     /// `#[serde(default)]`: a view from an older service reads as `None`.
     #[serde(default)]
     pub registration: Option<RegistrationView>,
+    /// The address the service dials while there is no registration (shading#28, additive): the
+    /// config `address`, or a `register:<id>` camera's `fallback_address`; `None` without one.
+    /// The panel's status line shows it (`address · bez ohlásenia`) when the relay never
+    /// announced, so an offline card keeps its line. `#[serde(default)]`: an older service's view
+    /// reads as `None`.
+    #[serde(default)]
+    pub address: Option<String>,
     /// Whether the panel can control this camera and, if not, why (shading#14):
     /// [`crate::control::control_status`] of `reachable` + `state`. The panel shows a warning
     /// badge for anything but [`ControlStatus::Ok`]. `#[serde(default)]`: an older service's view

@@ -75,7 +75,18 @@ pub fn camera_view(
         fps_align_settable,
         state,
         registration: None,
+        address: static_address(cam),
         control,
+    }
+}
+
+/// The address the service dials without a registration (shading#28): a plain `address`, or a
+/// `register:<id>` camera's `fallback_address` (`None` without one).
+pub fn static_address(cam: &CameraConfig) -> Option<String> {
+    if crate::registry::registered_id(&cam.address).is_some() {
+        cam.fallback_address.clone()
+    } else {
+        Some(cam.address.clone())
     }
 }
 
