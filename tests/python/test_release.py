@@ -214,8 +214,16 @@ def test_stage_refuses_a_missing_binary(tmp_path):
         release.stage(build, str(tmp_path / "dist"), web_dir=web)
 
 
-def test_the_real_panel_web_dir_exists():
-    assert os.path.isfile(os.path.join(release.WEB_DIR, "index.html"))
+def test_the_tarball_web_dir_is_the_panel_dist():
+    # shading#16's switch: the old service/web is gone; web/ is a copy of the Trunk dist, which
+    # the release job downloads from the panel job (it is not in git, so not checked for here).
+    assert release.WEB_DIR == os.path.join(release.REPO, "bkshading", "panel", "dist")
+
+
+def test_stage_refuses_a_missing_web_dir(tmp_path):
+    build, _ = make_build(tmp_path)
+    with pytest.raises(release.ReleaseError, match="panel web assets not found"):
+        release.stage(build, str(tmp_path / "dist"), web_dir=str(tmp_path / "no-dist"))
 
 
 # --- publish ---------------------------------------------------------------------------------

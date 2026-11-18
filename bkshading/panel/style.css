@@ -317,6 +317,14 @@ dialog.info button {
    `display: contents` (its buttons sit in the bar as before) and the burger is gone. */
 .menu { display: contents; }
 .burger { display: none; }
+/* Between the phone menu (700 px) and ~1000 px the full bar would push the page sideways: the
+   version goes and the bar and the pills tighten (measured: theme.spec.js "the top bar never
+   scrolls the page sideways"). */
+@media (max-width: 1000px) {
+    .bar { gap: 8px; }
+    .ver { display: none; }
+    .seg button { padding: 0 10px; }
+}
 @media (max-width: 700px) {
     .ver, .note { display: none; }
     .burger { display: inline-block; }

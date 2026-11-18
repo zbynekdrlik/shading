@@ -458,3 +458,48 @@ test("a phone without a saved layout starts in a row; a saved choice wins after 
   await expect(html).toHaveAttribute("data-layout", "grid");
   gate.assertClean();
 });
+
+test("the top bar never scrolls the page sideways at any width, console clean (shading#24 version D)", async ({ page }) => {
+  const gate = consoleGate(page);
+  await openWith(page, 8, 1920, 1080);
+  for (const w of [390, 701, 800, 1000, 1280, 1920]) {
+    await page.setViewportSize({ width: w, height: 900 });
+    const m = await page.evaluate(() => {
+      const bar = document.querySelector(".bar");
+      return {
+        page: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        bar: bar.scrollWidth - bar.clientWidth,
+        barH: bar.getBoundingClientRect().height,
+      };
+    });
+    expect(m.page, `page at ${w}px`).toBeLessThanOrEqual(0);
+    expect(m.bar, `bar at ${w}px`).toBeLessThanOrEqual(0);
+    expect(m.barH, `one-line bar at ${w}px`).toBeLessThan(80);
+  }
+  gate.assertClean();
+});
+
+test("a slider dragged away and back (no change event) follows the camera again, console clean (shading#24)", async ({ page }) => {
+  const gate = consoleGate(page);
+  const puts = [];
+  await openWith(page, 1, 1920, 1080, puts);
+  await page.locator('[data-role="kelvin-val"]').click();
+  const slider = page.locator('[data-role="kelvin-slider"]');
+  await expect(slider).toBeVisible();
+  // A drag away and back to the start: `input` events, a release, and NO `change` (the value
+  // ended where it began), exactly as the browser reports it.
+  await slider.evaluate((el) => {
+    el.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    el.value = "7000";
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.value = "5600";
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+  });
+  // A push of a new value moves the thumb: the finished drag no longer holds it.
+  await pushState(page, cams(1, { kelvin: 9000 }));
+  await expect(page.locator('[data-role="kelvin-val"]')).toHaveText("9000 K");
+  await expect.poll(async () => Number(await slider.inputValue())).toBe(9000);
+  expect(puts, "a drag that ends where it started writes nothing").toEqual([]);
+  gate.assertClean();
+});

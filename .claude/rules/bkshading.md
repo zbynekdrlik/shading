@@ -797,8 +797,8 @@ Pieces: three pure printers (`strih_bkshading_artifact_name` / `strih_bkshading_
 the printer — parity-tested), `setup-strih.sh` step **"16c"** (lettered, TOTAL_STEPS stays 17), and
 `verify-strih.sh` item 31. Tests: `tests/strih_provision_pure_functions.rs` (source-and-call + anchors).
 
-- **The panel web assets are EMBEDDED in the binary** (`bkshading/service/src/http.rs`:
-  `include_str!("../web/index.html")`, `include_bytes!("../web/icon-192.png")`, …), so the service is
+- **The panel web assets are EMBEDDED in the binary** (since v0.2.10 the Leptos dist via rust-embed
+  `http::PanelAssets`; before it `include_str!("../web/index.html")` …), so the service is
   SELF-CONTAINED — the unit + verify depend only on the binary + its `:8770` listener + `/api/version`,
   never a filesystem `web/`. This is why the Windows canon ships `bkshading.exe` ALONE. The Linux
   artifact + install still carry `web/` beside the binary (design wording) as a panel-source copy, but
@@ -1380,6 +1380,11 @@ drag is imprecise. The three step semantics DIFFER and are not interchangeable:
 ## Installable web app (PWA) — manifest + no-cache SW + embedded icons (issue 1305)
 
 The panel is installable as a windowed web app (own icon in the Windows dock, no browser chrome):
+- **Since v0.2.10 (shading#16's switch) these live in the panel:** `bkshading/panel/manifest.webmanifest`
+  (RELATIVE `start_url`/`scope` `./`, icons `icons/…`), `bkshading/panel/sw.js`, `bkshading/panel/icons/`
+  (generator `bkshading/panel/gen-icons.py`, output byte-identical to the old one), copied by Trunk
+  into the embedded dist; the `/manifest.webmanifest` / `/sw.js` / `/icon-*.png` routes and the
+  `include_bytes!` below are gone. The original issue-1305 layout, for history:
 - **Static assets in `bkshading/service/web/`:** `manifest.webmanifest` (name/short_name, `lang
   "sk"`, `start_url`/`scope` `/`, `display "standalone"`, dark `#14171c` bg/theme, icons 192+512
   with BOTH `purpose "any"` and `"maskable"` entries), `sw.js`, `icon-192.png`/`icon-512.png`,
@@ -1708,7 +1713,7 @@ reachable over USB-PTP.
   server responded with a status of 503"), exactly like `route.abort()`'s `net::ERR_FAILED`. An
   "unreachable service" fixture that must keep the console clean answers `200` with a NON-JSON body;
   the poll's `r.json()` throw takes the same offline path as a real failure.
-- Reproduce a panel E2E locally with ZERO builds: `python3 -m http.server 8799 --directory
+- (Pre-v0.2.10, the old JS panel.) Reproduce a panel E2E locally with ZERO builds: `python3 -m http.server 8799 --directory
   bkshading/service/web` + the Playwright MCP `browser_run_code_unsafe` with the test's own init
   script + route (the banner logic, routes and console gate all run without the Rust service).
   Or run the spec itself: `npm install @playwright/test@1.58.2` in a scratch dir (its chromium

@@ -97,7 +97,7 @@ pub fn StepperRow(
 
     // The bounds first: a value set while the old bounds stand is clamped to them.
     let place = move |s: &SliderSpec| {
-        if let Some(el) = input.get_untracked() {
+        if let Some(Some(el)) = input.try_get_untracked() {
             el.set_min(&s.min.to_string());
             el.set_max(&s.max.to_string());
             el.set_step(&s.step.to_string());
@@ -114,7 +114,9 @@ pub fn StepperRow(
         }
     });
 
-    let toggle = move || open.update(|o| *o = !*o);
+    let toggle = move || {
+        open.try_update(|o| *o = !*o);
+    };
     let slider_role = format!("{}-slider", row.role());
 
     view! {
@@ -153,8 +155,8 @@ pub fn StepperRow(
                     aria-label=row.label()
                     disabled=move || spec.with(Option::is_none)
                     on:input=move |_| {
-                        dragging.set_value(true);
-                        if let (Some(el), Some(s)) = (input.get_untracked(), spec.get_untracked()) {
+                        dragging.try_set_value(true);
+                        if let (Some(Some(el)), Some(Some(s))) = (input.try_get_untracked(), spec.try_get_untracked()) {
                             let shown = SliderSpec {
                                 value: el.value_as_number(),
                                 ..s
@@ -163,17 +165,22 @@ pub fn StepperRow(
                         }
                     }
                     on:change=move |_| {
-                        dragging.set_value(false);
-                        let Some(el) = input.get_untracked() else {
+                        dragging.try_set_value(false);
+                        let Some(Some(el)) = input.try_get_untracked() else {
                             return;
                         };
                         let wrote = on_slide.run(el.value_as_number());
                         if !wrote {
-                            if let Some(s) = spec.get_untracked() {
+                            if let Some(Some(s)) = spec.try_get_untracked() {
                                 place(&s);
                             }
                         }
                     }
+                    // A drag that ends where it started fires no `change`: the release (or a
+                    // focus moving away) still hands the thumb back to the camera's pushes.
+                    on:pointerup=move |_| { dragging.try_set_value(false); }
+                    on:pointercancel=move |_| { dragging.try_set_value(false); }
+                    on:blur=move |_| { dragging.try_set_value(false); }
                 />
             </div>
         </div>

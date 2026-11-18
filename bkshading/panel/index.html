@@ -28,6 +28,7 @@
                 background: #0f1216; color: #e3e8ee;
                 font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
             }
+            :root[data-mode="light"] #app-shell { background: #b9c1cb; color: #0e1319; }
             #app-shell h1 { margin-bottom: 2rem; font-size: 21px; font-weight: 700; }
             .shell-spinner {
                 width: 40px; height: 40px; border-radius: 50%;
@@ -49,6 +50,13 @@
         </div>
     </div>
     <script>
+    // shading#24: a device remembered in the light mode shows the loading shell light too (no dark
+    // flash before the app starts; the app itself owns the mode from then on, behave/look.rs).
+    try {
+        if (localStorage.getItem("shading.mode") === "light") document.documentElement.dataset.mode = "light";
+    } catch (error) {
+        console.log("[look] localStorage unavailable: " + error);
+    }
     // The installable web app (issue 1305): a network-only service worker (sw.js). Registered only
     // where the browser offers the API (a secure context: https, or localhost); on a plain-http LAN
     // page it is absent and nothing happens. data-sw on <html> says what happened (E2E, support);

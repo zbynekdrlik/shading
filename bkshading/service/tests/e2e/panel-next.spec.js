@@ -48,6 +48,7 @@ test("+/- steppers PUT the expected absolute values, console clean (issue 1304/1
   await page.locator('[data-role="tint-inc"]').click();
   await isoInc.click();
   await page.locator('[data-role="pane-sys"]').click();
+  await expect(shInc).toBeEnabled();
   await shInc.click();
 
   await expect.poll(async () => (await recorded(page)).length, { timeout: 10000 }).toBeGreaterThanOrEqual(before + 5);

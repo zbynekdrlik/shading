@@ -81,7 +81,7 @@ pub fn CameraBlock(id: String) -> impl IntoView {
     });
 
     let press = move |row: Row, dir: i32| {
-        let Some(c) = cam.get_untracked() else {
+        let Some(c) = cam.try_get_untracked().flatten() else {
             return;
         };
         let now = net::now_ms();
@@ -100,7 +100,7 @@ pub fn CameraBlock(id: String) -> impl IntoView {
     // The slider of `row` released at `raw`: the write (held like a tap), or false when nothing
     // was written (the thumb goes back).
     let slide = move |row: Row, raw: f64| -> bool {
-        let Some(c) = cam.get_untracked() else {
+        let Some(c) = cam.try_get_untracked().flatten() else {
             return false;
         };
         let now = net::now_ms();
