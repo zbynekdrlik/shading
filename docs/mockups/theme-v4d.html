@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="sk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shading Theme v4 D</title>
+<style>
+/* shading#24 mockup v1: the rebuilt panel's theme, based on the legacy panel (system font,
+   sentence case, calm cards), with two modes for the venue light. Sizes are chosen for a tablet
+   at arm's length (~50-60 cm): body text >= 15 px, values 26 px, touch targets 56 px. */
+:root, [data-mode="dark"] {
+  --val: #cdd5de;      /* values: light grey (Stepan), not the near-white --text */
+  --bg: #0f1216;        /* page */
+  --card: #171b21;      /* camera block */
+  --row: #1f242c;       /* one control row */
+  --line: #2c333d;
+  --text: #e3e8ee;      /* values, camera name: not pure white (no glare in a dark room) */
+  --label: #aab4c0;     /* row labels */
+  --dim: #8b96a3;       /* registration line, hints */
+  --btn: #262c35;
+  --btn-text: #e3e8ee;
+  --accent: #5b9bff;    /* slider fill + thumb */
+  --track: #39414c;
+  --ok: #4cc98a;
+  --warn-bg: #3a2a12;
+  --warn-text: #ffc46b;
+  --bad-bg: #3b1a1e;
+  --bad-text: #ff8f99;
+}
+[data-mode="light"] {
+  --val: #1f262e; /* owner 18.11: the first light mode was "extremely bright": no pure white, a muted grey-blue
+     paper (about 70-80 % luminance) so a lit room is readable without the screen glowing */
+  --bg: #b9c1cb;
+  --card: #cdd4dc;
+  --row: #c2cad3;
+  --line: #a3adb9;
+  --text: #0e1319;
+  --label: #2c3640;
+  --dim: #3a4550;
+  --btn: #d8dee5;
+  --btn-text: #0e1319;
+  --accent: #16509f;
+  --track: #9aa5b2;
+  --ok: #0c5a30;
+  --warn-bg: #e9d9b6;
+  --warn-text: #5b3600;
+  --bad-bg: #e5c4c8;
+  --bad-text: #7d0f1c;
+}
+* { box-sizing: border-box; }
+/* Marcel: an app, not a web page: no text selection on controls (a double tap never selects). */
+header, .cam { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+html, body { margin: 0; }
+body {
+  background: var(--bg); color: var(--text);
+  font: 16px/1.35 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+header {
+  display: flex; align-items: center; gap: 14px; padding: 12px 16px;
+  border-bottom: 1px solid var(--line); background: var(--card);
+}
+header h1 { font-size: 21px; margin: 0; font-weight: 700; }
+header .ver { color: var(--dim); font-size: 15px; }
+header .conn { color: var(--ok); font-size: 15px; font-weight: 600; }
+header .sp { flex: 1; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.seg button {
+  font: inherit; font-size: 16px; font-weight: 600; min-height: 48px; padding: 0 16px;
+  background: transparent; color: var(--label); border: 0; cursor: pointer;
+}
+.seg button[aria-pressed="true"] { background: var(--btn); color: var(--text); }
+.seg button[aria-selected="true"] { background: var(--btn); color: var(--text); }
+.iconbtn {
+  min-width: 48px; min-height: 48px; border-radius: 12px; border: 1px solid var(--line);
+  background: var(--btn); color: var(--btn-text); font-size: 22px; cursor: pointer;
+}
+/* Marcel: 8 cameras never fit one 1920 px screen at a readable size, and a layout must never wrap
+   unpredictably. So the operator picks the layout with the pill in the top bar (remembered per device):
+   - "4+4": a fixed grid of 4 columns (8 cameras = 2 rows of 4, the page scrolls vertically);
+   - "8 v rade": all cameras in ONE row, fixed card width, the row scrolls horizontally. */
+/* Version D (Marcel): a card is never narrower than --card-min (no trimmed or overflowing text) and never
+   wider than --card-max (no endless stretch; on a 3840 px (4K) screen all 8 cards fit in one row). */
+:root { --card-min: 300px; --card-max: 460px; --gap: 14px; } /* 460: all 8 cards fit a 3840 px (4K) screen */
+main { display: grid; gap: var(--gap); padding: 14px 16px; justify-content: start; }
+body[data-layout="grid"] main { grid-template-columns: repeat(4, clamp(var(--card-min), (100vw - 32px - 3 * var(--gap)) / 4, var(--card-max))); }
+body[data-layout="five"] main { grid-auto-flow: column; overflow-x: auto; overscroll-behavior-x: contain;
+  grid-auto-columns: clamp(var(--card-min), (100vw - 16px - 5 * var(--gap)) / 5 + 0.1px, var(--card-max)); } /* the 6th card starts exactly at the window edge. Marcel + Stepan: exactly 5 whole cards (the usual 3+2 event set), no partial 6th */
+body[data-layout="row"] main { grid-auto-flow: column; overflow-x: auto;
+  /* Marcel: 4 + 1/3 cards on the screen (the third of the 5th tells there is more to scroll):
+     4.333 cards + 4 gaps of 14 px fill the width inside the 16 px side paddings */
+  grid-auto-columns: clamp(var(--card-min), (100vw - 32px - 4 * var(--gap)) / 4.3333, var(--card-max));
+  overscroll-behavior-x: contain; } /* Marcel: no scroll snap */
+@media (max-width: 1340px) { body[data-layout="grid"] main { grid-template-columns: repeat(2, clamp(var(--card-min), (100vw - 32px - var(--gap)) / 2, var(--card-max))); } }
+.cam { background: var(--card); border: 2px solid transparent; box-shadow: inset 0 0 0 1px var(--line); border-radius: 14px; overflow: hidden; }
+/* Marcel: every card always has a 2 px border (transparent; the 1 px edge is an inset shadow), so PGM / PVW
+   only recolour it and a tally change never moves anything (no layout shift). */
+.prev { aspect-ratio: 16/9; background: #000; position: relative; display: grid; place-items: center; }
+.prev .ph { color: #9aa3ad; font-size: calc(var(--s) * 15); font-weight: 600; letter-spacing: .02em; }
+.prev .img { position: absolute; inset: 0;
+  background: linear-gradient(135deg,#3b1f4d,#8a3a7a 45%,#21152b 70%,#0b0b12); }
+.head { display: flex; align-items: center; gap: calc(var(--s) * 10); padding: calc(var(--s) * 12) calc(var(--s) * 14) calc(var(--s) * 4); } /* Marcel: ID, name, PGM and online share ONE vertical centre */
+.head > * { line-height: 1; display: inline-flex; align-items: center; }
+.num { font-size: calc(var(--s) * 30); font-weight: 800; line-height: 1; }
+.name { font-size: calc(var(--s) * 21); font-weight: 700; }
+.state { margin-left: auto; font-size: calc(var(--s) * 16); font-weight: 600; color: var(--ok); }
+.state.off { color: var(--bad-text); }
+.reg { padding: 0 calc(var(--s) * 14) calc(var(--s) * 10); color: var(--dim); font-size: calc(var(--s) * 14);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; /* Marcel: never wraps (no layout shift); full text in the tooltip */
+  -webkit-user-select: text; user-select: text; } /* Marcel: the status line with the IP address stays copyable */
+.reg .ago { font-variant-numeric: tabular-nums; } /* short, technical: "↻ 3s" = last announcement, "▲ 1h07m" = relay uptime */
+.warn { /* Marcel: an overlay over the controls (absolute in the relative .rows), never in the flow */
+  position: absolute; top: 0; left: calc(var(--s) * 10); right: calc(var(--s) * 10); z-index: 2;
+  padding: calc(var(--s) * 10) calc(var(--s) * 12); border-radius: calc(var(--s) * 10); font-size: calc(var(--s) * 16); font-weight: 600;
+  background: var(--bad-bg); color: var(--bad-text); display: flex; gap: calc(var(--s) * 8); align-items: center;
+  border: 1px solid var(--bad-text); box-shadow: 0 6px 18px rgba(0,0,0,.35);
+}
+.rows { padding: 0 calc(var(--s) * 10) calc(var(--s) * 12); display: grid; gap: calc(var(--s) * 8); position: relative; }
+.row { background: var(--row); border-radius: calc(var(--s) * 12); padding: calc(var(--s) * 5.6); } /* Marcel: -30 % */
+.ctl { display: grid; grid-template-columns: calc(var(--s) * 56) 1fr calc(var(--s) * 56); gap: calc(var(--s) * 8); align-items: center; }
+.ctl > button, .endbox > button {
+  height: calc(var(--s) * 56); border-radius: 12px; border: 1px solid var(--line); background: var(--btn);
+  color: var(--btn-text); font-size: calc(var(--s) * 28); font-weight: 600; cursor: pointer;
+}
+.ctl > button:disabled, .endbox > button:disabled { background: transparent; border-color: transparent; color: var(--track); cursor: default; }
+/* The end label is centred by an absolutely placed wrapper filling the button: Safari does not lay out
+   a <button> as grid/flex reliably, so the button itself only positions. */
+/* Marcel: "koniec" is an OVERLAY of the dead button, NOT its child: a sibling laid over the button by a
+   relative wrapper (absolute inset 0, flex-centred; pointer-events none). The "−" stays in the button. */
+.endbox { position: relative; display: grid; }
+.endbox > button.atend { border: 1px dashed var(--line); }
+.endbox > .endlab { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  font-size: calc(var(--s) * 12); font-weight: 700; line-height: 1; color: var(--warn-text); pointer-events: none;
+  background: color-mix(in srgb, var(--row) 70%, transparent); border-radius: calc(var(--s) * 12); }
+.mid { display: flex; flex-direction: column; align-items: center; text-align: center; min-width: 0; }
+.mid .lab { font-size: calc(var(--s) * 15); font-weight: 500; color: var(--label); line-height: 1.2; }
+.mid .val { font-size: calc(var(--s) * 26); font-weight: 500; font-variant-numeric: tabular-nums; line-height: 1.15;
+  color: var(--val); letter-spacing: 1px; } /* Stepan: "len troška hrubšie" (500); Marcel: letter-spacing 1px */
+/* Marcel: a pitch-black outline around the value letters AND the +/- glyphs, 1.5 px (he knows a half
+   pixel only shows on HiDPI). Dark mode only: on the light paper a black outline muddies dark text. */
+[data-mode="dark"] { --outline: 1.5px 0 0 #000, -1.5px 0 0 #000, 0 1.5px 0 #000, 0 -1.5px 0 #000,
+  1.5px 1.5px 0 #000, -1.5px -1.5px 0 #000, 1.5px -1.5px 0 #000, -1.5px 1.5px 0 #000; }
+[data-mode="dark"] .mid .val, [data-mode="dark"] .ctl > button, [data-mode="dark"] .endbox > button { text-shadow: var(--outline); } /* Marcel: a lighter weight, same size. Stepan (multifocal glasses): bold white numbers glare and blur, so the value is light grey, not white */
+.mid .val { cursor: pointer; border-radius: calc(var(--s) * 6); padding: 0 calc(var(--s) * 6); }
+.row.open .mid .val { background: var(--accent); color: var(--card); } /* the open slider's value is highlighted */
+.slider { display: none; padding: calc(var(--s) * 8) calc(var(--s) * 6) 0; }
+.row.open .slider { display: block; }
+.more { border-radius: calc(var(--s) * 12); } /* Marcel: no box around its controls (no nested look) */
+.more > summary {
+  list-style: none; display: flex; align-items: center; justify-content: center; gap: calc(var(--s) * 8);
+  min-height: calc(var(--s) * 44); font-size: calc(var(--s) * 15); font-weight: 600; color: var(--label); cursor: pointer;
+}
+.more > summary::-webkit-details-marker { display: none; }
+.more > summary::after { content: "▾"; transition: transform .15s; }
+.more[open] > summary::after { transform: rotate(180deg); }
+.more > summary { background: var(--row); border-radius: calc(var(--s) * 12); }
+.more .in { display: grid; gap: calc(var(--s) * 8); padding: calc(var(--s) * 8) 0 0; }
+.wb { min-height: calc(var(--s) * 56); border-radius: 12px; border: 1px solid var(--line); background: var(--btn);
+  color: var(--btn-text); font: inherit; font-weight: 600; font-size: calc(var(--s) * 16); cursor: pointer; }
+input[type=range] { width: 100%; height: 32px; -webkit-appearance: none; appearance: none; background: transparent; }
+input[type=range]::-webkit-slider-runnable-track { height: 8px; border-radius: 4px;
+  background: linear-gradient(var(--accent),var(--accent)) 0/var(--p,50%) 100% no-repeat, var(--track); }
+input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 26px; height: 26px; margin-top: -9px;
+  border-radius: 50%; background: var(--accent); border: calc(var(--s) * 3) solid var(--card); }
+input[type=range]::-moz-range-track { height: 8px; border-radius: 4px; background: var(--track); }
+input[type=range]::-moz-range-progress { height: 8px; border-radius: 4px; background: var(--accent); }
+input[type=range]::-moz-range-thumb { width: 22px; height: 22px; border-radius: 50%; background: var(--accent); border: 3px solid var(--card); }
+.foot { display: flex; justify-content: space-between; align-items: center; padding: 0 calc(var(--s) * 14) calc(var(--s) * 14); color: var(--dim); font-size: calc(var(--s) * 15); }
+.foot button { min-height: calc(var(--s) * 48); padding: 0 calc(var(--s) * 16); border-radius: 12px; border: 1px solid var(--line);
+  background: var(--btn); color: var(--btn-text); font: inherit; font-weight: 600; font-size: calc(var(--s) * 16); }
+.disabled .rows > :not(.warn), .disabled .foot { opacity: .45; }
+.note { max-width: calc(var(--s) * 1100); margin: calc(var(--s) * 8) calc(var(--s) * 16) calc(var(--s) * 24); color: var(--label); font-size: calc(var(--s) * 15); }
+.note h2 { color: var(--text); font-size: calc(var(--s) * 19); margin: calc(var(--s) * 18) 0 calc(var(--s) * 8); }
+.note table { border-collapse: collapse; width: 100%; font-size: calc(var(--s) * 15); }
+.note td, .note th { border-bottom: calc(var(--s) * 1) solid var(--line); padding: calc(var(--s) * 6) calc(var(--s) * 8); text-align: left; }
+.note td.ok { color: var(--ok); font-weight: 700; }
+/* Marcel: the camera LIVE in program (PGM tally) gets a red tint; on a live change it is critical to see it.
+   Preview (PVW) gets a green edge. Source: camera-box's tally service on the strih (camera-box#1417). */
+.cam.pgm { border-color: #e5343a; box-shadow: 0 0 0 2px rgba(229, 52, 58, .35); background: color-mix(in srgb, #e5343a 10%, var(--card)); }
+.cam.pvw { border-color: #2fae5c; box-shadow: none; }
+.tally { font-size: calc(var(--s) * 13); font-weight: 800; letter-spacing: .04em; padding: calc(var(--s) * 2) calc(var(--s) * 7); border-radius: calc(var(--s) * 6); margin-left: calc(var(--s) * 6); }
+.tally.pgm { background: #e5343a; color: #fff; }
+.tally.pvw { background: #2fae5c; color: #fff; }
+/* Version B (Marcel): instead of the folding "More", a 2-state pill per card switches between two panes of
+   the SAME fixed height, so the card never changes height (no layout shift):
+   EXP = exposure + colour (clona, ISO, biely bod, tint); SYS = capture (uzávierka, FPS, auto WB). */
+.pane-pill { display: grid; grid-template-columns: 1fr 1fr; border-radius: calc(var(--s) * 10); }
+.pane-pill button { min-height: calc(var(--s) * 36); font-size: calc(var(--s) * 14); font-weight: 700; letter-spacing: .06em; }
+.panes { display: grid; } /* both panes share one grid cell: the cell is as tall as the taller pane, always */
+.panes > .pane { grid-area: 1 / 1; display: grid; gap: calc(var(--s) * 8); align-content: start; visibility: hidden; }
+.panes[data-show="exp"] > .pane[data-pane="exp"], .panes[data-show="sys"] > .pane[data-pane="sys"] { visibility: visible; }
+/* owner 18.11: 8 cameras on 1920 px = ~224 px cards. Below 300 px a card goes compact, and NOTHING wraps
+   (no layout shift): 44 px +/- (still a touch target), value 22 px, one-line label, name and status. */
+.cam { container-type: inline-size; }
+/* Version D (Marcel): EVERYTHING inside a card scales with the card's own width, so the proportions of text,
+   +/- buttons and paddings stay the same at any resolution. 1 design px = 1/367 of the card width (the "5"
+   card at 1920 px), via container query units. */
+.cam > * { --s: calc(100cqw / 367); }
+.head .name, .head .state, .mid .lab, .mid .val { white-space: nowrap; }
+.mid .lab { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 420px) { main { padding: 10px; } body[data-layout="grid"] main { grid-template-columns: 1fr; }
+  body[data-layout="row"] main, body[data-layout="five"] main { grid-auto-columns: calc(100vw - 32px); } header { flex-wrap: wrap; } }
+</style>
+</head>
+<body data-mode="dark" data-layout="grid">
+<header>
+  <h1>Shading</h1><span class="ver">v0.3.0</span><span class="conn">● spojené</span>
+  <span class="sp"></span>
+  <div class="seg" role="group" aria-label="Rozloženie">
+    <button id="l-grid" aria-pressed="true" title="4 stĺpce, 8 kamier = 2 riadky">▦ 4+4</button>
+    <button id="l-five" aria-pressed="false" title="presne 5 celých kariet v rade (3+2), ďalšie sa posúvajú do strany">▥ 5</button>
+    <button id="l-row" aria-pressed="false" title="všetky kamery v jednom rade, posúva sa do strany">▤ 8 v rade</button>
+  </div>
+  <div class="seg" role="group" aria-label="Režim">
+    <button id="m-light" aria-pressed="false">☀ Svetlo</button>
+    <button id="m-dark" aria-pressed="true">☾ Tma</button>
+  </div>
+  <button class="iconbtn" title="ARRANGE">⇄</button>
+</header>
+<main id="grid"></main>
+
+<script>
+const cams = [
+  { n: 1, name: "Cam 1", off: true, reg: "cam1-shading · 10.77.8.121:8771 · ↻ 10m ⚠", warn: "⚠ Relay nedostupný — kamera sa nedá ovládať" },
+  { n: 2, name: "Cam 2", reg: "cam2 · 10.77.9.62:8771 · ↻ 1s · ▲ 3h12m", f: "f/2.8", p: 5 },
+  { n: 3, name: "Cam 3", tally: "pvw", reg: "cam3 · 10.77.9.63:8771 · ↻ 4s · ▲ 3h12m", f: "f/4.5", p: 30 },
+  { n: 4, name: "Cam 4", reg: "cam4-shading · 10.77.8.75:8771 · ↻ 3s · ▲ 1h07m", f: "f/4.0", end: "min", p: 0 },
+  { n: 5, name: "Cam 5", reg: "cam5 · 10.77.9.65:8771 · ↻ 2s · ▲ 2h40m", f: "f/5.6", p: 40 },
+  { n: 6, name: "Cam 6", tally: "pgm", reg: "cam6 · 10.77.9.66:8771 · ↻ 2s · ▲ 1h08m", f: "f/3.7", p: 15 },
+  { n: 7, name: "Cam 7", reg: "cam7 · 10.77.9.67:8771 · ↻ 5s · ▲ 1h08m", f: "f/3.5", p: 10 },
+  { n: 8, name: "Cam 8", reg: "cam8 · 10.77.9.68:8771 · ↻ 1s · ▲ 0h52m", f: "f/22", end: "max", p: 100 },
+];
+/* end: false | "min" (the "-" side is at its end) | "max" (the "+" side is at its end). Marcel: the overlay
+   label reads "min" on the minus button and "max" on the plus button. */
+const endBtn = (lab, sym, word, aria) =>
+  `<span class="endbox"><button disabled class="atend" aria-label="${lab} ${aria} (${word})">${sym}</button><span class="endlab" aria-hidden="true">${word}</span></span>`;
+const row = (lab, val, p, end = false, off = false) => `
+  <div class="row">
+    <div class="ctl">${end === "min" ? endBtn(lab, "−", "min", "menej") : `<button ${off ? "disabled" : ""} aria-label="${lab} menej">−</button>`}
+      <div class="mid"><span class="lab">${lab}</span><span class="val" role="button" tabindex="0" aria-expanded="false" aria-label="${lab}: posuvník">${val}</span></div>
+      ${end === "max" ? endBtn(lab, "+", "max", "viac") : `<button ${off ? "disabled" : ""} aria-label="${lab} viac">+</button>`}</div>
+    <div class="slider"><input type="range" value="${p}" style="--p:${p}%" aria-label="${lab}"></div>
+  </div>`;
+document.getElementById("grid").innerHTML = cams.map(c => `
+  <section class="cam ${c.off ? "disabled" : ""} ${c.tally || ""}">
+    <div class="prev">${c.off ? '<span class="ph">BEZ OBRAZU</span>' : '<div class="img"></div>'}</div>
+    <div class="head"><span class="num">${c.n}</span><span class="name">${c.name}</span>${c.tally ? `<span class="tally ${c.tally}">${c.tally.toUpperCase()}</span>` : ""}
+      <span class="state ${c.off ? "off" : ""}">${c.off ? "● relay offline" : "● online"}</span></div>
+    <div class="reg" title="${c.reg} (↻ = posledné ohlásenie relaya, ▲ = ako dlho relay beží)">${c.reg}</div>
+    <div class="rows">
+      ${c.warn ? `<div class="warn">${c.warn}</div>` : ""}
+      <div class="pane-pill seg" role="tablist" aria-label="${c.name}: ovládače">
+        <button role="tab" aria-selected="true" data-pane="exp" title="expozícia a farba: clona, ISO, biely bod, tint">EXP</button>
+        <button role="tab" aria-selected="false" data-pane="sys" title="snímanie: uzávierka, FPS, auto WB">SYS</button>
+      </div>
+      <div class="panes" data-show="exp">
+        <div class="pane" data-pane="exp">
+          ${row("Clona", c.off ? "—" : c.f, c.p ?? 0, c.end || false, c.off)}
+          ${row("ISO", c.off ? "—" : "640", 40)}
+          ${row("Biely bod", c.off ? "—" : "5000 K", 33)}
+          ${row("Tint", c.off ? "—" : "0", 50)}
+        </div>
+        <div class="pane" data-pane="sys">
+          ${row("Uzávierka", c.off ? "—" : "1/100", 20)}
+          ${row("FPS", c.off ? "—" : "60.00", 100)}
+          <button class="wb">Auto WB</button>
+        </div>
+      </div>
+    </div>
+    <div class="foot"><span>fps 60.00 · grab 60</span></div>
+  </section>`).join("");
+document.querySelectorAll('.pane-pill').forEach(pill => pill.addEventListener('click', e => {
+  const b = e.target.closest('button[data-pane]'); if (!b) return;
+  pill.querySelectorAll('button').forEach(x => x.setAttribute('aria-selected', x === b));
+  pill.nextElementSibling.dataset.show = b.dataset.pane;
+}));
+document.querySelectorAll('input[type=range]').forEach(r => r.addEventListener('input', () => r.style.setProperty('--p', r.value + '%')));
+document.querySelectorAll('.mid .val').forEach(v => v.addEventListener('click', () => {
+  const open = v.closest('.row').classList.toggle('open');
+  v.setAttribute('aria-expanded', open);
+}));
+
+function setMode(m) {
+  document.body.dataset.mode = m;
+  document.getElementById("m-light").setAttribute("aria-pressed", m === "light");
+  document.getElementById("m-dark").setAttribute("aria-pressed", m === "dark");
+}
+document.getElementById("m-light").onclick = () => setMode("light");
+document.getElementById("m-dark").onclick = () => setMode("dark");
+function setLayout(l) {
+  document.body.dataset.layout = l;
+  document.getElementById("l-grid").setAttribute("aria-pressed", l === "grid");
+  document.getElementById("l-row").setAttribute("aria-pressed", l === "row");
+  document.getElementById("l-five").setAttribute("aria-pressed", l === "five");
+  try { localStorage.setItem("shading.layout", l); } catch {}
+}
+document.getElementById("l-grid").onclick = () => setLayout("grid");
+document.getElementById("l-row").onclick = () => setLayout("row");
+document.getElementById("l-five").onclick = () => setLayout("five");
+let saved = null; try { saved = localStorage.getItem("shading.layout"); } catch {}
+setLayout(["row", "five"].includes(saved) ? saved : "grid");
+</script>
+</body>
+</html>
