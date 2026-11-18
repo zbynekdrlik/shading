@@ -1,8 +1,9 @@
-//! One camera card (mockup theme-v4b, shading#24): the NDI preview on top, then the number, name and
-//! online state on one centre, the handheld's one-line registration, the controls (the #14 warning
-//! as an overlay over them, the EXP/SYS tablist, both panes in one grid cell), and the fps-vs-grab
-//! line; in ARRANGE a cover with the grip and the eye over all of it. Every line is always present
-//! and one line high, so no push, tally or pane switch moves anything (no layout shift).
+//! One camera card (mockup docs/mockups/theme-v4d.html, shading#24): the NDI preview on top, then
+//! the number, name and online state on one centre, the handheld's one-line registration, the
+//! controls (the #14 warning as an overlay over them, the EXP/SYS tablist, both panes in one grid
+//! cell), and the fps-vs-grab line; in ARRANGE a cover with the grip and the eye over all of it.
+//! Every line is always present and one line high, so no push, tally or pane switch moves anything
+//! (no layout shift).
 
 use bkshading_proto::wire::{CameraView, Tally};
 use leptos::html;

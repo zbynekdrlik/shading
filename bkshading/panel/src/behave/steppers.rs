@@ -57,7 +57,7 @@ impl Row {
         Row::Fps,
     ];
 
-    /// The label in the block (mockup theme-v4b: sentence case).
+    /// The label in the block (mockup theme-v4d: sentence case).
     pub fn label(self) -> &'static str {
         match self {
             Row::Aperture => "Clona",
@@ -69,7 +69,7 @@ impl Row {
         }
     }
 
-    /// The card pane the row lives in (theme-v4b): EXP = exposure and colour, SYS = capture.
+    /// The card pane the row lives in (theme-v4d): EXP = exposure and colour, SYS = capture.
     pub fn pane(self) -> Pane {
         match self {
             Row::Aperture | Row::Iso | Row::Kelvin | Row::Tint => Pane::Exp,
@@ -126,7 +126,7 @@ impl Row {
     }
 }
 
-/// A card's two panes (shading#24 theme-v4b): a per-card EXP/SYS tablist switches between them,
+/// A card's two panes (shading#24 theme-v4d): a per-card EXP/SYS tablist switches between them,
 /// and both share one grid cell, so the card's height never changes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Pane {

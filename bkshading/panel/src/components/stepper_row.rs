@@ -1,4 +1,4 @@
-//! One stepper row (mockup theme-v4b, shading#24): `−` | the label over the value | `+`. One tap =
+//! One stepper row (mockup theme-v4d, shading#24): `−` | the label over the value | `+`. One tap =
 //! one write (no auto-repeat on hold, the issue-1229 rule). A tap on the value opens the row's
 //! slider under it (highlighted while open) and a second tap closes it; the slider writes once, on
 //! release. A button that reached the end of the range gets a SIBLING overlay over it (`min` on

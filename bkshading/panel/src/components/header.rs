@@ -1,4 +1,4 @@
-//! The top bar (mockups arrange-v1 and theme-v4b): title, version, connection, the hidden-cameras
+//! The top bar (mockups arrange-v1 and theme-v4d): title, version, connection, the hidden-cameras
 //! chip, the note, `↺ podľa čísel` (in ARRANGE), the layout pill (4+4 | 5 | 8 v rade), the mode
 //! pill (Svetlo | Tma) and the `⇄` key. On a phone (< 700 px, version D) only the title, the
 //! connection and a `☰` stay in the bar; the rest opens in an overlay menu under it.

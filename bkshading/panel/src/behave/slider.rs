@@ -1,4 +1,4 @@
-//! The slider behind a stepper's value (shading#24, mockup theme-v4b): hidden until the operator
+//! The slider behind a stepper's value (shading#24, mockup theme-v4d): hidden until the operator
 //! taps the value (Marcel: an always-visible slider is a misclick risk on a live show), then a
 //! range input under the row. Ported from the JS panel's sliders, which this release removes:
 //!

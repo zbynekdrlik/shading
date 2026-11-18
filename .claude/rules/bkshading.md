@@ -248,7 +248,7 @@ the house app stack airuleset#1333); mockup `docs/mockups/arrange-v1.html` appro
   job downloads `panel-dist`), so `docs/CONTRACT.md` ("web/ is a copy, not needed at runtime")
   stayed unchanged. Manifest and `sw.js` use RELATIVE paths.
 - **Theme v4b + version D (shading#24, design CLOSED with the PP operators in Discord 'Grading NEW',
-  normative mockups `docs/mockups/theme-v4b.html` + `theme-v4d.html`):**
+  normative mockup `docs/mockups/theme-v4d.html`; its predecessor theme-v4b.html was deleted):**
   - Tokens on `:root` (dark, the default) and `:root[data-mode="light"]` (muted grey-blue, no pure
     white). Values 26/500/letter-spacing 1px/`--val`; the 1.5 px black outline is `--outline`
     (`none` in light) on `.mid .val` and the +/- glyphs. System font (the Barlow/JetBrains files
