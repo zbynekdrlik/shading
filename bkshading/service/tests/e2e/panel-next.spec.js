@@ -80,7 +80,6 @@ test("the fps stepper writes only a whole rate the camera lists, console clean (
   await expect(page.locator('[data-role="fps-inc"]')).toBeDisabled();
   await page.locator('[data-role="fps-dec"]').click();
   await expect(val).toHaveText("50.00");
-  await expect(val).toHaveClass(/pending/);
   await expect.poll(() => puts.length).toBe(1);
   expect(puts[0].url).toContain("/api/cameras/cam1/params");
   expect(puts[0].body).toEqual({ fps: 50 });
@@ -120,7 +119,7 @@ test("a not-applied write flags the aperture value + stepper, console clean (iss
   gate.assertClean();
 });
 
-test("an optimistic tap holds its target against a stale pump snapshot, clears on confirmation, console clean (issue 1350)", async ({ page }) => {
+test("an optimistic tap holds its target against a stale pump snapshot, settles on the camera's value, console clean (issue 1350, shading#29)", async ({ page }) => {
   const gate = consoleGate(page);
   await page.addInitScript(DISABLE_WS);
   await blockApi(page, () => {});
@@ -133,26 +132,25 @@ test("an optimistic tap holds its target against a stale pump snapshot, clears o
   await expect(fnum).toHaveText("f/5.2");
   await expect(kval).toHaveText("5600 K");
 
+  // shading#29: the aperture shows the grid's next stop at once (5.2 -> 8.0 on [2.8 4.0 5.2 8.0]).
   await page.locator('[data-role="aperture-inc"]').click();
   await page.locator('[data-role="kelvin-inc"]').click();
-  await expect(fnum).toHaveText("f/5.2");
-  await expect(fnum).toHaveClass(/pending/);
-  await expect(kval).toHaveText("5700 K");
-  await expect(kval).toHaveClass(/pending/);
-
-  // A stale snapshot (taken before the camera applied the write) must not flip the numbers back.
-  await pushState(page, makeFixture({ apertureAv: 4.78, kelvin: 5600 }));
-  await expect(fnum).toHaveText("f/5.2");
-  await expect(fnum).toHaveClass(/pending/);
-  await expect(kval).toHaveText("5700 K");
-  await expect(kval).toHaveClass(/pending/);
-
-  // The confirming push: the lens moved to f/8.0, the white balance is 5700 K.
-  await pushState(page, makeFixture({ apertureAv: 6.0, kelvin: 5700 }));
   await expect(fnum).toHaveText("f/8.0");
-  await expect(fnum).not.toHaveClass(/pending/);
   await expect(kval).toHaveText("5700 K");
-  await expect(kval).not.toHaveClass(/pending/);
+
+  // A stale snapshot (taken before the camera applied the write) must not flip the numbers back,
+  // also after the write's 200 answer (blockApi answers at once) ended the lock.
+  await pushState(page, makeFixture({ apertureAv: 4.78, kelvin: 5600 }));
+  await expect(fnum).toHaveText("f/8.0");
+  await expect(kval).toHaveText("5700 K");
+
+  // The confirming push: the lens landed on its own next step f/5.6 (not the grid's guess), the
+  // white balance is 5700 K. The value settles on the camera's, with no red flash.
+  await pushState(page, makeFixture({ apertureAv: 4.97, kelvin: 5700 }));
+  await expect(fnum).toHaveText("f/5.6");
+  await expect(fnum).not.toHaveClass(/flash/);
+  await expect(kval).toHaveText("5700 K");
+  await expect(page.locator('[data-role="aperture-pending"]')).toBeHidden();
   gate.assertClean();
 });
 
@@ -167,11 +165,12 @@ test("a not-applied push after an optimistic tap surfaces the refusal (clears th
   const fnum = page.locator('[data-role="fnum"]');
   await expect(fnum).toHaveText("f/5.2");
   await page.locator('[data-role="aperture-inc"]').click();
-  await expect(fnum).toHaveClass(/pending/);
+  await expect(fnum).toHaveText("f/8.0");
 
+  // shading#29: the refusal reverts the guess and flashes the value red.
   await pushState(page, makeFixture({ apertureAv: 4.78, notApplied: ["apertureStep"] }));
   await expect(fnum).toHaveText("f/5.2");
-  await expect(fnum).not.toHaveClass(/pending/);
+  await expect(fnum).toHaveClass(/flash/);
   await expect(fnum).toHaveClass(/not-applied/);
   await expect(fnum).toHaveAttribute("title", "Kamera tento zápis neprijala");
   gate.assertClean();

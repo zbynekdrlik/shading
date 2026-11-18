@@ -90,6 +90,7 @@ impl Steppers {
         let seq = self.seq;
         let live = Live::of(cam);
         let key = row.key();
+        let from = pushed(row, &live).0;
         let base = self
             .holds
             .get(key)
@@ -143,7 +144,7 @@ impl Steppers {
             }
         };
         self.holds
-            .hold(key, HoldKind::Value, text, Some(target), seq, now);
+            .hold(key, HoldKind::Value, text, from, Some(target), seq, now);
         Some(Press {
             key: if row == Row::Aperture {
                 "apertureNorm"

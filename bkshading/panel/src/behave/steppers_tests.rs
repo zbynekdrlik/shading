@@ -1,4 +1,5 @@
 use super::*;
+use crate::behave::holds::{FLASH_MS, VALUE_HOLD_MS};
 use bkshading_proto::wire::{
     CameraCaps, CameraView, ControlStatus, FpsSync, RelayState, ShadingParams, Transport,
 };
@@ -116,32 +117,58 @@ fn iso_plus_writes_the_next_listed_value_and_holds_it() {
             value: serde_json::json!(800)
         }
     );
-    // The same (stale) push still shows 400: the panel holds 800, pending.
+    // The same (stale) push still shows 400: the panel holds 800, pending, the bar runs.
     let r = row(&s.view(&c, 100.0), Row::Iso);
-    assert_eq!((r.text.as_str(), r.pending), ("800", true));
+    assert_eq!((r.text.as_str(), r.pending, r.busy), ("800", true, true));
     assert!(!r.inc.enabled, "800 is the last choice");
     // The confirmation ends the hold.
     let r = row(&s.view(&with(|p| p.iso = Some(800)), 200.0), Row::Iso);
     assert_eq!((r.text.as_str(), r.pending), ("800", false));
 }
 
+/// shading#29: a double press, or a press while the row's write is unanswered, writes nothing;
+/// after the answer the next press builds on the held target.
 #[test]
-fn a_second_tap_builds_on_the_held_target() {
+fn a_row_is_locked_until_its_write_is_answered_then_builds_on_the_held_target() {
     let mut s = Steppers::default();
     let c = cam();
     assert_eq!(
         s.press(Row::Kelvin, 1, &c, 0.0).unwrap().value,
         serde_json::json!(5700)
     );
+    assert_eq!(s.press(Row::Kelvin, 1, &c, 10.0), None, "a double press");
     assert_eq!(
-        s.press(Row::Kelvin, 1, &c, 10.0).unwrap().value,
-        serde_json::json!(5800)
+        s.press(Row::Kelvin, -1, &c, 1000.0),
+        None,
+        "− is locked too"
     );
     assert_eq!(
         s.press(Row::Tint, -1, &c, 10.0).unwrap().value,
-        serde_json::json!(-1)
+        serde_json::json!(-1),
+        "another row is free"
     );
-    assert_eq!(row(&s.view(&c, 20.0), Row::Tint).text, "-1");
+    s.answered("kelvin", WriteAnswer::Accepted, 1500.0);
+    let r = row(&s.view(&c, 1500.0), Row::Kelvin);
+    assert_eq!(
+        (r.text.as_str(), r.pending, r.busy),
+        ("5700 K", true, false),
+        "answered: the bar ends, the target stays against the stale push"
+    );
+    assert_eq!(
+        s.press(Row::Kelvin, 1, &c, 1500.0).unwrap().value,
+        serde_json::json!(5800)
+    );
+    assert_eq!(row(&s.view(&c, 1600.0), Row::Tint).text, "-1");
+}
+
+#[test]
+fn a_fast_answer_still_ignores_the_second_press_of_a_double_click() {
+    let mut s = Steppers::default();
+    let c = cam();
+    s.press(Row::Iso, -1, &c, 0.0).unwrap();
+    s.answered("iso", WriteAnswer::Accepted, 40.0);
+    assert_eq!(s.press(Row::Iso, -1, &c, 120.0), None);
+    assert!(s.press(Row::Iso, -1, &c, 300.0).is_some());
 }
 
 #[test]
@@ -183,7 +210,7 @@ fn shutter_off_the_grid_steps_onto_it() {
 }
 
 #[test]
-fn the_aperture_step_sends_the_direction_and_holds_the_shown_f_stop() {
+fn the_aperture_step_sends_the_direction_and_shows_the_next_grid_stop() {
     let mut s = Steppers::default();
     let c = cam();
     assert_eq!(
@@ -194,13 +221,58 @@ fn the_aperture_step_sends_the_direction_and_holds_the_shown_f_stop() {
         }
     );
     let r = row(&s.view(&c, 100.0), Row::Aperture);
-    assert_eq!((r.text.as_str(), r.pending), ("f/5.2", true));
-    // The lens moved: the hold ends and the true f-stop shows.
+    assert_eq!(
+        (r.text.as_str(), r.pending, r.busy),
+        ("f/8.0", true, true),
+        "the grid's next stop at once"
+    );
+    // The lens moved to its own next step (5.6, between the grid's 5.2 and 8.0): the hold ends
+    // and the camera's real f-stop shows.
     let r = row(
-        &s.view(&with(|p| p.aperture_av = Some(6.0)), 200.0),
+        &s.view(&with(|p| p.aperture_av = Some(2.0 * 5.6f64.log2())), 200.0),
         Row::Aperture,
     );
-    assert_eq!((r.text.as_str(), r.pending), ("f/8.0", false));
+    assert_eq!(
+        (r.text.as_str(), r.pending, r.flash),
+        ("f/5.6", false, false)
+    );
+}
+
+#[test]
+fn the_next_aperture_stop_is_the_grids_else_a_third_stop() {
+    let grid = [2.8, 4.0, 5.2, 8.0];
+    // A pushed f-number is never exactly a grid entry (f/5.2 = AV 4.78 = 5.198...).
+    let f52 = f_number_from_av(4.78);
+    assert_eq!(aperture_next(f52, &grid, 1), 8.0);
+    assert_eq!(aperture_next(f52, &grid, -1), 4.0);
+    assert_eq!(
+        aperture_next(4.5, &grid, -1),
+        4.0,
+        "off the grid: the one below"
+    );
+    // shading#22: the lens opens past the grid's first entry; a third of a stop on.
+    let wider = aperture_next(2.8, &grid, -1);
+    assert!((wider - 2.8 / 2f64.powf(1.0 / 6.0)).abs() < 1e-9, "{wider}");
+    assert!((aperture_next(8.0, &grid, 1) - 8.0 * 2f64.powf(1.0 / 6.0)).abs() < 1e-9);
+    assert!((aperture_next(4.0, &[], 1) - 4.0 * 2f64.powf(1.0 / 6.0)).abs() < 1e-9);
+}
+
+#[test]
+fn an_aperture_press_past_the_grid_shows_a_third_stop_and_an_unknown_f_still_steps() {
+    let at_first = with(|p| {
+        p.aperture_av = Some(2.0 * 2.8f64.log2());
+        p.iris_range_pos = Some(0.2);
+    });
+    let mut s = Steppers::default();
+    s.press(Row::Aperture, -1, &at_first, 0.0).unwrap();
+    assert_eq!(row(&s.view(&at_first, 1.0), Row::Aperture).text, "f/2.5");
+    let unknown = with(|p| p.aperture_av = None);
+    let mut s = Steppers::default();
+    assert_eq!(
+        s.press(Row::Aperture, 1, &unknown, 0.0).unwrap().value,
+        serde_json::json!(1)
+    );
+    assert_eq!(row(&s.view(&unknown, 1.0), Row::Aperture).text, "f/—");
 }
 
 #[test]
@@ -285,7 +357,10 @@ fn a_not_applied_key_flags_its_row_and_ends_its_hold() {
     c.state.as_mut().unwrap().not_applied = vec!["apertureStep".into()];
     let v = s.view(&c, 50.0);
     let ap = row(&v, Row::Aperture);
-    assert!(ap.not_applied && !ap.pending);
+    assert!(ap.not_applied && !ap.pending && !ap.busy);
+    assert_eq!(ap.text, "f/5.2", "reverts to the camera's value");
+    assert!(ap.flash, "and flashes red");
+    assert!(!row(&s.view(&c, 50.0 + FLASH_MS), Row::Aperture).flash);
     assert_eq!(ap.inc.title, NOT_APPLIED_TITLE);
     assert!(!row(&v, Row::Iso).not_applied, "only the refused key");
 }
@@ -321,12 +396,38 @@ fn fps_steps_only_over_whole_listed_rates() {
 }
 
 #[test]
-fn a_failed_write_drops_the_hold() {
+fn a_failed_write_reverts_and_flashes() {
     let mut s = Steppers::default();
     let c = cam();
     s.press(Row::Kelvin, 1, &c, 0.0).unwrap();
-    s.write_failed("kelvin");
-    assert_eq!(row(&s.view(&c, 1.0), Row::Kelvin).text, "5600 K");
+    s.answered("kelvin", WriteAnswer::Failed, 1.0);
+    let r = row(&s.view(&c, 1.0), Row::Kelvin);
+    assert_eq!((r.text.as_str(), r.busy, r.flash), ("5600 K", false, true));
+    // The slider's aperture write answers under `apertureNorm`: the aperture row's hold.
+    let mut s = Steppers::default();
+    s.slide(Row::Aperture, 3.0, &c, 0.0).unwrap();
+    assert!(row(&s.view(&c, 1.0), Row::Aperture).busy);
+    s.answered("apertureNorm", WriteAnswer::Accepted, 2.0);
+    assert!(!row(&s.view(&c, 2.0), Row::Aperture).busy);
+    s.answered("autoWb", WriteAnswer::Failed, 3.0);
+    assert!(
+        s.view(&c, 3.0).iter().all(|r| !r.flash),
+        "no row holds autoWb"
+    );
+}
+
+#[test]
+fn an_unanswered_write_times_out_red_an_answered_one_settles_quietly() {
+    let c = cam();
+    let mut s = Steppers::default();
+    s.press(Row::Tint, 1, &c, 0.0).unwrap();
+    let r = row(&s.view(&c, VALUE_HOLD_MS), Row::Tint);
+    assert_eq!((r.text.as_str(), r.busy, r.flash), ("0", false, true));
+    let mut s = Steppers::default();
+    s.press(Row::Tint, 1, &c, 0.0).unwrap();
+    s.answered("tint", WriteAnswer::Accepted, 10.0);
+    let r = row(&s.view(&c, VALUE_HOLD_MS), Row::Tint);
+    assert_eq!((r.text.as_str(), r.flash), ("0", false));
 }
 
 #[test]

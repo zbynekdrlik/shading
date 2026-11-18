@@ -4,14 +4,16 @@
 //! the sixth stepper: fps).
 //!
 //! One tap = one PUT of one key, never an auto-repeat (the issue-1229 one-write rule). A tap steps
-//! from the camera's REAL current value (or the target of a tap still held), and sends:
-//! - clona: `{apertureStep: ±1}`, the relay walks the lens's own steps (shading#6);
+//! from the camera's REAL current value (or the target of a tap still held), shows the expected
+//! next value at once (shading#29), and sends:
+//! - clona: `{apertureStep: ±1}`, the relay walks the lens's own steps (shading#6); the panel shows
+//!   the next stop of the f-number grid ([`aperture_next`]) until the camera says where it landed;
 //! - ISO, uzávierka, fps: the absolute next listed choice;
 //! - biely bod ±100 K and tint ±1: the absolute value, clamped to the range.
 
 use bkshading_proto::wire::{CameraCaps, CameraView, ShadingParams};
 
-use super::holds::{HoldKind, Holds, Seen};
+use super::holds::{HoldKind, Holds, Seen, WriteAnswer};
 
 /// Kelvin per tap.
 pub const KELVIN_STEP: i64 = 100;
@@ -21,6 +23,9 @@ pub const TINT_STEP: i64 = 1;
 pub const KELVIN_RANGE: (i64, i64) = (2500, 10000);
 /// The tint range (the camera's own).
 pub const TINT_RANGE: (i64, i64) = (-50, 50);
+/// How far apart two f-numbers must be to count as different stops (the panel shows one decimal; a
+/// pushed f-number comes from `apertureAv` and is never exactly a grid entry).
+pub const F_NUMBER_EPS: f64 = 0.05;
 /// Mirror of the proto `mapping::IRIS_END_EPS`: how close to 0 / 1 `irisRangePos` is a lens end.
 pub const IRIS_END_EPS: f64 = 1e-3;
 
@@ -212,6 +217,11 @@ pub struct RowView {
     pub text: String,
     /// A tap is held: the value is the target, not yet confirmed.
     pub pending: bool,
+    /// The tap's write is unanswered: the row is locked and the bar under the value runs
+    /// (shading#29).
+    pub busy: bool,
+    /// The value was just refused or timed out: it flashes red (shading#29).
+    pub flash: bool,
     /// The camera did not apply the last write of this key (issue 1343).
     pub not_applied: bool,
     /// The bar's position in `[0, 1]`, or none when unknown.
@@ -259,6 +269,20 @@ pub fn nearest_index(choices: &[f64], value: f64) -> usize {
         .enumerate()
         .min_by(|a, b| (a.1 - value).abs().total_cmp(&(b.1 - value).abs()))
         .map_or(0, |(i, _)| i)
+}
+
+/// The f-stop an aperture press in `dir` is expected to reach from `f` (shading#29, shown at once
+/// until the camera answers): the next entry of the f-number grid the gates use, or one third of
+/// a stop on when the grid ends before the lens does (shading#22: the default grid starts at 2.8,
+/// a lens may open to 1.75). The relay walks the lens's own steps, so the camera's answer may
+/// differ; it is the truth.
+pub fn aperture_next(f: f64, grid: &[f64], dir: i32) -> f64 {
+    let next = if dir > 0 {
+        grid.iter().copied().find(|&c| c > f + F_NUMBER_EPS)
+    } else {
+        grid.iter().copied().rev().find(|&c| c < f - F_NUMBER_EPS)
+    };
+    next.unwrap_or_else(|| f * 2f64.powf(f64::from(dir.signum()) / 6.0))
 }
 
 /// Whether the iris is at the lens end a move in `dir` heads for (`irisRangePos`: 0 = wide open,
@@ -449,6 +473,8 @@ impl Steppers {
             row,
             text,
             pending: held.is_some(),
+            busy: self.holds.is_pending(row.key()),
+            flash: self.holds.flashing(row.key(), now),
             not_applied: refused,
             pos,
             dec: flag(dec),
@@ -458,16 +484,18 @@ impl Steppers {
     }
 
     /// A tap on `row`'s − (`dir` −1) or + (`dir` 1) of camera `cam`: the write, or none when the
-    /// button would be disabled. The tap is held (shown at once, pending) until a newer view of
-    /// the camera confirms or refuses it.
+    /// button would be disabled, the row's last write is unanswered, or the last accepted press
+    /// was under [`super::holds::DEBOUNCE_MS`] ago (shading#29). The tap is held (its expected
+    /// value shown at once) until a newer view of the camera confirms or refuses it.
     pub fn press(&mut self, row: Row, dir: i32, cam: &CameraView, now: f64) -> Option<Press> {
         let current = self.view(cam, now).into_iter().find(|v| v.row == row)?;
         let seq = self.seq;
         let gate = if dir < 0 { &current.dec } else { &current.inc };
-        if !gate.enabled {
+        if !gate.enabled || !self.holds.accepts(row.key(), now) {
             return None;
         }
         let live = Live::of(cam);
+        let from = pushed(row, &live).0;
         // `view` above reconciled the holds with this push: one still standing is the base.
         let base = self
             .holds
@@ -477,8 +505,12 @@ impl Steppers {
         let key = row.key();
         match row {
             Row::Aperture => {
+                // An unknown f-stop still steps (the relay knows it); the dash stays shown.
+                let grid = choices(row, live.caps);
+                let next = base.map(|f| aperture_next(f, &grid, dir));
+                let text = next.map_or_else(|| current.text.clone(), |f| format!("f/{f:.1}"));
                 self.holds
-                    .hold(key, HoldKind::Step, current.text.clone(), None, seq, now);
+                    .hold(key, HoldKind::Step, text, from, next, seq, now);
                 Some(Press {
                     key,
                     value: serde_json::json!(dir.signum()),
@@ -494,7 +526,7 @@ impl Steppers {
                     _ => fps_text(value),
                 };
                 self.holds
-                    .hold(key, HoldKind::Value, text, Some(value), seq, now);
+                    .hold(key, HoldKind::Value, text, from, Some(value), seq, now);
                 Some(Press {
                     key,
                     value: serde_json::json!(value as i64),
@@ -513,8 +545,15 @@ impl Steppers {
                 } else {
                     tint_text(next)
                 };
-                self.holds
-                    .hold(key, HoldKind::Value, text, Some(next as f64), seq, now);
+                self.holds.hold(
+                    key,
+                    HoldKind::Value,
+                    text,
+                    from,
+                    Some(next as f64),
+                    seq,
+                    now,
+                );
                 Some(Press {
                     key,
                     value: serde_json::json!(next),
@@ -523,9 +562,15 @@ impl Steppers {
         }
     }
 
-    /// The write of `key` failed before reaching the service: drop its hold.
-    pub fn write_failed(&mut self, key: &str) {
-        self.holds.drop_key(key);
+    /// The service answered the write of wire key `key` at `now` (the slider's `apertureNorm`
+    /// is the aperture row's hold): a 2xx unlocks the row, anything else reverts it with a red
+    /// flash (shading#29). A key no row holds (`autoWb`) changes nothing.
+    pub fn answered(&mut self, key: &str, answer: WriteAnswer, now: f64) {
+        let hold_key = Row::ALL
+            .iter()
+            .find(|r| r.refused_keys().contains(&key))
+            .map_or(key, |r| r.key());
+        self.holds.answered(hold_key, answer, now);
     }
 }
 

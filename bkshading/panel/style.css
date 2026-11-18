@@ -235,7 +235,7 @@ button { font: inherit; color: inherit; }
     font-size: calc(var(--s) * 12); font-weight: 700; line-height: 1; color: var(--warn-text); pointer-events: none;
     background: color-mix(in srgb, var(--row) 70%, transparent); border-radius: calc(var(--s) * 12);
 }
-.mid { display: flex; flex-direction: column; align-items: center; text-align: center; min-width: 0; }
+.mid { position: relative; display: flex; flex-direction: column; align-items: center; text-align: center; min-width: 0; }
 .mid .lab {
     font-size: calc(var(--s) * 15); font-weight: 500; color: var(--label); line-height: 1.2;
     white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis;
@@ -246,8 +246,27 @@ button { font: inherit; color: inherit; }
     color: var(--val); letter-spacing: 1px; text-shadow: var(--outline); white-space: nowrap;
     cursor: pointer; border-radius: calc(var(--s) * 6); padding: 0 calc(var(--s) * 6);
 }
-.mid .val.pending { color: var(--accent); font-style: italic; }
 .mid .val.not-applied { color: var(--bad-text); text-decoration: underline dotted; }
+/* shading#29 (Marcel): an unanswered press = a thin running bar UNDER the value, in the centre of
+   the row (never on a button, a thumb covers it); absolute, so it never moves anything. A refused
+   or timed-out value flashes red. */
+.mid .pend {
+    position: absolute; left: 20%; right: 20%; bottom: calc(var(--s) * -3); height: calc(var(--s) * 3);
+    border-radius: calc(var(--s) * 2); background: var(--track); overflow: hidden; pointer-events: none;
+}
+.mid .pend::before {
+    content: ""; position: absolute; top: 0; bottom: 0; width: 40%; border-radius: inherit;
+    background: var(--accent); animation: pend-run 0.9s ease-in-out infinite;
+}
+@keyframes pend-run { from { left: -40%; } to { left: 100%; } }
+.mid .val.flash { animation: val-flash 1.4s ease-out; }
+@keyframes val-flash {
+    0%, 35% { color: var(--bad-text); background: var(--bad-bg); }
+    100% { background: transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .mid .pend::before { animation: none; left: 30%; }
+}
 /* The value opens the slider; the open slider's value is highlighted. */
 .row.open .mid .val { background: var(--accent); color: var(--card); text-shadow: none; }
 .slider { display: none; padding: calc(var(--s) * 8) calc(var(--s) * 6) 0; }

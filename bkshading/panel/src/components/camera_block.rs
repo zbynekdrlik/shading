@@ -14,6 +14,7 @@ use crate::behave::block::{
     fps_sync, has_tally, is_online, number_text, online_text, status_line, status_title,
     tally_badge,
 };
+use crate::behave::holds::WriteAnswer;
 use crate::behave::steppers::{Pane, Row, RowView, Steppers};
 use crate::components::arrange::Cover;
 use crate::components::control_info::warning;
@@ -36,7 +37,8 @@ fn set_rows(rows: RwSignal<Vec<RowView>>, v: Vec<RowView>) {
     }
 }
 
-/// Sends one write and drops its hold when it never reached the service.
+/// Sends one write and hands the service's answer to the steppers (shading#29: a 2xx unlocks the
+/// row, anything else or no answer reverts it with a red flash), then redraws the block.
 fn send(
     store: Store,
     steppers: StoredValue<Steppers>,
@@ -46,13 +48,18 @@ fn send(
     value: serde_json::Value,
 ) {
     spawn_local(async move {
-        if net::put_param(&id, key, value).await.is_err() {
-            steppers.update_value(|s| s.write_failed(key));
-            if let Some(cam) = store.camera(&id) {
-                let now = net::now_ms();
-                if let Some(v) = steppers.try_update_value(|s| s.view(&cam, now)) {
-                    set_rows(rows, v);
-                }
+        let answer = WriteAnswer::of(net::put_param(&id, key, value).await.ok());
+        let now = net::now_ms();
+        // The block may be gone by now (hidden in ARRANGE): every access is fallible.
+        if steppers
+            .try_update_value(|s| s.answered(key, answer, now))
+            .is_none()
+        {
+            return;
+        }
+        if let Some(cam) = store.camera(&id) {
+            if let Some(v) = steppers.try_update_value(|s| s.view(&cam, now)) {
+                set_rows(rows, v);
             }
         }
     });

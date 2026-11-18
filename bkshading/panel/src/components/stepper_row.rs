@@ -3,6 +3,11 @@
 //! slider under it (highlighted while open) and a second tap closes it; the slider writes once, on
 //! release. A button that reached the end of the range gets a SIBLING overlay over it (`min` on
 //! `−`, `max` on `+`, Marcel: an overlay of the button, never its child).
+//!
+//! shading#29 (Marcel): a press shows the expected value at once; while its write is unanswered
+//! a thin animated bar runs UNDER the value (the centre of the row, never under the thumb) and
+//! both buttons ignore presses with no other visual change (`aria-busy` only); a refused or
+//! timed-out value flashes red (`.val.flash`).
 
 use leptos::html;
 use leptos::prelude::*;
@@ -36,6 +41,7 @@ fn StepButton(
     };
     let get = move |f: fn(&Gate) -> bool| move || gate().as_ref().is_some_and(f);
     let refused = move || view.with(|v| v.as_ref().is_some_and(|v| v.not_applied));
+    let busy = move || view.with(|v| v.as_ref().is_some_and(|v| v.busy));
     let (role, sym, word, aria) = if dir < 0 {
         (format!("{}-dec", row.role()), "−", "min", "o krok nižšie")
     } else {
@@ -52,6 +58,7 @@ fn StepButton(
                 data-role=role
                 aria-label=label
                 disabled=move || !get(|g| g.enabled)()
+                aria-busy=move || busy().then_some("true")
                 title=move || gate().map(|g| g.title).unwrap_or_default()
                 on:click=move |_| on_press.run(dir)
             >
@@ -127,8 +134,8 @@ pub fn StepperRow(
                     <span class="lab">{row.label()}</span>
                     <span
                         class="val"
-                        class:pending=flag(|v| v.pending)
                         class:not-applied=flag(|v| v.not_applied)
+                        class:flash=flag(|v| v.flash)
                         data-role=row.value_role()
                         role="button"
                         tabindex="0"
@@ -144,6 +151,13 @@ pub fn StepperRow(
                     >
                         {field(|v| v.text.clone())}
                     </span>
+                    // Absolute under the value: shown or hidden, it moves nothing.
+                    <span
+                        class="pend"
+                        data-role=format!("{}-pending", row.role())
+                        aria-hidden="true"
+                        hidden=move || !flag(|v| v.busy)()
+                    ></span>
                 </div>
                 <StepButton row=row dir=1 view=view on_press=on_press />
             </div>
