@@ -101,9 +101,13 @@ main {
   color: var(--btn-text); font-size: 28px; font-weight: 600; cursor: pointer;
 }
 .ctl > button:disabled { background: transparent; border-color: transparent; color: var(--track); cursor: default; }
-.ctl > button.atend { display: grid; place-items: center; padding: 0; line-height: 1; border: 1px dashed var(--line); }
-.ctl > button.atend .endwrap { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; }
-.ctl > button.atend small { display: block; font-size: 12px; font-weight: 700; color: var(--warn-text); }
+/* The end label is centred by an absolutely placed wrapper filling the button: Safari does not lay out
+   a <button> as grid/flex reliably, so the button itself only positions. */
+.ctl > button.atend { position: relative; padding: 0; border: 1px dashed var(--line); }
+.ctl > button.atend .endwrap { position: absolute; inset: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 2px; }
+.ctl > button.atend .endwrap > span { display: block; line-height: 1; font-size: 22px; }
+.ctl > button.atend small { display: block; line-height: 1; font-size: 12px; font-weight: 700; color: var(--warn-text); }
 .mid { display: flex; flex-direction: column; align-items: center; text-align: center; min-width: 0; }
 .mid .lab { font-size: 15px; font-weight: 500; color: var(--label); line-height: 1.2; }
 .mid .val { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.15; }
