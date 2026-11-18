@@ -71,10 +71,16 @@ header .sp { flex: 1; }
   min-width: 48px; min-height: 48px; border-radius: 12px; border: 1px solid var(--line);
   background: var(--btn); color: var(--btn-text); font-size: 22px; cursor: pointer;
 }
-main {
-  display: grid; gap: 14px; padding: 14px 16px;
-  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); /* owner: 8 cameras on a 1920 px screen */
-}
+/* Marcel: 8 cameras never fit one 1920 px screen at a readable size, and a layout must never wrap
+   unpredictably. So the operator picks the layout with the pill in the top bar (remembered per device):
+   - "4+4": a fixed grid of 4 columns (8 cameras = 2 rows of 4, the page scrolls vertically);
+   - "8 v rade": all cameras in ONE row, fixed card width, the row scrolls horizontally. */
+main { display: grid; gap: 14px; padding: 14px 16px; }
+body[data-layout="grid"] main { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+body[data-layout="row"] main { grid-auto-flow: column; grid-auto-columns: 360px; overflow-x: auto;
+  scroll-snap-type: x proximity; overscroll-behavior-x: contain; }
+body[data-layout="row"] .cam { scroll-snap-align: start; }
+@media (max-width: 1100px) { body[data-layout="grid"] main { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .cam { background: var(--card); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
 .prev { aspect-ratio: 16/9; background: #000; position: relative; display: grid; place-items: center; }
 .prev .ph { color: #9aa3ad; font-size: 15px; font-weight: 600; letter-spacing: .02em; }
@@ -171,13 +177,18 @@ input[type=range]::-moz-range-thumb { width: 22px; height: 22px; border-radius: 
   .wb { min-height: 44px; font-size: 14px; }
   .foot { padding: 0 10px 10px; font-size: 13px; }
 }
-@media (max-width: 420px) { main { padding: 10px; grid-template-columns: 1fr; } header { flex-wrap: wrap; } }
+@media (max-width: 420px) { main { padding: 10px; } body[data-layout="grid"] main { grid-template-columns: 1fr; }
+  body[data-layout="row"] main { grid-auto-columns: calc(100vw - 40px); } header { flex-wrap: wrap; } }
 </style>
 </head>
-<body data-mode="dark">
+<body data-mode="dark" data-layout="grid">
 <header>
   <h1>Shading</h1><span class="ver">v0.3.0</span><span class="conn">● spojené</span>
   <span class="sp"></span>
+  <div class="seg" role="group" aria-label="Rozloženie">
+    <button id="l-grid" aria-pressed="true" title="4 stĺpce, 8 kamier = 2 riadky">▦ 4+4</button>
+    <button id="l-row" aria-pressed="false" title="všetky kamery v jednom rade, posúva sa do strany">▤ 8 v rade</button>
+  </div>
   <div class="seg" role="group" aria-label="Režim">
     <button id="m-light" aria-pressed="false">☀ Svetlo</button>
     <button id="m-dark" aria-pressed="true">☾ Tma</button>
@@ -265,6 +276,16 @@ function setMode(m) {
 }
 document.getElementById("m-light").onclick = () => setMode("light");
 document.getElementById("m-dark").onclick = () => setMode("dark");
+function setLayout(l) {
+  document.body.dataset.layout = l;
+  document.getElementById("l-grid").setAttribute("aria-pressed", l === "grid");
+  document.getElementById("l-row").setAttribute("aria-pressed", l === "row");
+  try { localStorage.setItem("shading.layout", l); } catch {}
+}
+document.getElementById("l-grid").onclick = () => setLayout("grid");
+document.getElementById("l-row").onclick = () => setLayout("row");
+let saved = null; try { saved = localStorage.getItem("shading.layout"); } catch {}
+setLayout(saved === "row" ? "row" : "grid");
 table();
 </script>
 </body>
