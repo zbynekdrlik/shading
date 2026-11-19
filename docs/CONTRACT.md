@@ -288,6 +288,21 @@ UseDomains=no
       written.
     - `502 <text>` when the camera is offline, did not answer, or refused a write. The text names
       the PUT and the camera's own status and body.
+  - **New, additive (v0.2.14, shading#17): why a write was not applied.** Every key above keeps
+    its name, status and text.
+    - **State field `notAppliedReason`:** an object with the same keys as `notApplied`, each with
+      a reason; `{}` when nothing was refused. A relay older than 0.2.14 does not send it (a reader
+      that does not know it ignores it). Values: `"lens-end"` (the iris is at the end of the lens
+      this press heads for), `"not-controllable"` (the lens says `controllable: false`),
+      `"iris-not-following"` (the iris followed no probe with range left: auto exposure or a manual
+      lens), `"out-of-range"` (the camera refused a slider position as out of range),
+      `"camera-kept-value"` (the camera answered the write but reads back another value).
+    - **Header `x-bkshading-reason` on a failed `PUT /api/params`** (the 422 / 502 answers):
+      `"not-in-choices"` (the 422 `fps-not-settable`), `"camera-refused"` (the camera's own
+      non-2xx; then also `x-bkshading-camera-status: <its status>`), `"camera-not-answering"` (no
+      answer from the camera), `"camera-offline"` (no camera found, nothing written).
+    - Values may be added later; a reader must treat an unknown value as "not applied, reason
+      unknown".
   - `fps` is accepted only for a rate in `caps.fpsChoices`; any other value answers 422
     `fps-not-settable`.
   - `autoWb: true` now runs the camera's auto white balance.
@@ -336,6 +351,23 @@ UseDomains=no
   A poll error or `obs_connected: false` clears the tally (logged once per transition).
   camera-box: the strih seed (`strih_bkshading_config_text`) adds this table on boxes that run
   `strih-tally.service`. `--check-config` loads it like any other table.
+
+- **A failed `PUT /api/cameras/<id>/params` names its reason (v0.2.14, shading#17, additive).**
+  The answer stays `502 <text>`; it now carries the relay's `x-bkshading-reason` (and
+  `x-bkshading-camera-status`) header, or `x-bkshading-reason: relay-unreachable` when the relay
+  itself cannot be reached or is not registered. `CameraView.state.notAppliedReason` is the
+  relay's field passed through. A relay older than 0.2.14 gives no header and no field.
+- **NDI preview receivers run only while someone watches (v0.2.14, shading#19).** The service
+  connects a camera's NDI preview receiver only while a viewer was seen within 10 s: a
+  `GET /api/cameras/<id>/preview.jpg` of a known camera, or the new `POST /api/preview/viewer`
+  (answers `204`; a VISIBLE panel calls it every 2 s). With nobody watching the receivers
+  disconnect (no NDI decode, ~0 % CPU). So `CameraView.previewLive` is now `true` only while
+  some client watches that camera's preview; a tool that reads `previewLive` must first fetch the
+  preview (or call the viewer route) and wait a few seconds. The panel fetches nothing while its
+  page is `hidden`. **camera-box:** the strih kiosk app (`bkshading_panel_app.py`, WebKitGTK) must
+  hide its WebView on GTK `visibility-notify-event` `fully-obscured` and show it on
+  `unobscured` / `partially-obscured`: WebKitGTK alone reports a window under OBS as visible, so
+  without it the kiosk behind OBS keeps the receivers connected.
 
 ## Not shading's
 
