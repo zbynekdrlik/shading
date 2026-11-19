@@ -136,6 +136,7 @@ fn relay_state_capture_fps_is_camel_case_and_defaults_none() {
         version: "1.7.0-dev.530".into(),
         not_applied: Vec::new(),
         offline_reason: None,
+        not_applied_reason: Default::default(),
     };
     let json = serde_json::to_string(&st).unwrap();
     assert!(

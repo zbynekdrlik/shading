@@ -173,6 +173,27 @@ test("a refused write reverts the value and flashes it red, console clean (shadi
   gate.assertClean();
 });
 
+// shading#17: the relay says WHY a press was not applied (`notAppliedReason`); the panel shows the
+// reason's Slovak text in the note under the header and as the refused value's tooltip.
+test("a refused press shows the relay's reason in the note and the tooltip, console clean (shading#17)", async ({ page }) => {
+  const gate = consoleGate(page);
+  const lensEnd = "Clona je na konci rozsahu objektívu";
+  try {
+    await open(page);
+    await page.request.post(`${STUB}/__write`, { data: { refuse: true, reason: "lens-end" } });
+    const val = page.locator('[data-role="fnum"]');
+    await expect(val).toHaveText("f/5.2");
+    await page.locator('[data-role="aperture-inc"]').click();
+    await expect(page.locator('[data-role="arrange-note"]')).toHaveText(lensEnd, { timeout: 5000 });
+    await expect(val).toHaveClass(/flash/);
+    await expect(val).toHaveAttribute("title", lensEnd);
+    await expect(page.locator('[data-role="aperture-inc"]')).toHaveAttribute("title", lensEnd);
+  } finally {
+    await page.request.post(`${STUB}/__reset`);
+  }
+  gate.assertClean();
+});
+
 // shading#29 (live v0.2.12, PP cam6): "+" from f/3.2 showed f/3.5 (the next fNumberChoices menu
 // stop) and then the camera's f/3.3, a forward-then-back flicker. The stub moves `apertureAv` by
 // the lens's fine step (0.1 AV) per `apertureStep`, like the relay: the guess shown at once must be

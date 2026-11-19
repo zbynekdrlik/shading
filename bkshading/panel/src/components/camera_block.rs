@@ -10,11 +10,13 @@ use leptos::html;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
+use crate::behave::arrange_drag::{Note, Tone};
 use crate::behave::block::{
     fps_sync, has_tally, is_online, number_text, online_text, status_line, status_title,
     tally_badge,
 };
 use crate::behave::holds::WriteAnswer;
+use crate::behave::refusal::{header_reason, new_refusal_note, reason_text};
 use crate::behave::steppers::{Pane, Row, RowView, Steppers};
 use crate::components::arrange::Cover;
 use crate::components::control_info::warning;
@@ -30,9 +32,19 @@ fn control_word(cam: &CameraView) -> String {
         .unwrap_or_default()
 }
 
-/// Sets the rows only when one changed (the clock ticks twice a second).
-fn set_rows(rows: RwSignal<Vec<RowView>>, v: Vec<RowView>) {
-    if rows.try_with_untracked(|r| *r != v).unwrap_or(false) {
+/// Sets the rows only when one changed (the clock ticks twice a second). A refusal flash that
+/// starts here shows its reason in the note (shading#17).
+fn set_rows(store: Store, rows: RwSignal<Vec<RowView>>, v: Vec<RowView>) {
+    let note = rows
+        .try_with_untracked(|r| (*r != v).then(|| new_refusal_note(r, &v)))
+        .flatten();
+    if let Some(note) = note {
+        if let Some(text) = note {
+            store.show_note(Note {
+                text,
+                tone: Tone::Refused,
+            });
+        }
         rows.set(v);
     }
 }
@@ -50,7 +62,19 @@ fn send(
     write: u64,
 ) {
     spawn_local(async move {
-        let answer = WriteAnswer::of(net::put_param(&id, key, value).await.ok());
+        let got = net::put_param(&id, key, value).await.ok();
+        // shading#17: a failed write that names its reason shows it in the note.
+        if let Some((status, reason)) = &got {
+            if !(200..300).contains(status) {
+                if let Some(r) = header_reason(reason.as_deref()) {
+                    store.show_note(Note {
+                        text: reason_text(Some(r)),
+                        tone: Tone::Refused,
+                    });
+                }
+            }
+        }
+        let answer = WriteAnswer::of(got.map(|(status, _)| status));
         let now = net::now_ms();
         // The block may be gone by now (hidden in ARRANGE): every access is fallible.
         if steppers
@@ -61,7 +85,7 @@ fn send(
         }
         if let Some(cam) = store.camera(&id) {
             if let Some(v) = steppers.try_update_value(|s| s.view(&cam, now)) {
-                set_rows(rows, v);
+                set_rows(store, rows, v);
             }
         }
     });
@@ -86,7 +110,7 @@ pub fn CameraBlock(id: String) -> impl IntoView {
         let now = store.now.get();
         if let Some(c) = cam.get() {
             if let Some(v) = steppers.try_update_value(|s| s.view(&c, now)) {
-                set_rows(rows, v);
+                set_rows(store, rows, v);
             }
         }
     });
@@ -103,7 +127,7 @@ pub fn CameraBlock(id: String) -> impl IntoView {
             return;
         };
         if let Some(v) = steppers.try_update_value(|s| s.view(&c, now)) {
-            set_rows(rows, v);
+            set_rows(store, rows, v);
         }
         send(store, steppers, rows, c.id.clone(), p.key, p.value, p.id);
     };
@@ -123,7 +147,7 @@ pub fn CameraBlock(id: String) -> impl IntoView {
             return false;
         };
         if let Some(v) = steppers.try_update_value(|s| s.view(&c, now)) {
-            set_rows(rows, v);
+            set_rows(store, rows, v);
         }
         leptos::logging::log!(
             "[slider] {} release at {raw}: {}={}",

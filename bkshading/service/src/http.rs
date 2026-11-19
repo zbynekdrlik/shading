@@ -18,11 +18,13 @@ use axum::{
     Router,
 };
 use bkshading_proto::layout::{LayoutDoc, LayoutPut};
-use bkshading_proto::wire::{Aggregate, RelayState, ServerMsg, SetRequest};
+use bkshading_proto::wire::{
+    Aggregate, RelayState, ServerMsg, SetRequest, CAMERA_STATUS_HEADER, NOT_APPLIED_REASON_HEADER,
+};
 use rust_embed::RustEmbed;
 use tokio::sync::watch;
 
-use crate::aggregator::{aggregate_with_camera_update, Aggregator};
+use crate::aggregator::{aggregate_with_camera_update, Aggregator, ForwardError};
 use crate::config::{CameraConfig, ServiceConfig};
 use crate::layout::{LayoutStore, SaveError};
 use crate::preview::store::{wall_clock_ms, PreviewStore};
@@ -290,9 +292,9 @@ async fn set_params(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(req): Json<SetRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Response {
     let Some(cam) = state.config.cameras.iter().find(|c| c.id == id) else {
-        return Err((StatusCode::NOT_FOUND, format!("no camera '{id}'")));
+        return (StatusCode::NOT_FOUND, format!("no camera '{id}'")).into_response();
     };
     match state.agg.forward_set(cam, &req).await {
         Ok(relay_state) => {
@@ -302,10 +304,30 @@ async fn set_params(
             if let Some(rs) = relay_state {
                 push_camera_update(&state, cam, rs);
             }
-            Ok(Json(serde_json::json!({ "ok": true })))
+            Json(serde_json::json!({ "ok": true })).into_response()
         }
-        Err(e) => Err((StatusCode::BAD_GATEWAY, e.to_string())),
+        Err(e) => forward_error_response(&e),
     }
+}
+
+/// The panel's answer to a write that failed on its way to the camera: `502` with the error text
+/// (unchanged), plus the additive `x-bkshading-reason` (and `x-bkshading-camera-status`) headers
+/// the relay gave, or `relay-unreachable` when the relay could not be reached (shading#17). Pure.
+pub fn forward_error_response(e: &anyhow::Error) -> Response {
+    let mut resp = (StatusCode::BAD_GATEWAY, e.to_string()).into_response();
+    if let Some(fe) = e.downcast_ref::<ForwardError>() {
+        let headers = resp.headers_mut();
+        if let Some(reason) = fe.reason {
+            headers.insert(
+                NOT_APPLIED_REASON_HEADER,
+                header::HeaderValue::from_static(reason.as_str()),
+            );
+        }
+        if let Some(status) = fe.camera_status {
+            headers.insert(CAMERA_STATUS_HEADER, status.into());
+        }
+    }
+    resp
 }
 
 /// Pushes an immediate single-camera update over the live WS channel (issue 1337): take the

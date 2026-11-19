@@ -7,6 +7,8 @@
 //! `PtpMapping.kt`). Field names use `camelCase` to stay compatible with the verified
 //! dev2 MVP web-UI wire shape (`apertureAv`/`apertureNorm`/`iso`/...).
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 /// How a camera's shading is reached (owner decision 2026-08-20: transports are USB via
@@ -151,6 +153,95 @@ pub struct RelayState {
     /// that does not send it reads as `None`.
     #[serde(default)]
     pub offline_reason: Option<OfflineReason>,
+    /// Why each key of [`RelayState::not_applied`] was not applied (shading#17, 0.2.14,
+    /// additive): the same keys, each with a [`NotAppliedReason`]. Empty when nothing was refused,
+    /// and from a relay older than 0.2.14. The panel turns a reason into its Slovak text (the wire
+    /// carries the enum, as shading#14). `#[serde(default)]`: an older relay reads as empty.
+    #[serde(default)]
+    pub not_applied_reason: BTreeMap<String, NotAppliedReason>,
+}
+
+/// Why a write was not applied (shading#17). Wire: kebab-case. In a state's
+/// `notAppliedReason`, and as the `x-bkshading-reason` header of a failed `PUT /api/params`
+/// ([`NOT_APPLIED_REASON_HEADER`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NotAppliedReason {
+    /// The iris is at the end of the lens this press heads for (the camera's `normalised`, a
+    /// learned end, or a walk that found no further step).
+    LensEnd,
+    /// The lens says it cannot be controlled (`lens/iris/description` `controllable: false`).
+    NotControllable,
+    /// The iris followed none of the probes although the lens range has room (auto exposure owns
+    /// the iris, or a manual lens).
+    IrisNotFollowing,
+    /// The camera refused the value as out of range (a slider position past the lens's end).
+    OutOfRange,
+    /// The camera answered the write but reads back another value.
+    CameraKeptValue,
+    /// A failed write: the value is not one of the camera's choices (an `fps` it does not list).
+    NotInChoices,
+    /// A failed write: the camera refused it with an HTTP status
+    /// ([`CAMERA_STATUS_HEADER`] carries it).
+    CameraRefused,
+    /// A failed write: the camera gave no answer.
+    CameraNotAnswering,
+    /// A failed write: the camera is offline, nothing was written.
+    CameraOffline,
+    /// A failed write: the service cannot reach the camera's relay (no answer, not registered).
+    /// Sent by the service, never by a relay.
+    RelayUnreachable,
+    /// A reason this reader does not know (a newer relay). Never sent.
+    #[serde(other)]
+    Unknown,
+}
+
+/// The header naming a failed write's [`NotAppliedReason`] (kebab-case), on the relay's and the
+/// service's failed `PUT` answers (shading#17). The answer's status and text are unchanged.
+pub const NOT_APPLIED_REASON_HEADER: &str = "x-bkshading-reason";
+/// The camera's own HTTP status, next to `x-bkshading-reason: camera-refused` (shading#17).
+pub const CAMERA_STATUS_HEADER: &str = "x-bkshading-camera-status";
+
+impl NotAppliedReason {
+    /// The wire word (`lens-end`, ...), the value of [`NOT_APPLIED_REASON_HEADER`].
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NotAppliedReason::LensEnd => "lens-end",
+            NotAppliedReason::NotControllable => "not-controllable",
+            NotAppliedReason::IrisNotFollowing => "iris-not-following",
+            NotAppliedReason::OutOfRange => "out-of-range",
+            NotAppliedReason::CameraKeptValue => "camera-kept-value",
+            NotAppliedReason::NotInChoices => "not-in-choices",
+            NotAppliedReason::CameraRefused => "camera-refused",
+            NotAppliedReason::CameraNotAnswering => "camera-not-answering",
+            NotAppliedReason::CameraOffline => "camera-offline",
+            NotAppliedReason::RelayUnreachable => "relay-unreachable",
+            NotAppliedReason::Unknown => "unknown",
+        }
+    }
+
+    /// The reason a header value names; an unknown word is [`NotAppliedReason::Unknown`].
+    pub fn from_wire(word: &str) -> Self {
+        let word = word.trim();
+        Self::KNOWN
+            .into_iter()
+            .find(|r| r.as_str() == word)
+            .unwrap_or(NotAppliedReason::Unknown)
+    }
+
+    /// Every reason a relay or the service sends.
+    pub const KNOWN: [NotAppliedReason; 10] = [
+        NotAppliedReason::LensEnd,
+        NotAppliedReason::NotControllable,
+        NotAppliedReason::IrisNotFollowing,
+        NotAppliedReason::OutOfRange,
+        NotAppliedReason::CameraKeptValue,
+        NotAppliedReason::NotInChoices,
+        NotAppliedReason::CameraRefused,
+        NotAppliedReason::CameraNotAnswering,
+        NotAppliedReason::CameraOffline,
+        NotAppliedReason::RelayUnreachable,
+    ];
 }
 
 /// Why a relay cannot reach its camera this cycle (shading#14). Wire: kebab-case.
@@ -186,6 +277,7 @@ impl RelayState {
             version: version.into(),
             not_applied: Vec::new(),
             offline_reason: None,
+            not_applied_reason: BTreeMap::new(),
         }
     }
 }

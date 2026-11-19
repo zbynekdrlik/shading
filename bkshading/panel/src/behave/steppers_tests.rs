@@ -49,6 +49,7 @@ pub(crate) fn cam() -> CameraView {
             version: "0.2.7".into(),
             not_applied: vec![],
             offline_reason: None,
+            not_applied_reason: Default::default(),
         }),
         registration: None,
         address: None,
@@ -702,4 +703,38 @@ fn a_learned_aperture_step_is_clamped_and_never_jumps_over_a_grid_stop_29() {
     let landed = at_f(9.5 * 2f64.powf(0.01));
     s.view(&landed, 400.0);
     assert_eq!(guess(&mut s, &landed, 1, 1000.0), "f/9.7");
+}
+
+/// shading#17: a refused row says WHY (the relay's `notAppliedReason`), and the redraw that starts
+/// a press's refusal flash names that reason for the note, once.
+#[test]
+fn a_refused_press_names_its_reason_17() {
+    use crate::behave::refusal::{new_refusal_note, reason_text};
+    use bkshading_proto::wire::NotAppliedReason;
+    let mut c = cam();
+    let mut s = Steppers::default();
+    let before = s.view(&c, 0.0);
+    let p = s.press(Row::Aperture, 1, &c, 5.0).unwrap();
+    s.answered(p.key, p.id, WriteAnswer::Accepted, 10.0);
+    {
+        let st = c.state.as_mut().unwrap();
+        st.not_applied = vec!["apertureStep".into()];
+        st.not_applied_reason = [("apertureStep".to_string(), NotAppliedReason::LensEnd)].into();
+    }
+    let after = s.view(&c, 20.0);
+    let r = row(&after, Row::Aperture);
+    assert!(r.not_applied && r.flash, "{r:?}");
+    let lens_end = reason_text(Some(NotAppliedReason::LensEnd));
+    assert_eq!(r.refusal, lens_end);
+    assert_eq!(r.inc.title, lens_end);
+    assert_eq!(new_refusal_note(&before, &after), Some(lens_end));
+    // The next redraw of the same flash shows no second note.
+    let again = s.view(&c, 30.0);
+    assert_eq!(new_refusal_note(&after, &again), None);
+    // Without a reason (a relay older than 0.2.14) the plain text.
+    c.state.as_mut().unwrap().not_applied_reason.clear();
+    assert_eq!(
+        row(&s.view(&c, 40.0), Row::Aperture).refusal,
+        NOT_APPLIED_TITLE
+    );
 }

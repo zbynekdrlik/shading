@@ -13,7 +13,7 @@ use leptos::html;
 use leptos::prelude::*;
 
 use crate::behave::slider::SliderSpec;
-use crate::behave::steppers::{Gate, Row, RowView, NOT_APPLIED_TITLE};
+use crate::behave::steppers::{Gate, Row, RowView};
 
 /// The track's filled part up to the thumb (CSS `--p`).
 fn set_fill(el: &web_sys::HtmlInputElement, percent: f64) {
@@ -94,7 +94,12 @@ pub fn StepperRow(
     let spec = Memo::new(move |_| view.with(|v| v.as_ref().and_then(|v| v.slider.clone())));
     let value_title = move || {
         if flag(|v| v.not_applied)() {
-            NOT_APPLIED_TITLE.to_string()
+            view.with(|v| {
+                v.as_ref()
+                    .map(|v| v.refusal)
+                    .unwrap_or_default()
+                    .to_string()
+            })
         } else if open.get() {
             format!("{}: zavrieť posuvník", row.label())
         } else {

@@ -6,6 +6,7 @@
 //! - `look`: the per-device card layout and colour mode (shading#24);
 //! - `block`: a block's online, registration and fps-vs-grab lines;
 //! - `control_info`: why a camera cannot be controlled (shading#14), in Slovak;
+//! - `refusal`: why a write was not applied (shading#17), in Slovak;
 //! - `preview`: when a block fetches its NDI frame and what it shows meanwhile;
 //! - `arrange_drag` + `arrange_edit`: ARRANGE (shading#16).
 
@@ -16,5 +17,6 @@ pub mod control_info;
 pub mod holds;
 pub mod look;
 pub mod preview;
+pub mod refusal;
 pub mod slider;
 pub mod steppers;

@@ -172,6 +172,7 @@ fn a_write_confirmation_keeps_the_cameras_tally_25() {
         version: "0.2.11".into(),
         not_applied: Vec::new(),
         offline_reason: None,
+        not_applied_reason: Default::default(),
     };
     let updated = aggregate_with_camera_update(&agg, &cfg.cameras[0], state);
     assert_eq!(updated.cameras[0].tally, Some(Tally::Pgm));
