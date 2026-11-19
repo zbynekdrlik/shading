@@ -627,11 +627,13 @@ impl Steppers {
             was_refused: live.refused(row),
         };
         let id = self.holds.hold(key, tap, seq, now);
-        self.aperture_press = (row == Row::Aperture).then(|| StepBasis {
-            id,
-            from_av: live.params.and_then(|p| p.aperture_av),
-            dir: dir.signum(),
-        });
+        if row == Row::Aperture {
+            self.aperture_press = Some(StepBasis {
+                id,
+                from_av: live.params.and_then(|p| p.aperture_av),
+                dir: dir.signum(),
+            });
+        }
         Some(Press {
             key,
             value: write,
