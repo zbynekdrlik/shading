@@ -1,5 +1,5 @@
 use super::*;
-use crate::behave::holds::{FLASH_MS, VALUE_HOLD_MS};
+use crate::behave::holds::{FLASH_MS, STEP_HOLD_MS, VALUE_HOLD_MS};
 use bkshading_proto::wire::{
     CameraCaps, CameraView, ControlStatus, FpsSync, RelayState, ShadingParams, Transport,
 };
@@ -643,6 +643,27 @@ fn the_aperture_guess_uses_the_learned_av_step_of_this_camera_29() {
     assert_eq!(guess(&mut s.clone(), &landed, -1, 1000.0), "f/4.0");
     // Another camera's block has learned nothing: the default step.
     assert_eq!(guess(&mut Steppers::default(), &at_f(4.0), 1, 0.0), "f/4.1");
+}
+
+/// A step too small to change the shown f-stop (0.03 AV at f/4.96: both read f/5.0) never ends
+/// the hold by its text; when the hold times out on a newer view with the lens moved along the
+/// press, that step is learned too (else the 0.1 AV default keeps guessing a value never reached).
+#[test]
+fn a_step_too_small_to_change_the_text_is_learned_when_its_hold_times_out_29() {
+    let mut s = Steppers::default();
+    assert_eq!(guess(&mut s, &at_f(4.96), 1, 0.0), "f/5.1");
+    let landed = at_f(4.96 * 2f64.powf(0.015));
+    let r = row(&s.view(&landed, 400.0), Row::Aperture);
+    assert_eq!(
+        (r.text.as_str(), r.pending),
+        ("f/5.1", true),
+        "same text: still held"
+    );
+    let r = row(&s.view(&landed, STEP_HOLD_MS + 10.0), Row::Aperture);
+    assert_eq!((r.text.as_str(), r.pending), ("f/5.0", false));
+    assert_eq!(guess(&mut s, &landed, 1, STEP_HOLD_MS + 500.0), "f/5.1");
+    // The default 0.1 AV would have said f/5.2 from f/5.01.
+    assert_eq!(guess(&mut Steppers::default(), &landed, 1, 0.0), "f/5.2");
 }
 
 /// A press of another row while the aperture step is held keeps its learning basis.
