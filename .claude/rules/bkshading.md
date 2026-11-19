@@ -105,7 +105,7 @@ the camera's USB-C CDC-NCM link (since v0.2.0, shading#6; before that over USB-P
   10.11.2026: no 4.8 at 108 mm, writes of 4.6/4.8 stay 4.4; the earlier 4.8 was another zoom) while
   `lens/iris/description` says min 4.1; the PP 6K has 1/6 steps (2.8 2.9 3.1 3.2 3.3 3.5). A
   nominal grid (v0.2.0) skipped 4.8 and 6.7 (camera-box#1452 again). So:
-  - the panel's +/- send `{apertureStep: ±1}` and show the GUESSED next grid stop (shading#29,
+  - the panel's +/- send `{apertureStep: ±1}` and show a GUESSED fine lens step (shading#29 v0.2.13,
     `steppers::aperture_next`) until a push shows an f-stop different from the one at the press;
     then the display is the true `apertureStop`, which may differ from the guess;
   - `CameraSession::step_iris`: GET the TRUE f-stop, PUT a target `APERTURE_PROBE_STOPS` (1/16
@@ -311,8 +311,8 @@ the house app stack airuleset#1333); mockup `docs/mockups/arrange-v1.html` appro
   `store/` = signals + `conn.rs` rules + `net.rs` browser IO; `components/` render. New logic goes into
   `behave/` with a test, never straight into a component.
 - **Stepper press lifecycle (shading#29, v0.2.12, Marcel: "optimistic + debounce + value update").**
-  A press shows the expected value at once (aperture: `aperture_next`, the next `fNumberChoices`
-  entry, a third of a stop past the grid's end). The hold is `pending` until the service ANSWERS the
+  A press shows the expected value at once (aperture: `aperture_next`, ONE FINE lens step, see the
+  v0.2.13 bullet below). The hold is `pending` until the service ANSWERS the
   PUT (`net::put_param` returns the status -> `WriteAnswer::of` -> `Steppers::answered`; the slider's
   `apertureNorm` maps to the aperture row). While pending, or within `DEBOUNCE_MS` (300) of the last
   accepted press, `Holds::accepts` refuses a press of that row (both +/-); the buttons are NOT
@@ -325,14 +325,27 @@ the house app stack airuleset#1333); mockup `docs/mockups/arrange-v1.html` appro
   write never unlocks a newer press; Auto WB and the fps align button send id 0 (no hold). A
   `notApplied` the view at the press already showed (an earlier write's, still in the relay state)
   refuses only after this write's answer. The slider checks only the lock, never the 300 ms guard.
-  The aperture guess is only TEXT (`value: None`): the next press builds on the camera's f-stop;
-  outside the grid's span (f/1.75 under the default 2.8..) it is a third of a stop. A 502 path has
+  The aperture guess is only TEXT (`value: None`): the next press builds on the camera's f-stop. A 502 path has
   no E2E on purpose: Chromium logs every 5xx resource as a console error. E2E:
   `stepper-lock.spec.js` on the :8786/:8787 pair; the stub's `POST /__write {delayMs, refuse}` delays
   the PUT answer (sleep outside the stub lock, so polls keep answering) or answers the state with the
   written keys in `notApplied`. "a second press after a fast answer but within 300 ms" is the one
   E2E only the guard passes (verified: DEBOUNCE_MS 0 -> 2 writes). A row at a range end has its button disabled by the GATE (ISO 800 =
   the stub's last choice), so a lock test that clicks both buttons uses kelvin.
+- **The optimistic aperture guess is ONE FINE lens step, never the next menu stop (shading#29,
+  v0.2.13, live PP cam6 on v0.2.12: "+" from f/3.2 showed f/3.5, then the confirmed f/3.3 = a
+  forward-then-back flicker).** The `fNumberChoices` grid (1/3-stop menu: 2.8 3.2 3.5 ...) is NOT the
+  step grid: the relay's `apertureStep` moves the lens's own fine step (~0.1 AV: 3.2 -> 3.3,
+  3.7 -> 3.8). `aperture_next(f, grid, dir, step_av)` = `2^((AV ± step)/2)` with AV = `2 log2 f`,
+  stopped ON the grid's next entry in `dir` if the step would pass it (never jump a menu stop).
+  `step_av` is learned per block (= per camera) in `Steppers::row_view`: an aperture Step hold that a
+  NEWER, non-refused view ends with a different f-stop text teaches `|AV_after − AV_at_press|`
+  (`learned_aperture_step`, clamped `APERTURE_STEP_AV_RANGE` 0.03..0.4); before any, 0.1 AV
+  (`APERTURE_STEP_AV_DEFAULT`). The lens-end gating (`irisRangePos`) is unchanged. E2E:
+  `stepper-lock.spec.js` "the aperture guess equals the confirmed value": the stub's `--apply-writes`
+  moves `apertureAv` by 0.1 per `apertureStep`, and every sampled value is the start or the landing.
+  General lesson: a menu/choice list a camera reports is a SLIDER grid, never proof of the step a
+  relative write moves; derive an optimistic guess from the step the device actually moved.
 - **The service embeds `bkshading/panel/dist/` with rust-embed** (`http::PanelAssets`, `panel_file`:
   hashed files immutable, the rest `no-cache`). The folder must exist to compile: build it
   (`cd bkshading/panel && trunk build --release`) or `mkdir -p bkshading/panel/dist && echo placeholder
