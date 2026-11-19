@@ -1,5 +1,5 @@
 use super::*;
-use crate::behave::holds::{FLASH_MS, VALUE_HOLD_MS};
+use crate::behave::holds::{FLASH_MS, STEP_HOLD_MS, VALUE_HOLD_MS};
 use bkshading_proto::wire::{
     CameraCaps, CameraView, ControlStatus, FpsSync, RelayState, ShadingParams, Transport,
 };
@@ -206,7 +206,7 @@ fn shutter_off_the_grid_steps_onto_it() {
 }
 
 #[test]
-fn the_aperture_step_sends_the_direction_and_shows_the_next_grid_stop() {
+fn the_aperture_step_sends_the_direction_and_shows_one_fine_step() {
     let mut s = Steppers::default();
     let c = cam();
     assert_eq!(
@@ -216,8 +216,8 @@ fn the_aperture_step_sends_the_direction_and_shows_the_next_grid_stop() {
     let r = row(&s.view(&c, 100.0), Row::Aperture);
     assert_eq!(
         (r.text.as_str(), r.pending, r.busy),
-        ("f/8.0", true, true),
-        "the grid's next stop at once"
+        ("f/5.4", true, true),
+        "one fine lens step (0.1 AV) at once, not the grid's next stop f/8.0"
     );
     // The lens moved to its own next step (5.6, between the grid's 5.2 and 8.0): the hold ends
     // and the camera's real f-stop shows.
@@ -231,34 +231,65 @@ fn the_aperture_step_sends_the_direction_and_shows_the_next_grid_stop() {
     );
 }
 
+/// shading#29 (live v0.2.12): the guess is one fine AV step, never the next grid stop; it stops
+/// ON a grid stop it would pass, and the step is clamped to 0.03..0.4 AV.
 #[test]
-fn the_next_aperture_stop_is_the_grids_else_a_third_stop() {
+fn the_next_aperture_stop_is_one_fine_step_never_past_a_grid_stop() {
     let grid = [2.8, 4.0, 5.2, 8.0];
+    let fine = |f: f64, d: f64| f_number_from_av(av_from_f_number(f) + d);
     // A pushed f-number is never exactly a grid entry (f/5.2 = AV 4.78 = 5.198...).
     let f52 = f_number_from_av(4.78);
-    assert_eq!(aperture_next(f52, &grid, 1), 8.0);
-    assert_eq!(aperture_next(f52, &grid, -1), 4.0);
+    assert!((aperture_next(f52, &grid, 1, 0.1) - fine(f52, 0.1)).abs() < 1e-9);
+    assert!((aperture_next(f52, &grid, -1, 0.1) - fine(f52, -0.1)).abs() < 1e-9);
     assert_eq!(
-        aperture_next(4.5, &grid, -1),
+        aperture_next(3.9, &grid, 1, 0.1),
         4.0,
-        "off the grid: the one below"
+        "never past the grid's 4.0"
     );
-    // shading#22: the lens opens past the grid's first entry; a third of a stop on.
-    let wider = aperture_next(2.8, &grid, -1);
-    assert!((wider - 2.8 / 2f64.powf(1.0 / 6.0)).abs() < 1e-9, "{wider}");
-    assert!((aperture_next(8.0, &grid, 1) - 8.0 * 2f64.powf(1.0 / 6.0)).abs() < 1e-9);
-    assert!((aperture_next(4.0, &[], 1) - 4.0 * 2f64.powf(1.0 / 6.0)).abs() < 1e-9);
+    assert_eq!(
+        aperture_next(4.1, &grid, -1, 0.4),
+        4.0,
+        "never below the grid's 4.0"
+    );
+    // Outside the grid (a lens opening past the grid's 2.8, shading#22): the fine step.
+    assert!((aperture_next(1.75, &grid, 1, 0.1) - fine(1.75, 0.1)).abs() < 1e-9);
+    assert!((aperture_next(11.0, &grid, 1, 0.1) - fine(11.0, 0.1)).abs() < 1e-9);
+    assert!((aperture_next(4.0, &[], 1, 0.1) - fine(4.0, 0.1)).abs() < 1e-9);
+    // The step is clamped; a bad step falls back to the default.
+    assert!((aperture_next(11.0, &grid, 1, 2.0) - fine(11.0, 0.4)).abs() < 1e-9);
+    assert!((aperture_next(11.0, &grid, -1, 0.001) - fine(11.0, -0.03)).abs() < 1e-9);
+    assert!((aperture_next(11.0, &grid, 1, f64::NAN) - fine(11.0, 0.1)).abs() < 1e-9);
+    assert_eq!(aperture_next(4.5, &grid, 0, 0.1), 4.5);
 }
 
 #[test]
-fn an_aperture_press_past_the_grid_shows_a_third_stop_and_an_unknown_f_still_steps() {
+fn a_learned_aperture_step_is_the_av_distance_clamped_along_the_press() {
+    let d = learned_aperture_step(Some(3.356), Some(3.444), 1).unwrap();
+    assert!((d - 0.088).abs() < 1e-9, "{d}");
+    let d = learned_aperture_step(Some(3.444), Some(3.356), -1).unwrap();
+    assert!((d - 0.088).abs() < 1e-9, "{d}");
+    assert_eq!(learned_aperture_step(Some(3.0), Some(4.0), 1), Some(0.4));
+    assert_eq!(learned_aperture_step(Some(4.0), Some(4.01), 1), Some(0.03));
+    assert_eq!(learned_aperture_step(None, Some(4.0), 1), None);
+    assert_eq!(learned_aperture_step(Some(4.0), None, 1), None);
+    assert_eq!(
+        learned_aperture_step(Some(4.0), Some(3.9), 1),
+        None,
+        "a landing against the press"
+    );
+    assert_eq!(learned_aperture_step(Some(4.0), Some(4.1), -1), None);
+    assert_eq!(learned_aperture_step(Some(4.0), Some(4.0), 1), None);
+}
+
+#[test]
+fn an_aperture_press_past_the_grid_shows_a_fine_step_and_an_unknown_f_still_steps() {
     let at_first = with(|p| {
         p.aperture_av = Some(2.0 * 2.8f64.log2());
         p.iris_range_pos = Some(0.2);
     });
     let mut s = Steppers::default();
     s.press(Row::Aperture, -1, &at_first, 0.0).unwrap();
-    assert_eq!(row(&s.view(&at_first, 1.0), Row::Aperture).text, "f/2.5");
+    assert_eq!(row(&s.view(&at_first, 1.0), Row::Aperture).text, "f/2.7");
     let unknown = with(|p| p.aperture_av = None);
     let mut s = Steppers::default();
     assert_eq!(
@@ -553,28 +584,122 @@ fn the_next_aperture_press_builds_on_the_cameras_f_stop_not_the_guess() {
     let c = cam();
     let mut s = Steppers::default();
     let p = s.press(Row::Aperture, -1, &c, 0.0).unwrap();
-    assert_eq!(row(&s.view(&c, 1.0), Row::Aperture).text, "f/4.0");
+    assert_eq!(row(&s.view(&c, 1.0), Row::Aperture).text, "f/5.1");
     s.answered("apertureStep", p.id, WriteAnswer::Accepted, 100.0);
-    // No push moved the lens yet: the next − guesses from f/5.2 again, never from the guess f/4.0.
+    // No push moved the lens yet: the next − guesses from f/5.2 again, never from the guess f/5.1.
     s.press(Row::Aperture, -1, &c, 500.0).unwrap();
-    assert_eq!(row(&s.view(&c, 501.0), Row::Aperture).text, "f/4.0");
+    assert_eq!(row(&s.view(&c, 501.0), Row::Aperture).text, "f/5.1");
 }
 
-/// Review finding: a lens below the grid's start (f/1.75 on the default 2.8.. grid, shading#22)
-/// shows a third of a stop, not the grid's f/2.8 more than a stop away; so does one above its end.
+/// A Pocket 6K-like camera at f-stop `f` with the 1/3-stop menu grid 2.8..5.6 (`fNumberChoices`),
+/// the iris mid-range (shading#29 live v0.2.12, PP cam6).
+fn at_f(f: f64) -> CameraView {
+    let mut c = with(|p| {
+        p.aperture_av = Some(2.0 * f.log2());
+        p.iris_range_pos = Some(0.5);
+    });
+    c.state
+        .as_mut()
+        .unwrap()
+        .caps
+        .as_mut()
+        .unwrap()
+        .fnumber_choices = vec![2.8, 3.2, 3.5, 4.0, 4.5, 5.0, 5.6];
+    c
+}
+
+fn guess(s: &mut Steppers, c: &CameraView, dir: i32, now: f64) -> String {
+    s.press(Row::Aperture, dir, c, now).unwrap();
+    row(&s.view(c, now + 1.0), Row::Aperture).text
+}
+
+/// shading#29 live v0.2.12 (PP cam6): "+" from f/3.2 showed f/3.5 (the next MENU stop) and then the
+/// camera's f/3.3. The relay's apertureStep moves the lens's FINE step (~0.1 AV), so the guess is
+/// one fine step, never the next 1/3-stop menu entry.
 #[test]
-fn outside_the_grid_the_guess_is_a_third_of_a_stop() {
-    let grid = [2.8, 4.0, 5.6, 8.0];
-    let g = aperture_next(1.75, &grid, 1);
-    assert!((g - 1.75 * 2f64.powf(1.0 / 6.0)).abs() < 1e-9, "{g}");
+fn an_aperture_press_guesses_the_lenss_fine_step_not_the_next_menu_stop_29() {
+    assert_eq!(guess(&mut Steppers::default(), &at_f(3.2), 1, 0.0), "f/3.3");
+    assert_eq!(guess(&mut Steppers::default(), &at_f(3.7), 1, 0.0), "f/3.8");
     assert_eq!(
-        aperture_next(2.8, &grid, 1),
-        4.0,
-        "inside the grid: its next entry"
+        guess(&mut Steppers::default(), &at_f(3.8), -1, 0.0),
+        "f/3.7"
     );
-    let g = aperture_next(11.0, &grid, -1);
-    assert!(
-        (g - 11.0 / 2f64.powf(1.0 / 6.0)).abs() < 1e-9,
-        "above the grid: {g}"
+}
+
+/// The fine step is learned per camera from the last confirmed step: f/4.0 -> f/4.3 is 0.209 AV,
+/// so a "+" from f/4.0 then guesses f/4.3 and a "−" from f/4.3 f/4.0 (the default 0.1 AV would
+/// say f/4.1 and f/4.2).
+#[test]
+fn the_aperture_guess_uses_the_learned_av_step_of_this_camera_29() {
+    let mut s = Steppers::default();
+    assert_eq!(guess(&mut s, &at_f(4.0), 1, 0.0), "f/4.1");
+    let landed = at_f(4.3);
+    assert_eq!(
+        row(&s.view(&landed, 400.0), Row::Aperture).text,
+        "f/4.3",
+        "the camera's landing ends the hold"
     );
+    assert_eq!(guess(&mut s.clone(), &at_f(4.0), 1, 1000.0), "f/4.3");
+    assert_eq!(guess(&mut s.clone(), &landed, -1, 1000.0), "f/4.0");
+    // Off a grid stop: f/5.55 − 0.209 AV = f/5.2 (the default: f/5.4; the grid's 5.0 not reached).
+    assert_eq!(guess(&mut s.clone(), &at_f(5.55), -1, 1000.0), "f/5.2");
+    // Another camera's block has learned nothing: the default step.
+    assert_eq!(guess(&mut Steppers::default(), &at_f(4.0), 1, 0.0), "f/4.1");
+}
+
+/// A step too small to change the shown f-stop (0.03 AV at f/4.96: both read f/5.0) never ends
+/// the hold by its text; when the hold times out on a newer view with the lens moved along the
+/// press, that step is learned too (else the 0.1 AV default keeps guessing a value never reached).
+#[test]
+fn a_step_too_small_to_change_the_text_is_learned_when_its_hold_times_out_29() {
+    let mut s = Steppers::default();
+    assert_eq!(guess(&mut s, &at_f(4.96), 1, 0.0), "f/5.1");
+    let landed = at_f(4.96 * 2f64.powf(0.015));
+    let r = row(&s.view(&landed, 400.0), Row::Aperture);
+    assert_eq!(
+        (r.text.as_str(), r.pending),
+        ("f/5.1", true),
+        "same text: still held"
+    );
+    let r = row(&s.view(&landed, STEP_HOLD_MS + 10.0), Row::Aperture);
+    assert_eq!((r.text.as_str(), r.pending), ("f/5.0", false));
+    assert_eq!(guess(&mut s, &landed, 1, STEP_HOLD_MS + 500.0), "f/5.1");
+    // The default 0.1 AV would have said f/5.2 from f/5.01.
+    assert_eq!(guess(&mut Steppers::default(), &landed, 1, 0.0), "f/5.2");
+}
+
+/// A press of another row while the aperture step is held keeps its learning basis.
+#[test]
+fn another_rows_press_keeps_the_aperture_steps_learning_basis_29() {
+    let mut s = Steppers::default();
+    guess(&mut s, &at_f(4.0), 1, 0.0);
+    s.press(Row::Kelvin, 1, &at_f(4.0), 100.0).unwrap();
+    s.view(&at_f(4.3), 400.0);
+    assert_eq!(guess(&mut s, &at_f(4.0), 1, 1000.0), "f/4.3");
+}
+
+/// A landing against the press (the iris turned on the body) teaches nothing: the default stays.
+#[test]
+fn a_landing_against_the_press_teaches_no_aperture_step_29() {
+    let mut s = Steppers::default();
+    guess(&mut s, &at_f(4.3), 1, 0.0);
+    s.view(&at_f(4.0), 400.0);
+    assert_eq!(guess(&mut s, &at_f(4.0), 1, 1000.0), "f/4.1");
+}
+
+/// A learned step is clamped to 0.03..0.4 AV, and a guess never jumps over a menu stop: a step of
+/// 0.4 AV from f/3.6 would be f/4.1, past the grid's 4.0.
+#[test]
+fn a_learned_aperture_step_is_clamped_and_never_jumps_over_a_grid_stop_29() {
+    let mut s = Steppers::default();
+    guess(&mut s, &at_f(3.2), 1, 0.0);
+    s.view(&at_f(3.9), 400.0); // 0.57 AV: clamped to 0.4
+    assert_eq!(guess(&mut s.clone(), &at_f(3.6), 1, 1000.0), "f/4.0");
+    assert_eq!(guess(&mut s.clone(), &at_f(3.0), 1, 1000.0), "f/3.2");
+    // 0.02 AV (f/9.5 -> f/9.566, past the grid's end): clamped up to 0.03, so f/9.7, not f/9.6.
+    let mut s = Steppers::default();
+    guess(&mut s, &at_f(9.5), 1, 0.0);
+    let landed = at_f(9.5 * 2f64.powf(0.01));
+    s.view(&landed, 400.0);
+    assert_eq!(guess(&mut s, &landed, 1, 1000.0), "f/9.7");
 }

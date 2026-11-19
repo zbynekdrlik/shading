@@ -5,7 +5,7 @@
 //! Two kinds:
 //! - [`HoldKind::Value`]: the target is known (ISO 800, 5700 K). Ends when a push shows it.
 //! - [`HoldKind::Step`]: an aperture +/- (shading#6): the relay walks the lens and the landing is
-//!   unknown until it answers, so the panel shows a GUESS (the next grid stop, shading#29) and the
+//!   unknown until it answers, so the panel shows a GUESS (one fine lens step, shading#29) and the
 //!   hold ends when a push shows an f-stop DIFFERENT from the one at the tap (`from`); the value
 //!   then settles on the camera's real stop.
 //!

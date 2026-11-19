@@ -6,8 +6,9 @@
 //! One tap = one PUT of one key, never an auto-repeat (the issue-1229 one-write rule). A tap steps
 //! from the camera's REAL current value (or the target of a tap still held), shows the expected
 //! next value at once (shading#29), and sends:
-//! - clona: `{apertureStep: ±1}`, the relay walks the lens's own steps (shading#6); the panel shows
-//!   the next stop of the f-number grid ([`aperture_next`]) until the camera says where it landed;
+//! - clona: `{apertureStep: ±1}`, the relay walks the lens's own FINE steps (shading#6); the panel
+//!   shows one fine step on ([`aperture_next`]: the AV step this camera's last confirmed press
+//!   moved, 0.1 AV before any) until the camera says where it landed;
 //! - ISO, uzávierka, fps: the absolute next listed choice;
 //! - biely bod ±100 K and tint ±1: the absolute value, clamped to the range.
 
@@ -26,6 +27,13 @@ pub const TINT_RANGE: (i64, i64) = (-50, 50);
 /// How far apart two f-numbers must be to count as different stops (the panel shows one decimal; a
 /// pushed f-number comes from `apertureAv` and is never exactly a grid entry).
 pub const F_NUMBER_EPS: f64 = 0.05;
+/// The AV step an aperture press is expected to move before this camera's first confirmed press
+/// (shading#29, live v0.2.12: the relay's `apertureStep` moves the lens's FINE step, ~0.1 AV:
+/// 3.2 -> 3.3, 3.7 -> 3.8; never the 1/3-stop `fNumberChoices` menu).
+pub const APERTURE_STEP_AV_DEFAULT: f64 = 0.1;
+/// The bounds of a learned aperture AV step: a landing further away (the iris turned on the body,
+/// a zoom) or closer (a rounding) never makes the guess absurd.
+pub const APERTURE_STEP_AV_RANGE: (f64, f64) = (0.03, 0.4);
 /// Mirror of the proto `mapping::IRIS_END_EPS`: how close to 0 / 1 `irisRangePos` is a lens end.
 pub const IRIS_END_EPS: f64 = 1e-3;
 
@@ -246,6 +254,34 @@ pub fn f_number_from_av(av: f64) -> f64 {
     2f64.powf(av).sqrt()
 }
 
+/// The aperture value of an f-number: `2 log2(f)`.
+pub fn av_from_f_number(f: f64) -> f64 {
+    2.0 * f.log2()
+}
+
+/// The AV step a confirmed aperture press in `dir` moved (`|AV_after - AV_before|`), clamped to
+/// [`APERTURE_STEP_AV_RANGE`]; none when either value is unknown or the lens landed AGAINST the
+/// press (the iris turned on the body, a zoom: not this press's step).
+pub fn learned_aperture_step(
+    av_before: Option<f64>,
+    av_after: Option<f64>,
+    dir: i32,
+) -> Option<f64> {
+    let (lo, hi) = APERTURE_STEP_AV_RANGE;
+    let moved = av_after? - av_before?;
+    let along = (moved > 0.0 && dir > 0) || (moved < 0.0 && dir < 0);
+    (moved.is_finite() && along).then(|| moved.abs().clamp(lo, hi))
+}
+
+/// What an aperture press learns its step from (shading#29): its write's id (the hold it belongs
+/// to), the camera's AV at the press and the direction.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct StepBasis {
+    id: u64,
+    from_av: Option<f64>,
+    dir: i32,
+}
+
 /// Mirror of the proto `mapping::step_choice`: the index of the next choice from `current` in
 /// direction `dir` over ascending `choices`. "+" = the first choice strictly above, "−" = the last
 /// strictly below; past an end it stays on the end; a value off the grid steps ONTO it.
@@ -274,24 +310,28 @@ pub fn nearest_index(choices: &[f64], value: f64) -> usize {
 }
 
 /// The f-stop an aperture press in `dir` is expected to reach from `f` (shading#29, shown at once
-/// until the camera answers): the next entry of the f-number grid the gates use, or one third of
-/// a stop on when `f` lies outside the grid or the grid ends before the lens does (shading#22: the
-/// default grid starts at 2.8, a lens may open to 1.75). The relay walks the lens's own steps, so the camera's answer may
-/// differ; it is the truth.
-pub fn aperture_next(f: f64, grid: &[f64], dir: i32) -> f64 {
-    let next = if dir > 0 {
-        grid.iter().copied().find(|&c| c > f + F_NUMBER_EPS)
+/// until the camera answers): one FINE lens step of `step_av` AV on (the relay's `apertureStep`
+/// moves the lens's own step, ~0.1 AV, never the 1/3-stop `fNumberChoices` menu), clamped to
+/// [`APERTURE_STEP_AV_RANGE`]. It never jumps over a stop of the grid: a step that would pass the
+/// grid's next entry in `dir` stops on it. The camera's answer is the truth.
+pub fn aperture_next(f: f64, grid: &[f64], dir: i32, step_av: f64) -> f64 {
+    let (lo, hi) = APERTURE_STEP_AV_RANGE;
+    let step = if step_av.is_finite() {
+        step_av.abs().clamp(lo, hi)
     } else {
-        grid.iter().copied().rev().find(|&c| c < f - F_NUMBER_EPS)
+        APERTURE_STEP_AV_DEFAULT
     };
-    // Outside the grid's span the grid says nothing about the lens's steps (a lens below the
-    // default grid's 2.8 moves ~1/6 stop, not to f/2.8): a third of a stop then.
-    let inside = match (grid.first(), grid.last()) {
-        (Some(&lo), Some(&hi)) => f >= lo - F_NUMBER_EPS && f <= hi + F_NUMBER_EPS,
-        _ => false,
-    };
-    next.filter(|_| inside)
-        .unwrap_or_else(|| f * 2f64.powf(f64::from(dir.signum()) / 6.0))
+    let sign = f64::from(dir.signum());
+    let target = f_number_from_av(av_from_f_number(f) + sign * step);
+    if dir > 0 {
+        let stop = grid.iter().copied().find(|&c| c > f + F_NUMBER_EPS);
+        stop.map_or(target, |c| target.min(c))
+    } else if dir < 0 {
+        let stop = grid.iter().copied().rev().find(|&c| c < f - F_NUMBER_EPS);
+        stop.map_or(target, |c| target.max(c))
+    } else {
+        f
+    }
 }
 
 /// Whether the iris is at the lens end a move in `dir` heads for (`irisRangePos`: 0 = wide open,
@@ -429,6 +469,11 @@ pub struct Steppers {
     /// another camera, or the clock, changes nothing here).
     last: Option<CameraView>,
     pub(super) seq: u64,
+    /// The basis of the last aperture press, until its hold ends (the step it learns).
+    aperture_press: Option<StepBasis>,
+    /// The AV step this camera's last confirmed aperture press moved (shading#29), none before
+    /// any: [`APERTURE_STEP_AV_DEFAULT`] then.
+    aperture_step_av: Option<f64>,
 }
 
 impl Steppers {
@@ -450,6 +495,11 @@ impl Steppers {
     fn row_view(&mut self, row: Row, live: &Live, seq: u64, now: f64) -> RowView {
         let (pushed_text, pushed_value) = pushed(row, live);
         let refused = live.refused(row);
+        let step_before = (row == Row::Aperture)
+            .then(|| self.holds.get(row.key()))
+            .flatten()
+            .filter(|h| h.kind == HoldKind::Step)
+            .map(|h| (h.seq, h.id));
         let held = self
             .holds
             .reconcile(
@@ -462,6 +512,24 @@ impl Steppers {
                 },
             )
             .cloned();
+        // An aperture step whose hold ended on a newer view without a refusal (a different f-stop,
+        // or the timeout of a step too small to change the shown text) teaches this camera's fine
+        // step from where the lens moved along the press (shading#29).
+        if let (None, Some((hold_seq, id))) = (&held, step_before) {
+            // Every Step hold is made by `press` together with its basis (a slider hold is a Value
+            // hold): the ids always match; the filter only keeps a future second source honest.
+            let basis = self.aperture_press.take();
+            debug_assert!(
+                basis.is_none_or(|b| b.id == id),
+                "a Step hold without its basis"
+            );
+            if let Some(b) = basis.filter(|b| b.id == id && seq > hold_seq && !refused) {
+                let after = live.params.and_then(|p| p.aperture_av);
+                if let Some(d) = learned_aperture_step(b.from_av, after, b.dir) {
+                    self.aperture_step_av = Some(d);
+                }
+            }
+        }
         let (text, base) = match &held {
             Some(h) => (h.text.clone(), h.value.or(pushed_value)),
             None => (pushed_text, pushed_value),
@@ -514,9 +582,10 @@ impl Steppers {
                 // press builds on the pushed one (`value` none). An unknown f-stop still steps
                 // (the relay knows it); the dash stays shown.
                 let grid = choices(row, live.caps);
+                let step = self.aperture_step_av.unwrap_or(APERTURE_STEP_AV_DEFAULT);
                 let text = base.map_or_else(
                     || current.text.clone(),
-                    |f| format!("f/{:.1}", aperture_next(f, &grid, dir)),
+                    |f| format!("f/{:.1}", aperture_next(f, &grid, dir, step)),
                 );
                 (HoldKind::Step, text, None, serde_json::json!(dir.signum()))
             }
@@ -565,6 +634,13 @@ impl Steppers {
             was_refused: live.refused(row),
         };
         let id = self.holds.hold(key, tap, seq, now);
+        if row == Row::Aperture {
+            self.aperture_press = Some(StepBasis {
+                id,
+                from_av: live.params.and_then(|p| p.aperture_av),
+                dir: dir.signum(),
+            });
+        }
         Some(Press {
             key,
             value: write,
