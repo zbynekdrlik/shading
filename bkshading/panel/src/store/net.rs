@@ -31,6 +31,28 @@ pub fn perf_now() -> f64 {
         .map_or_else(now_ms, |p| p.now())
 }
 
+/// Whether the page can be seen (`document.visibilityState` is not `hidden`). On strih the kiosk
+/// app hides its view when OBS covers the window, since WebKitGTK alone reports an obscured
+/// window as visible (shading#19).
+pub fn page_visible() -> bool {
+    web_sys::window()
+        .and_then(|w| w.document())
+        .is_none_or(|d| d.visibility_state() != web_sys::VisibilityState::Hidden)
+}
+
+/// Tells the service a visible panel watches the previews (`POST /api/preview/viewer`,
+/// shading#19), so it keeps the NDI receivers connected. A hidden page says nothing.
+fn announce_viewer() {
+    if !page_visible() {
+        return;
+    }
+    spawn_local(async {
+        if let Err(e) = fetch("POST", "/api/preview/viewer", None, None).await {
+            leptos::logging::log!("[preview] viewer call failed: {e}");
+        }
+    });
+}
+
 /// An answer of the service: its status and body text.
 pub struct Answer {
     pub status: u16,
@@ -297,4 +319,19 @@ pub fn start(store: Store) {
         move || store.now.set(now_ms()),
         Duration::from_millis(u64::from(conn::TICK_MS)),
     );
+    // shading#19: the preview receivers run only while a visible panel says so; a page that
+    // becomes visible says it at once (the first picture follows the connect).
+    announce_viewer();
+    set_interval(
+        announce_viewer,
+        Duration::from_millis(u64::from(crate::behave::preview::VIEWER_MS)),
+    );
+    if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+        let on_change = Closure::<dyn Fn()>::new(announce_viewer);
+        let _ = doc.add_event_listener_with_callback(
+            "visibilitychange",
+            on_change.as_ref().unchecked_ref(),
+        );
+        on_change.forget(); // one per page, lives as long as the page
+    }
 }

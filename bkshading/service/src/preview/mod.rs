@@ -128,11 +128,23 @@ impl PreviewConfig {
     }
 }
 
+/// How long after the last viewer the NDI preview receivers stay connected, in ms (shading#19).
+///
+/// A visible panel calls `POST /api/preview/viewer` every 2 s and fetches frames ~3 times a
+/// second, so 10 s rides out a few lost calls. A connected receiver costs ~5-6 % of a core for
+/// the SDK's decode of the 60 fps proxy whether or not a frame is kept (measured on strih-pp,
+/// 19.11.2026), so with nobody watching the workers disconnect and park.
+pub const PREVIEW_DEMAND_MS: u64 = 10_000;
+
+/// How often a parked worker looks whether a viewer came back, in ms (shading#19).
+pub const PREVIEW_DEMAND_POLL_MS: u64 = 250;
+
 /// Spawn a preview worker for every camera that has an `ndi_preview` source name, returning
 /// the shared store the HTTP layer reads. A camera without a preview name (a handheld with no
-/// feed) gets no worker — its block stays params-only.
+/// feed) gets no worker — its block stays params-only. The store wants frames only while a
+/// viewer was seen within [`PREVIEW_DEMAND_MS`] (shading#19).
 pub fn start_all(config: &ServiceConfig) -> PreviewStore {
-    let store = PreviewStore::new();
+    let store = PreviewStore::on_demand(PREVIEW_DEMAND_MS);
     for cam in &config.cameras {
         if let Some(name) = &cam.ndi_preview {
             worker::spawn_preview(

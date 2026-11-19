@@ -73,6 +73,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/cameras", get(cameras))
         .route("/api/cameras/:id/params", put(set_params))
         .route("/api/cameras/:id/preview.jpg", get(preview_jpg))
+        .route("/api/preview/viewer", post(preview_viewer))
         .route("/api/relays/register", post(register_relay))
         .route("/api/layout", get(get_layout).put(put_layout))
         .route("/ws", get(ws_upgrade))
@@ -324,6 +325,13 @@ async fn preview_jpg(State(state): State<AppState>, Path(id): Path<String>) -> R
     preview_response(&state.config, &state.previews, &id, wall_clock_ms())
 }
 
+/// `POST /api/preview/viewer` (shading#19): a VISIBLE panel calls it every 2 s, so the NDI preview
+/// receivers connect (and stay connected) only while someone can see the pictures. `204`.
+async fn preview_viewer(State(state): State<AppState>) -> StatusCode {
+    state.previews.viewer_seen(wall_clock_ms());
+    StatusCode::NO_CONTENT
+}
+
 /// The pure preview-endpoint decision (issue 808), split out so its status contract is Tier-0
 /// tested without an HTTP server:
 /// - an unknown camera id -> `404`, the ONLY error status;
@@ -332,7 +340,8 @@ async fn preview_jpg(State(state): State<AppState>, Path(id): Path<String>) -> R
 ///   `204 No Content`, never a 4xx/5xx. Chromium logs every 4xx/5xx resource load as a console
 ///   error, and a stale frame served as live would freeze the operator's picture.
 ///
-/// Every answer for a known camera is `Cache-Control: no-store`: a preview is always "now".
+/// Every answer for a known camera is `Cache-Control: no-store`: a preview is always "now". A
+/// fetch of a known camera counts as a viewer (shading#19): it keeps the receivers connected.
 pub fn preview_response(
     config: &ServiceConfig,
     previews: &PreviewStore,
@@ -342,6 +351,7 @@ pub fn preview_response(
     if !config.cameras.iter().any(|c| c.id == id) {
         return (StatusCode::NOT_FOUND, format!("no camera '{id}'")).into_response();
     }
+    previews.viewer_seen(now_ms);
     match previews.get_fresh(id, now_ms, config.preview.max_frame_age_ms()) {
         Some(frame) => (
             [

@@ -4,7 +4,8 @@
 //! one request in flight, aborted after [`FETCH_TIMEOUT_MS`] or when the block drops to its
 //! placeholder. A 204 (no fresh frame), a failed fetch, or a push that turns the feed off shows the
 //! placeholder with the `<img>` source REMOVED (no load/error event, no frozen frame) and the
-//! object URL revoked.
+//! object URL revoked. A page nobody sees (`document.visibilityState` hidden) fetches nothing and
+//! shows the placeholder (shading#19).
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -17,7 +18,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 
 use crate::behave::preview::{
-    keeps_frame, placeholder_text, should_fetch, FETCH_TIMEOUT_MS, PREVIEW_FPS,
+    keeps_frame, placeholder_text, tick_action, Tick, FETCH_TIMEOUT_MS, PREVIEW_FPS,
 };
 use crate::store::{net, Store};
 
@@ -186,12 +187,15 @@ pub fn Preview(id: String, live: Signal<bool>, busy: RwSignal<bool>) -> impl Int
     let tick_id = id.clone();
     let tick = move || {
         // An interval tick can still run while the block is being removed: `try_` reads.
-        if !live.try_get_untracked().unwrap_or(false) || !store.connected_untracked() {
-            frame.placeholder();
-            return;
-        }
-        if should_fetch(true, true, busy.try_get_untracked().unwrap_or(true)) {
-            spawn_local(load(tick_id.clone(), frame, live, busy, store));
+        match tick_action(
+            live.try_get_untracked().unwrap_or(false),
+            store.connected_untracked(),
+            net::page_visible(),
+            busy.try_get_untracked().unwrap_or(true),
+        ) {
+            Tick::Fetch => spawn_local(load(tick_id.clone(), frame, live, busy, store)),
+            Tick::Wait => {}
+            Tick::Placeholder => frame.placeholder(),
         }
     };
     if let Ok(handle) =

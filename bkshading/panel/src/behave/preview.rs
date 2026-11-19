@@ -30,6 +30,35 @@ pub fn should_fetch(live: bool, connected: bool, busy: bool) -> bool {
     live && connected && !busy
 }
 
+/// How often a VISIBLE panel tells the service it is watching (`POST /api/preview/viewer`,
+/// shading#19). The service keeps the NDI receivers connected 10 s after the last call, so a few
+/// lost calls never drop the picture.
+pub const VIEWER_MS: u32 = 2000;
+
+/// What a block's preview does on one tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tick {
+    /// Fetch one frame.
+    Fetch,
+    /// A fetch is in flight: leave it.
+    Wait,
+    /// Show the placeholder (abort a fetch in flight, drop the frame).
+    Placeholder,
+}
+
+/// The block's decision on one tick (shading#19): a feed not live, no contact, or a page nobody
+/// sees (`visible` false: a hidden tab, or a kiosk app that hides its view behind OBS) drops to the
+/// placeholder and fetches nothing, so a page that comes back never shows a frozen frame.
+pub fn tick_action(live: bool, connected: bool, visible: bool, busy: bool) -> Tick {
+    if !(live && connected && visible) {
+        Tick::Placeholder
+    } else if should_fetch(live, connected, busy) {
+        Tick::Fetch
+    } else {
+        Tick::Wait
+    }
+}
+
 /// After a failed fetch: whether the frame on screen stays. Only a TIMEOUT, on a feed still live
 /// with contact, keeps a frame shown less than [`KEEP_ON_TIMEOUT_MS`] ago (`shown_at`, monotonic).
 pub fn keeps_frame(

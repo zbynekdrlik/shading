@@ -355,6 +355,65 @@ test("a live preview frame is shown, a stopped feed drops to the placeholder and
   gate.assertClean();
 });
 
+// shading#19: the page's visibility, under the test's control. WebKitGTK reports a kiosk window behind
+// OBS as visible, so the kiosk app hides its view; the panel then sees `hidden`, like a hidden tab.
+const VISIBILITY_HOOK = () => {
+  window.__visibility = "visible";
+  Object.defineProperty(Document.prototype, "visibilityState", {
+    configurable: true,
+    get() {
+      return window.__visibility;
+    },
+  });
+  window.__setVisibility = (v) => {
+    window.__visibility = v;
+    document.dispatchEvent(new Event("visibilitychange"));
+  };
+};
+
+test("a visible panel announces its viewer; a hidden page fetches nothing and shows the placeholder, console clean (shading#19)", async ({ page }) => {
+  const gate = consoleGate(page);
+  let previewHits = 0;
+  let viewerCalls = 0;
+  await page.addInitScript(DISABLE_WS);
+  await page.addInitScript(VISIBILITY_HOOK);
+  await page.route("**/api/cameras", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(makeFixture({ hasPreview: true, previewLive: true })) })
+  );
+  await page.route(PREVIEW_URL_RE, (route) => {
+    previewHits += 1;
+    return route.fulfill({ status: 200, contentType: "image/jpeg", headers: { "cache-control": "no-store" }, body: PREVIEW_JPEG });
+  });
+  page.on("request", (req) => {
+    if (req.method() === "POST" && req.url().endsWith("/api/preview/viewer")) viewerCalls += 1;
+  });
+
+  await page.goto(`${PREVIEW_SVC}${PANEL}`);
+  const img = page.locator('[data-role="preview-img"]');
+  const placeholder = page.locator('[data-role="preview-placeholder"]');
+  await expect(img).toHaveClass(/ready/, { timeout: 12000 });
+  // The real service answers the viewer call (204): a visible panel calls it at start and every 2 s.
+  await expect.poll(() => viewerCalls, { timeout: 6000, intervals: [200] }).toBeGreaterThanOrEqual(2);
+  const answer = await page.request.post(`${PREVIEW_SVC}/api/preview/viewer`);
+  expect(answer.status()).toBe(204);
+
+  await page.evaluate(() => window.__setVisibility("hidden"));
+  await expect(placeholder).toBeVisible({ timeout: 3000 });
+  expect(await img.getAttribute("src"), "no frozen frame on a hidden page").toBeNull();
+  // One fetch may still have been in flight when the page hid; after that nothing.
+  await page.waitForTimeout(700);
+  const hitsHidden = previewHits;
+  const callsHidden = viewerCalls;
+  await page.waitForTimeout(3000);
+  expect(previewHits, "a hidden page fetches no preview").toBe(hitsHidden);
+  expect(viewerCalls, "a hidden page is no viewer").toBe(callsHidden);
+
+  await page.evaluate(() => window.__setVisibility("visible"));
+  await expect(img).toHaveClass(/ready/, { timeout: 5000 });
+  expect(viewerCalls, "becoming visible announces the viewer at once").toBeGreaterThan(callsHidden);
+  gate.assertClean();
+});
+
 test("a block removed while its preview fetch is in flight leaves a clean console (shading#16 review)", async ({ page }) => {
   const gate = consoleGate(page);
   let held = 0;

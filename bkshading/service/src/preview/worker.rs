@@ -6,15 +6,20 @@
 //! build the source → capture → decimate → encode → store, forever; on a source error it
 //! logs, backs off, and rebuilds (a cambox feed that comes and goes self-heals). The pure
 //! decision logic it composes (decimate, encode) is unit-tested separately.
+//!
+//! shading#19: the receiver runs only while someone watches ([`PreviewStore::wanted`]). With no
+//! viewer a cycle builds no source, and a running session ends `parked` the moment the viewer
+//! leaves; the worker then polls the demand every [`PREVIEW_DEMAND_POLL_MS`]. Parking is logged at
+//! info once per transition, never as a failure.
 
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::preview::decimate::Decimator;
 use crate::preview::encode::encode_jpeg;
 use crate::preview::source::PreviewSource;
 use crate::preview::store::{wall_clock_ms, PreviewStore};
-use crate::preview::PreviewConfig;
+use crate::preview::{PreviewConfig, PREVIEW_DEMAND_POLL_MS};
 
 /// A source builder: NDI-source-name → a boxed [`PreviewSource`] (or an error to retry).
 pub type SourceBuilder = fn(&str) -> anyhow::Result<Box<dyn PreviewSource>>;
@@ -52,8 +57,9 @@ fn run_forever(
     // a source that is found and then fails every time, warns once per streak, not every cycle,
     // forever (shading#3).
     let mut trouble = RepeatGate::default();
+    let mut was_parked = false;
     loop {
-        cycle(
+        let log = cycle(
             cam_id,
             source_name,
             cfg,
@@ -62,7 +68,19 @@ fn run_forever(
             &mut decim,
             &mut trouble,
         );
-        thread::sleep(cfg.reconnect_backoff());
+        if log.parked != was_parked {
+            if log.parked {
+                tracing::info!(cam = %cam_id, source = %source_name, "preview parked: no viewer, NDI receiver disconnected");
+            } else {
+                tracing::info!(cam = %cam_id, source = %source_name, "preview resumed: a viewer is back");
+            }
+            was_parked = log.parked;
+        }
+        if log.parked {
+            thread::sleep(Duration::from_millis(PREVIEW_DEMAND_POLL_MS));
+        } else {
+            thread::sleep(cfg.reconnect_backoff());
+        }
     }
 }
 
@@ -73,10 +91,14 @@ pub struct CycleLog {
     pub warned: bool,
     /// The source stored frames after a warned streak.
     pub recovered: bool,
+    /// Nobody watches: no source was built, or the session ended because the viewer left
+    /// (shading#19). Not a failure.
+    pub parked: bool,
 }
 
 /// One turn of the reconnect loop: build the source, run it until it fails, and log the
-/// failure through the camera's `trouble` gate. Public for the worker tests.
+/// failure through the camera's `trouble` gate. With no viewer it builds nothing and returns
+/// `parked` (shading#19). Public for the worker tests.
 pub fn cycle(
     cam_id: &str,
     source_name: &str,
@@ -86,6 +108,14 @@ pub fn cycle(
     decim: &mut Decimator,
     trouble: &mut RepeatGate,
 ) -> CycleLog {
+    if !store.wanted(wall_clock_ms()) {
+        tracing::trace!(cam = %cam_id, "preview: no viewer, no receiver");
+        return CycleLog {
+            warned: false,
+            recovered: false,
+            parked: true,
+        };
+    }
     match build(source_name) {
         Ok(mut src) => {
             let was_failing = trouble.in_streak();
@@ -96,6 +126,19 @@ pub fn cycle(
             }
             let end = run_source(cam_id, src.as_mut(), cfg, store, decim, trouble);
             let recovered = end.stored && was_failing;
+            if end.parked {
+                // The viewer left: the source is dropped (disconnected) when `src` goes out of
+                // scope; nothing failed.
+                if end.stored {
+                    trouble.clear();
+                }
+                tracing::debug!(cam = %cam_id, source = %source_name, "preview session parked: the viewer left");
+                return CycleLog {
+                    warned: false,
+                    recovered,
+                    parked: true,
+                };
+            }
             if end.stored {
                 tracing::info!(cam = %cam_id, source = %source_name, "preview source delivered frames, then ended");
                 trouble.clear();
@@ -106,7 +149,11 @@ pub fn cycle(
             } else {
                 tracing::debug!(cam = %cam_id, error = %end.error, "preview capture error again; rebuilding source");
             }
-            CycleLog { warned, recovered }
+            CycleLog {
+                warned,
+                recovered,
+                parked: false,
+            }
         }
         Err(e) => {
             let text = format!("{e:#}");
@@ -119,6 +166,7 @@ pub fn cycle(
             CycleLog {
                 warned,
                 recovered: false,
+                parked: false,
             }
         }
     }
@@ -155,9 +203,12 @@ pub struct SessionEnd {
     pub error: String,
     /// Whether this connection stored at least one frame.
     pub stored: bool,
+    /// It ended because nobody watches any more (shading#19), not on a source error.
+    pub parked: bool,
 }
 
-/// Drive one connected source into the store until it fails. `trouble` is the camera's
+/// Drive one connected source into the store until it fails, or until nobody watches
+/// ([`PreviewStore::wanted`], checked before every capture: `parked`). `trouble` is the camera's
 /// warning gate, shared across reconnects: a stored frame clears it. Public for the worker tests.
 pub fn run_source(
     cam_id: &str,
@@ -177,6 +228,13 @@ pub fn run_source(
     decim.reset();
     let mut stored = false;
     loop {
+        if !store.wanted(wall_clock_ms()) {
+            return SessionEnd {
+                error: "no viewer".into(),
+                stored,
+                parked: true,
+            };
+        }
         // The source asks at frame arrival, so a frame the decimator drops is never built
         // (shading#3) and the kept cadence does not drift. The slot is spent by an encode attempt:
         // a kept frame the source could not build leaves it for the next one.
@@ -220,6 +278,7 @@ pub fn run_source(
                 return SessionEnd {
                     error: format!("{e:#}"),
                     stored,
+                    parked: false,
                 };
             }
         }
