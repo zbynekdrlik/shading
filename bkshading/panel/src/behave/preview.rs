@@ -79,6 +79,18 @@ mod tests {
         );
     }
 
+    /// shading#19: a page nobody sees (a hidden tab, a kiosk window behind OBS whose app hides its
+    /// view) fetches no frame and drops the shown one, so it comes back to no frozen picture.
+    #[test]
+    fn a_hidden_page_fetches_nothing_and_shows_the_placeholder_19() {
+        assert_eq!(tick_action(true, true, true, false), Tick::Fetch);
+        assert_eq!(tick_action(true, true, false, false), Tick::Placeholder);
+        assert_eq!(tick_action(true, true, false, true), Tick::Placeholder);
+        assert_eq!(tick_action(false, true, true, false), Tick::Placeholder);
+        assert_eq!(tick_action(true, false, true, false), Tick::Placeholder);
+        assert_eq!(tick_action(true, true, true, true), Tick::Wait);
+    }
+
     #[test]
     fn the_placeholder_says_whether_a_frame_was_seen() {
         assert_eq!(placeholder_text(false), "NDI preview — čakám…");
