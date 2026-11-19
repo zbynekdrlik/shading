@@ -460,3 +460,22 @@ impl RestClient {
         }
     }
 }
+
+/// `e` as the source of an error whose text is `msg` (shading#17): `to_string()` stays `msg`, the
+/// pinned answer text, while the HTTP layer still finds the `RestError` (`downcast_ref`) to name
+/// the reason.
+pub fn camera_err(e: RestError, msg: String) -> anyhow::Error {
+    anyhow::Error::new(e).context(msg)
+}
+
+/// No camera answers its REST API, so nothing was written (shading#17: `camera-offline`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CameraOffline;
+
+impl fmt::Display for CameraOffline {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("camera offline: no camera answers its REST API, nothing written")
+    }
+}
+
+impl std::error::Error for CameraOffline {}

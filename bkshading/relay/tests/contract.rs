@@ -106,3 +106,27 @@ fn the_offline_reason_field_is_additive_offline_reason_on_the_wire_14() {
     .unwrap();
     assert_eq!(older.offline_reason, None);
 }
+
+#[test]
+fn the_not_applied_reason_field_is_additive_17() {
+    // shading#17 (v0.2.14): `GET /api/state` carries `notAppliedReason` ({} when nothing was
+    // refused) next to `notApplied`; a failed PUT names `x-bkshading-reason`. Every other key keeps
+    // its name.
+    let st = bkshading_proto::wire::RelayState::offline("0.2.14");
+    let json = serde_json::to_value(&st).unwrap();
+    assert_eq!(json["notAppliedReason"], serde_json::json!({}));
+    assert_eq!(json["notApplied"], serde_json::json!([]));
+    assert_eq!(
+        bkshading_proto::wire::NOT_APPLIED_REASON_HEADER,
+        "x-bkshading-reason"
+    );
+    assert_eq!(
+        bkshading_proto::wire::CAMERA_STATUS_HEADER,
+        "x-bkshading-camera-status"
+    );
+    let older: bkshading_proto::wire::RelayState = serde_json::from_str(
+        r#"{"online":true,"camera":"x","params":{},"caps":null,"fpsSupported":false,"version":"0.2.13","notApplied":["iso"]}"#,
+    )
+    .unwrap();
+    assert!(older.not_applied_reason.is_empty());
+}

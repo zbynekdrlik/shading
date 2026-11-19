@@ -21,8 +21,9 @@ WITHOUT a camera or the real relay binary, so the E2E can drive the panel end-to
                          answers N ms after it arrives (shading#29: the panel's lock while a write
                          is unanswered), and with `refuse` it applies nothing and answers the state
                          with every written key in `notApplied` (the camera refused it); `stepAv`
-                         sets the AV one `apertureStep` moves (default APERTURE_STEP_AV). Dropped
-                         by /__reset.
+                         sets the AV one `apertureStep` moves (default APERTURE_STEP_AV); `reason`
+                         (with `refuse`) names every refused key's `notAppliedReason`
+                         (shading#17). Dropped by /__reset.
   * `--apply-writes`   -> a PUT changes the served params (iso, kelvin, tint, shutter) and answers
                          `{"applied": n, "state": {...}}` like the real relay, so the service pushes
                          its immediate confirmation (issue 1337). An `apertureStep` of +/-1 moves
@@ -78,6 +79,7 @@ _state = copy.deepcopy(STATE)
 _state_delay_ms = 0
 _write_delay_ms = 0
 _write_refuse = False
+_write_reason = None
 _step_av = None
 _gets = 0
 _apply_writes = False
@@ -116,7 +118,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(404, {"error": "not found", "path": self.path})
 
     def do_POST(self):
-        global _state, _state_delay_ms, _write_delay_ms, _write_refuse, _step_av
+        global _state, _state_delay_ms, _write_delay_ms, _write_refuse, _write_reason, _step_av
         if self.path == "/__state":
             length = int(self.headers.get("Content-Length", "0"))
             patch = json.loads(self.rfile.read(length).decode("utf-8"))  # loud on malformed JSON
@@ -129,6 +131,7 @@ class Handler(BaseHTTPRequestHandler):
                 _state_delay_ms = 0
                 _write_delay_ms = 0
                 _write_refuse = False
+                _write_reason = None
                 _step_av = None
                 self._json(200, _state)
         elif self.path == "/__lag":
@@ -143,10 +146,16 @@ class Handler(BaseHTTPRequestHandler):
             with _lock:
                 _write_delay_ms = int(body.get("delayMs", 0))
                 _write_refuse = bool(body.get("refuse", False))
+                _write_reason = body.get("reason")
                 _step_av = float(body["stepAv"]) if body.get("stepAv") is not None else None
                 self._json(
                     200,
-                    {"delayMs": _write_delay_ms, "refuse": _write_refuse, "stepAv": _step_av},
+                    {
+                        "delayMs": _write_delay_ms,
+                        "refuse": _write_refuse,
+                        "reason": _write_reason,
+                        "stepAv": _step_av,
+                    },
                 )
         else:
             self._json(404, {"error": "not found", "path": self.path})
@@ -160,6 +169,7 @@ class Handler(BaseHTTPRequestHandler):
                 _recorded.append(body)
                 delay_ms = _write_delay_ms
                 refuse = _write_refuse
+                reason = _write_reason
             # Outside the lock: the service's state polls keep answering meanwhile.
             if delay_ms:
                 time.sleep(delay_ms / 1000.0)
@@ -167,6 +177,8 @@ class Handler(BaseHTTPRequestHandler):
                 if refuse:
                     answer = copy.deepcopy(_state)
                     answer["notApplied"] = [k for k, v in body.items() if v is not None]
+                    if reason is not None:
+                        answer["notAppliedReason"] = {k: reason for k in answer["notApplied"]}
                     self._json(200, {"applied": 0, "state": answer})
                     return
                 if not _apply_writes:

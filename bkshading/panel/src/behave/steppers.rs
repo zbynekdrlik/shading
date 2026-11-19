@@ -12,7 +12,9 @@
 //! - ISO, uzávierka, fps: the absolute next listed choice;
 //! - biely bod ±100 K and tint ±1: the absolute value, clamped to the range.
 
-use bkshading_proto::wire::{CameraCaps, CameraView, ShadingParams};
+use std::collections::BTreeMap;
+
+use bkshading_proto::wire::{CameraCaps, CameraView, NotAppliedReason, ShadingParams};
 
 use super::holds::{HoldKind, Holds, Seen, Tap, WriteAnswer};
 
@@ -232,6 +234,8 @@ pub struct RowView {
     pub flash: bool,
     /// The camera did not apply the last write of this key (issue 1343).
     pub not_applied: bool,
+    /// Why, in Slovak (shading#17): the value's tooltip and the note of a refused press.
+    pub refusal: &'static str,
     /// The bar's position in `[0, 1]`, or none when unknown.
     pub pos: Option<f64>,
     pub dec: Gate,
@@ -387,6 +391,7 @@ pub(super) struct Live<'a> {
     pub(super) params: Option<&'a ShadingParams>,
     pub(super) caps: Option<&'a CameraCaps>,
     not_applied: &'a [String],
+    reasons: Option<&'a BTreeMap<String, NotAppliedReason>>,
 }
 
 impl<'a> Live<'a> {
@@ -396,7 +401,17 @@ impl<'a> Live<'a> {
             params: state.map(|s| &s.params),
             caps: state.and_then(|s| s.caps.as_ref()),
             not_applied: state.map_or(&[], |s| s.not_applied.as_slice()),
+            reasons: state.map(|s| &s.not_applied_reason),
         }
+    }
+    /// Why `row` was refused (shading#17): the reason of its first refused key, in Slovak.
+    fn refusal(&self, row: Row) -> &'static str {
+        let reason = row
+            .refused_keys()
+            .iter()
+            .filter(|k| self.not_applied.iter().any(|n| n == *k))
+            .find_map(|k| self.reasons.and_then(|r| r.get(*k)).copied());
+        super::refusal::reason_text(reason)
     }
     fn refused(&self, row: Row) -> bool {
         row.refused_keys()
@@ -495,6 +510,7 @@ impl Steppers {
     fn row_view(&mut self, row: Row, live: &Live, seq: u64, now: f64) -> RowView {
         let (pushed_text, pushed_value) = pushed(row, live);
         let refused = live.refused(row);
+        let refusal = live.refusal(row);
         let step_before = (row == Row::Aperture)
             .then(|| self.holds.get(row.key()))
             .flatten()
@@ -540,7 +556,7 @@ impl Steppers {
                 Gate {
                     enabled: true,
                     end: false,
-                    title: NOT_APPLIED_TITLE.into(),
+                    title: refusal.into(),
                 }
             } else {
                 g
@@ -553,6 +569,7 @@ impl Steppers {
             busy: self.holds.is_pending(row.key()),
             flash: self.holds.flashing(row.key(), now),
             not_applied: refused,
+            refusal,
             pos,
             dec: flag(dec),
             inc: flag(inc),

@@ -37,6 +37,7 @@ fn state(iso: i64) -> RelayState {
         version: "0.2.10".into(),
         not_applied: Vec::new(),
         offline_reason: None,
+        not_applied_reason: Default::default(),
     }
 }
 

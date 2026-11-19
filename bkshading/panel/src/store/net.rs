@@ -31,10 +31,34 @@ pub fn perf_now() -> f64 {
         .map_or_else(now_ms, |p| p.now())
 }
 
+/// Whether the page can be seen (`document.visibilityState` is not `hidden`). On strih the kiosk
+/// app hides its view when OBS covers the window, since WebKitGTK alone reports an obscured
+/// window as visible (shading#19).
+pub fn page_visible() -> bool {
+    web_sys::window()
+        .and_then(|w| w.document())
+        .is_none_or(|d| d.visibility_state() != web_sys::VisibilityState::Hidden)
+}
+
+/// Tells the service a visible panel watches the previews (`POST /api/preview/viewer`,
+/// shading#19), so it keeps the NDI receivers connected. A hidden page says nothing.
+fn announce_viewer() {
+    if !page_visible() {
+        return;
+    }
+    spawn_local(async {
+        if let Err(e) = fetch("POST", "/api/preview/viewer", None, None).await {
+            leptos::logging::log!("[preview] viewer call failed: {e}");
+        }
+    });
+}
+
 /// An answer of the service: its status and body text.
 pub struct Answer {
     pub status: u16,
     pub text: String,
+    /// A failed write's `x-bkshading-reason` header (shading#17), if any.
+    pub reason: Option<String>,
 }
 
 /// One HTTP request (`no-store`); `Err` when it never got an answer (no network, aborted).
@@ -46,12 +70,21 @@ pub async fn fetch_text(
 ) -> Result<Answer, String> {
     let resp = fetch(method, url, json_body, signal).await?;
     let status = resp.status();
+    let reason = resp
+        .headers()
+        .get(bkshading_proto::wire::NOT_APPLIED_REASON_HEADER)
+        .ok()
+        .flatten();
     let text = JsFuture::from(resp.text().map_err(js_err)?)
         .await
         .map_err(js_err)?
         .as_string()
         .unwrap_or_default();
-    Ok(Answer { status, text })
+    Ok(Answer {
+        status,
+        text,
+        reason,
+    })
 }
 
 /// One HTTP request; the raw response.
@@ -90,21 +123,30 @@ fn js_err(e: JsValue) -> String {
         .unwrap_or_else(|| format!("{e:?}"))
 }
 
-/// A tap's write: `PUT /api/cameras/<id>/params` with one key. The HTTP status of the answer, or
-/// `Err` when the request never reached the service; the caller hands either to
-/// `Steppers::answered` (a 2xx unlocks the row, anything else reverts it, shading#29).
-pub async fn put_param(id: &str, key: &str, value: serde_json::Value) -> Result<u16, String> {
+/// A tap's write: `PUT /api/cameras/<id>/params` with one key. The HTTP status of the answer and
+/// its `x-bkshading-reason` header (shading#17), or `Err` when the request never reached the
+/// service; the caller hands the status to `Steppers::answered` (a 2xx unlocks the row, anything
+/// else reverts it, shading#29) and shows the reason.
+pub async fn put_param(
+    id: &str,
+    key: &str,
+    value: serde_json::Value,
+) -> Result<(u16, Option<String>), String> {
     let url = format!("/api/cameras/{}/params", js_sys::encode_uri_component(id));
     let body = serde_json::json!({ key: value }).to_string();
     let started = now_ms();
     match fetch_text("PUT", &url, Some(body.clone()), None).await {
         Ok(a) => {
             leptos::logging::log!(
-                "[write] {id} {body} -> {} in {:.0} ms",
+                "[write] {id} {body} -> {} in {:.0} ms{}",
                 a.status,
-                now_ms() - started
+                now_ms() - started,
+                a.reason
+                    .as_deref()
+                    .map(|r| format!(" ({r})"))
+                    .unwrap_or_default()
             );
-            Ok(a.status)
+            Ok((a.status, a.reason))
         }
         Err(e) => {
             leptos::logging::log!("[write] {id} {body} failed: {e}");
@@ -297,4 +339,19 @@ pub fn start(store: Store) {
         move || store.now.set(now_ms()),
         Duration::from_millis(u64::from(conn::TICK_MS)),
     );
+    // shading#19: the preview receivers run only while a visible panel says so; a page that
+    // becomes visible says it at once (the first picture follows the connect).
+    announce_viewer();
+    set_interval(
+        announce_viewer,
+        Duration::from_millis(u64::from(crate::behave::preview::VIEWER_MS)),
+    );
+    if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+        let on_change = Closure::<dyn Fn()>::new(announce_viewer);
+        let _ = doc.add_event_listener_with_callback(
+            "visibilitychange",
+            on_change.as_ref().unchecked_ref(),
+        );
+        on_change.forget(); // one per page, lives as long as the page
+    }
 }

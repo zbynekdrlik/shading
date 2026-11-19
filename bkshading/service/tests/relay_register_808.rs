@@ -39,6 +39,7 @@ async fn fake_relay() -> SocketAddr {
         version: "test".into(),
         not_applied: vec![],
         offline_reason: None,
+        not_applied_reason: Default::default(),
     };
     let body = serde_json::to_string(&state).unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

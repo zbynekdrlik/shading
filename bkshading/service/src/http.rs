@@ -18,11 +18,13 @@ use axum::{
     Router,
 };
 use bkshading_proto::layout::{LayoutDoc, LayoutPut};
-use bkshading_proto::wire::{Aggregate, RelayState, ServerMsg, SetRequest};
+use bkshading_proto::wire::{
+    Aggregate, RelayState, ServerMsg, SetRequest, CAMERA_STATUS_HEADER, NOT_APPLIED_REASON_HEADER,
+};
 use rust_embed::RustEmbed;
 use tokio::sync::watch;
 
-use crate::aggregator::{aggregate_with_camera_update, Aggregator};
+use crate::aggregator::{aggregate_with_camera_update, Aggregator, ForwardError};
 use crate::config::{CameraConfig, ServiceConfig};
 use crate::layout::{LayoutStore, SaveError};
 use crate::preview::store::{wall_clock_ms, PreviewStore};
@@ -73,6 +75,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/cameras", get(cameras))
         .route("/api/cameras/:id/params", put(set_params))
         .route("/api/cameras/:id/preview.jpg", get(preview_jpg))
+        .route("/api/preview/viewer", post(preview_viewer))
         .route("/api/relays/register", post(register_relay))
         .route("/api/layout", get(get_layout).put(put_layout))
         .route("/ws", get(ws_upgrade))
@@ -289,9 +292,9 @@ async fn set_params(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(req): Json<SetRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Response {
     let Some(cam) = state.config.cameras.iter().find(|c| c.id == id) else {
-        return Err((StatusCode::NOT_FOUND, format!("no camera '{id}'")));
+        return (StatusCode::NOT_FOUND, format!("no camera '{id}'")).into_response();
     };
     match state.agg.forward_set(cam, &req).await {
         Ok(relay_state) => {
@@ -301,10 +304,29 @@ async fn set_params(
             if let Some(rs) = relay_state {
                 push_camera_update(&state, cam, rs);
             }
-            Ok(Json(serde_json::json!({ "ok": true })))
+            Json(serde_json::json!({ "ok": true })).into_response()
         }
-        Err(e) => Err((StatusCode::BAD_GATEWAY, e.to_string())),
+        Err(e) => forward_error_response(&e),
     }
+}
+
+/// The panel's answer to a write that failed on its way to the camera: `502` with the error text
+/// (unchanged), plus the additive `x-bkshading-reason` (and `x-bkshading-camera-status`) headers
+/// the relay gave, or `relay-unreachable` when the relay could not be reached (shading#17). Pure.
+pub fn forward_error_response(e: &anyhow::Error) -> Response {
+    let mut resp = (StatusCode::BAD_GATEWAY, e.to_string()).into_response();
+    if let Some(fe) = e.downcast_ref::<ForwardError>() {
+        let headers = resp.headers_mut();
+        if let Some(word) = fe.reason.as_deref() {
+            if let Ok(v) = header::HeaderValue::from_str(word) {
+                headers.insert(NOT_APPLIED_REASON_HEADER, v);
+            }
+        }
+        if let Some(status) = fe.camera_status {
+            headers.insert(CAMERA_STATUS_HEADER, status.into());
+        }
+    }
+    resp
 }
 
 /// Pushes an immediate single-camera update over the live WS channel (issue 1337): take the
@@ -324,6 +346,13 @@ async fn preview_jpg(State(state): State<AppState>, Path(id): Path<String>) -> R
     preview_response(&state.config, &state.previews, &id, wall_clock_ms())
 }
 
+/// `POST /api/preview/viewer` (shading#19): a VISIBLE panel calls it every 2 s, so the NDI preview
+/// receivers connect (and stay connected) only while someone can see the pictures. `204`.
+async fn preview_viewer(State(state): State<AppState>) -> StatusCode {
+    state.previews.viewer_seen(wall_clock_ms());
+    StatusCode::NO_CONTENT
+}
+
 /// The pure preview-endpoint decision (issue 808), split out so its status contract is Tier-0
 /// tested without an HTTP server:
 /// - an unknown camera id -> `404`, the ONLY error status;
@@ -332,15 +361,22 @@ async fn preview_jpg(State(state): State<AppState>, Path(id): Path<String>) -> R
 ///   `204 No Content`, never a 4xx/5xx. Chromium logs every 4xx/5xx resource load as a console
 ///   error, and a stale frame served as live would freeze the operator's picture.
 ///
-/// Every answer for a known camera is `Cache-Control: no-store`: a preview is always "now".
+/// Every answer for a known camera is `Cache-Control: no-store`: a preview is always "now". A
+/// fetch of a known camera with an NDI preview counts as a viewer (shading#19): it keeps the
+/// receivers connected.
 pub fn preview_response(
     config: &ServiceConfig,
     previews: &PreviewStore,
     id: &str,
     now_ms: u64,
 ) -> Response {
-    if !config.cameras.iter().any(|c| c.id == id) {
+    let Some(cam) = config.cameras.iter().find(|c| c.id == id) else {
         return (StatusCode::NOT_FOUND, format!("no camera '{id}'")).into_response();
+    };
+    // Only a camera with a preview is a viewer: a tool polling a params-only camera must not keep
+    // every receiver connected (review, shading#19).
+    if cam.ndi_preview.is_some() {
+        previews.viewer_seen(now_ms);
     }
     match previews.get_fresh(id, now_ms, config.preview.max_frame_age_ms()) {
         Some(frame) => (

@@ -14,6 +14,7 @@
 //! 0x5007 aperture converge/settle (issue 1452). `GET lens/iris` returns the f-stop the lens
 //! actually landed on.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -24,7 +25,8 @@ use bkshading_proto::read::{
     RestWrite, WriteBasis,
 };
 use bkshading_proto::wire::{
-    summarize_set_request, OfflineReason, RelayState, SetQueue, SetRequest, SubmitAction,
+    summarize_set_request, NotAppliedReason, OfflineReason, RelayState, SetQueue, SetRequest,
+    SubmitAction,
 };
 
 pub mod discover;
@@ -212,13 +214,22 @@ struct DrainLog {
     written: SetRequest,
     aperture_written: bool,
     /// Keys to report as not applied that the read-back comparison cannot see (an `apertureStep`
-    /// the iris did not follow).
-    not_applied: Vec<String>,
+    /// the iris did not follow), each with why (shading#17).
+    not_applied: Vec<(String, NotAppliedReason)>,
     /// An `apertureStep` ran in this round.
     stepped: bool,
     /// An absolute iris write (`apertureNorm`) may still be travelling: the next step waits it out
     /// once, then clears this.
     iris_travelling: bool,
+}
+
+impl DrainLog {
+    /// `key` was not applied, for `reason` (shading#17). The first reason for a key stays.
+    fn refuse(&mut self, key: &str, reason: NotAppliedReason) {
+        if !self.not_applied.iter().any(|(k, _)| k == key) {
+            self.not_applied.push((key.to_string(), reason));
+        }
+    }
 }
 
 /// One camera the relay owns, driven through its REST API.
@@ -529,6 +540,7 @@ impl CameraSession {
                         version: self.version.clone(),
                         not_applied: Vec::new(),
                         offline_reason: None,
+                        not_applied_reason: BTreeMap::new(),
                     },
                     basis: Some(basis),
                 }
@@ -734,7 +746,7 @@ impl CameraSession {
         let Some((mut basis, link)) = self.write_basis() else {
             guard.disarm_and_abort("the camera is offline");
             *lock(&self.read_cache) = None;
-            anyhow::bail!("camera offline: no camera answers its REST API, nothing written");
+            return Err(rest::CameraOffline.into());
         };
         let mut before_stop = basis.aperture_stop;
         let drain_started = std::time::Instant::now();
@@ -870,7 +882,7 @@ impl CameraSession {
                     && matches!(e, RestError::Status { status: 400, .. })
                 {
                     tracing::info!(write = ?w, "aperture slider position refused as out of range (no lens range known)");
-                    log.not_applied.push("apertureNorm".into());
+                    log.refuse("apertureNorm", NotAppliedReason::OutOfRange);
                     continue;
                 }
                 if matches!(e, RestError::Transport(_)) {
@@ -880,13 +892,16 @@ impl CameraSession {
                     RestError::Transport(_) => "did not answer",
                     _ => "refused",
                 };
-                anyhow::bail!(
+                // The text stays as it was; the `RestError` rides along as the source, so the
+                // HTTP layer can name the reason (shading#17).
+                let msg = format!(
                     "camera {} {what} PUT {}{} {}: {e}",
                     link.client.addr,
                     bkshading_proto::rest::API_PREFIX,
                     w.path(),
                     rest::write_body(w).unwrap_or_default()
                 );
+                return Err(rest::camera_err(e, msg));
             }
             log.count += 1;
             match w {
@@ -941,7 +956,7 @@ impl CameraSession {
                 dir,
                 "aperture step refused: lens/iris/description says controllable=false"
             );
-            log.not_applied.push("apertureStep".into());
+            log.refuse("apertureStep", NotAppliedReason::NotControllable);
             return Ok(None);
         }
         // An absolute iris write earlier in this round is still travelling: let it land first, so
@@ -968,7 +983,7 @@ impl CameraSession {
                 iris_range_pos = ?range_pos,
                 "aperture step refused: the iris is at that end of the lens (lens/iris normalised)"
             );
-            log.not_applied.push("apertureStep".into());
+            log.refuse("apertureStep", NotAppliedReason::LensEnd);
             return Ok(None);
         }
         if let Some(f) = focal {
@@ -980,7 +995,7 @@ impl CameraSession {
                     focal_mm = ?f,
                     "aperture step refused: a learned end of the lens at this focal length"
                 );
-                log.not_applied.push("apertureStep".into());
+                log.refuse("apertureStep", NotAppliedReason::LensEnd);
                 return Ok(None);
             }
             let known = lock(&self.lens).neighbour(f, start, dir);
@@ -1017,13 +1032,14 @@ impl CameraSession {
                 if matches!(e, RestError::Transport(_)) {
                     self.forget_link("an aperture probe got no answer");
                 }
-                anyhow::bail!(
+                let msg = format!(
                     "camera {} refused the aperture step PUT {}{} {}: {e}",
                     link.client.addr,
                     bkshading_proto::rest::API_PREFIX,
                     w.path(),
                     rest::write_body(&w).unwrap_or_default()
                 );
+                return Err(rest::camera_err(e, msg));
             }
             probes += 1;
             log.count += 1;
@@ -1064,7 +1080,7 @@ impl CameraSession {
         }
         // With range left this is an iris that does not follow (auto exposure, a manual lens),
         // not an end: reported, never learned.
-        log.not_applied.push("apertureStep".into());
+        log.refuse("apertureStep", NotAppliedReason::IrisNotFollowing);
         tracing::warn!(
             dir,
             from = start,
@@ -1081,7 +1097,7 @@ impl CameraSession {
             lock(&self.lens).note_end(f, start, dir);
             tracing::info!(dir, at = start, focal_mm = ?f, "aperture step: learned this end of the lens at this focal length");
         }
-        log.not_applied.push("apertureStep".into());
+        log.refuse("apertureStep", NotAppliedReason::LensEnd);
     }
 
     /// Writes a neighbour a walk proved adjacent (0.2.5): ONE PUT, then the usual wait for the
@@ -1114,13 +1130,14 @@ impl CameraSession {
             if matches!(e, RestError::Transport(_)) {
                 self.forget_link("an aperture write got no answer");
             }
-            anyhow::bail!(
+            let msg = format!(
                 "camera {} refused the aperture step PUT {}{} {}: {e}",
                 link.client.addr,
                 bkshading_proto::rest::API_PREFIX,
                 w.path(),
                 rest::write_body(&w).unwrap_or_default()
             );
+            return Err(rest::camera_err(e, msg));
         }
         log.count += 1;
         match self.wait_iris_move(link, start)? {
@@ -1178,7 +1195,8 @@ impl CameraSession {
             if matches!(e, RestError::Transport(_)) {
                 self.forget_link("an iris read got no answer");
             }
-            anyhow::anyhow!("camera {} iris read failed: {e}", link.client.addr)
+            let msg = format!("camera {} iris read failed: {e}", link.client.addr);
+            rest::camera_err(e, msg)
         })?;
         let stop = iris
             .aperture_stop
@@ -1260,15 +1278,23 @@ impl CameraSession {
             }
             // Refusals the comparison cannot see (an apertureStep the iris did not follow) go into
             // the state BEFORE it is cached, so the next /api/state still carries them.
-            for k in &log.not_applied {
+            // shading#17: each key carries why; a key only the comparison found is one the camera
+            // answered but kept (`camera-kept-value`).
+            let mut reasons: BTreeMap<String, NotAppliedReason> = not_applied
+                .iter()
+                .map(|k| (k.clone(), NotAppliedReason::CameraKeptValue))
+                .collect();
+            for (k, reason) in &log.not_applied {
                 if !not_applied.contains(k) {
                     not_applied.push(k.clone());
                 }
+                reasons.insert(k.clone(), *reason);
             }
             if !not_applied.is_empty() {
-                tracing::warn!(not_applied = ?not_applied, "shading write(s) NOT applied by the camera");
+                tracing::warn!(not_applied = ?reasons, "shading write(s) NOT applied by the camera");
             }
             state.not_applied = not_applied;
+            state.not_applied_reason = reasons;
         }
         *cache = Some(CachedRead {
             state: state.clone(),

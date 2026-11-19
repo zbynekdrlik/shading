@@ -18,6 +18,8 @@ use bkshading_proto::wire::{
     RelayState, SetRequest,
 };
 
+use bkshading_proto::wire::{NotAppliedReason, CAMERA_STATUS_HEADER, NOT_APPLIED_REASON_HEADER};
+
 use crate::config::{CameraConfig, ServiceConfig};
 use crate::preview::store::{wall_clock_ms, PreviewStore};
 use crate::registry::RelayRegistry;
@@ -361,7 +363,12 @@ impl Aggregator {
         ) else {
             tracing::error!(id = %cam.id, params = %params, address = %cam.address,
                 "PUT /api/params -> relay not registered (or stale)");
-            anyhow::bail!("relay {} is not registered", cam.id);
+            return Err(ForwardError {
+                message: format!("relay {} is not registered", cam.id),
+                reason: Some(NotAppliedReason::RelayUnreachable.as_str().to_string()),
+                camera_status: None,
+            }
+            .into());
         };
         let url = format!("http://{address}/api/params");
         let start = Instant::now();
@@ -389,17 +396,70 @@ impl Aggregator {
             }
             Ok(resp) => {
                 let status = resp.status();
+                // shading#17: the relay's reason headers (a relay older than 0.2.14 sends none).
+                let header = |name: &str| {
+                    resp.headers()
+                        .get(name)
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_string)
+                };
+                // Passed on as the relay's own word (a newer relay's value reaches the panel as
+                // it was sent), only when it is a plain kebab-case token.
+                let reason = header(NOT_APPLIED_REASON_HEADER)
+                    .map(|w| w.trim().to_string())
+                    .filter(|w| reason_token_ok(w));
+                let camera_status =
+                    header(CAMERA_STATUS_HEADER).and_then(|v| v.trim().parse::<u16>().ok());
                 let body = resp.text().await.unwrap_or_default();
                 let body_tail: String = body.chars().take(500).collect();
                 tracing::error!(id = %cam.id, params = %params, status = %status, latency_ms,
+                    reason = ?reason, camera_status = ?camera_status,
                     body = %body_tail, "PUT /api/params -> relay non-2xx");
-                anyhow::bail!("relay {} returned {}", cam.id, status);
+                Err(ForwardError {
+                    message: format!("relay {} returned {}", cam.id, status),
+                    reason,
+                    camera_status,
+                }
+                .into())
             }
             Err(e) => {
                 tracing::error!(id = %cam.id, params = %params, latency_ms, error = %e,
                     "PUT /api/params -> relay unreachable");
-                Err(e.into())
+                let message = format!("relay {} unreachable: {e}", cam.id);
+                Err(anyhow::Error::new(e).context(ForwardError {
+                    message,
+                    reason: Some(NotAppliedReason::RelayUnreachable.as_str().to_string()),
+                    camera_status: None,
+                }))
             }
         }
     }
+}
+
+/// Why a forwarded write failed (shading#17): the text the service answers with, and the reason
+/// (with the camera's own status for `camera-refused`) the panel shows. `reason` is `None` for a
+/// relay older than 0.2.14, or a failure the relay could not classify.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForwardError {
+    pub message: String,
+    /// A [`NotAppliedReason`] wire word, kept as sent so a newer relay's value passes through.
+    pub reason: Option<String>,
+    pub camera_status: Option<u16>,
+}
+
+impl std::fmt::Display for ForwardError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ForwardError {}
+
+/// Whether a relay's reason header is a plain kebab-case token (`[a-z0-9-]`, 1..=48), safe to
+/// pass on to the panel unchanged.
+pub fn reason_token_ok(word: &str) -> bool {
+    (1..=48).contains(&word.len())
+        && word
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }

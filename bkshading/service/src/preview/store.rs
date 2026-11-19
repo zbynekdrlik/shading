@@ -14,6 +14,7 @@
 //! stored frame stays for diagnostics.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -48,14 +49,65 @@ impl PreviewFrame {
 }
 
 /// Cheap-to-clone handle to the shared per-camera preview map.
+///
+/// shading#19: it also holds when a viewer was last seen (a `preview.jpg` fetch, or a visible
+/// panel's `POST /api/preview/viewer`). A store made by [`PreviewStore::on_demand`] wants frames
+/// only within its demand window after that; the workers drop their NDI receivers outside it.
+/// One stamp for the whole service: a visible panel shows every camera of its venue.
 #[derive(Clone, Default)]
 pub struct PreviewStore {
     inner: Arc<Mutex<HashMap<String, PreviewFrame>>>,
+    /// The demand window in ms; `None` = always wanted (tools and tests).
+    demand_ms: Option<u64>,
+    /// Wall-clock ms of the last viewer; 0 = none yet.
+    viewer_ms: Arc<AtomicU64>,
 }
 
 impl PreviewStore {
+    /// A store that always wants frames (no demand window).
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A store that wants frames only within `window_ms` after the last viewer (shading#19).
+    pub fn on_demand(window_ms: u64) -> Self {
+        Self {
+            demand_ms: Some(window_ms),
+            ..Self::default()
+        }
+    }
+
+    /// A viewer was seen at `now_ms` (a preview fetch, or the panel's viewer call).
+    pub fn viewer_seen(&self, now_ms: u64) {
+        // The newest call wins (a clock stepped back is followed, not ignored); at least 1, since 0
+        // means "nobody yet".
+        self.viewer_ms.store(now_ms.max(1), Ordering::Relaxed);
+    }
+
+    /// Does anyone watch at `now_ms`: a viewer seen at most the demand window ago? A store without
+    /// a window always wants frames. A clock stepped back below the stamp reads as a viewer just
+    /// seen (the stamp moves to the new time, so the window is never stretched by the step), never
+    /// as an underflow.
+    pub fn wanted(&self, now_ms: u64) -> bool {
+        let Some(window) = self.demand_ms else {
+            return true;
+        };
+        let seen = self.viewer_ms.load(Ordering::Relaxed);
+        if seen == 0 {
+            return false;
+        }
+        if now_ms < seen {
+            // The wall clock stepped back: the window restarts at the new time instead of
+            // holding the receivers for the size of the step (review, shading#19).
+            let _ = self.viewer_ms.compare_exchange(
+                seen,
+                now_ms.max(1),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            );
+            return true;
+        }
+        now_ms - seen <= window
     }
 
     /// Replace `cam_id`'s latest frame, bumping its sequence number.

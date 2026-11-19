@@ -57,6 +57,7 @@ fn immediate_confirm_push_updates_only_the_target_camera_1337() {
         version: "1.7.0-dev.640".into(),
         not_applied: Vec::new(),
         offline_reason: None,
+        not_applied_reason: Default::default(),
     };
     let cam1_before = camera_view(&cfg.cameras[0], Some(online_iso(400)), false);
     let handheld = camera_view(&cfg.cameras[1], None, false);
@@ -104,6 +105,7 @@ fn not_applied_is_carried_through_the_camera_view_and_pushed_1343() {
         version: "1.7.0-dev.643".into(),
         not_applied: vec!["apertureNorm".to_string()],
         offline_reason: None,
+        not_applied_reason: Default::default(),
     };
     let view = camera_view(&cfg.cameras[0], Some(state), false);
     assert_eq!(
@@ -154,6 +156,7 @@ fn camera_with_ndi_preview_has_preview_block() {
         version: "1.7.0-dev.516".into(),
         not_applied: Vec::new(),
         offline_reason: None,
+        not_applied_reason: Default::default(),
     };
     let view = camera_view(&cfg.cameras[0], Some(state), false);
     assert!(
@@ -213,6 +216,7 @@ fn online_state_with_fps_and_capture(fps100: Option<i64>, capture_fps: Option<i6
         version: "1.7.0-dev.516".into(),
         not_applied: Vec::new(),
         offline_reason: None,
+        not_applied_reason: Default::default(),
     }
 }
 
@@ -661,6 +665,7 @@ fn immediate_confirm_push_keeps_the_preview_live_flag_808() {
         version: "1.7.0-dev.761".into(),
         not_applied: Vec::new(),
         offline_reason: None,
+        not_applied_reason: Default::default(),
     };
     for live in [true, false] {
         let agg = Aggregate {

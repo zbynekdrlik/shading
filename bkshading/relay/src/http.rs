@@ -8,14 +8,17 @@ use std::sync::Arc;
 
 use axum::{
     extract::State,
-    http::StatusCode,
-    response::Json,
+    http::{HeaderName, HeaderValue, StatusCode},
+    response::{IntoResponse, Json, Response},
     routing::{get, put},
     Router,
 };
 use bkshading_proto::read::FpsNotSettable;
-use bkshading_proto::wire::{RelayState, SetRequest};
+use bkshading_proto::wire::{
+    NotAppliedReason, RelayState, SetRequest, CAMERA_STATUS_HEADER, NOT_APPLIED_REASON_HEADER,
+};
 
+use crate::transport::rest::{CameraOffline, RestError};
 use crate::transport::{ApplyOutcome, CameraSession};
 
 type Shared = Arc<CameraSession>;
@@ -51,10 +54,7 @@ async fn state(State(session): State<Shared>) -> Json<RelayState> {
     Json(st)
 }
 
-async fn set_params(
-    State(session): State<Shared>,
-    Json(req): Json<SetRequest>,
-) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
+async fn set_params(State(session): State<Shared>, Json(req): Json<SetRequest>) -> Response {
     let s = session.clone();
     // issue 1309/1337: funnel through the single-flight FIFO gate so rapid SETs never write to the
     // camera at once. An `Applied` write returns 200 with the applied count AND the state read back
@@ -62,16 +62,57 @@ async fn set_params(
     // to the panel; a SET that queued behind an in-flight write returns 202 `{"queued": true}` (it
     // is applied in order by the in-flight worker).
     match tokio::task::spawn_blocking(move || s.submit(&req)).await {
-        Ok(Ok(ApplyOutcome::Applied { count, state })) => Ok((
+        Ok(Ok(ApplyOutcome::Applied { count, state })) => (
             StatusCode::OK,
             Json(serde_json::json!({ "applied": count, "state": *state })),
-        )),
-        Ok(Ok(ApplyOutcome::Queued)) => Ok((
+        )
+            .into_response(),
+        Ok(Ok(ApplyOutcome::Queued)) => (
             StatusCode::ACCEPTED,
             Json(serde_json::json!({ "queued": true })),
-        )),
-        Ok(Err(e)) => Err((set_error_status(&e), e.to_string())),
-        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+        )
+            .into_response(),
+        Ok(Err(e)) => set_error_response(&e),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// The answer to a failed `PUT /api/params`: the status of [`set_error_status`], the error's text
+/// (both unchanged, the pinned contract), plus the additive `x-bkshading-reason` header and, for a
+/// camera refusal, `x-bkshading-camera-status` (shading#17). A failure the relay cannot classify
+/// carries no header. Pure.
+pub fn set_error_response(e: &anyhow::Error) -> Response {
+    let mut resp = (set_error_status(e), e.to_string()).into_response();
+    if let Some((reason, camera_status)) = set_error_reason(e) {
+        let headers = resp.headers_mut();
+        headers.insert(
+            HeaderName::from_static(NOT_APPLIED_REASON_HEADER),
+            HeaderValue::from_static(reason.as_str()),
+        );
+        if let Some(status) = camera_status {
+            headers.insert(HeaderName::from_static(CAMERA_STATUS_HEADER), status.into());
+        }
+    }
+    resp
+}
+
+/// Why a write failed, from its error chain (shading#17): a `fps` the camera does not list =
+/// `not-in-choices`; the camera's own non-2xx = `camera-refused` with its status; no answer =
+/// `camera-not-answering`; no camera found, nothing written = `camera-offline`. Anything else (an
+/// undecodable answer, a missing value) is not classified: `None`, no header. Pure.
+pub fn set_error_reason(e: &anyhow::Error) -> Option<(NotAppliedReason, Option<u16>)> {
+    if e.is::<FpsNotSettable>() {
+        return Some((NotAppliedReason::NotInChoices, None));
+    }
+    if e.is::<CameraOffline>() {
+        return Some((NotAppliedReason::CameraOffline, None));
+    }
+    match e.downcast_ref::<RestError>() {
+        Some(RestError::Status { status, .. }) => {
+            Some((NotAppliedReason::CameraRefused, Some(*status)))
+        }
+        Some(RestError::Transport(_)) => Some((NotAppliedReason::CameraNotAnswering, None)),
+        Some(RestError::Decode(_)) | None => None,
     }
 }
 
