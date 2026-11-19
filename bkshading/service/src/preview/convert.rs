@@ -4,9 +4,9 @@
 //! unit-testable on CI without libndi or a camera. The real receiver dispatches on the
 //! captured frame's actual FourCC and calls one of these; RGB is what the JPEG encoder wants.
 //!
-//! The receiver requests the SDK's `UYVY_BGRA` colour format (mirroring the appliance's
-//! `src/ndi.rs`), so a preview stream with no alpha arrives as `UYVY` and one with alpha as
-//! `BGRA`; `RGBA`/`BGRX` are handled defensively for other sources.
+//! The receiver requests the SDK's `UYVY_BGRA` colour format (shading#34: the SDK then skips its
+//! own conversion, ~1.5-2 % of a core less per receiver), so a preview stream with no alpha
+//! arrives as `UYVY` and one with alpha as `BGRA`; `RGBA`/`BGRX` are handled defensively.
 //!
 //! Pixel groups are walked with explicit index math (not `chunks_exact(N)` with a constant
 //! size, which the 1.98 clippy lint rejects).
@@ -43,9 +43,20 @@ pub fn rgba_to_rgb(rgba: &[u8], width: usize, height: usize) -> Vec<u8> {
     out
 }
 
-/// `UYVY` (packed 4:2:2, 4 bytes = 2 px: `U Y0 V Y1`) → RGB, BT.601 full-range approximation.
-/// Exact coefficients are unimportant for a shading PREVIEW (a rough colour reference, not a
-/// graded master); the conversion is deterministic and unit-tested for grey/luma sanity.
+/// BT.709 luma weights (ITU-R BT.709): `Kr`, `Kb`; `Kg = 1 - Kr - Kb`.
+const KR: f32 = 0.2126;
+const KB: f32 = 0.0722;
+const KG: f32 = 1.0 - KR - KB;
+/// Video-range scale: luma 16..235 (219 steps), chroma 16..240 (224 steps) onto 0..255.
+const Y_SCALE: f32 = 255.0 / 219.0;
+const C_SCALE: f32 = 255.0 / 224.0;
+
+/// `UYVY` (packed 4:2:2, 4 bytes = 2 px: `U Y0 V Y1`) → RGB, **video-range BT.709** (shading#34).
+/// That is what the NDI SDK itself does for the 640x360 preview proxy: measured live on strih-pp
+/// against the SDK's own BGRX of the same frame (BT.709 MAE 1.6 levels, BT.601 2.4, the old
+/// full-range BT.601 15.5 with black lifted to 16). Both pixels of a macropixel use its chroma
+/// (repeated, not interpolated: interpolation measured further from the SDK). Luma below 16 /
+/// above 235 clamps to 0 / 255.
 /// EVEN width is assumed (each macropixel is 2 px); an odd-width source would yield
 /// `rgb.len() != w*h*3`, which `RawFrame::is_valid` then rejects downstream (frame dropped,
 /// never a panic) — NDI video widths are even in practice.
@@ -55,14 +66,16 @@ pub fn uyvy_to_rgb(uyvy: &[u8], width: usize, height: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(pairs * 6);
     for i in 0..pairs {
         let b = i * 4;
-        let u = uyvy[b] as f32 - 128.0;
-        let y0 = uyvy[b + 1] as f32;
-        let v = uyvy[b + 2] as f32 - 128.0;
-        let y1 = uyvy[b + 3] as f32;
-        for y in [y0, y1] {
-            out.push(clamp8(y + 1.402 * v));
-            out.push(clamp8(y - 0.344_136 * u - 0.714_136 * v));
-            out.push(clamp8(y + 1.772 * u));
+        let cb = (uyvy[b] as f32 - 128.0) * C_SCALE;
+        let cr = (uyvy[b + 2] as f32 - 128.0) * C_SCALE;
+        let r_off = 2.0 * (1.0 - KR) * cr;
+        let b_off = 2.0 * (1.0 - KB) * cb;
+        let g_off = -(KR * r_off + KB * b_off) / KG;
+        for y in [uyvy[b + 1], uyvy[b + 3]] {
+            let y = (y as f32 - 16.0) * Y_SCALE;
+            out.push(clamp8(y + r_off));
+            out.push(clamp8(y + g_off));
+            out.push(clamp8(y + b_off));
         }
     }
     out

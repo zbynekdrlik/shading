@@ -270,11 +270,14 @@ pub fn capture_outcome(frame_type: i32) -> CaptureOutcome {
         other => CaptureOutcome::Other(other),
     }
 }
-// Request BGRX/BGRA = value 0 per vendor/distroav/lib/ndi/Processing.NDI.Recv.h
-// (NDIlib_recv_color_format_BGRX_BGRA = 0; UYVY_BGRA would be 1). This is the correct, live-verified
-// request (the BGRA/BGRX 4bpp path serves the JPEG preview); the actual FourCC is dispatched on
-// capture, where UYVY is still handled defensively (see the FOURCC_UYVY arm below).
-const COLOR_FORMAT_BGRX_BGRA: c_int = 0;
+// The colour format asked of the SDK, per vendor/distroav/lib/ndi/Processing.NDI.Recv.h
+// (NDIlib_recv_color_format_BGRX_BGRA = 0, UYVY_BGRA = 1). shading#34: UYVY_BGRA, so the SDK
+// hands over its native 4:2:2 and skips converting all 60 frames a second to BGRX (live strih-pp:
+// 4.5 % vs 5.9-6.5 % of a core per receiver); `convert::uyvy_to_rgb` converts only the kept
+// frames, video-range BT.709 like the SDK. A source with alpha still arrives BGRA (FourCC
+// dispatch on capture).
+const COLOR_FORMAT_UYVY_BGRA: c_int = 1;
+const REQUESTED_COLOR_FORMAT: c_int = COLOR_FORMAT_UYVY_BGRA;
 // The NDI low-quality preview stream (`NDIlib_recv_bandwidth_lowest`). src/ndi.rs uses 100
 // (HIGHEST) for the full display; a shading preview only needs LOWEST.
 const BANDWIDTH_LOWEST: c_int = 0;
@@ -497,7 +500,7 @@ impl NdiPreviewSource {
         let recv_name = CString::new("bkshading-preview").context("recv name")?;
         let create = NDIlibRecvCreateV3T {
             source_to_connect_to: source,
-            color_format: COLOR_FORMAT_BGRX_BGRA,
+            color_format: REQUESTED_COLOR_FORMAT,
             bandwidth: BANDWIDTH_LOWEST,
             allow_video_fields: false,
             p_ndi_recv_name: recv_name.as_ptr(),
