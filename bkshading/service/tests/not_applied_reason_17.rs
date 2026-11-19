@@ -103,3 +103,41 @@ fn the_state_s_reasons_pass_through_the_camera_view_17() {
         serde_json::json!({"apertureStep": "lens-end"})
     );
 }
+
+#[tokio::test]
+async fn a_newer_relay_s_reason_word_passes_through_unchanged_17() {
+    let addr = refusing_relay(502, vec![("x-bkshading-reason", "battery-low")]).await;
+    let cfg = config(&addr);
+    let agg = Aggregator::new("0.2.14-test").unwrap();
+    let err = agg.forward_set(&cfg.cameras[0], &iso()).await.unwrap_err();
+    assert_eq!(
+        forward_error_response(&err).headers()["x-bkshading-reason"],
+        "battery-low"
+    );
+    // Not a token: dropped, never forwarded.
+    let bad = refusing_relay(502, vec![("x-bkshading-reason", "Two Words")]).await;
+    let err = agg
+        .forward_set(&config(&bad).cameras[0], &iso())
+        .await
+        .unwrap_err();
+    assert!(forward_error_response(&err)
+        .headers()
+        .get("x-bkshading-reason")
+        .is_none());
+}
+
+#[tokio::test]
+async fn an_unreachable_relay_keeps_the_transport_detail_in_the_text_17() {
+    let dead = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().to_string()
+    };
+    let agg = Aggregator::new("0.2.14-test").unwrap();
+    let err = agg
+        .forward_set(&config(&dead).cameras[0], &iso())
+        .await
+        .unwrap_err();
+    let text = err.to_string();
+    assert!(text.starts_with("relay cam6 unreachable: "), "{text}");
+    assert!(text.len() > "relay cam6 unreachable: ".len(), "{text}");
+}

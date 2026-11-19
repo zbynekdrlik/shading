@@ -365,7 +365,7 @@ impl Aggregator {
                 "PUT /api/params -> relay not registered (or stale)");
             return Err(ForwardError {
                 message: format!("relay {} is not registered", cam.id),
-                reason: Some(NotAppliedReason::RelayUnreachable),
+                reason: Some(NotAppliedReason::RelayUnreachable.as_str().to_string()),
                 camera_status: None,
             }
             .into());
@@ -403,8 +403,11 @@ impl Aggregator {
                         .and_then(|v| v.to_str().ok())
                         .map(str::to_string)
                 };
-                let reason =
-                    header(NOT_APPLIED_REASON_HEADER).map(|w| NotAppliedReason::from_wire(&w));
+                // Passed on as the relay's own word (a newer relay's value reaches the panel as
+                // it was sent), only when it is a plain kebab-case token.
+                let reason = header(NOT_APPLIED_REASON_HEADER)
+                    .map(|w| w.trim().to_string())
+                    .filter(|w| reason_token_ok(w));
                 let camera_status =
                     header(CAMERA_STATUS_HEADER).and_then(|v| v.trim().parse::<u16>().ok());
                 let body = resp.text().await.unwrap_or_default();
@@ -422,9 +425,10 @@ impl Aggregator {
             Err(e) => {
                 tracing::error!(id = %cam.id, params = %params, latency_ms, error = %e,
                     "PUT /api/params -> relay unreachable");
+                let message = format!("relay {} unreachable: {e}", cam.id);
                 Err(anyhow::Error::new(e).context(ForwardError {
-                    message: format!("relay {} unreachable", cam.id),
-                    reason: Some(NotAppliedReason::RelayUnreachable),
+                    message,
+                    reason: Some(NotAppliedReason::RelayUnreachable.as_str().to_string()),
                     camera_status: None,
                 }))
             }
@@ -434,11 +438,12 @@ impl Aggregator {
 
 /// Why a forwarded write failed (shading#17): the text the service answers with, and the reason
 /// (with the camera's own status for `camera-refused`) the panel shows. `reason` is `None` for a
-/// relay older than 0.2.14 that names none.
+/// relay older than 0.2.14, or a failure the relay could not classify.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForwardError {
     pub message: String,
-    pub reason: Option<NotAppliedReason>,
+    /// A [`NotAppliedReason`] wire word, kept as sent so a newer relay's value passes through.
+    pub reason: Option<String>,
     pub camera_status: Option<u16>,
 }
 
@@ -449,3 +454,12 @@ impl std::fmt::Display for ForwardError {
 }
 
 impl std::error::Error for ForwardError {}
+
+/// Whether a relay's reason header is a plain kebab-case token (`[a-z0-9-]`, 1..=48), safe to
+/// pass on to the panel unchanged.
+pub fn reason_token_ok(word: &str) -> bool {
+    (1..=48).contains(&word.len())
+        && word
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}

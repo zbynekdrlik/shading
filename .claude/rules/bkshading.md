@@ -235,7 +235,20 @@ knowing a part:
   `service/tests/control_14.rs`, the contract pin in `relay/tests/contract.rs`, Playwright
   "... Slovak popup per cause" (fixtures) and "the real service turns a relay's offline reason ..."
   (the stub relay's `POST /__state` / `POST /__reset`; always reset in `finally`, the stub is shared).
-- Not done: a per-key reason for `notApplied` (followup).
+- **The per-key reason for `notApplied` (shading#17, v0.2.14):** `RelayState.notAppliedReason`
+  `{key: NotAppliedReason}` (kebab-case, `#[serde(other)] Unknown`), filled where the relay
+  refuses (`DrainLog::refuse` at each site: `lens-end`, `not-controllable`, `iris-not-following`,
+  `out-of-range`) and `camera-kept-value` for a key only the read-back comparison found. A failed
+  `PUT /api/params` keeps its status + text and adds `x-bkshading-reason` (+
+  `x-bkshading-camera-status`), classified in `relay/src/http.rs::set_error_reason` from the
+  error CHAIN: write errors are built with `rest::camera_err(e, msg)` (`anyhow::Error::new(e)
+  .context(msg)`: `to_string()` stays the old pinned text, `downcast_ref::<RestError>()` still
+  finds the cause), "no camera" is the `rest::CameraOffline` type; anything unclassified sends NO
+  header (never a guessed reason). The service passes the relay's word through as sent
+  (`aggregator::ForwardError`, token-checked), or `relay-unreachable`. Panel: Slovak only in
+  `behave/refusal.rs`; the refused value's tooltip + the header note when a refusal flash starts
+  (`new_refusal_note`) or a PUT fails with a reason. A 502-with-header path has no E2E (Chromium
+  logs 5xx); the lens-end path does (`stepper-lock.spec.js`, the stub's `/__write {reason}`).
 
 ## The panel: Leptos CSR at /, ARRANGE, the venue layout (shading#16 v0.2.7, switch + theme shading#24 v0.2.10)
 Owner decision A (15.11.2026): the panel is rebuilt on fohmixer-ui's stack (Leptos 0.7.8 CSR, Trunk,
@@ -534,6 +547,30 @@ was reused.
     warn once per source per process. Never log per frame.
 - `Closes #N` in a dev commit closes the ticket at merge, before camera-box deploys. Reopen it
   and close with the live read from camera-box.
+
+### NDI receivers run only while someone watches (shading#19, v0.2.14)
+Live strih-pp (v0.2.13, no operator): service 22-23 % of a core = the four NDI receivers (the SDK
+decodes the 60 fps proxy, ~5-6 % each, kept frames or not); kiosk WebKit 8-9 % fetching previews
+behind OBS (WebKitGTK reports an obscured window `visible`).
+- `PreviewStore::on_demand(PREVIEW_DEMAND_MS = 10 s)` holds ONE viewer stamp for the service (a
+  visible panel shows every camera): a `preview.jpg` fetch of a camera WITH `ndi_preview`, or
+  `POST /api/preview/viewer` (204). `PreviewStore::new()` = always wanted (tools, older tests).
+  A wall clock stepped back moves the stamp to the new time (never stretches the window).
+- `worker::cycle` builds no source without a viewer; `run_source` checks `wanted` before every
+  capture and returns `parked`; a parked worker polls every `PREVIEW_DEMAND_POLL_MS` (250).
+  "parked"/"resumed" are logged once per TRANSITION through the camera's `RepeatGate`
+  (`park()`/`resume()`), never per cycle; a session that parks inside `cycle` counts too.
+- Panel: `behave::preview::tick_action(live, connected, visible, busy)`; a hidden page fetches
+  nothing and shows the placeholder (no frozen frame on return). `net::start` posts the viewer
+  call every `VIEWER_MS` (2 s) while visible and at once on `visibilitychange` to visible.
+- `previewLive` is true only while some client watches (CONTRACT). The kiosk app (camera-box)
+  must hide its WebView on GTK `visibility-notify-event` `fully-obscured`, or the kiosk behind
+  OBS stays a viewer.
+- NOT done: requesting `UYVY_BGRA` (saves ~2.3 % per receiver while watching): `convert::
+  uyvy_to_rgb` is full-range BT.601, NDI UYVY is video-range BT.709; a switch needs a correct
+  converter + a live colour A/B first.
+- E2E: override `Document.prototype.visibilityState` in an init script and dispatch
+  `visibilitychange` (panel-next.spec.js "a visible panel announces its viewer...").
 
 ### A preview is shown only while its frame is FRESH — 204, `previewLive`, no frozen frame (issue 808, 3.10.2026)
 The panel used to reload an `<img>` at 3 Hz against an endpoint that answered `503` until a frame

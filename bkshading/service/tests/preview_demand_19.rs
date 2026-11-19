@@ -227,3 +227,84 @@ async fn the_panel_viewer_call_wakes_the_previews_19() {
     assert_eq!(resp.status().as_u16(), 204);
     assert!(store.wanted(wall_clock_ms()), "a visible panel is a viewer");
 }
+
+fn one_frame(_: &str) -> anyhow::Result<Box<dyn PreviewSource>> {
+    Ok(Box::new(SlowFeed {
+        calls: 0,
+        limit: 1000,
+        delay: Duration::from_millis(5),
+    }))
+}
+
+/// Review of shading#19: "parked" and "resumed" are logged once per TRANSITION, across cycles and
+/// across a session that parks inside `cycle`, for every round, never only the first.
+#[test]
+fn park_and_resume_are_logged_once_per_transition_every_round_19() {
+    let cfg = PreviewConfig::default();
+    let store = PreviewStore::on_demand(100);
+    let mut trouble = RepeatGate::default();
+    let mut decim = Decimator::new(cfg.fps);
+    let mut run = |store: &PreviewStore, trouble: &mut RepeatGate| {
+        cycle(
+            "cam1",
+            "CAM1 (usb)",
+            &cfg,
+            store,
+            one_frame,
+            &mut decim,
+            trouble,
+        )
+    };
+    // Nobody yet: parked, logged once; the next idle cycle logs nothing.
+    let a = run(&store, &mut trouble);
+    assert!(a.parked && a.parked_now && !a.resumed);
+    let b = run(&store, &mut trouble);
+    assert!(b.parked && !b.parked_now && !b.resumed);
+    for round in 0..2 {
+        // A viewer comes: resumed (once); the session runs until the 100 ms window ends and parks
+        // inside the same cycle: parked again (once).
+        store.viewer_seen(wall_clock_ms());
+        let c = run(&store, &mut trouble);
+        assert!(c.resumed, "round {round}: {c:?}");
+        assert!(c.parked && c.parked_now, "round {round}: {c:?}");
+        let d = run(&store, &mut trouble);
+        assert!(
+            d.parked && !d.parked_now && !d.resumed,
+            "round {round}: {d:?}"
+        );
+    }
+    assert!(trouble.parked());
+}
+
+#[test]
+fn a_clock_stepped_back_never_stretches_the_window_19() {
+    let store = PreviewStore::on_demand(PREVIEW_DEMAND_MS);
+    let t = 1_800_000_000_000;
+    store.viewer_seen(t);
+    // The clock steps back an hour: still a viewer now, but the window restarts at the new time.
+    let back = t - 3_600_000;
+    assert!(store.wanted(back));
+    assert!(store.wanted(back + PREVIEW_DEMAND_MS));
+    assert!(
+        !store.wanted(back + PREVIEW_DEMAND_MS + 1),
+        "not for the hour of the step"
+    );
+}
+
+#[test]
+fn a_params_only_camera_s_fetch_is_no_viewer_19() {
+    let cfg = ServiceConfig::from_toml_str(
+        r#"
+[[camera]]
+id = "handheld-1"
+label = "Handheld"
+transport = "sbc-relay"
+address = "register:handheld-1"
+"#,
+    )
+    .unwrap();
+    let store = PreviewStore::on_demand(PREVIEW_DEMAND_MS);
+    let now = wall_clock_ms();
+    let _ = preview_response(&cfg, &store, "handheld-1", now);
+    assert!(!store.wanted(now));
+}

@@ -18,7 +18,7 @@ use bkshading_proto::wire::{
     NotAppliedReason, RelayState, SetRequest, CAMERA_STATUS_HEADER, NOT_APPLIED_REASON_HEADER,
 };
 
-use crate::transport::rest::RestError;
+use crate::transport::rest::{CameraOffline, RestError};
 use crate::transport::{ApplyOutcome, CameraSession};
 
 type Shared = Arc<CameraSession>;
@@ -79,33 +79,40 @@ async fn set_params(State(session): State<Shared>, Json(req): Json<SetRequest>) 
 
 /// The answer to a failed `PUT /api/params`: the status of [`set_error_status`], the error's text
 /// (both unchanged, the pinned contract), plus the additive `x-bkshading-reason` header and, for a
-/// camera refusal, `x-bkshading-camera-status` (shading#17). Pure.
+/// camera refusal, `x-bkshading-camera-status` (shading#17). A failure the relay cannot classify
+/// carries no header. Pure.
 pub fn set_error_response(e: &anyhow::Error) -> Response {
-    let (reason, camera_status) = set_error_reason(e);
     let mut resp = (set_error_status(e), e.to_string()).into_response();
-    let headers = resp.headers_mut();
-    headers.insert(
-        HeaderName::from_static(NOT_APPLIED_REASON_HEADER),
-        HeaderValue::from_static(reason.as_str()),
-    );
-    if let Some(status) = camera_status {
-        headers.insert(HeaderName::from_static(CAMERA_STATUS_HEADER), status.into());
+    if let Some((reason, camera_status)) = set_error_reason(e) {
+        let headers = resp.headers_mut();
+        headers.insert(
+            HeaderName::from_static(NOT_APPLIED_REASON_HEADER),
+            HeaderValue::from_static(reason.as_str()),
+        );
+        if let Some(status) = camera_status {
+            headers.insert(HeaderName::from_static(CAMERA_STATUS_HEADER), status.into());
+        }
     }
     resp
 }
 
 /// Why a write failed, from its error chain (shading#17): a `fps` the camera does not list =
 /// `not-in-choices`; the camera's own non-2xx = `camera-refused` with its status; no answer =
-/// `camera-not-answering`; anything else (no camera found, nothing written) = `camera-offline`.
-/// Pure.
-pub fn set_error_reason(e: &anyhow::Error) -> (NotAppliedReason, Option<u16>) {
+/// `camera-not-answering`; no camera found, nothing written = `camera-offline`. Anything else (an
+/// undecodable answer, a missing value) is not classified: `None`, no header. Pure.
+pub fn set_error_reason(e: &anyhow::Error) -> Option<(NotAppliedReason, Option<u16>)> {
     if e.is::<FpsNotSettable>() {
-        return (NotAppliedReason::NotInChoices, None);
+        return Some((NotAppliedReason::NotInChoices, None));
+    }
+    if e.is::<CameraOffline>() {
+        return Some((NotAppliedReason::CameraOffline, None));
     }
     match e.downcast_ref::<RestError>() {
-        Some(RestError::Status { status, .. }) => (NotAppliedReason::CameraRefused, Some(*status)),
-        Some(RestError::Transport(_)) => (NotAppliedReason::CameraNotAnswering, None),
-        Some(RestError::Decode(_)) | None => (NotAppliedReason::CameraOffline, None),
+        Some(RestError::Status { status, .. }) => {
+            Some((NotAppliedReason::CameraRefused, Some(*status)))
+        }
+        Some(RestError::Transport(_)) => Some((NotAppliedReason::CameraNotAnswering, None)),
+        Some(RestError::Decode(_)) | None => None,
     }
 }
 

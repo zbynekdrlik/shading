@@ -86,13 +86,28 @@ impl PreviewStore {
 
     /// Does anyone watch at `now_ms`: a viewer seen at most the demand window ago? A store without
     /// a window always wants frames. A clock stepped back below the stamp reads as a viewer just
-    /// seen, never as an underflow. Pure on the stamp.
+    /// seen (the stamp moves to the new time, so the window is never stretched by the step), never
+    /// as an underflow.
     pub fn wanted(&self, now_ms: u64) -> bool {
         let Some(window) = self.demand_ms else {
             return true;
         };
         let seen = self.viewer_ms.load(Ordering::Relaxed);
-        seen != 0 && now_ms.saturating_sub(seen) <= window
+        if seen == 0 {
+            return false;
+        }
+        if now_ms < seen {
+            // The wall clock stepped back: the window restarts at the new time instead of
+            // holding the receivers for the size of the step (review, shading#19).
+            let _ = self.viewer_ms.compare_exchange(
+                seen,
+                now_ms.max(1),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            );
+            return true;
+        }
+        now_ms - seen <= window
     }
 
     /// Replace `cam_id`'s latest frame, bumping its sequence number.

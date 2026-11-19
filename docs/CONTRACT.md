@@ -300,7 +300,8 @@ UseDomains=no
     - **Header `x-bkshading-reason` on a failed `PUT /api/params`** (the 422 / 502 answers):
       `"not-in-choices"` (the 422 `fps-not-settable`), `"camera-refused"` (the camera's own
       non-2xx; then also `x-bkshading-camera-status: <its status>`), `"camera-not-answering"` (no
-      answer from the camera), `"camera-offline"` (no camera found, nothing written).
+      answer from the camera), `"camera-offline"` (no camera found, nothing written). A failure
+      the relay cannot classify (e.g. an answer it cannot decode) carries no header.
     - Values may be added later; a reader must treat an unknown value as "not applied, reason
       unknown".
   - `fps` is accepted only for a rate in `caps.fpsChoices`; any other value answers 422
@@ -355,15 +356,17 @@ UseDomains=no
 - **A failed `PUT /api/cameras/<id>/params` names its reason (v0.2.14, shading#17, additive).**
   The answer stays `502 <text>`; it now carries the relay's `x-bkshading-reason` (and
   `x-bkshading-camera-status`) header, or `x-bkshading-reason: relay-unreachable` when the relay
-  itself cannot be reached or is not registered. `CameraView.state.notAppliedReason` is the
-  relay's field passed through. A relay older than 0.2.14 gives no header and no field.
+  itself cannot be reached or is not registered. The relay's word is passed on as sent (a value
+  newer than this service included). `CameraView.state.notAppliedReason` is the relay's field
+  passed through. A relay older than 0.2.14 gives no header and no field.
 - **NDI preview receivers run only while someone watches (v0.2.14, shading#19).** The service
   connects a camera's NDI preview receiver only while a viewer was seen within 10 s: a
-  `GET /api/cameras/<id>/preview.jpg` of a known camera, or the new `POST /api/preview/viewer`
-  (answers `204`; a VISIBLE panel calls it every 2 s). With nobody watching the receivers
+  `GET /api/cameras/<id>/preview.jpg` of a camera that has an `ndi_preview`, or the new
+  `POST /api/preview/viewer` (answers `204`; a VISIBLE panel calls it every 2 s). One viewer wakes
+  EVERY camera's receiver (one stamp for the service). With nobody watching the receivers
   disconnect (no NDI decode, ~0 % CPU). So `CameraView.previewLive` is now `true` only while
-  some client watches that camera's preview; a tool that reads `previewLive` must first fetch the
-  preview (or call the viewer route) and wait a few seconds. The panel fetches nothing while its
+  some client watches any preview; a tool that reads `previewLive` must first fetch a preview (or
+  call the viewer route) and wait a few seconds. The panel fetches nothing while its
   page is `hidden`. **camera-box:** the strih kiosk app (`bkshading_panel_app.py`, WebKitGTK) must
   hide its WebView on GTK `visibility-notify-event` `fully-obscured` and show it on
   `unobscured` / `partially-obscured`: WebKitGTK alone reports a window under OBS as visible, so

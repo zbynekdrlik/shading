@@ -143,7 +143,7 @@ fn a_camera_refusal_is_camera_refused_with_its_status_17() {
     );
     assert_eq!(
         set_error_reason(&err),
-        (NotAppliedReason::CameraRefused, Some(403))
+        Some((NotAppliedReason::CameraRefused, Some(403)))
     );
     let resp = set_error_response(&err);
     assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
@@ -168,23 +168,58 @@ fn an_unlisted_fps_is_not_in_choices_17() {
 
 #[test]
 fn no_camera_is_camera_offline_and_a_silent_one_camera_not_answering_17() {
-    let offline =
-        anyhow::anyhow!("camera offline: no camera answers its REST API, nothing written");
+    use bkshading_relay::transport::rest::{camera_err, CameraOffline, RestError};
+    // Nothing answers at the camera's address: the drain finds no camera.
+    let dead = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let s = Arc::new(
+        CameraSession::new(
+            CameraLocator::Fixed(CameraAddr {
+                host: "127.0.0.1".into(),
+                port: dead,
+            }),
+            "0.2.14-test",
+        )
+        .with_aperture_readback_delay_ms(0),
+    );
+    let offline = s
+        .submit(&SetRequest {
+            iso: Some(800),
+            ..Default::default()
+        })
+        .unwrap_err();
+    assert_eq!(offline.to_string(), CameraOffline.to_string());
     assert_eq!(
         set_error_reason(&offline),
-        (NotAppliedReason::CameraOffline, None)
+        Some((NotAppliedReason::CameraOffline, None))
     );
-    let silent = anyhow::Error::new(bkshading_relay::transport::rest::RestError::Transport(
-        "timed out".into(),
-    ))
-    .context("camera 127.0.0.1:1 did not answer PUT /control/api/v1/video/iso {}");
+    let silent = camera_err(
+        RestError::Transport("timed out".into()),
+        "camera 127.0.0.1:1 did not answer PUT /control/api/v1/video/iso {}".into(),
+    );
     assert_eq!(
         set_error_reason(&silent),
-        (NotAppliedReason::CameraNotAnswering, None)
+        Some((NotAppliedReason::CameraNotAnswering, None))
     );
     assert!(silent
         .to_string()
         .starts_with("camera 127.0.0.1:1 did not answer"));
+    // A failure the relay cannot classify names no reason (no header), never a wrong one.
+    let odd = camera_err(
+        RestError::Decode("not JSON".into()),
+        "camera x iris read failed".into(),
+    );
+    assert_eq!(set_error_reason(&odd), None);
+    assert!(set_error_response(&odd)
+        .headers()
+        .get("x-bkshading-reason")
+        .is_none());
+    assert_eq!(
+        set_error_reason(&anyhow::anyhow!("reports no apertureStop")),
+        None
+    );
 }
 
 #[test]

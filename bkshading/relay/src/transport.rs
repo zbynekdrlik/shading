@@ -14,6 +14,7 @@
 //! 0x5007 aperture converge/settle (issue 1452). `GET lens/iris` returns the f-stop the lens
 //! actually landed on.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -27,7 +28,6 @@ use bkshading_proto::wire::{
     summarize_set_request, NotAppliedReason, OfflineReason, RelayState, SetQueue, SetRequest,
     SubmitAction,
 };
-use std::collections::BTreeMap;
 
 pub mod discover;
 mod lens_memory;
@@ -746,7 +746,7 @@ impl CameraSession {
         let Some((mut basis, link)) = self.write_basis() else {
             guard.disarm_and_abort("the camera is offline");
             *lock(&self.read_cache) = None;
-            anyhow::bail!("camera offline: no camera answers its REST API, nothing written");
+            return Err(rest::CameraOffline.into());
         };
         let mut before_stop = basis.aperture_stop;
         let drain_started = std::time::Instant::now();
@@ -901,7 +901,7 @@ impl CameraSession {
                     w.path(),
                     rest::write_body(w).unwrap_or_default()
                 );
-                return Err(anyhow::Error::new(e).context(msg));
+                return Err(rest::camera_err(e, msg));
             }
             log.count += 1;
             match w {
@@ -1039,7 +1039,7 @@ impl CameraSession {
                     w.path(),
                     rest::write_body(&w).unwrap_or_default()
                 );
-                return Err(anyhow::Error::new(e).context(msg));
+                return Err(rest::camera_err(e, msg));
             }
             probes += 1;
             log.count += 1;
@@ -1137,7 +1137,7 @@ impl CameraSession {
                 w.path(),
                 rest::write_body(&w).unwrap_or_default()
             );
-            return Err(anyhow::Error::new(e).context(msg));
+            return Err(rest::camera_err(e, msg));
         }
         log.count += 1;
         match self.wait_iris_move(link, start)? {
@@ -1196,7 +1196,7 @@ impl CameraSession {
                 self.forget_link("an iris read got no answer");
             }
             let msg = format!("camera {} iris read failed: {e}", link.client.addr);
-            anyhow::Error::new(e).context(msg)
+            rest::camera_err(e, msg)
         })?;
         let stop = iris
             .aperture_stop

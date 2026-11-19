@@ -317,11 +317,10 @@ pub fn forward_error_response(e: &anyhow::Error) -> Response {
     let mut resp = (StatusCode::BAD_GATEWAY, e.to_string()).into_response();
     if let Some(fe) = e.downcast_ref::<ForwardError>() {
         let headers = resp.headers_mut();
-        if let Some(reason) = fe.reason {
-            headers.insert(
-                NOT_APPLIED_REASON_HEADER,
-                header::HeaderValue::from_static(reason.as_str()),
-            );
+        if let Some(word) = fe.reason.as_deref() {
+            if let Ok(v) = header::HeaderValue::from_str(word) {
+                headers.insert(NOT_APPLIED_REASON_HEADER, v);
+            }
         }
         if let Some(status) = fe.camera_status {
             headers.insert(CAMERA_STATUS_HEADER, status.into());
@@ -363,17 +362,22 @@ async fn preview_viewer(State(state): State<AppState>) -> StatusCode {
 ///   error, and a stale frame served as live would freeze the operator's picture.
 ///
 /// Every answer for a known camera is `Cache-Control: no-store`: a preview is always "now". A
-/// fetch of a known camera counts as a viewer (shading#19): it keeps the receivers connected.
+/// fetch of a known camera with an NDI preview counts as a viewer (shading#19): it keeps the
+/// receivers connected.
 pub fn preview_response(
     config: &ServiceConfig,
     previews: &PreviewStore,
     id: &str,
     now_ms: u64,
 ) -> Response {
-    if !config.cameras.iter().any(|c| c.id == id) {
+    let Some(cam) = config.cameras.iter().find(|c| c.id == id) else {
         return (StatusCode::NOT_FOUND, format!("no camera '{id}'")).into_response();
+    };
+    // Only a camera with a preview is a viewer: a tool polling a params-only camera must not keep
+    // every receiver connected (review, shading#19).
+    if cam.ndi_preview.is_some() {
+        previews.viewer_seen(now_ms);
     }
-    previews.viewer_seen(now_ms);
     match previews.get_fresh(id, now_ms, config.preview.max_frame_age_ms()) {
         Some(frame) => (
             [

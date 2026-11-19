@@ -57,7 +57,6 @@ fn run_forever(
     // a source that is found and then fails every time, warns once per streak, not every cycle,
     // forever (shading#3).
     let mut trouble = RepeatGate::default();
-    let mut was_parked = false;
     loop {
         let log = cycle(
             cam_id,
@@ -68,14 +67,6 @@ fn run_forever(
             &mut decim,
             &mut trouble,
         );
-        if log.parked != was_parked {
-            if log.parked {
-                tracing::info!(cam = %cam_id, source = %source_name, "preview parked: no viewer, NDI receiver disconnected");
-            } else {
-                tracing::info!(cam = %cam_id, source = %source_name, "preview resumed: a viewer is back");
-            }
-            was_parked = log.parked;
-        }
         if log.parked {
             thread::sleep(Duration::from_millis(PREVIEW_DEMAND_POLL_MS));
         } else {
@@ -94,6 +85,10 @@ pub struct CycleLog {
     /// Nobody watches: no source was built, or the session ended because the viewer left
     /// (shading#19). Not a failure.
     pub parked: bool,
+    /// This cycle logged "preview parked" (the camera went from watched to not watched).
+    pub parked_now: bool,
+    /// This cycle logged "preview resumed" (a viewer came back to a parked camera).
+    pub resumed: bool,
 }
 
 /// One turn of the reconnect loop: build the source, run it until it fails, and log the
@@ -114,7 +109,14 @@ pub fn cycle(
             warned: false,
             recovered: false,
             parked: true,
+            parked_now: park(cam_id, source_name, trouble),
+            resumed: false,
         };
+    }
+    // A viewer is there: a parked camera resumes (logged once, at the transition).
+    let resumed = trouble.resume();
+    if resumed {
+        tracing::info!(cam = %cam_id, source = %source_name, "preview resumed: a viewer is back");
     }
     match build(source_name) {
         Ok(mut src) => {
@@ -132,11 +134,12 @@ pub fn cycle(
                 if end.stored {
                     trouble.clear();
                 }
-                tracing::debug!(cam = %cam_id, source = %source_name, "preview session parked: the viewer left");
                 return CycleLog {
                     warned: false,
                     recovered,
                     parked: true,
+                    parked_now: park(cam_id, source_name, trouble),
+                    resumed,
                 };
             }
             if end.stored {
@@ -153,6 +156,8 @@ pub fn cycle(
                 warned,
                 recovered,
                 parked: false,
+                parked_now: false,
+                resumed,
             }
         }
         Err(e) => {
@@ -167,16 +172,32 @@ pub fn cycle(
                 warned,
                 recovered: false,
                 parked: false,
+                parked_now: false,
+                resumed,
             }
         }
     }
 }
 
+/// Nobody watches `cam_id`: logs "preview parked" when this is a new park (once per transition,
+/// shading#19). Whether it logged.
+fn park(cam_id: &str, source_name: &str, trouble: &mut RepeatGate) -> bool {
+    let new = trouble.park();
+    if new {
+        tracing::info!(cam = %cam_id, source = %source_name, "preview parked: no viewer, NDI receiver disconnected");
+    }
+    new
+}
+
 /// Lets each distinct error text through once per failure streak, so a failure that repeats
 /// at a fixed rate, or two that alternate, warn once and the repeats log at debug (shading#3).
+///
+/// It also remembers whether the camera is parked (shading#19), so "parked" and "resumed" are
+/// logged once per transition, across cycles.
 #[derive(Debug, Default)]
 pub struct RepeatGate {
     seen: std::collections::HashSet<String>,
+    parked: bool,
 }
 
 impl RepeatGate {
@@ -193,6 +214,21 @@ impl RepeatGate {
     /// Something worked: the next error starts a new streak.
     pub fn clear(&mut self) {
         self.seen.clear();
+    }
+
+    /// Nobody watches: true when the camera was not parked yet (a transition worth a log line).
+    pub fn park(&mut self) -> bool {
+        !std::mem::replace(&mut self.parked, true)
+    }
+
+    /// A viewer is there: true when the camera was parked (a transition worth a log line).
+    pub fn resume(&mut self) -> bool {
+        std::mem::replace(&mut self.parked, false)
+    }
+
+    /// Is the camera parked (nobody watched at the last look)?
+    pub fn parked(&self) -> bool {
+        self.parked
     }
 }
 
