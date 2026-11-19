@@ -499,7 +499,7 @@ impl Steppers {
             .then(|| self.holds.get(row.key()))
             .flatten()
             .filter(|h| h.kind == HoldKind::Step)
-            .map(|h| (h.from.clone(), h.seq, h.id));
+            .map(|h| (h.seq, h.id));
         let held = self
             .holds
             .reconcile(
@@ -512,11 +512,18 @@ impl Steppers {
                 },
             )
             .cloned();
-        // An aperture step that a newer view CONFIRMED (a different f-stop, no refusal) teaches
-        // this camera's fine step (shading#29).
-        if let (None, Some((from, hold_seq, id))) = (&held, step_before) {
-            let basis = self.aperture_press.take().filter(|b| b.id == id);
-            if let Some(b) = basis.filter(|_| seq > hold_seq && !refused && pushed_text != from) {
+        // An aperture step whose hold ended on a newer view without a refusal (a different f-stop,
+        // or the timeout of a step too small to change the shown text) teaches this camera's fine
+        // step from where the lens moved along the press (shading#29).
+        if let (None, Some((hold_seq, id))) = (&held, step_before) {
+            // Every Step hold is made by `press` together with its basis (a slider hold is a Value
+            // hold): the ids always match; the filter only keeps a future second source honest.
+            let basis = self.aperture_press.take();
+            debug_assert!(
+                basis.is_none_or(|b| b.id == id),
+                "a Step hold without its basis"
+            );
+            if let Some(b) = basis.filter(|b| b.id == id && seq > hold_seq && !refused) {
                 let after = live.params.and_then(|p| p.aperture_av);
                 if let Some(d) = learned_aperture_step(b.from_av, after, b.dir) {
                     self.aperture_step_av = Some(d);
