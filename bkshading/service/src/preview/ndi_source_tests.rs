@@ -215,3 +215,30 @@ fn an_unusable_shape_warns_once_per_source() {
         "another source warns on its own"
     );
 }
+
+/// shading#34: the receiver asks the SDK for UYVY (no per-frame BGRX conversion in the SDK).
+#[test]
+fn the_receiver_requests_uyvy_bgra_34() {
+    assert_eq!(
+        REQUESTED_COLOR_FORMAT, 1,
+        "NDIlib_recv_color_format_UYVY_BGRA"
+    );
+}
+
+/// shading#34: a captured UYVY frame is converted video-range BT.709 (Y 16 -> 0, Y 235 -> 255),
+/// through the same capture glue a real frame takes (padded stride, copy before the free).
+#[test]
+fn a_kept_uyvy_frame_converts_video_range_34() {
+    let mut recv = FakeRecv::default();
+    // 2x1 UYVY (4 bytes of pixels) with 4 bytes of row padding: U Y0 V Y1 = black, white.
+    let data = vec![128, 16, 128, 235, 9, 9, 9, 9];
+    recv.script
+        .push_back((FRAME_TYPE_VIDEO, Some((FOURCC_UYVY, 2, 1, 8, data))));
+    let mut st = state(clock_at(0));
+    let frame = capture_frame(&mut recv, &mut st, 100, &mut || true)
+        .expect("no error")
+        .expect("a frame");
+    assert!(frame.is_valid());
+    assert_eq!(frame.rgb, [0, 0, 0, 255, 255, 255]);
+    assert_eq!(recv.log, ["capture", "free"]);
+}

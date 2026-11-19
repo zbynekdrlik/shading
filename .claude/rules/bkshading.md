@@ -566,9 +566,17 @@ behind OBS (WebKitGTK reports an obscured window `visible`).
 - `previewLive` is true only while some client watches (CONTRACT). The kiosk app (camera-box)
   must hide its WebView on GTK `visibility-notify-event` `fully-obscured`, or the kiosk behind
   OBS stays a viewer.
-- NOT done: requesting `UYVY_BGRA` (saves ~2.3 % per receiver while watching): `convert::
-  uyvy_to_rgb` is full-range BT.601, NDI UYVY is video-range BT.709; a switch needs a correct
-  converter + a live colour A/B first.
+- Since v0.2.15 (shading#34) the receiver requests `UYVY_BGRA` (value 1): the SDK hands over
+  its native 4:2:2 instead of converting all 60 frames a second to BGRX (live strih-pp probe, per
+  receiver capturing every frame: UYVY 4.5 % vs BGRX 5.9-6.5 % of a core). `convert::uyvy_to_rgb`
+  is **video-range BT.709 with repeated chroma**, because that is what the SDK's own BGRX of the
+  640x360 proxy is (A/B on the same frame: BT.709 MAE 1.6, BT.601 video 2.4, the old full-range
+  BT.601 15.5 with black lifted to RGB 16; interpolated chroma 2.0). An alpha source still
+  arrives BGRA. Re-check with a raw-frame probe (python/ctypes `recv_create_v3`, color_format 0
+  then 1, the same source back to back) whenever the SDK or the cambox encoder changes. At night
+  the cameras show near-black: judge the matrix on a colourful UYVY source (`STREAM-PP (stream)`),
+  the range on a camera. Raw frames leave strih-pp by a short `python3 -m http.server` (curl from
+  dev1 on 10.76.8.202), not through MCP base64.
 - E2E: override `Document.prototype.visibilityState` in an init script and dispatch
   `visibilitychange` (panel-next.spec.js "a visible panel announces its viewer...").
 
@@ -656,7 +664,8 @@ never load on its own ship target.
   behavior tests live in `service/tests/preview.rs` (default features).
   The 3rd — the color-format meaning vs the installed header — is
   RESOLVED (#808 SBC lane): value 0 is `BGRX_BGRA` per `Processing.NDI.Recv.h`, so the misnamed
-  constant was renamed `COLOR_FORMAT_UYVY_BGRA` → `COLOR_FORMAT_BGRX_BGRA` (behaviour unchanged; the
+  constant was renamed `COLOR_FORMAT_UYVY_BGRA` → `COLOR_FORMAT_BGRX_BGRA` (behaviour unchanged; since
+  shading#34 the request IS `UYVY_BGRA` = 1, on purpose; the
   same harmless mislabel still stands in the main display path `src/ndi.rs`, a separate subsystem).
   Task 4 (make `--features ndi` the default build, or keep opt-in) is RESOLVED — owner decision
   2026-08-24 (issue 1157 comment 5393834171, možnosť 1; features-default-on rule): **`ndi` is now
