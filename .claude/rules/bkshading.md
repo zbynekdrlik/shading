@@ -249,6 +249,12 @@ knowing a part:
   `behave/refusal.rs`; the refused value's tooltip + the header note when a refusal flash starts
   (`new_refusal_note`) or a PUT fails with a reason. A 502-with-header path has no E2E (Chromium
   logs 5xx); the lens-end path does (`stepper-lock.spec.js`, the stub's `/__write {reason}`).
+  Live check (19.11.2026, PP cam7): the reason comes from the RELAY, so the cambox relay must be
+  >= 0.2.14 too (camera-box deploys relays separately from the service; PP ran 0.2.9). At a
+  known lens end the panel's button is already disabled ("Objektív je na najotvorenejšej
+  clone"), so drive the refusal with one `PUT /api/cameras/camN/params {"apertureStep":-1}` from
+  the page: `notAppliedReason {apertureStep: lens-end}` and the f-number tooltip show for ~1.5 s
+  (the header note needs a refused press of the panel itself). Never on the PGM camera (tally).
 
 ## The panel: Leptos CSR at /, ARRANGE, the venue layout (shading#16 v0.2.7, switch + theme shading#24 v0.2.10)
 Owner decision A (15.11.2026): the panel is rebuilt on fohmixer-ui's stack (Leptos 0.7.8 CSR, Trunk,
