@@ -186,6 +186,7 @@ test("the aperture guess equals the confirmed value, never forward-then-back, co
     // A second press builds on the camera's f-stop (the stub's 0.1 AV = the default step).
     await inc.click();
     await expect(val).toHaveText("f/5.6", { timeout: 300 });
+    await expect(bar).toBeVisible();
     await expect(bar).toBeHidden({ timeout: 5000 });
     await page.waitForTimeout(2500);
     await expect(val).toHaveText("f/5.6");
@@ -224,6 +225,7 @@ test("the aperture guess learns the camera's own step from the last confirmed pr
     // Nothing learned yet: the default 0.1 AV (f/5.4); the lens lands at AV 4.93 = f/5.5.
     await inc.click();
     await expect(val).toHaveText("f/5.4", { timeout: 300 });
+    await expect(bar).toBeVisible();
     await expect(bar).toBeHidden({ timeout: 5000 });
     await expect(val).toHaveText("f/5.5", { timeout: 3000 });
     await page.waitForTimeout(2500);
@@ -240,6 +242,7 @@ test("the aperture guess learns the camera's own step from the last confirmed pr
     });
     await inc.click();
     await expect(val).toHaveText("f/5.8", { timeout: 300 });
+    await expect(bar).toBeVisible();
     await expect(bar).toBeHidden({ timeout: 5000 });
     await page.waitForTimeout(2500);
     await expect(val).toHaveText("f/5.8");

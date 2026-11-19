@@ -17,9 +17,9 @@ WITHOUT a camera or the real relay binary, so the E2E can drive the panel end-to
                          while a write lands).
   * GET  /__gets       -> how many `GET /api/state` arrived so far (a test waits for a poll to
                          be in flight).
-  * POST /__write      -> `{"delayMs": N, "refuse": bool, "stepAv": x}`: a `PUT /api/params` answers N ms
-                         after it arrives (shading#29: the panel's lock while a write is
-                         unanswered), and with `refuse` it applies nothing and answers the state
+  * POST /__write      -> `{"delayMs": N, "refuse": bool, "stepAv": x}`: a `PUT /api/params`
+                         answers N ms after it arrives (shading#29: the panel's lock while a write
+                         is unanswered), and with `refuse` it applies nothing and answers the state
                          with every written key in `notApplied` (the camera refused it); `stepAv`
                          sets the AV one `apertureStep` moves (default APERTURE_STEP_AV). Dropped
                          by /__reset.
@@ -27,8 +27,8 @@ WITHOUT a camera or the real relay binary, so the E2E can drive the panel end-to
                          `{"applied": n, "state": {...}}` like the real relay, so the service pushes
                          its immediate confirmation (issue 1337). An `apertureStep` of +/-1 moves
                          `apertureAv` by one fine lens step (APERTURE_STEP_AV = 0.1 AV, the
-                         relay's live behaviour, shading#29; `/__write` `stepAv` changes it). Off by default: the shared stub
-                         keeps its fixed fixture.
+                         relay's live behaviour, shading#29; `/__write` `stepAv` changes it). Off
+                         by default: the shared stub keeps its fixed fixture.
 
 Stdlib only (http.server/json/argparse), threaded so the service's concurrent poll + the browser
 never block each other. Fails loudly on error (never a silent swallow, per script-failure-policy).

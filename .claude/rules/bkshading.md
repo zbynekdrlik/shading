@@ -338,8 +338,9 @@ the house app stack airuleset#1333); mockup `docs/mockups/arrange-v1.html` appro
   step grid: the relay's `apertureStep` moves the lens's own fine step (~0.1 AV: 3.2 -> 3.3,
   3.7 -> 3.8). `aperture_next(f, grid, dir, step_av)` = `2^((AV ± step)/2)` with AV = `2 log2 f`,
   stopped ON the grid's next entry in `dir` if the step would pass it (never jump a menu stop).
-  `step_av` is learned per block (= per camera) in `Steppers::row_view`: an aperture Step hold that a
-  NEWER, non-refused view ends with a different f-stop text teaches `|AV_after − AV_at_press|`
+  `step_av` is learned per block (= per camera) in `Steppers::row_view`: an aperture Step hold that
+  ends on a NEWER, non-refused view (a different f-stop text, or the 8 s timeout of a step too small
+  to change the `{:.1}` text) teaches `|AV_after − AV_at_press|` along the press
   (`learned_aperture_step`, clamped `APERTURE_STEP_AV_RANGE` 0.03..0.4); before any, 0.1 AV
   (`APERTURE_STEP_AV_DEFAULT`). The lens-end gating (`irisRangePos`) is unchanged. E2E:
   `stepper-lock.spec.js` "the aperture guess equals the confirmed value" (the stub's `--apply-writes`

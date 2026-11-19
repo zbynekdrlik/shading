@@ -641,6 +641,8 @@ fn the_aperture_guess_uses_the_learned_av_step_of_this_camera_29() {
     );
     assert_eq!(guess(&mut s.clone(), &at_f(4.0), 1, 1000.0), "f/4.3");
     assert_eq!(guess(&mut s.clone(), &landed, -1, 1000.0), "f/4.0");
+    // Off a grid stop: f/5.55 − 0.209 AV = f/5.2 (the default: f/5.4; the grid's 5.0 not reached).
+    assert_eq!(guess(&mut s.clone(), &at_f(5.55), -1, 1000.0), "f/5.2");
     // Another camera's block has learned nothing: the default step.
     assert_eq!(guess(&mut Steppers::default(), &at_f(4.0), 1, 0.0), "f/4.1");
 }
