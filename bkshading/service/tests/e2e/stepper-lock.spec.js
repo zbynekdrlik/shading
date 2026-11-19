@@ -183,7 +183,7 @@ test("the aperture guess equals the confirmed value, never forward-then-back, co
     await page.waitForTimeout(2500);
     await expect(val).toHaveText("f/5.4");
 
-    // A second press builds on the camera's f-stop with the learned 0.1 AV step.
+    // A second press builds on the camera's f-stop (the stub's 0.1 AV = the default step).
     await inc.click();
     await expect(val).toHaveText("f/5.6", { timeout: 300 });
     await expect(bar).toBeHidden({ timeout: 5000 });
@@ -203,6 +203,54 @@ test("the aperture guess equals the confirmed value, never forward-then-back, co
     const state = await (await page.request.get(`${STUB}/api/state`)).json();
     expect(state.params.apertureAv).toBeCloseTo(4.98, 6);
     expect(await writes(page)).toBe(before + 2);
+  } finally {
+    await page.request.post(`${STUB}/__reset`);
+  }
+  gate.assertClean();
+});
+
+// The guess learns this camera's own step: a lens that moves 0.15 AV per step lands the first
+// press past the default 0.1 AV guess, and from then on the guess is the landing.
+test("the aperture guess learns the camera's own step from the last confirmed press, console clean (shading#29)", async ({ page }) => {
+  const gate = consoleGate(page);
+  try {
+    await open(page);
+    const val = page.locator('[data-role="fnum"]');
+    const inc = page.locator('[data-role="aperture-inc"]');
+    const bar = page.locator('[data-role="aperture-pending"]');
+    await expect(val).toHaveText("f/5.2");
+    await page.request.post(`${STUB}/__write`, { data: { delayMs: 600, stepAv: 0.15 } });
+
+    // Nothing learned yet: the default 0.1 AV (f/5.4); the lens lands at AV 4.93 = f/5.5.
+    await inc.click();
+    await expect(val).toHaveText("f/5.4", { timeout: 300 });
+    await expect(bar).toBeHidden({ timeout: 5000 });
+    await expect(val).toHaveText("f/5.5", { timeout: 3000 });
+    await page.waitForTimeout(2500);
+
+    // Learned 0.15 AV: the guess is the next landing, AV 5.08 = f/5.8 (the default would say f/5.7).
+    await page.evaluate(() => {
+      const w = /** @type {any} */ (window);
+      w.__fnum = [];
+      w.__fnumTimer = setInterval(() => {
+        const el = document.querySelector('[data-role="fnum"]');
+        const t = el ? el.textContent : null;
+        if (w.__fnum[w.__fnum.length - 1] !== t) w.__fnum.push(t);
+      }, 10);
+    });
+    await inc.click();
+    await expect(val).toHaveText("f/5.8", { timeout: 300 });
+    await expect(bar).toBeHidden({ timeout: 5000 });
+    await page.waitForTimeout(2500);
+    await expect(val).toHaveText("f/5.8");
+    const seen = await page.evaluate(() => {
+      const w = /** @type {any} */ (window);
+      clearInterval(w.__fnumTimer);
+      return w.__fnum;
+    });
+    expect(seen).toEqual(["f/5.5", "f/5.8"]);
+    const state = await (await page.request.get(`${STUB}/api/state`)).json();
+    expect(state.params.apertureAv).toBeCloseTo(5.08, 6);
   } finally {
     await page.request.post(`${STUB}/__reset`);
   }

@@ -325,8 +325,8 @@ the house app stack airuleset#1333); mockup `docs/mockups/arrange-v1.html` appro
   write never unlocks a newer press; Auto WB and the fps align button send id 0 (no hold). A
   `notApplied` the view at the press already showed (an earlier write's, still in the relay state)
   refuses only after this write's answer. The slider checks only the lock, never the 300 ms guard.
-  The aperture guess is only TEXT (`value: None`): the next press builds on the camera's f-stop. A 502 path has
-  no E2E on purpose: Chromium logs every 5xx resource as a console error. E2E:
+  The aperture guess is only TEXT (`value: None`): the next press builds on the camera's f-stop.
+  A 502 path has no E2E on purpose: Chromium logs every 5xx resource as a console error. E2E:
   `stepper-lock.spec.js` on the :8786/:8787 pair; the stub's `POST /__write {delayMs, refuse}` delays
   the PUT answer (sleep outside the stub lock, so polls keep answering) or answers the state with the
   written keys in `notApplied`. "a second press after a fast answer but within 300 ms" is the one
@@ -342,8 +342,11 @@ the house app stack airuleset#1333); mockup `docs/mockups/arrange-v1.html` appro
   NEWER, non-refused view ends with a different f-stop text teaches `|AV_after − AV_at_press|`
   (`learned_aperture_step`, clamped `APERTURE_STEP_AV_RANGE` 0.03..0.4); before any, 0.1 AV
   (`APERTURE_STEP_AV_DEFAULT`). The lens-end gating (`irisRangePos`) is unchanged. E2E:
-  `stepper-lock.spec.js` "the aperture guess equals the confirmed value": the stub's `--apply-writes`
-  moves `apertureAv` by 0.1 per `apertureStep`, and every sampled value is the start or the landing.
+  `stepper-lock.spec.js` "the aperture guess equals the confirmed value" (the stub's `--apply-writes`
+  moves `apertureAv` by 0.1 per `apertureStep`; every sampled value is the start or a landing) and
+  "... learns the camera's own step" (`POST /__write {stepAv: 0.15}`). A landing AGAINST the press
+  (iris turned on the body) teaches nothing; the basis (`StepBasis`: write id, AV at the press, dir)
+  is tied to the hold's write id.
   General lesson: a menu/choice list a camera reports is a SLIDER grid, never proof of the step a
   relative write moves; derive an optimistic guess from the step the device actually moved.
 - **The service embeds `bkshading/panel/dist/` with rust-embed** (`http::PanelAssets`, `panel_file`:

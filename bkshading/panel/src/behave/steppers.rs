@@ -259,12 +259,27 @@ pub fn av_from_f_number(f: f64) -> f64 {
     2.0 * f.log2()
 }
 
-/// The AV step a confirmed aperture press moved (`|AV_after - AV_before|`), clamped to
-/// [`APERTURE_STEP_AV_RANGE`]; none when either value is unknown.
-pub fn learned_aperture_step(av_before: Option<f64>, av_after: Option<f64>) -> Option<f64> {
+/// The AV step a confirmed aperture press in `dir` moved (`|AV_after - AV_before|`), clamped to
+/// [`APERTURE_STEP_AV_RANGE`]; none when either value is unknown or the lens landed AGAINST the
+/// press (the iris turned on the body, a zoom: not this press's step).
+pub fn learned_aperture_step(
+    av_before: Option<f64>,
+    av_after: Option<f64>,
+    dir: i32,
+) -> Option<f64> {
     let (lo, hi) = APERTURE_STEP_AV_RANGE;
-    let d = (av_after? - av_before?).abs();
-    d.is_finite().then(|| d.clamp(lo, hi))
+    let moved = av_after? - av_before?;
+    let along = (moved > 0.0 && dir > 0) || (moved < 0.0 && dir < 0);
+    (moved.is_finite() && along).then(|| moved.abs().clamp(lo, hi))
+}
+
+/// What an aperture press learns its step from (shading#29): its write's id (the hold it belongs
+/// to), the camera's AV at the press and the direction.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct StepBasis {
+    id: u64,
+    from_av: Option<f64>,
+    dir: i32,
 }
 
 /// Mirror of the proto `mapping::step_choice`: the index of the next choice from `current` in
@@ -454,8 +469,8 @@ pub struct Steppers {
     /// another camera, or the clock, changes nothing here).
     last: Option<CameraView>,
     pub(super) seq: u64,
-    /// The AV of the camera at the last aperture press (the basis of the step it learns).
-    aperture_from_av: Option<f64>,
+    /// The basis of the last aperture press, until its hold ends (the step it learns).
+    aperture_press: Option<StepBasis>,
     /// The AV step this camera's last confirmed aperture press moved (shading#29), none before
     /// any: [`APERTURE_STEP_AV_DEFAULT`] then.
     aperture_step_av: Option<f64>,
@@ -484,7 +499,7 @@ impl Steppers {
             .then(|| self.holds.get(row.key()))
             .flatten()
             .filter(|h| h.kind == HoldKind::Step)
-            .map(|h| (h.from.clone(), h.seq));
+            .map(|h| (h.from.clone(), h.seq, h.id));
         let held = self
             .holds
             .reconcile(
@@ -499,10 +514,11 @@ impl Steppers {
             .cloned();
         // An aperture step that a newer view CONFIRMED (a different f-stop, no refusal) teaches
         // this camera's fine step (shading#29).
-        if let (None, Some((from, hold_seq))) = (&held, step_before) {
-            if seq > hold_seq && !refused && pushed_text != from {
+        if let (None, Some((from, hold_seq, id))) = (&held, step_before) {
+            let basis = self.aperture_press.take().filter(|b| b.id == id);
+            if let Some(b) = basis.filter(|_| seq > hold_seq && !refused && pushed_text != from) {
                 let after = live.params.and_then(|p| p.aperture_av);
-                if let Some(d) = learned_aperture_step(self.aperture_from_av, after) {
+                if let Some(d) = learned_aperture_step(b.from_av, after, b.dir) {
                     self.aperture_step_av = Some(d);
                 }
             }
@@ -564,7 +580,6 @@ impl Steppers {
                     || current.text.clone(),
                     |f| format!("f/{:.1}", aperture_next(f, &grid, dir, step)),
                 );
-                self.aperture_from_av = live.params.and_then(|p| p.aperture_av);
                 (HoldKind::Step, text, None, serde_json::json!(dir.signum()))
             }
             Row::Iso | Row::Shutter | Row::Fps => {
@@ -612,6 +627,11 @@ impl Steppers {
             was_refused: live.refused(row),
         };
         let id = self.holds.hold(key, tap, seq, now);
+        self.aperture_press = (row == Row::Aperture).then(|| StepBasis {
+            id,
+            from_av: live.params.and_then(|p| p.aperture_av),
+            dir: dir.signum(),
+        });
         Some(Press {
             key,
             value: write,
