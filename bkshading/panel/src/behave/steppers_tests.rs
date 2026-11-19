@@ -614,22 +614,23 @@ fn an_aperture_press_guesses_the_lenss_fine_step_not_the_next_menu_stop_29() {
     );
 }
 
-/// The fine step is learned per camera from the last confirmed step: f/3.2 -> f/3.4 is 0.175 AV,
-/// so the next "+" from f/3.4 guesses f/3.6 (the default 0.1 AV would say f/3.5).
+/// The fine step is learned per camera from the last confirmed step: f/4.0 -> f/4.25 is 0.175 AV,
+/// so a "+" from f/4.0 then guesses f/4.2 and a "−" from f/4.25 f/4.0 (the default 0.1 AV would
+/// say f/4.1 both times).
 #[test]
 fn the_aperture_guess_uses_the_learned_av_step_of_this_camera_29() {
     let mut s = Steppers::default();
-    assert_eq!(guess(&mut s, &at_f(3.2), 1, 0.0), "f/3.3");
-    let landed = at_f(3.4);
+    assert_eq!(guess(&mut s, &at_f(4.0), 1, 0.0), "f/4.1");
+    let landed = at_f(4.25);
     assert_eq!(
         row(&s.view(&landed, 400.0), Row::Aperture).text,
-        "f/3.4",
+        "f/4.2",
         "the camera's landing ends the hold"
     );
-    assert_eq!(guess(&mut s, &landed, 1, 1000.0), "f/3.6");
-    // A learned step also goes the other way.
-    let mut s2 = s.clone();
-    assert_eq!(guess(&mut s2, &landed, -1, 2000.0), "f/3.2");
+    assert_eq!(guess(&mut s.clone(), &at_f(4.0), 1, 1000.0), "f/4.2");
+    assert_eq!(guess(&mut s.clone(), &landed, -1, 1000.0), "f/4.0");
+    // Another camera's block has learned nothing: the default step.
+    assert_eq!(guess(&mut Steppers::default(), &at_f(4.0), 1, 0.0), "f/4.1");
 }
 
 /// A learned step is clamped to 0.03..0.4 AV, and a guess never jumps over a menu stop: a step of
