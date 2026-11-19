@@ -645,6 +645,16 @@ fn the_aperture_guess_uses_the_learned_av_step_of_this_camera_29() {
     assert_eq!(guess(&mut Steppers::default(), &at_f(4.0), 1, 0.0), "f/4.1");
 }
 
+/// A press of another row while the aperture step is held keeps its learning basis.
+#[test]
+fn another_rows_press_keeps_the_aperture_steps_learning_basis_29() {
+    let mut s = Steppers::default();
+    guess(&mut s, &at_f(4.0), 1, 0.0);
+    s.press(Row::Kelvin, 1, &at_f(4.0), 100.0).unwrap();
+    s.view(&at_f(4.3), 400.0);
+    assert_eq!(guess(&mut s, &at_f(4.0), 1, 1000.0), "f/4.3");
+}
+
 /// A landing against the press (the iris turned on the body) teaches nothing: the default stays.
 #[test]
 fn a_landing_against_the_press_teaches_no_aperture_step_29() {
