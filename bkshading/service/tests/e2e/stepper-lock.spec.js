@@ -147,3 +147,64 @@ test("a refused write reverts the value and flashes it red, console clean (shadi
   }
   gate.assertClean();
 });
+
+// shading#29 (live v0.2.12, PP cam6): "+" from f/3.2 showed f/3.5 (the next fNumberChoices menu
+// stop) and then the camera's f/3.3, a forward-then-back flicker. The stub moves `apertureAv` by
+// the lens's fine step (0.1 AV) per `apertureStep`, like the relay: the guess shown at once must be
+// the value the camera then confirms, and nothing else may ever show in between.
+test("the aperture guess equals the confirmed value, never forward-then-back, console clean (shading#29)", async ({ page }) => {
+  const gate = consoleGate(page);
+  try {
+    await open(page);
+    const val = page.locator('[data-role="fnum"]');
+    const inc = page.locator('[data-role="aperture-inc"]');
+    const bar = page.locator('[data-role="aperture-pending"]');
+    await expect(val).toHaveText("f/5.2");
+    await page.request.post(`${STUB}/__write`, { data: { delayMs: 600 } });
+    // Sample the shown value every 10 ms inside the page, from before the press to the end.
+    await page.evaluate(() => {
+      const w = /** @type {any} */ (window);
+      w.__fnum = [];
+      w.__fnumTimer = setInterval(() => {
+        const el = document.querySelector('[data-role="fnum"]');
+        const t = el ? el.textContent : null;
+        if (w.__fnum[w.__fnum.length - 1] !== t) w.__fnum.push(t);
+      }, 10);
+    });
+    const before = await writes(page);
+
+    await inc.click();
+    // At once: the guess (the write answers 600 ms later).
+    await expect(val).toHaveText("f/5.4", { timeout: 300 });
+    await expect(bar).toBeVisible();
+    await expect(bar).toBeHidden({ timeout: 5000 });
+    await expect.poll(() => writes(page)).toBe(before + 1);
+    // Past the confirmation push: the camera's landing (AV 4.88) is the guess.
+    await page.waitForTimeout(2500);
+    await expect(val).toHaveText("f/5.4");
+
+    // A second press builds on the camera's f-stop with the learned 0.1 AV step.
+    await inc.click();
+    await expect(val).toHaveText("f/5.6", { timeout: 300 });
+    await expect(bar).toBeHidden({ timeout: 5000 });
+    await page.waitForTimeout(2500);
+    await expect(val).toHaveText("f/5.6");
+
+    const seen = await page.evaluate(() => {
+      const w = /** @type {any} */ (window);
+      clearInterval(w.__fnumTimer);
+      return w.__fnum;
+    });
+    expect(seen, "only the start and each landing, no other value in between").toEqual([
+      "f/5.2",
+      "f/5.4",
+      "f/5.6",
+    ]);
+    const state = await (await page.request.get(`${STUB}/api/state`)).json();
+    expect(state.params.apertureAv).toBeCloseTo(4.98, 6);
+    expect(await writes(page)).toBe(before + 2);
+  } finally {
+    await page.request.post(`${STUB}/__reset`);
+  }
+  gate.assertClean();
+});

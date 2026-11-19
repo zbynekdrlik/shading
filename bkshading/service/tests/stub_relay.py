@@ -24,7 +24,9 @@ WITHOUT a camera or the real relay binary, so the E2E can drive the panel end-to
                          by /__reset.
   * `--apply-writes`   -> a PUT changes the served params (iso, kelvin, tint, shutter) and answers
                          `{"applied": n, "state": {...}}` like the real relay, so the service pushes
-                         its immediate confirmation (issue 1337). Off by default: the shared stub
+                         its immediate confirmation (issue 1337). An `apertureStep` of +/-1 moves
+                         `apertureAv` by one fine lens step of APERTURE_STEP_AV (0.1 AV, the
+                         relay's live behaviour, shading#29). Off by default: the shared stub
                          keeps its fixed fixture.
 
 Stdlib only (http.server/json/argparse), threaded so the service's concurrent poll + the browser
@@ -79,6 +81,8 @@ _gets = 0
 _apply_writes = False
 # The params a PUT may change when --apply-writes is on.
 _WRITABLE = ("iso", "kelvin", "tint", "shutter")
+# The AV one `apertureStep` moves under --apply-writes: the lens's fine step (shading#29).
+APERTURE_STEP_AV = 0.1
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -166,6 +170,12 @@ class Handler(BaseHTTPRequestHandler):
                     if body.get(key) is not None:
                         _state["params"][key] = body[key]
                         applied += 1
+                step = body.get("apertureStep")
+                if step is not None:
+                    sign = 1 if step > 0 else -1
+                    av = _state["params"]["apertureAv"] + sign * APERTURE_STEP_AV
+                    _state["params"]["apertureAv"] = round(av, 6)
+                    applied += 1
                 self._json(200, {"applied": applied, "state": _state})
         else:
             self._json(404, {"error": "not found", "path": self.path})
