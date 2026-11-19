@@ -350,6 +350,9 @@ the house app stack airuleset#1333); mockup `docs/mockups/arrange-v1.html` appro
   is tied to the hold's write id.
   General lesson: a menu/choice list a camera reports is a SLIDER grid, never proof of the step a
   relative write moves; derive an optimistic guess from the step the device actually moved.
+  E2E gotcha (CI run 44429212413): an in-page `setInterval` value sampler must record the CURRENT
+  text synchronously at start (`startFnumSampler`), or a click right after `page.evaluate` beats
+  the first tick on a slow runner and the start value is missing.
 - **The service embeds `bkshading/panel/dist/` with rust-embed** (`http::PanelAssets`, `panel_file`:
   hashed files immutable, the rest `no-cache`). The folder must exist to compile: build it
   (`cd bkshading/panel && trunk build --release`) or `mkdir -p bkshading/panel/dist && echo placeholder
