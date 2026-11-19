@@ -103,17 +103,24 @@ def test_ci_windows_check_covers_the_default_ndi_path():
     )
 
 
-def test_color_format_misnomer_stays_renamed():
-    """value 0 is NDIlib_recv_color_format_BGRX_BGRA per the installed SDK header (issue 1157
-    deferral 2, resolved in the #808 SBC lane) -- the misnamed constant must never come back."""
+def test_color_format_names_match_their_sdk_values():
+    """Per the installed SDK header (issue 1157 deferral 2, resolved in the #808 SBC lane)
+    NDIlib_recv_color_format_BGRX_BGRA = 0 and UYVY_BGRA = 1. The misnomer (a value-0 constant
+    named UYVY) must never come back. Since shading#34 the request is UYVY_BGRA on purpose, so
+    every COLOR_FORMAT_* constant is checked against its own SDK value."""
     with open(NDI_SOURCE, encoding="utf-8") as fh:
         src = fh.read()
-    assert "COLOR_FORMAT_UYVY_BGRA" not in src, (
-        "the misnamed COLOR_FORMAT_UYVY_BGRA must stay renamed -- value 0 is BGRX_BGRA per "
-        "Processing.NDI.Recv.h"
-    )
-    assert "COLOR_FORMAT_BGRX_BGRA" in src, (
-        "ndi_source.rs must define/use COLOR_FORMAT_BGRX_BGRA (the correct name for value 0)"
+    sdk = {"BGRX_BGRA": 0, "UYVY_BGRA": 1, "RGBX_RGBA": 2, "UYVY_RGBA": 3, "FASTEST": 100, "BEST": 101}
+    found = re.findall(r"const COLOR_FORMAT_([A-Z_]+): c_int = (\d+);", src)
+    assert found, "ndi_source.rs must name the requested colour format as a COLOR_FORMAT_* constant"
+    for name, value in found:
+        assert name in sdk, f"COLOR_FORMAT_{name} is not an NDIlib_recv_color_format_* name"
+        assert int(value) == sdk[name], (
+            f"COLOR_FORMAT_{name} = {value}, but the SDK header gives {sdk[name]}"
+        )
+    assert "color_format: REQUESTED_COLOR_FORMAT" in src
+    assert re.search(r"const REQUESTED_COLOR_FORMAT: c_int = COLOR_FORMAT_UYVY_BGRA;", src), (
+        "shading#34: the preview requests UYVY_BGRA (video-range BT.709 converter)"
     )
 
 
