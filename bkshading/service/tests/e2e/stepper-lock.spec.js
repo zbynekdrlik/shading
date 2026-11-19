@@ -22,6 +22,31 @@ async function writes(page) {
   return (await (await page.request.get(`${STUB}/__recorded`)).json()).length;
 }
 
+// Records every distinct text of the aperture value, every 10 ms, inside the page. The current
+// text is recorded at once (synchronously), so a press right after this never beats the first
+// tick (CI run 44429212413 lost the start value that way).
+async function startFnumSampler(page) {
+  await page.evaluate(() => {
+    const w = /** @type {any} */ (window);
+    const read = () => {
+      const el = document.querySelector('[data-role="fnum"]');
+      const t = el ? el.textContent : null;
+      if (w.__fnum[w.__fnum.length - 1] !== t) w.__fnum.push(t);
+    };
+    w.__fnum = [];
+    read();
+    w.__fnumTimer = setInterval(read, 10);
+  });
+}
+
+async function stopFnumSampler(page) {
+  return page.evaluate(() => {
+    const w = /** @type {any} */ (window);
+    clearInterval(w.__fnumTimer);
+    return w.__fnum;
+  });
+}
+
 async function open(page) {
   await page.request.post(`${STUB}/__reset`);
   await page.goto(`${SVC}/`);
@@ -161,16 +186,7 @@ test("the aperture guess equals the confirmed value, never forward-then-back, co
     const bar = page.locator('[data-role="aperture-pending"]');
     await expect(val).toHaveText("f/5.2");
     await page.request.post(`${STUB}/__write`, { data: { delayMs: 600 } });
-    // Sample the shown value every 10 ms inside the page, from before the press to the end.
-    await page.evaluate(() => {
-      const w = /** @type {any} */ (window);
-      w.__fnum = [];
-      w.__fnumTimer = setInterval(() => {
-        const el = document.querySelector('[data-role="fnum"]');
-        const t = el ? el.textContent : null;
-        if (w.__fnum[w.__fnum.length - 1] !== t) w.__fnum.push(t);
-      }, 10);
-    });
+    await startFnumSampler(page);
     const before = await writes(page);
 
     await inc.click();
@@ -191,11 +207,7 @@ test("the aperture guess equals the confirmed value, never forward-then-back, co
     await page.waitForTimeout(2500);
     await expect(val).toHaveText("f/5.6");
 
-    const seen = await page.evaluate(() => {
-      const w = /** @type {any} */ (window);
-      clearInterval(w.__fnumTimer);
-      return w.__fnum;
-    });
+    const seen = await stopFnumSampler(page);
     expect(seen, "only the start and each landing, no other value in between").toEqual([
       "f/5.2",
       "f/5.4",
@@ -231,26 +243,14 @@ test("the aperture guess learns the camera's own step from the last confirmed pr
     await page.waitForTimeout(2500);
 
     // Learned 0.15 AV: the guess is the next landing, AV 5.08 = f/5.8 (the default would say f/5.7).
-    await page.evaluate(() => {
-      const w = /** @type {any} */ (window);
-      w.__fnum = [];
-      w.__fnumTimer = setInterval(() => {
-        const el = document.querySelector('[data-role="fnum"]');
-        const t = el ? el.textContent : null;
-        if (w.__fnum[w.__fnum.length - 1] !== t) w.__fnum.push(t);
-      }, 10);
-    });
+    await startFnumSampler(page);
     await inc.click();
     await expect(val).toHaveText("f/5.8", { timeout: 300 });
     await expect(bar).toBeVisible();
     await expect(bar).toBeHidden({ timeout: 5000 });
     await page.waitForTimeout(2500);
     await expect(val).toHaveText("f/5.8");
-    const seen = await page.evaluate(() => {
-      const w = /** @type {any} */ (window);
-      clearInterval(w.__fnumTimer);
-      return w.__fnum;
-    });
+    const seen = await stopFnumSampler(page);
     expect(seen).toEqual(["f/5.5", "f/5.8"]);
     const state = await (await page.request.get(`${STUB}/api/state`)).json();
     expect(state.params.apertureAv).toBeCloseTo(5.08, 6);
