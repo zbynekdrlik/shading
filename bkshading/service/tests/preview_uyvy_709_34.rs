@@ -45,7 +45,7 @@ fn mid_grey_stays_neutral_on_the_video_scale_34() {
 #[test]
 fn bt709_75_percent_colour_bars_34() {
     // ITU-R BT.709 75 % bars, 8-bit video range (Y, Cb, Cr) -> RGB 191 / 0.
-    let bars: [(&str, (u8, u8, u8), [u8; 3]); 7] = [
+    let bars = [
         ("white", (180, 128, 128), [191, 191, 191]),
         ("yellow", (168, 44, 136), [191, 191, 0]),
         ("cyan", (145, 147, 44), [0, 191, 191]),
