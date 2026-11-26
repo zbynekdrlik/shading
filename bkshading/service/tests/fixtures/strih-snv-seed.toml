@@ -18,19 +18,19 @@ reconnect_backoff_ms = 2000
 [[camera]]
 id = "cam2"
 label = "Cam 2"
-# a handheld SBC relay controls this cambox's camera (owner ruling 5977504457)
-transport = "sbc-relay"
-address = "register:cam2-shading"
+# the camera's USB goes straight into the CAM2 cambox (owner 26.11.2026, shading#37)
+transport = "cambox-relay"
+address = "register:cam2"
+fallback_address = "cam2.lan:8771"
 ndi_preview = "CAM2 (usb)"
 grab_fps = 60
 
 [[camera]]
 id = "cam3"
 label = "Cam 3"
-# cam3 has no handheld SBC, never had one (owner 2026-11-10): SBC relays exist only for cam1/2/4
-transport = "cambox-relay"
-address = "register:cam3"
-fallback_address = "cam3.lan:8771"
+# the handheld SBC (Orange) that announced as cam2-shading is cam3's (owner 26.11.2026, shading#37)
+transport = "sbc-relay"
+address = "register:cam3-shading"
 ndi_preview = "CAM3 (usb)"
 grab_fps = 60
 

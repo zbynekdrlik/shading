@@ -467,8 +467,11 @@ the house app stack airuleset#1333); mockup `docs/mockups/arrange-v1.html` appro
 - The strih seed test (`service/tests/service.rs` `both_strih_seeds_load_in_the_service_1431`) reads
   `service/tests/fixtures/strih-*-seed.toml`, a snapshot of camera-box's
   `strih_bkshading_config_text` at camera-box 390ae50, with cam3 corrected by hand on 10.11.2026.
-  **Handheld SBC relays exist only for cam1, cam2 and cam4** (owner 10.11.2026: cam3 never had
-  one). The SNV seed had cam3 on `sbc-relay@register:cam4-shading`, so the live panel showed
+  **SNV mapping (owner 26.11.2026, shading#37, correcting his 10.11. ruling):** cam2's camera USB
+  goes straight into the CAM2 cambox (`cambox-relay` `register:cam2`); the Orange handheld SBC is
+  cam3's (`sbc-relay` `register:cam3-shading`, it first announced as `cam2-shading`). PP: cam1 and
+  cam4 on their Oranges (`cam1-shading`, `cam4-shading`). An earlier seed had cam3 on
+  `sbc-relay@register:cam4-shading`, so the live panel showed
   cam3 offline while its cambox relay ran and announced itself as `cam3`. A camera shown offline
   with a running relay: compare `/api/cameras` `registration` against the relay's
   `BKSHADING_RELAY_ID`. camera-box checks its live seed with
