@@ -572,7 +572,7 @@ test("cameras stand in number order whatever the config order, and never move on
   const block = (id) => page.locator(`#camera-grid > [data-id="${id}"]`);
   await expect(block("cam1")).toHaveClass(/disabled/);
   await expect(block("cam1").locator('[data-role="control-warn"]')).toBeVisible();
-  await expect(block("cam6").locator('[data-role="control-warn"]')).toContainText("Relay nedostupný");
+  await expect(block("cam6").locator('[data-role="control-warn"]')).toContainText("Cambox nie je online");
 
   await show([cam("cam1", true, true), cam("cam4", true, true), cam("cam6", true, true), cam("cam7", true, true), cam("cam2", true, true)]);
   await expect.poll(order).toEqual(["cam1", "cam2", "cam4", "cam6", "cam7"]);
