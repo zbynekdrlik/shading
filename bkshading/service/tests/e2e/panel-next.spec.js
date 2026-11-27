@@ -661,9 +661,10 @@ test("a handheld that registers itself becomes reachable in the panel and takes 
   // keeps its place with a dash (shading#28).
   await expect(online).toHaveText("relay offline", { timeout: 15000 });
   await expect(regLine).toHaveText("—");
-  await expect(warn).toContainText("Relay nedostupný");
+  // shading#14 (owner 27.11.): a handheld (sbc-relay) is named as its Orange.
+  await expect(warn).toContainText("Orange nie je online");
   await warn.click();
-  await expect(dlg.locator('[data-role="control-info-title"]')).toHaveText("Panel sa nespojí s relay pri kamere");
+  await expect(dlg.locator('[data-role="control-info-title"]')).toHaveText("Orange pri kamere nie je online");
   await dlg.locator('[data-role="control-info-close"]').click();
   await expect(dlg).toBeHidden();
 
@@ -689,13 +690,19 @@ test("a handheld that registers itself becomes reachable in the panel and takes 
   gate.assertClean();
 });
 
+// shading#14, owner 27.11.2026: the warning names the device at the camera (the cambox, or the
+// Orange of a handheld), and the rare "remote control not allowed" case says how it is switched
+// on (a notebook on the camera's USB-C), never "Web media manager".
 const CONTROL_CASES = [
-  { control: "relay-unreachable", reachable: false, state: null, badge: "Relay nedostupný", title: "Panel sa nespojí s relay pri kamere", step: "Skontroluj, či je box pri kamere zapnutý a pripojený do siete" },
-  { control: "relay-too-old", reachable: true, version: "0.1.2", badge: "Starý relay", title: "Relay pri kamere je príliš starý", cause: "verziu 0.1.2", step: "treba nasadiť nový relay" },
-  { control: "no-camera-link", reachable: true, reason: "no-camera-link", badge: "Kamera nie je pripojená cez USB", title: "Relay nevidí kameru na USB", step: "skontroluj USB-C kábel" },
-  { control: "camera-not-answering", reachable: true, reason: "camera-not-answering", badge: "Kamera neodpovedá", title: "Kamera je pripojená, ale neodpovedá", step: "Zapni na kamere Web media manager" },
-  { control: "rest-off", reachable: true, reason: "rest-off", badge: "Zapni Web media manager na kamere", title: "Na kamere je vypnutý Web media manager", step: "Zapni na kamere Web media manager" },
-  { control: "camera-offline", reachable: true, version: "0.2.5", badge: "Kamera offline", title: "Kamera sa nedá ovládať", step: "Web media manager" },
+  { transport: "cambox-relay", control: "relay-unreachable", reachable: false, state: null, badge: "Cambox nie je online", title: "Cambox pri kamere nie je online", step: "Skontroluj, či je cambox zapnutý a pripojený do siete" },
+  { transport: "cambox-relay", control: "relay-too-old", reachable: true, version: "0.1.2", badge: "Starý relay", title: "Relay pri kamere je príliš starý", cause: "verziu 0.1.2", step: "treba nasadiť nový relay" },
+  { transport: "cambox-relay", control: "no-camera-link", reachable: true, reason: "no-camera-link", badge: "Kamera nie je pripojená do camboxu", title: "Cambox nevidí kameru", step: "USB-C kábel medzi kamerou a camboxom" },
+  { transport: "cambox-relay", control: "camera-offline", reachable: true, version: "0.2.5", badge: "Kamera nie je pripojená do camboxu", title: "Cambox nevidí kameru", step: "USB-C kábel medzi kamerou a camboxom" },
+  { transport: "sbc-relay", control: "relay-unreachable", reachable: false, state: null, badge: "Orange nie je online", title: "Orange pri kamere nie je online", step: "Zapni Orange pri kamere" },
+  { transport: "sbc-relay", control: "no-camera-link", reachable: true, reason: "no-camera-link", badge: "Orange nemá USB-C do kamery", title: "Orange nevidí kameru", step: "USB-C kábel medzi Orange a kamerou" },
+  { transport: "sbc-relay", control: "camera-offline", reachable: true, version: "0.2.8", badge: "Orange nemá USB-C do kamery", title: "Orange nevidí kameru", step: "USB-C kábel medzi Orange a kamerou" },
+  { transport: "cambox-relay", control: "camera-not-answering", reachable: true, reason: "camera-not-answering", badge: "Kamera neodpovedá", title: "Kamera je pripojená, ale neodpovedá", step: "notebook pripojený USB-C káblom do kamery" },
+  { transport: "cambox-relay", control: "rest-off", reachable: true, reason: "rest-off", badge: "Kamera nemá povolené riadenie", title: "Kamera nemá povolené riadenie", step: "notebook pripojený USB-C káblom do kamery" },
 ];
 
 test("a camera that cannot be controlled shows a warning and a Slovak popup per cause, console clean (shading#14)", async ({ page }) => {
@@ -711,7 +718,7 @@ test("a camera that cannot be controlled shows a warning and a Slovak popup per 
       {
         id: "cam7",
         label: "Cam 7",
-        transport: "cambox-relay",
+        transport: c.transport || "cambox-relay",
         hasPreview: false,
         reachable: c.reachable,
         grabFps: null,
@@ -738,13 +745,14 @@ test("a camera that cannot be controlled shows a warning and a Slovak popup per 
     await expect(dlg.locator('[data-role="control-info-camera"]')).toHaveText("Cam 7");
     if (c.cause) await expect(dlg.locator('[data-role="control-info-cause"]')).toContainText(c.cause);
     await expect(dlg.locator('[data-role="control-info-step"]')).toContainText(c.step);
+    await expect(dlg, c.control).not.toContainText("Web media manager");
     await dlg.locator('[data-role="control-info-close"]').click();
     await expect(dlg).toBeHidden();
   }
 
-  await pushState(page, view(CONTROL_CASES[4]));
+  await pushState(page, view(CONTROL_CASES[8]));
   await warn.click();
-  await expect(dlg.locator('[data-role="control-info-title"]')).toHaveText(CONTROL_CASES[4].title);
+  await expect(dlg.locator('[data-role="control-info-title"]')).toHaveText(CONTROL_CASES[8].title);
   await pushState(page, view(CONTROL_CASES[2]));
   await expect(dlg.locator('[data-role="control-info-title"]')).toHaveText(CONTROL_CASES[2].title);
 
@@ -765,9 +773,9 @@ test("the real service turns a relay's offline reason and an old relay into the 
     await expect(warn).toBeHidden();
 
     await page.request.post(`${STUB}/__state`, { data: { online: false, offlineReason: "rest-off" } });
-    await expect(warn).toContainText("Zapni Web media manager na kamere", { timeout: 15000 });
+    await expect(warn).toContainText("Kamera nemá povolené riadenie", { timeout: 15000 });
     await warn.click();
-    await expect(dlg.locator('[data-role="control-info-step"]')).toContainText("Zapni na kamere Web media manager");
+    await expect(dlg.locator('[data-role="control-info-step"]')).toContainText("notebook pripojený USB-C káblom do kamery");
     await dlg.locator('[data-role="control-info-close"]').click();
     await expect(dlg).toBeHidden();
 

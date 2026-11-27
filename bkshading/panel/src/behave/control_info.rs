@@ -90,10 +90,36 @@ mod tests {
             assert!(i.badge.starts_with('⚠'), "{s:?}");
             assert!(!i.title.is_empty() && !i.step.is_empty());
         }
+        // owner 27.11.2026 (shading#14): the rare permission case is told the owner's way.
         assert!(info(ControlStatus::CameraNotAnswering)
             .unwrap()
             .step
-            .contains("Zapni na kamere Web media manager"));
+            .contains("notebook pripojený USB-C káblom do kamery"));
+    }
+
+    /// shading#14, owner 27.11.2026: the device at the camera is named (cambox / Orange), and
+    /// no text says "Web media manager" (nobody understands it).
+    #[test]
+    fn the_warning_names_the_cambox_or_the_orange_never_web_media_manager() {
+        let orange = |s| info_for(s, Transport::SbcRelay).unwrap();
+        let cambox = |s| info_for(s, Transport::CamboxRelay).unwrap();
+        assert_eq!(orange(ControlStatus::RelayUnreachable).badge, "⚠ Orange nie je online");
+        assert_eq!(orange(ControlStatus::NoCameraLink).badge, "⚠ Orange nemá USB-C do kamery");
+        assert_eq!(orange(ControlStatus::CameraOffline).badge, "⚠ Orange nemá USB-C do kamery");
+        assert_eq!(cambox(ControlStatus::RelayUnreachable).badge, "⚠ Cambox nie je online");
+        assert_eq!(cambox(ControlStatus::NoCameraLink).badge, "⚠ Kamera nie je pripojená do camboxu");
+        assert_eq!(cambox(ControlStatus::CameraOffline).badge, "⚠ Kamera nie je pripojená do camboxu");
+        assert!(cambox(ControlStatus::RestOff)
+            .step
+            .contains("notebook pripojený USB-C káblom do kamery"));
+        for t in [Transport::SbcRelay, Transport::CamboxRelay, Transport::EthernetRest] {
+            for s in ALL_NOT_OK {
+                let i = info_for(s, t).unwrap();
+                for text in [i.badge, i.title, i.cause, i.step] {
+                    assert!(!text.contains("Web media manager"), "{s:?} {t:?}: {text}");
+                }
+            }
+        }
     }
 
     #[test]
