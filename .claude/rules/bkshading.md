@@ -231,6 +231,13 @@ knowing a part:
   `CONTROL_INFO` until v0.2.10): the warning `data-role="control-warn"` is an overlay OUTSIDE
   `.panes`, because a disabled card's panes get `pointer-events: none`. The Slovak texts live only in the panel (the wire carries enums). An open
   popup follows the push for its block (`dlg.dataset.cameraId`): refilled, closed when `ok`.
+  **Wording (owner 27.11.2026, v0.2.16):** `info_for(status, transport)` names the device at the
+  camera, the Orange (`sbc-relay`) or the cambox: "Orange nie je online", "Orange nemá USB-C do
+  kamery", "Cambox nie je online", "Kamera nie je pripojená do camboxu" (a reasonless
+  `camera-offline` reads as the missing USB-C). NEVER the words "Web media manager" in a panel text
+  (nobody understands it, a unit test sweeps every text): `rest-off` = "Kamera nemá povolené
+  riadenie", switched on once from a notebook on the camera's USB-C. No live WMM-off test (the owner
+  will not run it, once-in-5-years new-camera case).
 - Tests: `relay/tests/offline_reason_14.rs`, `proto/tests/control_14.rs`,
   `service/tests/control_14.rs`, the contract pin in `relay/tests/contract.rs`, Playwright
   "... Slovak popup per cause" (fixtures) and "the real service turns a relay's offline reason ..."
