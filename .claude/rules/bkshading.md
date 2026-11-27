@@ -231,6 +231,13 @@ knowing a part:
   `CONTROL_INFO` until v0.2.10): the warning `data-role="control-warn"` is an overlay OUTSIDE
   `.panes`, because a disabled card's panes get `pointer-events: none`. The Slovak texts live only in the panel (the wire carries enums). An open
   popup follows the push for its block (`dlg.dataset.cameraId`): refilled, closed when `ok`.
+  **Wording (owner 27.11.2026, v0.2.16):** `info_for(status, transport)` names the device at the
+  camera, the Orange (`sbc-relay`) or the cambox: "Orange nie je online", "Orange nemá USB-C do
+  kamery", "Cambox nie je online", "Kamera nie je pripojená do camboxu" (a reasonless
+  `camera-offline` reads as the missing USB-C). NEVER the words "Web media manager" in a panel text
+  (nobody understands it, a unit test sweeps every text): `rest-off` = "Kamera nemá povolené
+  riadenie", switched on once from a notebook on the camera's USB-C. No live WMM-off test (the owner
+  will not run it, once-in-5-years new-camera case).
 - Tests: `relay/tests/offline_reason_14.rs`, `proto/tests/control_14.rs`,
   `service/tests/control_14.rs`, the contract pin in `relay/tests/contract.rs`, Playwright
   "... Slovak popup per cause" (fixtures) and "the real service turns a relay's offline reason ..."
@@ -249,6 +256,12 @@ knowing a part:
   `behave/refusal.rs`; the refused value's tooltip + the header note when a refusal flash starts
   (`new_refusal_note`) or a PUT fails with a reason. A 502-with-header path has no E2E (Chromium
   logs 5xx); the lens-end path does (`stepper-lock.spec.js`, the stub's `/__write {reason}`).
+  Live check (19.11.2026, PP cam7): the reason comes from the RELAY, so the cambox relay must be
+  >= 0.2.14 too (camera-box deploys relays separately from the service; PP ran 0.2.9). At a
+  known lens end the panel's button is already disabled ("Objektív je na najotvorenejšej
+  clone"), so drive the refusal with one `PUT /api/cameras/camN/params {"apertureStep":-1}` from
+  the page: `notAppliedReason {apertureStep: lens-end}` and the f-number tooltip show for ~1.5 s
+  (the header note needs a refused press of the panel itself). Never on the PGM camera (tally).
 
 ## The panel: Leptos CSR at /, ARRANGE, the venue layout (shading#16 v0.2.7, switch + theme shading#24 v0.2.10)
 Owner decision A (15.11.2026): the panel is rebuilt on fohmixer-ui's stack (Leptos 0.7.8 CSR, Trunk,
@@ -461,8 +474,11 @@ the house app stack airuleset#1333); mockup `docs/mockups/arrange-v1.html` appro
 - The strih seed test (`service/tests/service.rs` `both_strih_seeds_load_in_the_service_1431`) reads
   `service/tests/fixtures/strih-*-seed.toml`, a snapshot of camera-box's
   `strih_bkshading_config_text` at camera-box 390ae50, with cam3 corrected by hand on 10.11.2026.
-  **Handheld SBC relays exist only for cam1, cam2 and cam4** (owner 10.11.2026: cam3 never had
-  one). The SNV seed had cam3 on `sbc-relay@register:cam4-shading`, so the live panel showed
+  **SNV mapping (owner 26.11.2026, shading#37, correcting his 10.11. ruling):** cam2's camera USB
+  goes straight into the CAM2 cambox (`cambox-relay` `register:cam2`); the Orange handheld SBC is
+  cam3's (`sbc-relay` `register:cam3-shading`, it first announced as `cam2-shading`). PP: cam1 and
+  cam4 on their Oranges (`cam1-shading`, `cam4-shading`). An earlier seed had cam3 on
+  `sbc-relay@register:cam4-shading`, so the live panel showed
   cam3 offline while its cambox relay ran and announced itself as `cam3`. A camera shown offline
   with a running relay: compare `/api/cameras` `registration` against the relay's
   `BKSHADING_RELAY_ID`. camera-box checks its live seed with

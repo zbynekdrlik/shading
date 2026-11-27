@@ -2,7 +2,7 @@
 //! block's warning badge and the popup, in plain Slovak. The wire carries only the status
 //! (`CameraView.control`); the texts live here only (ported verbatim from the JS panel).
 
-use bkshading_proto::wire::ControlStatus;
+use bkshading_proto::wire::{ControlStatus, Transport};
 
 /// One status's texts. `cause` may hold `{version}` (the relay's version).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13,52 +13,83 @@ pub struct Info {
     pub step: &'static str,
 }
 
-const WMM_STEP: &str = "Zapni na kamere Web media manager: v menu kamery Setup, alebo v programe Blackmagic Camera Setup v časti Network access. Panel potom kameru nájde sám do pár sekúnd.";
-const NOT_ANSWERING_STEP: &str = "Počkaj chvíľu, kým sa kamera zapne. Ak to trvá dlhšie ako minútu: Zapni na kamere Web media manager: v menu kamery Setup, alebo v programe Blackmagic Camera Setup v časti Network access. Panel potom kameru nájde sám do pár sekúnd.";
+/// Every status that shows a warning (all but `Ok`).
+pub const ALL_NOT_OK: [ControlStatus; 6] = [
+    ControlStatus::RelayUnreachable,
+    ControlStatus::RelayTooOld,
+    ControlStatus::NoCameraLink,
+    ControlStatus::CameraNotAnswering,
+    ControlStatus::RestOff,
+    ControlStatus::CameraOffline,
+];
 
-const CAMERA_OFFLINE: Info = Info {
-    badge: "⚠ Kamera offline — nedá sa ovládať",
-    title: "Kamera sa nedá ovládať",
-    cause: "Relay beží, ale kameru nevidí. Tento relay presnú príčinu nehlási.",
-    step: "Skontroluj, či je kamera zapnutá, či je zapojený USB-C kábel ku boxu a či má kamera zapnutý Web media manager.",
+/// How the rare "remote control not allowed" case is switched on (owner 27.11.2026, shading#14):
+/// said the owner's way, never "Web media manager" (nobody understands it).
+const PERMISSION_STEP: &str = "Povolenie riadenia sa zapína raz, cez notebook pripojený USB-C káblom do kamery (program Blackmagic Camera Setup). Býva to pri novej kamere; povedz to technikovi.";
+const NOT_ANSWERING_STEP: &str = "Počkaj chvíľu, kým sa kamera zapne. Ak to trvá dlhšie ako minútu, vypni a zapni kameru. Ak nepomôže ani to, kamera asi nemá povolené riadenie: zapína sa raz, cez notebook pripojený USB-C káblom do kamery.";
+
+const ORANGE_OFFLINE: Info = Info {
+    badge: "⚠ Orange nie je online",
+    title: "Orange pri kamere nie je online",
+    cause: "Panel sa nespojí s Orange (malý počítač na kamere, cez ktorý panel kameru ovláda). Orange je vypnutý, nie je v sieti, alebo na ňom nebeží relay.",
+    step: "Zapni Orange pri kamere a skontroluj, či je v sieti. Ak je zapnutý, reštartuj ho.",
+};
+const ORANGE_NO_CAMERA: Info = Info {
+    badge: "⚠ Orange nemá USB-C do kamery",
+    title: "Orange nevidí kameru",
+    cause: "Orange beží, ale kameru nevidí: USB-C kábel medzi Orange a kamerou nie je zapojený, alebo je kamera vypnutá.",
+    step: "Zapni kameru a zapoj USB-C kábel medzi Orange a kamerou (aj znova).",
+};
+const CAMBOX_OFFLINE: Info = Info {
+    badge: "⚠ Cambox nie je online",
+    title: "Cambox pri kamere nie je online",
+    cause: "Panel sa nespojí s camboxom (počítač pri kamere, cez ktorý panel kameru ovláda). Cambox je vypnutý, nie je v sieti, alebo na ňom nebeží relay.",
+    step: "Skontroluj, či je cambox zapnutý a pripojený do siete. Ak je zapnutý, reštartuj ho.",
+};
+const CAMBOX_NO_CAMERA: Info = Info {
+    badge: "⚠ Kamera nie je pripojená do camboxu",
+    title: "Cambox nevidí kameru",
+    cause: "Cambox beží, ale kameru nevidí: USB-C kábel medzi kamerou a camboxom nie je zapojený, alebo je kamera vypnutá.",
+    step: "Zapni kameru a zapoj USB-C kábel medzi kamerou a camboxom (aj znova).",
 };
 
-/// The texts of `status`; `None` for a camera that can be controlled.
-pub fn info(status: ControlStatus) -> Option<Info> {
+/// The texts of `status` for a camera reached through `transport` (owner 27.11.2026,
+/// shading#14: the warning names the device at the camera, the Orange of a handheld or the
+/// cambox); `None` for a camera that can be controlled. `EthernetRest` (no box, future) reads
+/// like a cambox.
+pub fn info_for(status: ControlStatus, transport: Transport) -> Option<Info> {
+    let orange = transport == Transport::SbcRelay;
     Some(match status {
         ControlStatus::Ok => return None,
-        ControlStatus::RelayUnreachable => Info {
-            badge: "⚠ Relay nedostupný — kamera sa nedá ovládať",
-            title: "Panel sa nespojí s relay pri kamere",
-            cause: "Relay (malý box alebo počítač pri kamere, cez ktorý panel ovláda kameru) neodpovedá. Box je vypnutý, odpojený zo siete, alebo na ňom nebeží relay.",
-            step: "Skontroluj, či je box pri kamere zapnutý a pripojený do siete (kábel alebo WiFi). Ak je zapnutý, reštartuj ho.",
-        },
+        ControlStatus::RelayUnreachable if orange => ORANGE_OFFLINE,
+        ControlStatus::RelayUnreachable => CAMBOX_OFFLINE,
+        // A relay without a reason (CameraOffline) is in practice the missing USB-C link.
+        ControlStatus::NoCameraLink | ControlStatus::CameraOffline if orange => ORANGE_NO_CAMERA,
+        ControlStatus::NoCameraLink | ControlStatus::CameraOffline => CAMBOX_NO_CAMERA,
         ControlStatus::RelayTooOld => Info {
             badge: "⚠ Starý relay — kamera sa nedá ovládať",
             title: "Relay pri kamere je príliš starý",
-            cause: "Relay na tomto boxe má verziu {version}. Táto verzia ešte nevie ovládať kameru cez jej rozhranie (REST); treba verziu 0.2.0 alebo novšiu.",
+            cause: "Relay pri kamere má verziu {version}. Táto verzia ešte nevie ovládať kameru cez jej rozhranie (REST); treba verziu 0.2.0 alebo novšiu.",
             step: "Na tento box treba nasadiť nový relay. Povedz to technikovi (nasadzuje ho camera-box).",
-        },
-        ControlStatus::NoCameraLink => Info {
-            badge: "⚠ Kamera nie je pripojená cez USB",
-            title: "Relay nevidí kameru na USB",
-            cause: "Relay beží, ale kamera nie je pripojená USB-C káblom k boxu, alebo je vypnutá.",
-            step: "Zapni kameru a skontroluj USB-C kábel medzi kamerou a boxom (zapoj ho znova).",
         },
         ControlStatus::CameraNotAnswering => Info {
             badge: "⚠ Kamera neodpovedá",
             title: "Kamera je pripojená, ale neodpovedá",
-            cause: "Relay vidí kameru na USB-C, ale kamera neodpovedá na ovládanie. Kamera sa ešte zapína, alebo má vypnutý Web media manager.",
+            cause: "Kamera je pripojená USB-C káblom, ale neodpovedá na ovládanie. Väčšinou sa ešte zapína.",
             step: NOT_ANSWERING_STEP,
         },
         ControlStatus::RestOff => Info {
-            badge: "⚠ Zapni Web media manager na kamere",
-            title: "Na kamere je vypnutý Web media manager",
-            cause: "Kamera je pripojená a odpovedá, ale ovládanie cez sieť (Web media manager) má vypnuté.",
-            step: WMM_STEP,
+            badge: "⚠ Kamera nemá povolené riadenie",
+            title: "Kamera nemá povolené riadenie",
+            cause: "Kamera je pripojená a odpovedá, ale nemá povolené riadenie na diaľku.",
+            step: PERMISSION_STEP,
         },
-        ControlStatus::CameraOffline => CAMERA_OFFLINE,
     })
+}
+
+/// [`info_for`] for a cambox camera (the default transport).
+pub fn info(status: ControlStatus) -> Option<Info> {
+    info_for(status, Transport::CamboxRelay)
 }
 
 /// The popup's cause line with the relay's version filled in (`?` when unknown).
@@ -90,10 +121,58 @@ mod tests {
             assert!(i.badge.starts_with('⚠'), "{s:?}");
             assert!(!i.title.is_empty() && !i.step.is_empty());
         }
+        // owner 27.11.2026 (shading#14): the rare permission case is told the owner's way.
         assert!(info(ControlStatus::CameraNotAnswering)
             .unwrap()
             .step
-            .contains("Zapni na kamere Web media manager"));
+            .contains("notebook pripojený USB-C káblom do kamery"));
+    }
+
+    /// shading#14, owner 27.11.2026: the device at the camera is named (cambox / Orange), and
+    /// no text says "Web media manager" (nobody understands it).
+    #[test]
+    fn the_warning_names_the_cambox_or_the_orange_never_web_media_manager() {
+        let orange = |s| info_for(s, Transport::SbcRelay).unwrap();
+        let cambox = |s| info_for(s, Transport::CamboxRelay).unwrap();
+        assert_eq!(
+            orange(ControlStatus::RelayUnreachable).badge,
+            "⚠ Orange nie je online"
+        );
+        assert_eq!(
+            orange(ControlStatus::NoCameraLink).badge,
+            "⚠ Orange nemá USB-C do kamery"
+        );
+        assert_eq!(
+            orange(ControlStatus::CameraOffline).badge,
+            "⚠ Orange nemá USB-C do kamery"
+        );
+        assert_eq!(
+            cambox(ControlStatus::RelayUnreachable).badge,
+            "⚠ Cambox nie je online"
+        );
+        assert_eq!(
+            cambox(ControlStatus::NoCameraLink).badge,
+            "⚠ Kamera nie je pripojená do camboxu"
+        );
+        assert_eq!(
+            cambox(ControlStatus::CameraOffline).badge,
+            "⚠ Kamera nie je pripojená do camboxu"
+        );
+        assert!(cambox(ControlStatus::RestOff)
+            .step
+            .contains("notebook pripojený USB-C káblom do kamery"));
+        for t in [
+            Transport::SbcRelay,
+            Transport::CamboxRelay,
+            Transport::EthernetRest,
+        ] {
+            for s in ALL_NOT_OK {
+                let i = info_for(s, t).unwrap();
+                for text in [i.badge, i.title, i.cause, i.step] {
+                    assert!(!text.contains("Web media manager"), "{s:?} {t:?}: {text}");
+                }
+            }
+        }
     }
 
     #[test]

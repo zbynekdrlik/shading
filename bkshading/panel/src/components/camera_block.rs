@@ -164,7 +164,7 @@ pub fn CameraBlock(id: String) -> impl IntoView {
     let online = move || cam.with(|c| c.as_ref().is_some_and(is_online));
     let control = move || cam.with(|c| c.as_ref().map(control_word).unwrap_or_default());
     let label = move || cam.with(|c| c.as_ref().map(|c| c.label.clone()).unwrap_or_default());
-    let badge = move || cam.with(|c| c.as_ref().and_then(|c| warning(c.control)));
+    let badge = move || cam.with(|c| c.as_ref().and_then(|c| warning(c.control, c.transport)));
     // shading#28: (line, tooltip, stale) — the line is never empty.
     let reg = move || {
         cam.with(|c| {
