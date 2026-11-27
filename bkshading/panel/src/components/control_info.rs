@@ -2,11 +2,11 @@
 //! block whose warning was tapped. An open popup follows the push for its camera: refilled with
 //! the new cause, closed once the camera can be controlled again.
 
-use bkshading_proto::wire::ControlStatus;
+use bkshading_proto::wire::{ControlStatus, Transport};
 use leptos::html;
 use leptos::prelude::*;
 
-use crate::behave::control_info::{cause_text, info};
+use crate::behave::control_info::{cause_text, info_for};
 use crate::store::Store;
 
 /// The popup.
@@ -19,7 +19,7 @@ pub fn ControlInfo() -> impl IntoView {
     let shown = Memo::new(move |_| {
         let id = store.info_for.get()?;
         let cam = store.camera(&id)?;
-        let i = info(cam.control)?;
+        let i = info_for(cam.control, cam.transport)?;
         let version = cam.state.as_ref().map(|s| s.version.clone());
         Some((
             cam.label.clone(),
@@ -77,7 +77,8 @@ pub fn ControlInfo() -> impl IntoView {
     }
 }
 
-/// The status a block's warning shows, or none while the camera can be controlled.
-pub fn warning(status: ControlStatus) -> Option<&'static str> {
-    info(status).map(|i| i.badge)
+/// The status a block's warning shows, or none while the camera can be controlled; it names the
+/// cambox or the Orange by the camera's `transport` (shading#14, owner 27.11.2026).
+pub fn warning(status: ControlStatus, transport: Transport) -> Option<&'static str> {
+    info_for(status, transport).map(|i| i.badge)
 }
